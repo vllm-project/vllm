@@ -12,7 +12,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1, KVConnectorMetadata, KVConnectorRole)
 from vllm.logger import init_logger
 from vllm.v1.attention.backends.mla.common import MLACommonMetadata
-from vllm.v1.core.sched.output import NewRequestData, SchedulerOutput
+from vllm.v1.core.sched.output import CachedRequestData, NewRequestData
 
 if TYPE_CHECKING:
     from vllm.attention.backends.abstract import AttentionMetadata
@@ -32,8 +32,8 @@ class ReqMeta:
     is_store: bool
 
     @staticmethod
-    def from_request(request: NewRequestData, block_size: int,
-                     is_store: bool) -> "ReqMeta":
+    def from_new_request(request: NewRequestData, block_size: int,
+                         is_store: bool) -> "ReqMeta":
         valid_num_tokens = align_to_block_size(len(request.prompt_token_ids),
                                                block_size)
         token_ids = torch.tensor(request.prompt_token_ids)[:valid_num_tokens]
@@ -57,14 +57,23 @@ class SharedStorageConnectorMetadata(KVConnectorMetadata):
     def __init__(self):
         self.requests = []
 
-    def add_request(
+    def add_new_request(
         self,
         request: NewRequestData,
         block_size: int,
         is_store: bool,
     ) -> None:
         self.requests.append(
-            ReqMeta.from_request(request, block_size, is_store))
+            ReqMeta.from_new_request(request, block_size, is_store))
+
+    def add_cached_request(
+        self,
+        request: CachedRequestData,
+        block_size: int,
+        is_store: bool,
+    ) -> None:
+        self.requests.append(
+            ReqMeta.from_cached_request(request, block_size, is_store))
 
 
 class SharedStorageConnector(KVConnectorBase_V1):
@@ -271,7 +280,10 @@ class SharedStorageConnector(KVConnectorBase_V1):
             self._requests_need_load.append(request.request_id)
 
     def build_connector_meta(
-            self, scheduler_output: SchedulerOutput) -> KVConnectorMetadata:
+        self,
+        new_reqs_data: NewRequestData,
+        resumed_reqs_data: CachedRequestData,
+    ) -> KVConnectorMetadata:
         """Build the connector metadata for this step.
 
         This function should NOT modify any fields in the scheduler_output.
@@ -281,16 +293,33 @@ class SharedStorageConnector(KVConnectorBase_V1):
             scheduler_output (SchedulerOutput): the scheduler output object.
         """
         meta = SharedStorageConnectorMetadata()
-        for request in scheduler_output.scheduled_new_reqs:
-            if request.req_id in self._requests_need_load:
-                meta.add_request(request, self._block_size, is_store=False)
+
+        total_need_load = 0
+        for new_req in new_reqs_data:
+            if new_req.req_id in self._requests_need_load:
+                meta.add_new_request(new_req, self._block_size, is_store=False)
+                total_need_load += 1
             else:
                 # NOTE: here, we set the store and load being exclusive,
                 # but in LMCache use case, a single request can have both
                 # store and load status
-                if not self._found_match_for_request(request):
-                    meta.add_request(request, self._block_size, is_store=True)
+                # NOTE(rob): for this debug implementation, we only cache
+                # the original prompt tokens.
+                if not self._found_match_for_request(new_req):
+                    meta.add_new_request(new_req,
+                                         self._block_size,
+                                         is_store=True)
 
+        # NOTE(rob): here we rely on the resumed requests being
+        # the first N requests in the list scheduled_cache_reqs.
+        for resumed_req in resumed_reqs_data:
+            if resumed_req.req_id in self._requests_need_load:
+                meta.add_cached_request(resumed_req,
+                                        self._block_size,
+                                        is_store=False)
+                total_need_load += 1
+
+        assert total_need_load == len(self._requests_need_load)
         self._requests_need_load.clear()
         return meta
 
