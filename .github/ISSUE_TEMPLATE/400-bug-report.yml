@@ -32,15 +32,6 @@ body:
     required: true
 - type: textarea
   attributes:
-    label: Model Input Dumps
-    description: |
-      If you are facing crashing due to illegal memory access or other issues with model execution, vLLM may dump the problematic input of the model. In this case, you will see the message `Error in model execution (input dumped to /tmp/err_xxx.pkl)`. If you see this message, please zip the file (because GitHub doesn't support .pkl file format) and upload it here. This will help us to reproduce the issue and facilitate the debugging process.
-    placeholder: |
-      Upload the dumped input file.
-  validations:
-    required: false
-- type: textarea
-  attributes:
     label: 🐛 Describe the bug
     description: |
       Please provide a clear and concise description of what the bug is.

@@ -3,7 +3,7 @@ SUCCESS=0
 
 while getopts "c:" OPT; do
   case ${OPT} in
-    c ) 
+    c )
         CONFIG="$OPTARG"
         ;;
     \? )
@@ -18,9 +18,14 @@ IFS=$'\n' read -d '' -r -a MODEL_CONFIGS < "$CONFIG"
 
 for MODEL_CONFIG in "${MODEL_CONFIGS[@]}"
 do
+    if [[ $MODEL_CONFIG == \#* ]]; then
+        echo "=== SKIPPING MODEL: $MODEL_CONFIG ==="
+        continue
+    fi
+
     LOCAL_SUCCESS=0
     IFS=', ' read -r -a array <<< "$MODEL_CONFIG"
-    
+
     echo "=== RUNNING MODEL: $MODEL_CONFIG ==="
 
     export QUANTIZATION=${array[0]}

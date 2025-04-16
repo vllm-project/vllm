@@ -1,6 +1,6 @@
 # Using other frameworks
 
-```{toctree}
+:::{toctree}
 :maxdepth: 1
 
 bentoml
@@ -11,4 +11,4 @@ lws
 modal
 skypilot
 triton
-```
+:::

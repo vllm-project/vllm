@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 from collections import deque
 from typing import Deque, FrozenSet, Iterable, List, Optional, Tuple, Union
 

@@ -2,17 +2,123 @@
 
 # Using Kubernetes
 
-Using Kubernetes to deploy vLLM is a scalable and efficient way to serve machine learning models. This guide will walk you through the process of deploying vLLM with Kubernetes, including the necessary prerequisites, steps for deployment, and testing.
+Deploying vLLM on Kubernetes is a scalable and efficient way to serve machine learning models. This guide walks you through deploying vLLM using native Kubernetes.
 
-## Prerequisites
+* [Deployment with CPUs](#deployment-with-cpus)
+* [Deployment with GPUs](#deployment-with-gpus)
 
-Before you begin, ensure that you have the following:
+Alternatively, you can deploy vLLM to Kubernetes using any of the following:
+* [Helm](frameworks/helm.md)
+* [InftyAI/llmaz](integrations/llmaz.md)
+* [KServe](integrations/kserve.md)
+* [kubernetes-sigs/lws](frameworks/lws.md)
+* [meta-llama/llama-stack](integrations/llamastack.md)
+* [substratusai/kubeai](integrations/kubeai.md)
+* [vllm-project/aibrix](https://github.com/vllm-project/aibrix)
+* [vllm-project/production-stack](integrations/production-stack.md)
 
-- A running Kubernetes cluster
-- NVIDIA Kubernetes Device Plugin (`k8s-device-plugin`): This can be found at `https://github.com/NVIDIA/k8s-device-plugin/`
-- Available GPU resources in your cluster
+## Deployment with CPUs
 
-## Deployment Steps
+:::{note}
+The use of CPUs here is for demonstration and testing purposes only and its performance will not be on par with GPUs.
+:::
+
+First, create a Kubernetes PVC and Secret for downloading and storing Hugging Face model:
+
+```bash
+cat <<EOF |kubectl apply -f -
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: vllm-models
+spec:
+  accessModes:
+    - ReadWriteOnce
+  volumeMode: Filesystem
+  resources:
+    requests:
+      storage: 50Gi
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: hf-token-secret
+type: Opaque
+data:
+  token: $(HF_TOKEN)
+EOF
+```
+
+Next, start the vLLM server as a Kubernetes Deployment and Service:
+
+```bash
+cat <<EOF |kubectl apply -f -
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vllm-server
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: vllm
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: vllm
+    spec:
+      containers:
+      - name: vllm
+        image: vllm/vllm-openai:latest
+        command: ["/bin/sh", "-c"]
+        args: [
+          "vllm serve meta-llama/Llama-3.2-1B-Instruct"
+        ]
+        env:
+        - name: HUGGING_FACE_HUB_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: hf-token-secret
+              key: token
+        ports:
+          - containerPort: 8000
+        volumeMounts:
+          - name: llama-storage
+            mountPath: /root/.cache/huggingface
+      volumes:
+      - name: llama-storage
+        persistentVolumeClaim:
+          claimName: vllm-models
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: vllm-server
+spec:
+  selector:
+    app.kubernetes.io/name: vllm
+  ports:
+  - protocol: TCP
+    port: 8000
+    targetPort: 8000
+  type: ClusterIP
+EOF
+```
+
+We can verify that the vLLM server has started successfully via the logs (this might take a couple of minutes to download the model):
+
+```console
+kubectl logs -l app.kubernetes.io/name=vllm
+...
+INFO:     Started server process [1]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
+```
+
+## Deployment with GPUs
+
+**Pre-requisite**: Ensure that you have a running [Kubernetes cluster with GPUs](https://kubernetes.io/docs/tasks/manage-gpus/scheduling-gpus/).
 
 1. Create a PVC, Secret and Deployment for vLLM
 

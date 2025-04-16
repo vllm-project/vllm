@@ -4,19 +4,19 @@
 
 This document provides an overview of the vLLM architecture.
 
-```{contents} Table of Contents
+:::{contents} Table of Contents
 :depth: 2
 :local: true
-```
+:::
 
 ## Entrypoints
 
 vLLM provides a number of entrypoints for interacting with the system. The
 following diagram shows the relationship between them.
 
-```{image} /assets/design/arch_overview/entrypoints.excalidraw.png
+:::{image} /assets/design/arch_overview/entrypoints.excalidraw.png
 :alt: Entrypoints Diagram
-```
+:::
 
 ### LLM Class
 
@@ -66,7 +66,7 @@ This server can be started using the `vllm serve` command.
 vllm serve <model>
 ```
 
-The code for the `vllm` CLI can be found in <gh-file:vllm/scripts.py>.
+The code for the `vllm` CLI can be found in <gh-file:vllm/entrypoints/cli/main.py>.
 
 Sometimes you may see the API server entrypoint used directly instead of via the
 `vllm` CLI command. For example:
@@ -84,9 +84,9 @@ More details on the API server can be found in the [OpenAI-Compatible Server](#o
 The `LLMEngine` and `AsyncLLMEngine` classes are central to the functioning of
 the vLLM system, handling model inference and asynchronous request processing.
 
-```{image} /assets/design/arch_overview/llm_engine.excalidraw.png
+:::{image} /assets/design/arch_overview/llm_engine.excalidraw.png
 :alt: LLMEngine Diagram
-```
+:::
 
 ### LLMEngine
 
@@ -144,11 +144,11 @@ configurations affect the class we ultimately get.
 
 The following figure shows the class hierarchy of vLLM:
 
-> ```{figure} /assets/design/hierarchy.png
+> :::{figure} /assets/design/hierarchy.png
 > :align: center
 > :alt: query
 > :width: 100%
-> ```
+> :::
 
 There are several important design choices behind this class hierarchy:
 
@@ -178,7 +178,7 @@ of a vision model and a language model. By making the constructor uniform, we
 can easily create a vision model and a language model and compose them into a
 vision-language model.
 
-````{note}
+:::{note}
 To support this change, all vLLM models' signatures have been updated to:
 
 ```python
@@ -215,7 +215,7 @@ else:
 ```
 
 This way, the model can work with both old and new versions of vLLM.
-````
+:::
 
 3\. **Sharding and Quantization at Initialization**: Certain features require
 changing the model weights. For example, tensor parallelism needs to shard the

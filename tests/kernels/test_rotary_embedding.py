@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """
 Tests for miscellaneous utilities
 """
@@ -40,7 +41,7 @@ def test_rotary_embedding_opcheck(dist_init, device, max_position,
                                   is_neox_style, rotary_dim, head_size,
                                   seq_len):
     batch_size = 1
-    base = 0
+    base = 10000
     num_heads = 7
     rot = RotaryEmbedding(head_size, rotary_dim, max_position, base,
                           is_neox_style, torch.float32)

@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 # Helper functions for 3D sparse pattern
 # These function are not optimized and very inefficient.
 # Avoid calling them too frequent or use a cache mechanism.

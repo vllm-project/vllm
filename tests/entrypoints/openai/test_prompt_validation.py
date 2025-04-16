@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 # imports for guided decoding tests
 import re
 
@@ -15,7 +17,7 @@ async def test_empty_prompt():
         client = remote_server.get_async_client()
 
         with pytest.raises(openai.BadRequestError,
-                           match=re.compile('.+Prompt cannot be empty.+')):
+                           match="decoder prompt cannot be empty"):
             await client.completions.create(model=model_name,
                                             prompt="",
                                             max_tokens=5,

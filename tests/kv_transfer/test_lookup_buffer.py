@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import os
 import random
 
@@ -20,7 +22,7 @@ def test_run(my_rank, buffer, device):
         assert buffer.buffer_size == 0
         assert len(buffer.buffer) == 0
 
-    print("My rank: %d, device: %s" % (my_rank, device))
+    print(f"My rank: {my_rank}, device: {device}")
 
     # insert
     tokens = torch.tensor([1, 2, 3]).to(device)
@@ -48,7 +50,7 @@ def test_run(my_rank, buffer, device):
         assert buffer.buffer_size == 0
         assert len(buffer.buffer) == 0
 
-    print("My rank: %d, Test run passed!" % (my_rank))
+    print(f"My rank: {my_rank}, Test run passed!")
 
 
 def stress_test(my_rank, buf, device):
@@ -94,7 +96,7 @@ def stress_test(my_rank, buf, device):
                 assert torch.allclose(k, k_)
                 assert torch.allclose(v, v_)
                 assert torch.allclose(h, h_)
-    print('Rank %d done' % my_rank)
+    print(f"Rank {my_rank} done")
     torch.distributed.barrier()
 
     if my_rank == 0:
@@ -108,7 +110,7 @@ def stress_test(my_rank, buf, device):
     else:
         torch.distributed.send(torch.tensor([n]), 0)
 
-    print("My rank: %d, Passed stress test!" % (my_rank))
+    print(f"My rank: {my_rank}, Passed stress test!")
 
 
 if __name__ == "__main__":
@@ -122,7 +124,7 @@ if __name__ == "__main__":
         rank=my_rank,
     )
 
-    print("initialized! My rank is %d" % my_rank)
+    print(f"initialized! My rank is {my_rank}")
 
     config = KVTransferConfig(
         kv_connector='PyNcclConnector',

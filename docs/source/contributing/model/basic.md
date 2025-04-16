@@ -10,9 +10,9 @@ First, clone the PyTorch model code from the source repository.
 For instance, vLLM's [OPT model](gh-file:vllm/model_executor/models/opt.py) was adapted from
 HuggingFace's [modeling_opt.py](https://github.com/huggingface/transformers/blob/main/src/transformers/models/opt/modeling_opt.py) file.
 
-```{warning}
+:::{warning}
 Make sure to review and adhere to the original code's copyright and licensing terms!
-```
+:::
 
 ## 2. Make your code compatible with vLLM
 
@@ -74,16 +74,14 @@ def forward(
     self,
     input_ids: torch.Tensor,
     positions: torch.Tensor,
-    kv_caches: List[torch.Tensor],
-    attn_metadata: AttentionMetadata,
 ) -> torch.Tensor:
     ...
 ```
 
-```{note}
+:::{note}
 Currently, vLLM supports the basic multi-head attention mechanism and its variant with rotary positional embeddings.
 If your model employs a different attention mechanism, you will need to implement a new attention layer in vLLM.
-```
+:::
 
 For reference, check out our [Llama implementation](gh-file:vllm/model_executor/models/llama.py). vLLM already supports a large number of models. It is recommended to find a model similar to yours and adapt it to your model's architecture. Check out <gh-dir:vllm/model_executor/models> for more examples.
 

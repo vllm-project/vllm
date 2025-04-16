@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """
 Example of using the OpenAI entrypoint's rerank API which is compatible with
 Jina and Cohere https://jina.ai/reranker
@@ -22,12 +23,19 @@ data = {
         "The capital of France is Paris.", "Horses and cows are both animals"
     ]
 }
-response = requests.post(url, headers=headers, json=data)
 
-# Check the response
-if response.status_code == 200:
-    print("Request successful!")
-    print(json.dumps(response.json(), indent=2))
-else:
-    print(f"Request failed with status code: {response.status_code}")
-    print(response.text)
+
+def main():
+    response = requests.post(url, headers=headers, json=data)
+
+    # Check the response
+    if response.status_code == 200:
+        print("Request successful!")
+        print(json.dumps(response.json(), indent=2))
+    else:
+        print(f"Request failed with status code: {response.status_code}")
+        print(response.text)
+
+
+if __name__ == "__main__":
+    main()

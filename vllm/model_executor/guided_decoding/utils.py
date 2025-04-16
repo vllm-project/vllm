@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import re
 
 
@@ -24,6 +26,18 @@ def has_xgrammar_unsupported_json_features(schema: dict) -> bool:
         if obj.get("type") == "array" and any(key in obj for key in [
                 "uniqueItems", "contains", "minContains", "maxContains",
                 "minItems", "maxItems"
+        ]):
+            return True
+
+        # Unsupported keywords for strings
+        if obj.get("type") == "string" and any(
+                key in obj for key in ["minLength", "maxLength", "format"]):
+            return True
+
+        # Unsupported keywords for objects
+        if obj.get("type") == "object" and any(key in obj for key in [
+                "minProperties", "maxProperties", "propertyNames",
+                "patternProperties"
         ]):
             return True
 

@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 from abc import ABC, abstractmethod
 from typing import Final, Generic, Optional, Protocol, TypeVar, Union
 
@@ -32,10 +34,6 @@ class VisionEncoderInfo(ABC, Generic[_C]):
         raise NotImplementedError
 
     @abstractmethod
-    def get_max_image_tokens(self) -> int:
-        raise NotImplementedError
-
-    @abstractmethod
     def get_image_size(self) -> int:
         raise NotImplementedError
 
@@ -63,6 +61,9 @@ def get_vision_encoder_info(
     if isinstance(vision_config, CLIPVisionConfig):
         return CLIPEncoderInfo(vision_config)
     if isinstance(vision_config, PixtralVisionConfig):
+        # Need to sneak in spatial_merge_size for Mistral3
+        vision_config.spatial_merge_size = getattr(hf_config,
+                                                   "spatial_merge_size", 1)
         return PixtralHFEncoderInfo(vision_config)
     if isinstance(vision_config, SiglipVisionConfig):
         return SiglipEncoderInfo(vision_config)
@@ -130,10 +131,11 @@ def resolve_visual_encoder_outputs(
     # Get the hidden states corresponding to the layer indices.
     # Negative values are relative to the full visual encoder,
     # so offset them depending on how many layers were loaded.
-    # NOTE: this assumes that encoder_outputs contains a list
-    # of hidden states in the same order as the encoder layers
-    # that produced them.
-    offset = max_possible_layers - len(encoder_outputs)
+    # NOTE: this assumes that encoder_outputs is a list containing
+    # the inputs to the visual encoder, followed by the hidden states
+    # of each layer.
+    num_loaded_layers = len(encoder_outputs) - 1
+    offset = max_possible_layers - num_loaded_layers
     hs_pool = [
         encoder_outputs[layer_idx]
         if layer_idx >= 0 else encoder_outputs[layer_idx + offset]

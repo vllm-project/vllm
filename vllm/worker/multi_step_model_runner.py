@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import dataclasses
 import functools
 from dataclasses import dataclass, field
@@ -474,7 +476,7 @@ class MultiStepModelRunner(GPUModelRunnerBase[StatefulModelInput]):
         # path for warm up runs
         if not model_input.is_multi_step:
             return self._base_model_runner.execute_model(
-                frozen_model_input, kv_caches, intermediate_tensors, num_steps)
+                frozen_model_input, None, intermediate_tensors, num_steps)
 
         # make sure we skip the sampler on the lask rank and only pythonize
         # if CPU is ahead.
@@ -536,7 +538,7 @@ class MultiStepModelRunner(GPUModelRunnerBase[StatefulModelInput]):
 
         # Execute the model
         output = self._base_model_runner.execute_model(frozen_model_input,
-                                                       kv_caches,
+                                                       None,
                                                        intermediate_tensors,
                                                        num_steps=1)
 

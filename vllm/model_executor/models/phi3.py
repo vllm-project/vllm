@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 # Adapted from llama.py
 """Inference-only Phi3 model code inherit from Llama.py"""
 

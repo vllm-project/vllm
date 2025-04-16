@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 # Adapted from: https://github.com/huggingface/peft/blob/main/src/peft/tuners/lora/config.py
 
 import json
@@ -40,7 +42,7 @@ class PEFTHelper:
 
     def _validate_features(self) -> List[str]:
         """
-        Check if there are any unsupported Lora features.
+        Check if there are any unsupported LoRA features.
         """
         error_msg = []
         if self.modules_to_save:

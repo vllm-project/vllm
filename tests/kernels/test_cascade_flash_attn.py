@@ -1,4 +1,6 @@
-from typing import List, Optional, Tuple
+# SPDX-License-Identifier: Apache-2.0
+
+from typing import Optional
 
 import pytest
 import torch
@@ -23,7 +25,7 @@ DTYPES = [torch.float16, torch.bfloat16]
 @torch.inference_mode()
 def test_merge_kernel(
     num_tokens: int,
-    num_heads: Tuple[int, int],
+    num_heads: tuple[int, int],
     head_size: int,
     dtype: torch.dtype,
 ):
@@ -83,8 +85,8 @@ CASES = [
 @pytest.mark.parametrize("fa_version", [2, 3])
 @torch.inference_mode()
 def test_cascade(
-    seq_lens_and_common_prefix: Tuple[List[Tuple[int, int]], int],
-    num_heads: Tuple[int, int],
+    seq_lens_and_common_prefix: tuple[list[tuple[int, int]], int],
+    num_heads: tuple[int, int],
     head_size: int,
     dtype: torch.dtype,
     block_size: int,

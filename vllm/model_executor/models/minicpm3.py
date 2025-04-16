@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 # Adapted from
 # https://github.com/huggingface/transformers/blob/v4.28.0/src/transformers/models/llama/modeling_llama.py
 # Copyright 2024 The ModelBest team.
@@ -27,7 +29,7 @@ import torch
 from torch import nn
 from transformers import PretrainedConfig
 
-from vllm.attention import Attention, AttentionMetadata
+from vllm.attention import Attention
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -127,8 +129,6 @@ class MiniCPM3Attention(nn.Module):
         self,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
-        kv_cache: torch.Tensor,
-        attn_metadata: AttentionMetadata,
     ) -> torch.Tensor:
         q, _ = self.q_a_proj(hidden_states)
         q = self.q_a_layernorm(q)
@@ -168,7 +168,7 @@ class MiniCPM3Attention(nn.Module):
             v, [0, self.qk_head_dim - self.v_head_dim],
             value=0).view(-1, self.num_local_heads * self.qk_head_dim)
 
-        attn_output = self.attn(q, k, v, kv_cache, attn_metadata)
+        attn_output = self.attn(q, k, v)
         attn_output = attn_output.view(
             -1, self.num_local_heads,
             self.qk_head_dim)[..., :self.v_head_dim].reshape(
@@ -224,22 +224,6 @@ class MiniCPM3ForCausalLM(MiniCPMForCausalLM):
             "up_proj",
         ],
     }
-
-    # LoRA specific attributes
-    supported_lora_modules = [
-        "kv_a_proj_with_mqa",
-        "q_a_proj",
-        "q_b_proj",
-        "kv_b_proj",
-        "o_proj",
-        "gate_up_proj",
-        "down_proj",
-        "embed_tokens",
-        "lm_head",
-    ]
-
-    # `embedding_modules` and `embedding_padding_modules`
-    # are inherited from MiniCPMForCausalLM
 
     def _init_model(self, *, vllm_config: VllmConfig, prefix: str = ""):
         return MiniCPM3Model(vllm_config=vllm_config, prefix=prefix)

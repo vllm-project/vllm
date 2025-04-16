@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 from fractions import Fraction
 from typing import Callable, Optional, Union
 

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """
 Test the piecewise compilation with a simple model so that we
 can exactly calculate the expected output and side effects.
@@ -91,7 +92,7 @@ def test_simple_piecewise_compile():
             num_graphs_seen=1,  # one graph for the model
             num_piecewise_graphs_seen=5,  # 2 * num_layers + 1
             num_piecewise_capturable_graphs_seen=3,  # 1 + num_layers
-            num_inductor_compilations=3,  # num_piecewise_capturable_graphs_seen
+            num_backend_compilations=3,  # num_piecewise_capturable_graphs_seen
             num_cudagraph_caputured=
             6,  # num_cudagraph_sizes * num_piecewise_capturable_graphs_seen
     ):

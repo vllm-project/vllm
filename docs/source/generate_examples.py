@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import itertools
 import re
 from dataclasses import dataclass, field
@@ -12,15 +14,18 @@ EXAMPLE_DOC_DIR = ROOT_DIR / "docs/source/getting_started/examples"
 def fix_case(text: str) -> str:
     subs = {
         "api": "API",
-        "Cli": "CLI",
+        "cli": "CLI",
         "cpu": "CPU",
         "llm": "LLM",
+        "mae": "MAE",
         "tpu": "TPU",
         "aqlm": "AQLM",
         "gguf": "GGUF",
         "lora": "LoRA",
+        "rlhf": "RLHF",
         "vllm": "vLLM",
         "openai": "OpenAI",
+        "lmcache": "LMCache",
         "multilora": "MultiLoRA",
         "mlpspeculator": "MLPSpeculator",
         r"fp\d+": lambda x: x.group(0).upper(),  # e.g. fp16, fp32
@@ -57,9 +62,9 @@ class Index:
 
     def generate(self) -> str:
         content = f"# {self.title}\n\n{self.description}\n\n"
-        content += "```{toctree}\n"
+        content += ":::{toctree}\n"
         content += f":caption: {self.caption}\n:maxdepth: {self.maxdepth}\n"
-        content += "\n".join(self.documents) + "\n```\n"
+        content += "\n".join(self.documents) + "\n:::\n"
         return content
 
 
@@ -72,7 +77,7 @@ class Example:
         path (Path): The path to the main directory or file.
         category (str): The category of the document.
         main_file (Path): The main file in the directory.
-        other_files (list[Path]): List of other files in the directory.
+        other_files (list[Path]): list of other files in the directory.
         title (str): The title of the document.
 
     Methods:
@@ -145,7 +150,7 @@ class Example:
             return content
 
         content += "## Example materials\n\n"
-        for file in self.other_files:
+        for file in sorted(self.other_files):
             include = "include" if file.suffix == ".md" else "literalinclude"
             content += f":::{{admonition}} {file.relative_to(self.path)}\n"
             content += ":class: dropdown\n\n"
@@ -192,7 +197,7 @@ def generate_examples():
             path=EXAMPLE_DOC_DIR / "examples_offline_inference_index.md",
             title="Offline Inference",
             description=
-            "Offline inference examples demonstrate how to use vLLM in an offline setting, where the model is queried for predictions in batches.",  # noqa: E501
+            "Offline inference examples demonstrate how to use vLLM in an offline setting, where the model is queried for predictions in batches. We recommend starting with <project:basic.md>.",  # noqa: E501
             caption="Examples",
         ),
     }

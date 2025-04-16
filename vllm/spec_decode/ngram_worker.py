@@ -1,9 +1,12 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import weakref
 from typing import List, Optional, Set, Tuple
 
 import torch
 import torch.nn as nn
 
+from vllm.config import VllmConfig
 from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.sequence import ExecuteModelRequest
 from vllm.spec_decode.interfaces import SpeculativeProposals
@@ -23,11 +26,18 @@ class NGramWorker(NonLLMProposerWorkerBase):
     which don't rely on LLM model to give proposals.
     """
 
-    def __init__(self, *args, **kwargs):
+    def __init__(
+        self,
+        vllm_config: VllmConfig,
+        local_rank: int,
+        device_type: str = "cuda",
+        **kwargs,
+    ):
+        super().__init__(vllm_config)
+
         # Get local_rank/vocab_size from kwargs attribute
-        self.local_rank = kwargs["local_rank"]
-        self.vocab_size = kwargs["vllm_config"].model_config.get_vocab_size()
-        self.device_type = kwargs.get("device_type", "cuda")
+        self.local_rank = local_rank
+        self.device_type = device_type
 
         # Lazy initialization list.
         self._proposer: Top1Proposer

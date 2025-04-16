@@ -22,7 +22,26 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, m) {
       "                     Tensor! num_tokens_post_pad) -> ()");
   m.impl("moe_align_block_size", torch::kCUDA, &moe_align_block_size);
 
+  // temporarily adapted from
+  // https://github.com/sgl-project/sglang/commit/ded9fcd09a43d5e7d5bb31a2bc3e9fc21bf65d2a
+  m.def(
+      "sgl_moe_align_block_size(Tensor topk_ids, int num_experts,"
+      "                         int block_size, Tensor! sorted_token_ids,"
+      "                         Tensor! experts_ids,"
+      "                         Tensor! num_tokens_post_pad) -> ()");
+  m.impl("sgl_moe_align_block_size", torch::kCUDA, &sgl_moe_align_block_size);
+
 #ifndef USE_ROCM
+  m.def(
+      "moe_wna16_gemm(Tensor input, Tensor! output, Tensor b_qweight, "
+      "Tensor b_scales, Tensor? b_qzeros, "
+      "Tensor? topk_weights, Tensor sorted_token_ids, "
+      "Tensor expert_ids, Tensor num_tokens_post_pad, "
+      "int top_k, int BLOCK_SIZE_M, int BLOCK_SIZE_N, int BLOCK_SIZE_K, "
+      "int bit) -> Tensor");
+
+  m.impl("moe_wna16_gemm", torch::kCUDA, &moe_wna16_gemm);
+
   m.def(
       "marlin_gemm_moe(Tensor! a, Tensor! b_q_weights, Tensor! sorted_ids, "
       "Tensor! topk_weights, Tensor! topk_ids, Tensor! b_scales, Tensor! "
@@ -33,6 +52,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, m) {
       "int moe_block_size, bool replicate_input, bool apply_weights)"
       " -> Tensor");
   // conditionally compiled so impl registration is in source file
+
 #endif
 }
 

@@ -1,9 +1,13 @@
+# SPDX-License-Identifier: Apache-2.0
+
 from typing import List, Optional, Tuple
 
 import numpy
 import torch
 
+import vllm.envs as envs
 from vllm import _custom_ops as ops
+from vllm.model_executor.layers.linear import LinearBase
 from vllm.platforms import current_platform
 from vllm.scalar_type import ScalarType, scalar_types
 
@@ -115,7 +119,7 @@ def verify_marlin_supports_shape(output_size_per_partition: int,
             and input_size_per_partition % group_size != 0):
         raise ValueError(
             f"Weight input_size_per_partition = {input_size_per_partition}"
-            f" is not divisible by group_size = {group_size}."
+            f" is not divisible by group_size = {group_size}. "
             "Consider reducing tensor_parallel_size or running "
             "with --quantization gptq.")
 
@@ -131,6 +135,20 @@ def check_marlin_supports_shape(output_size_per_partition: int,
     except ValueError as e:
         return False, e.__str__()
     return True, None
+
+
+def check_marlin_supports_layer(layer: LinearBase, group_size: int) \
+                                    -> bool:
+    output_size_per_partition = getattr(layer, "output_size_per_partition",
+                                        None) or layer.output_size
+    input_size_per_partition = getattr(layer, "input_size_per_partition",
+                                       None) or layer.input_size
+
+    return check_marlin_supports_shape(
+        output_size_per_partition=output_size_per_partition,
+        input_size_per_partition=input_size_per_partition,
+        input_size=layer.input_size,
+        group_size=group_size)[0]
 
 
 def marlin_make_workspace(output_size_per_partition: int,
@@ -273,6 +291,23 @@ def moe_awq_to_marlin_zero_points(q_zp_packed: torch.Tensor, size_k: int,
     return output
 
 
+def should_use_atomic_add_reduce(m: int, n: int, k: int, device: torch.device,
+                                 dtype: torch.dtype) -> bool:
+    # disable atomicAdd reduce by default,
+    # one can enable it with VLLM_MARLIN_USE_ATOMIC_ADD=1
+    if not envs.VLLM_MARLIN_USE_ATOMIC_ADD or device.type != "cuda":
+        return False
+
+    # sm8x doesn't support atomicAdd + bfloat16 natively
+    device_capability = torch.cuda.get_device_capability(device)
+    if device_capability[0] < 9 and dtype == torch.bfloat16:
+        return False
+
+    # the performance of atomicAdd is better than global reduce
+    # only when m*n is small and k is large
+    return n < 2048 and k >= 2048
+
+
 def apply_gptq_marlin_linear(
         input: torch.Tensor,
         weight: torch.Tensor,
@@ -290,6 +325,12 @@ def apply_gptq_marlin_linear(
     reshaped_x = input.reshape(-1, input.shape[-1])
     out_shape = input.shape[:-1] + (output_size_per_partition, )
 
+    use_atomic_add = should_use_atomic_add_reduce(m=reshaped_x.size(0),
+                                                  n=output_size_per_partition,
+                                                  k=reshaped_x.size(1),
+                                                  device=input.device,
+                                                  dtype=input.dtype)
+
     output = ops.gptq_marlin_gemm(reshaped_x,
                                   weight,
                                   weight_scale,
@@ -303,6 +344,7 @@ def apply_gptq_marlin_linear(
                                   size_k=input_size_per_partition,
                                   is_k_full=is_k_full,
                                   has_zp=False,
+                                  use_atomic_add=use_atomic_add,
                                   use_fp32_reduce=use_fp32_reduce,
                                   is_zp_float=False)
 
@@ -328,6 +370,12 @@ def apply_awq_marlin_linear(
     reshaped_x = input.reshape(-1, input.shape[-1])
     out_shape = input.shape[:-1] + (output_size_per_partition, )
 
+    use_atomic_add = should_use_atomic_add_reduce(m=reshaped_x.size(0),
+                                                  n=output_size_per_partition,
+                                                  k=reshaped_x.size(1),
+                                                  device=input.device,
+                                                  dtype=input.dtype)
+
     output = ops.gptq_marlin_gemm(reshaped_x,
                                   weight,
                                   weight_scale,
@@ -341,6 +389,7 @@ def apply_awq_marlin_linear(
                                   size_k=input_size_per_partition,
                                   is_k_full=True,
                                   has_zp=True,
+                                  use_atomic_add=use_atomic_add,
                                   use_fp32_reduce=use_fp32_reduce,
                                   is_zp_float=False)
 
