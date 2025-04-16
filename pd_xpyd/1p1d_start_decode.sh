@@ -1,11 +1,11 @@
-set -x
+#set -x
 BASH_DIR=$(dirname "${BASH_SOURCE[0]}")
 source "$BASH_DIR"/pd_bucket.sh
 
 source ./pd_xpyd/pd_env.sh
 
 export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib
-export MOONCAKE_CONFIG_PATH=./pd_xpyd/mooncake_d.json
+export MOONCAKE_CONFIG_PATH=./pd_xpyd/1p1d_mooncake_d.json
 
 model_path=/mnt/disk2/hf_models/DeepSeek-R1-BF16-w8afp8-static-no-ste-G2/
 
@@ -15,7 +15,7 @@ export VLLM_GRAPH_PROMPT_RATIO=0
 # params
 model_len=2048
 max_num_batched_tokens=2048
-max_num_seqs=1
+max_num_seqs=64
 input_min=128
 input_max=1024
 output_max=1024
@@ -40,6 +40,10 @@ env | grep VLLM_PROMPT_BS
 env | grep VLLM_PROMPT_SEQ
 env | grep VLLM_DECODE_BS
 env | grep VLLM_DECODE_BLOCK
+
+export VLLM_HPU_LOG_STEP_GRAPH_COMPILATION=true
+export GRAPH_VISUALIZATION=1
+export PT_HPU_METRICS_GC_DETAILS=1
 
 export VLLM_SKIP_WARMUP=False
 #export PT_HPU_RECIPE_CACHE_CONFIG=./_decode_cache,false,16384
