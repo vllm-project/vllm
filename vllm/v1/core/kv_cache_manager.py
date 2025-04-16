@@ -220,9 +220,7 @@ class KVCacheManager:
         num_total_computed_tokens = (
             request.num_computed_tokens +
             len(new_computed_blocks) * self.block_size)
-        if num_external_tokens > 0:
-            num_total_computed_tokens += num_external_tokens
-            assert num_total_computed_tokens % self.block_size == 0
+        num_total_computed_tokens += num_external_tokens
 
         num_required_blocks = cdiv(
             num_total_computed_tokens + num_tokens + num_lookahead_tokens,

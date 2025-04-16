@@ -530,7 +530,7 @@ class Scheduler(SchedulerInterface):
     def _try_schedule_encoder_inputs(
         self,
         request: Request,
-        num_total_computed_tokens: int,
+        num_computed_tokens: int,
         num_new_tokens: int,
         encoder_budget: int,
     ) -> tuple[list[int], int, int]:
@@ -541,8 +541,7 @@ class Scheduler(SchedulerInterface):
         An encoder input will be scheduled if:
         - Its output tokens overlap with the range of tokens being computed
         in this step, i.e.,
-        [num_total_computed_tokens, num_total_computed_tokens + num_new_tokens),
-        num_total_computed_tokens = num_computed_tokens + num_external_tokens
+        [num_computed_tokens, num_computed_tokens + num_new_tokens),
         - It is not already computed and stored in the encoder cache.
         - There is sufficient encoder token budget to process it.
         - The encoder cache has space to store it.
@@ -550,6 +549,9 @@ class Scheduler(SchedulerInterface):
         If an encoder input cannot be scheduled due to cache or budget
         limitations, the method adjusts `num_new_tokens` to schedule only the
         decoder tokens up to just before the unschedulable encoder input.
+
+        Note that num_computed_tokens includes both locally cached
+        blocks and externally cached blocks (via KVConnector).
         """
         encoder_inputs_to_schedule: list[int] = []
         mm_positions = request.mm_positions
@@ -562,10 +564,10 @@ class Scheduler(SchedulerInterface):
             # The encoder output is needed if the two ranges overlap:
             # [num_cached_tokens, num_cached_tokens + num_new_tokens) and
             # [start_pos, start_pos + num_encoder_tokens)
-            if start_pos >= num_total_computed_tokens + num_new_tokens:
+            if start_pos >= num_computed_tokens + num_new_tokens:
                 # The encoder input is not needed in this step.
                 break
-            if start_pos + num_encoder_tokens <= num_total_computed_tokens:
+            if start_pos + num_encoder_tokens <= num_computed_tokens:
                 # The encoder input is already computed and stored
                 # in the decoder's KV cache.
                 continue
@@ -578,10 +580,10 @@ class Scheduler(SchedulerInterface):
             # partially schedule a multimodal item. If the scheduled range would
             # only cover part of the mm input, roll back to before the mm item.
             if (self.scheduler_config.disable_chunked_mm_input
-                    and num_total_computed_tokens < start_pos
-                    and (num_total_computed_tokens + num_new_tokens)
+                    and num_computed_tokens < start_pos
+                    and (num_computed_tokens + num_new_tokens)
                     < (start_pos + num_encoder_tokens)):
-                num_new_tokens = start_pos - num_total_computed_tokens
+                num_new_tokens = start_pos - num_computed_tokens
                 break
 
             if (not self.encoder_cache_manager.can_allocate(request, i)
@@ -590,12 +592,12 @@ class Scheduler(SchedulerInterface):
                 # NOTE(woosuk): We assume that the encoder input tokens should
                 # be processed altogether, as the encoder usually uses
                 # bidirectional attention.
-                if num_total_computed_tokens < start_pos:
+                if num_computed_tokens < start_pos:
                     # We only schedule the decoder tokens just before the
                     # encoder input.
-                    num_new_tokens = start_pos - num_total_computed_tokens
+                    num_new_tokens = start_pos - num_computed_tokens
                 else:
-                    # Because of prefix caching, num_total_computed_tokens is
+                    # Because of prefix caching, num_computed_tokens is
                     # greater than start_pos even though encoder input is not
                     # available. In this case, we can't schedule any token for
                     # the request in this step.
