@@ -198,7 +198,7 @@ class OpenAIServingResponse(OpenAIServing):
             logger.exception("Error in preprocessing prompt inputs")
             return self.create_error_response(str(e))
 
-        request_id = "chatcmpl-" \
+        request_id = "resp_" \
                      f"{self._base_request_id(raw_request, request.request_id)}"
 
         request_metadata = RequestResponseMetadata(request_id=request_id)

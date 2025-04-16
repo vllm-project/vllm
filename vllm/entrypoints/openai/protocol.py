@@ -9,7 +9,8 @@ from typing import Annotated, Any, ClassVar, Literal, Optional, Union
 
 import torch
 from fastapi import UploadFile
-from openai.types.responses import ResponseInputParam, ResponseTextConfigParam, ResponseError
+from openai.types.responses import (ResponseInputParam,
+                                    ResponseTextConfigParam, ResponseError)
 from pydantic import (BaseModel, ConfigDict, Field, TypeAdapter,
                       ValidationInfo, field_validator, model_validator)
 from typing_extensions import TypeAlias
@@ -166,8 +167,8 @@ class FunctionDefinition(OpenAIBaseModel):
 
 
 class ResponseReasoning(OpenAIBaseModel):
-    effort: Optional[Literal["low"], Literal["medium"], Literal["high"]] = "medium"
-    generate_summary: Optional[Literal["concise"], Literal["detailed"]] = None
+    effort: Optional[Union[Literal["low"], Literal["medium"], Literal["high"]]] = "medium"
+    generate_summary: Optional[Union[Literal["concise"], Literal["detailed"]]] = None
 
 
 class ChatCompletionToolsParam(OpenAIBaseModel):

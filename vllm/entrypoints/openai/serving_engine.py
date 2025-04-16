@@ -32,7 +32,8 @@ from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
                                               ScoreRequest,
                                               TokenizeChatRequest,
                                               TokenizeCompletionRequest,
-                                              TranscriptionRequest, ResponseRequest)
+                                              TranscriptionRequest,
+                                              ResponseRequest)
 from vllm.entrypoints.openai.serving_models import OpenAIServingModels
 from vllm.entrypoints.openai.tool_parsers import ToolParser
 # yapf: enable
