@@ -645,6 +645,11 @@ class NomicBertEmbeddingModel(BertEmbeddingModel):
         assert config.__class__.__name__ == "NomicBertConfig"
         assert config.activation_function == "swiglu"
 
+        # Assume NomicBertModel all linear layers do not have bias
+        assert not config.mlp_fc1_bias
+        assert not config.mlp_fc2_bias
+        assert not config.qkv_proj_bias
+
         config.layer_norm_eps = config.layer_norm_epsilon
         config.position_embedding_type = "rotary"
         config.intermediate_size = config.n_inner
@@ -664,14 +669,10 @@ class NomicBertEmbeddingModel(BertEmbeddingModel):
             }
         }
 
-        assert config.mlp_fc1_bias == config.mlp_fc2_bias
-        bias = config.qkv_proj_bias
-        gate_up_proj_bias = config.mlp_fc1_bias
-
         return BertModel(vllm_config=vllm_config,
                          prefix=prefix,
-                         bias=bias,
-                         gate_up_proj_bias=gate_up_proj_bias,
+                         bias=False,
+                         gate_up_proj_bias=False,
                          rotary_kwargs=rotary_kwargs,
                          embedding_class=BertEmbedding)
 
