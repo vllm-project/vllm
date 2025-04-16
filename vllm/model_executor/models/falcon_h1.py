@@ -204,6 +204,7 @@ class FalconH1SSMDecoderLayer(nn.Module):
         hidden_states = self.mamba(
             hidden_states,
             mamba_cache_params,
+            mamba2_metadata=mamba2_metadata,
             mup_vector=self.mup_vector,
         )
         return hidden_states, residual
@@ -376,6 +377,7 @@ class FalconH1ParallelHybrid(nn.Module):
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
         mamba_cache_params: MambaCacheParams,
+        mamba2_metadata: Mamba2Metadata,
         **kwargs,
     ):
         residual = hidden_states
@@ -397,7 +399,7 @@ class FalconH1ParallelHybrid(nn.Module):
             hidden_states=hidden_states * self.ssm_in_multiplier,
             residual=residual,
             mamba_cache_params=mamba_cache_params,
-            sequence_idx=sequence_idx,
+            mamba2_metadata=mamba2_metadata,
             **kwargs,
         )
         # Sum the outputs from both branches.
