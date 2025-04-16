@@ -163,10 +163,12 @@ class Processor:
                 "backend at the engine level.")
             if params.guided_decoding.backend != engine_level_backend:
                 raise ValueError(
-                    "Request-level structured output backend must match "
-                    "engine-level backend. The request specified "
-                    f"'{params.guided_decoding.backend}', but the engine was "
-                    f"initialised with '{engine_level_backend}'.")
+                    "Request-level structured output backend selection is no "
+                    "longer supported. The request specified "
+                    f"'{params.guided_decoding.backend}', but vLLM was "
+                    f"initialised with '{engine_level_backend}'. This error "
+                    "can be resolved by removing backend selection from the "
+                    "request.")
         else:
             params.guided_decoding.backend = engine_level_backend
 
