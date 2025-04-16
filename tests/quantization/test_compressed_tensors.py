@@ -261,16 +261,23 @@ def test_compressed_tensors_w8a8_dynamic_per_token(
 
 @pytest.mark.parametrize(
     "wNa16_args",
-    [
-        ("nm-testing/tinyllama-oneshot-w4a16-channel-v2", "channel", None, 8),
-        ("nm-testing/tinyllama-oneshot-w4a16-group128-v2", "group", 128, 8),
-        ("nm-testing/tinyllama-oneshot-w8a16-per-channel", "channel", None, 4),
-    ],
+    [("nm-testing/tinyllama-oneshot-w4a16-channel-v2", "channel", None, 8,
+      True, False),
+     ("nm-testing/tinyllama-oneshot-w4a16-group128-v2", "group", 128, 8, True,
+      False),
+     ("nm-testing/tinyllama-oneshot-w8a16-per-channel", "channel", None, 4,
+      True, False),
+     ("nm-testing/TinyLlama-1.1B-Chat-v1.0-awq-group128-asym256", "group", 128,
+      8, False, False),
+     ("nm-testing/TinyLlama-1.1B-Chat-v1.0-W4A16-G128-Asym-Updated-Channel",
+      "channel", None, 8, False, False),
+     ("nm-testing/TinyLlama-1.1B-Chat-v1.0-W4A16-G128-Asym-Updated-ActOrder",
+      "group", 128, 8, False, True)],
 )
 @pytest.mark.skipif(not current_platform.is_cuda(),
                     reason="The tests are skipped on non-CUDA platform.")
 def test_compressed_tensors_wNa16(vllm_runner, wNa16_args):
-    model, strategy, group, pack_factor = wNa16_args
+    model, strategy, group, pack_factor, symmetric, has_g_idx = wNa16_args
     with vllm_runner(model) as llm:
 
         def check_model(model):
@@ -286,6 +293,8 @@ def test_compressed_tensors_wNa16(vllm_runner, wNa16_args):
                                                   if group is None else group)
 
             assert qkv_proj.scheme.pack_factor == pack_factor
+            assert qkv_proj.scheme.symmetric == symmetric
+            assert qkv_proj.scheme.has_g_idx == has_g_idx
 
         llm.apply_model(check_model)
 
