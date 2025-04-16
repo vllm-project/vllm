@@ -558,9 +558,6 @@ class MiniMaxVL01ForConditionalGeneration(nn.Module, SupportsMultiModal, Support
             raise ValueError(f"{padding_side} is not `left` or `right`.")
         self._padding_side = padding_side
 
-    def get_input_embeddings(self):
-        return self.language_model.get_input_embeddings()
-
     def set_input_embeddings(self, value):
         self.language_model.set_input_embeddings(value)
 
@@ -892,7 +889,7 @@ class MiniMaxVL01ForConditionalGeneration(nn.Module, SupportsMultiModal, Support
             # In case image_token_index is not in the embeddings (extra token but embedding don't have it)
             for_inputs_embeds_ids = input_ids.clone()
             for_inputs_embeds_ids[(input_ids == self.config.image_token_index)] = 0
-            inputs_embeds = self.get_input_embeddings()(for_inputs_embeds_ids)
+            inputs_embeds = self.get_input_embeddings(for_inputs_embeds_ids)
 
             # 2. Merge text and images
             if pixel_values is not None and input_ids.shape[1] != 1 and pixel_values.size(0) > 0:
