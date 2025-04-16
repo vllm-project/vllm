@@ -885,6 +885,7 @@ class MiniMaxVL01ForConditionalGeneration(nn.Module, SupportsMultiModal, Support
         vision_feature_select_strategy = self.config.vision_feature_select_strategy
         attention_mask = kwargs.pop("attention_mask", None)
         position_ids = kwargs.pop("position_ids", None)
+        kv_caches = kwargs.pop("kv_caches", None)
         if inputs_embeds is None:
             # 1. Extract the input embeddings
             # In case image_token_index is not in the embeddings (extra token but embedding don't have it)
@@ -978,6 +979,7 @@ class MiniMaxVL01ForConditionalGeneration(nn.Module, SupportsMultiModal, Support
             input_ids=input_ids,
             positions=positions,
             intermediate_tensors=intermediate_tensors,
+            kv_caches=kv_caches,
             attention_mask=attention_mask,
             position_ids=position_ids,
             past_key_values=past_key_values,
