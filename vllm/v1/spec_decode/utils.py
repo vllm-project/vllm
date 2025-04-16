@@ -3,10 +3,7 @@ from vllm.v1.worker.gpu_input_batch import InputBatch
 
 
 def is_spec_decode_supported(req_id: str, input_batch: InputBatch) -> bool:
-    if req_id in input_batch.top_k_reqs or req_id in input_batch.top_p_reqs:
-        # Spec decode doesn't support top_p/top_k sampling.
-        return False
-    elif req_id in input_batch.min_p_reqs:
+    if req_id in input_batch.min_p_reqs:
         # Spec decode doesn't support min_p sampling.
         return False
     elif (req_id in input_batch.frequency_penalties_reqs

@@ -12,7 +12,7 @@ from .tokenizer_group import TokenizerGroup
 def init_tokenizer_from_configs(model_config: ModelConfig,
                                 scheduler_config: SchedulerConfig,
                                 parallel_config: ParallelConfig,
-                                lora_config: LoRAConfig):
+                                lora_config: Optional[LoRAConfig]):
     init_kwargs = dict(tokenizer_id=model_config.tokenizer,
                        enable_lora=bool(lora_config),
                        max_num_seqs=scheduler_config.max_num_seqs,

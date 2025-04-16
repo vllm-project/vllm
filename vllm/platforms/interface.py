@@ -1,5 +1,4 @@
 # SPDX-License-Identifier: Apache-2.0
-
 import enum
 import platform
 import random
@@ -9,13 +8,21 @@ from typing import TYPE_CHECKING, NamedTuple, Optional, Tuple, Union
 import numpy as np
 import torch
 
+from vllm.inputs import PromptType
 from vllm.logger import init_logger
 
 if TYPE_CHECKING:
-    from vllm.config import VllmConfig
+    from vllm.config import ModelConfig, VllmConfig
+    from vllm.lora.request import LoRARequest
+    from vllm.pooling_params import PoolingParams
+    from vllm.sampling_params import SamplingParams
     from vllm.utils import FlexibleArgumentParser
 else:
+    ModelConfig = None
     VllmConfig = None
+    LoRARequest = None
+    PoolingParams = None
+    SamplingParams = None
     FlexibleArgumentParser = None
 
 logger = init_logger(__name__)
@@ -29,10 +36,10 @@ def in_wsl() -> bool:
 class _Backend(enum.Enum):
     FLASH_ATTN = enum.auto()
     FLASH_ATTN_VLLM_V1 = enum.auto()
+    TRITON_ATTN_VLLM_V1 = enum.auto()
     XFORMERS = enum.auto()
     ROCM_FLASH = enum.auto()
     TORCH_SDPA = enum.auto()
-    OPENVINO = enum.auto()
     FLASHINFER = enum.auto()
     TRITON_MLA = enum.auto()  # Supported by V1
     FLASHMLA = enum.auto()  # Supported by V1
@@ -52,7 +59,6 @@ class PlatformEnum(enum.Enum):
     XPU = enum.auto()
     CPU = enum.auto()
     NEURON = enum.auto()
-    OPENVINO = enum.auto()
     OOT = enum.auto()
     UNSPECIFIED = enum.auto()
 
@@ -112,6 +118,8 @@ class Platform:
 
     supported_quantization: list[str] = []
 
+    additional_env_vars: list[str] = []
+
     def is_cuda(self) -> bool:
         return self._enum == PlatformEnum.CUDA
 
@@ -133,15 +141,15 @@ class Platform:
     def is_neuron(self) -> bool:
         return self._enum == PlatformEnum.NEURON
 
-    def is_openvino(self) -> bool:
-        return self._enum == PlatformEnum.OPENVINO
-
     def is_out_of_tree(self) -> bool:
         return self._enum == PlatformEnum.OOT
 
     def is_cuda_alike(self) -> bool:
         """Stateless version of :func:`torch.cuda.is_available`."""
         return self._enum in (PlatformEnum.CUDA, PlatformEnum.ROCM)
+
+    def is_sleep_mode_available(self) -> bool:
+        return self._enum == PlatformEnum.CUDA
 
     @classmethod
     def get_attn_backend_cls(cls, selected_backend: _Backend, head_size: int,
@@ -232,7 +240,7 @@ class Platform:
                                 parser: Optional[FlexibleArgumentParser] = None
                                 ) -> None:
         """
-        Do some pre-registeration or update action for the current platform.
+        Do some pre-registration or update action for the current platform.
 
         This function is called before global VllmConfig is initialized or cli
         arguments are parsed. It's used for out-of-tree platforms to register or
@@ -372,6 +380,28 @@ class Platform:
         return (envs.VLLM_USE_V1
                 or parallel_config.distributed_executor_backend
                 == "external_launcher")
+
+    @classmethod
+    def supports_v1(cls, model_config: ModelConfig) -> bool:
+        """Returns whether the current platform can support v1 for the supplied
+        model configuration.
+        """
+        return False
+
+    @classmethod
+    def use_custom_allreduce(cls) -> bool:
+        """
+        Returns if custom allreduce is supported on the current platform
+        """
+        return False
+
+    @classmethod
+    def validate_request(
+        cls,
+        prompt: PromptType,
+        params: Union[SamplingParams, PoolingParams],
+    ) -> None:
+        """Raises if this request is unsupported on this platform"""
 
 
 class UnspecifiedPlatform(Platform):

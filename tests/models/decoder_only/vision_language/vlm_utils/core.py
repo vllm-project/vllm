@@ -4,7 +4,6 @@ from typing import Any, Callable, Optional, Union
 
 import torch
 from PIL.Image import Image
-from transformers import BatchEncoding
 from transformers.models.auto.auto_factory import _BaseAutoModelClass
 
 from vllm.config import TaskOption
@@ -31,7 +30,6 @@ def run_test(
     vllm_output_post_proc: Optional[Callable[[RunnerOutput, str], Any]],
     auto_cls: type[_BaseAutoModelClass],
     use_tokenizer_eos: bool,
-    postprocess_inputs: Callable[[BatchEncoding], BatchEncoding],
     comparator: Callable[..., None],
     get_stop_token_ids: Optional[Callable[[AnyTokenizer], list[int]]],
     stop_str: Optional[list[str]],
@@ -52,6 +50,10 @@ def run_test(
     model_info = HF_EXAMPLE_MODELS.find_hf_info(model)
     model_info.check_available_online(on_fail="skip")
     model_info.check_transformers_version(on_fail="skip")
+
+    # Disable other modalities to save memory
+    default_limits = {"image": 0, "video": 0, "audio": 0}
+    limit_mm_per_prompt = default_limits | limit_mm_per_prompt
 
     vllm_outputs_per_mm = []
     hf_outputs_per_mm = []
@@ -101,7 +103,6 @@ def run_test(
     hf_model = hf_runner(model,
                          dtype=dtype,
                          auto_cls=auto_cls,
-                         postprocess_inputs=postprocess_inputs,
                          model_kwargs=hf_model_kwargs)
 
     # Some models need to patch things like the model processor, e.g., internvl
