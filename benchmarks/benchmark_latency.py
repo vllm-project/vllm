@@ -19,7 +19,7 @@ from vllm.engine.arg_utils import EngineArgs
 from vllm.inputs import PromptType
 from vllm.sampling_params import BeamSearchParams
 from vllm.utils import FlexibleArgumentParser
-
+import vllm
 
 def save_to_pytorch_benchmark_format(args: argparse.Namespace,
                                      results: dict[str, Any]) -> None:
@@ -37,7 +37,9 @@ def main(args: argparse.Namespace):
     print(args)
 
     engine_args = EngineArgs.from_cli_args(args)
-
+    if vllm.envs.VLLM_USE_SP_PREFILL:
+        args.enable_chunked_prefill = False
+        args.max_num_seqs = 1
     # NOTE(woosuk): If the request cannot be processed in a single batch,
     # the engine will automatically process the request in multiple batches.
     llm = LLM(**dataclasses.asdict(engine_args))
