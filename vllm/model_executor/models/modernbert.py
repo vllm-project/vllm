@@ -9,6 +9,7 @@ from torch import nn
 from transformers import ModernBertConfig
 
 from vllm.config import VllmConfig
+from vllm.model_executor.layers.linear import RowParallelLinear
 from vllm.model_executor.layers.pooler import CrossEncodingPooler
 from vllm.model_executor.layers.rotary_embedding import RotaryEmbedding
 from vllm.model_executor.layers.vocab_parallel_embedding import (
@@ -143,9 +144,9 @@ class ModernBertAttention(nn.Module):
                                                     head_size=self.head_dim,
                                                     dim=self.head_dim,
                                                     base=rope_theta)
-        self.Wo = nn.Linear(config.hidden_size,
-                            config.hidden_size,
-                            bias=config.attention_bias)
+        self.Wo = RowParallelLinear(config.hidden_size,
+                                    config.hidden_size,
+                                    bias=config.attention_bias)
         self.pruned_heads = set()
 
     def forward(
@@ -170,7 +171,7 @@ class ModernBertAttention(nn.Module):
             **kwargs,
         )
         hidden_states = attn_outputs
-        hidden_states = self.Wo(hidden_states)
+        hidden_states, _ = self.Wo(hidden_states)
 
         return hidden_states
 
@@ -200,13 +201,13 @@ class ModernBertMLP(nn.Module):
                             int(config.intermediate_size) * 2,
                             bias=config.mlp_bias)
         self.act = GELUActivation()
-        self.Wo = nn.Linear(config.intermediate_size,
-                            config.hidden_size,
-                            bias=config.mlp_bias)
+        self.Wo = RowParallelLinear(config.intermediate_size,
+                                    config.hidden_size,
+                                    bias=config.mlp_bias)
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         input, gate = self.Wi(hidden_states).chunk(2, dim=-1)
-        return self.Wo(self.act(input) * gate)
+        return self.Wo(self.act(input) * gate)[0]
 
 
 class ModernBertLayer(nn.Module):
