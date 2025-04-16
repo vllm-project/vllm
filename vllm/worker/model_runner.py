@@ -1086,7 +1086,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
         self.max_batchsize_to_capture = \
             self.vllm_config.compilation_config.max_capture_size
 
-        self.graph_runners: List[Dict[int, CUDAGraphRunner]] = [
+        self.graph_runners: List[Dict[Tuple[int, bool], CUDAGraphRunner]] = [
             {} for _ in range(self.parallel_config.pipeline_parallel_size)
         ]
         self.graph_memory_pool: Optional[Tuple[
@@ -1529,6 +1529,10 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
         input_positions = torch.zeros(max_batch_size,
                                       dtype=torch.long,
                                       device=self.device)
+        inputs_embeds = torch.zeros(
+            (max_batch_size, self.model_config.get_hidden_size()),
+            dtype=self.model_config.dtype,
+            device=self.device)
         if self.model_config.uses_mrope:
             input_positions = torch.tile(input_positions,
                                          (3, 1)).cuda(device=self.device)
@@ -1568,13 +1572,15 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                     self.parallel_config.pipeline_parallel_size):
                 # Only rank 0 should print progress bar during capture
                 cudagraph_capture_sizes = (tqdm(
-                    self.vllm_config.compilation_config.
-                    cudagraph_capture_sizes,
+                    list(
+                        itertools.product(
+                            self.vllm_config.compilation_config.
+                            cudagraph_capture_sizes, [True, False])),
                     desc="Capturing CUDA graph shapes",
                 ) if get_tensor_model_parallel_rank() == 0 else
                                            self.vllm_config.compilation_config.
                                            cudagraph_capture_sizes)
-                for batch_size in cudagraph_capture_sizes:
+                for batch_size, use_inputs_embeds in cudagraph_capture_sizes:
                     attn_metadata = (
                         self.attn_state.graph_capture_get_metadata_for_batch(
                             batch_size,
@@ -1605,6 +1611,9 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                     capture_inputs = {
                         "input_ids":
                         input_tokens[:batch_size],
+                        "inputs_embeds":
+                        inputs_embeds[:batch_size]
+                        if use_inputs_embeds else None,
                         "positions":
                         input_positions[..., :batch_size],
                         "intermediate_inputs":
@@ -1641,8 +1650,8 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                                              virtual_engine):
                         graph_runner.capture(**capture_inputs)
                     self.graph_memory_pool = graph_runner.graph.pool()
-                    self.graph_runners[virtual_engine][batch_size] = (
-                        graph_runner)
+                    self.graph_runners[virtual_engine][(
+                        batch_size, use_inputs_embeds)] = (graph_runner)
 
         if self.lora_config:
             self._remove_dummy_loras()
@@ -1774,8 +1783,9 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
         if prefill_meta is None and decode_meta.use_cuda_graph:
             assert model_input.input_tokens is not None
             graph_batch_size = model_input.input_tokens.shape[0]
-            model_executable = self.graph_runners[virtual_engine][
-                graph_batch_size]
+            use_inputs_embeds = model_input.inputs_embeds is not None
+            model_executable = self.graph_runners[virtual_engine][(
+                graph_batch_size, use_inputs_embeds)]
             if previous_hidden_states is not None:
                 previous_hidden_states = torch.cat([
                     previous_hidden_states,
@@ -1826,9 +1836,8 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
                                      self.vllm_config, virtual_engine):
                 hidden_or_intermediate_states = model_executable(
                     input_ids=model_input.input_tokens,
-                    **{
-                        "inputs_embeds": model_input.inputs_embeds,
-                    } if model_input.inputs_embeds is not None else {},
+                    inputs_embeds=model_input.inputs_embeds
+                    if model_input.inputs_embeds is not None else None,
                     positions=model_input.input_positions,
                     intermediate_tensors=intermediate_tensors,
                     **MultiModalKwargs.as_kwargs(multi_modal_kwargs,
@@ -2015,6 +2024,7 @@ class CUDAGraphRunner(nn.Module):
     def capture(
         self,
         input_ids: torch.Tensor,
+        inputs_embeds: Optional[torch.Tensor],
         positions: torch.Tensor,
         intermediate_inputs: Optional[IntermediateTensors],
         kv_caches: List[torch.Tensor],
@@ -2031,6 +2041,7 @@ class CUDAGraphRunner(nn.Module):
         for _ in range(_NUM_WARMUP_ITERS):
             self.model(
                 input_ids=input_ids,
+                inputs_embeds=inputs_embeds,
                 positions=positions,
                 intermediate_tensors=intermediate_inputs,
                 **kwargs,
@@ -2043,6 +2054,9 @@ class CUDAGraphRunner(nn.Module):
         with torch.cuda.graph(self._graph, pool=memory_pool, stream=stream):
             output_hidden_or_intermediate_states = self.model(
                 input_ids=input_ids,
+                **({
+                    "inputs_embeds": inputs_embeds,
+                } if inputs_embeds is not None else {}),
                 positions=positions,
                 intermediate_tensors=intermediate_inputs,
                 **kwargs,
@@ -2070,6 +2084,9 @@ class CUDAGraphRunner(nn.Module):
         self.input_buffers = {
             "input_ids":
             input_ids,
+            **({
+                "inputs_embeds": inputs_embeds,
+            } if inputs_embeds is not None else {}),
             "positions":
             positions,
             "kv_caches":
@@ -2090,6 +2107,7 @@ class CUDAGraphRunner(nn.Module):
     def forward(
         self,
         input_ids: torch.Tensor,
+        inputs_embeds: Optional[torch.Tensor],
         positions: torch.Tensor,
         intermediate_tensors: Optional[IntermediateTensors],
         **kwargs,
@@ -2104,6 +2122,9 @@ class CUDAGraphRunner(nn.Module):
             # so the shape is not padded, we need to copy partial only
             self.input_buffers["positions"][:positions.shape[0]].copy_(
                 positions, non_blocking=True)
+        if inputs_embeds is not None:
+            self.input_buffers["inputs_embeds"][:inputs_embeds.shape[0]].copy_(
+                inputs_embeds, non_blocking=True)
 
         if self.backend_name != "NO_ATTENTION":
             self.input_buffers["slot_mapping"].copy_(
