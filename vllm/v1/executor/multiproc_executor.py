@@ -29,7 +29,7 @@ from vllm.executor.multiproc_worker_utils import (
 from vllm.logger import init_logger
 from vllm.utils import (get_distributed_init_method, get_mp_context,
                         get_open_port)
-from vllm.v1.executor.abstract import Executor
+from vllm.v1.executor.abstract import Executor, FailureCallback
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.worker.worker_base import WorkerWrapperBase
 
@@ -49,7 +49,7 @@ class MultiprocExecutor(Executor):
         self._finalizer = weakref.finalize(self, self.shutdown)
         self.is_failed = False
         self.shutdown_event = threading.Event()
-        self.failure_callback: Optional[Callable] = None
+        self.failure_callback: Optional[FailureCallback] = None
 
         self.world_size = self.parallel_config.world_size
         tensor_parallel_size = self.parallel_config.tensor_parallel_size
@@ -133,7 +133,7 @@ class MultiprocExecutor(Executor):
                daemon=True,
                name="MultiprocWorkerMonitor").start()
 
-    def register_failure_callback(self, callback: Callable):
+    def register_failure_callback(self, callback: FailureCallback):
         if self.is_failed:
             callback()
         else:
@@ -276,8 +276,7 @@ class WorkerProc:
     ):
         self.rank = rank
         wrapper = WorkerWrapperBase(vllm_config=vllm_config, rpc_rank=rank)
-        # TODO: move `init_worker` to executor level as a collective rpc
-        # call
+        # TODO: move `init_worker` to executor level as a collective rpc call
         all_kwargs: list[dict] = [
             {} for _ in range(vllm_config.parallel_config.world_size)
         ]

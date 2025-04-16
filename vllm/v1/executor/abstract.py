@@ -15,6 +15,8 @@ from vllm.executor.uniproc_executor import (  # noqa
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
 from vllm.v1.outputs import ModelRunnerOutput
 
+FailureCallback = Callable[[], None]
+
 
 class Executor(ExecutorBase):
     """
@@ -62,7 +64,7 @@ class Executor(ExecutorBase):
                             args=(kv_cache_configs, ))
         self.collective_rpc("compile_or_warm_up_model")
 
-    def register_failure_callback(self, callback: Callable):
+    def register_failure_callback(self, callback: FailureCallback):
         """
         Register a function to be called if the executor enters a permanent
         failed state.

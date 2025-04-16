@@ -481,8 +481,7 @@ class SyncMPClient(MPClient):
             log_stats=log_stats,
         )
 
-        self.outputs_queue: queue.Queue[Union[EngineCoreOutputs,
-                                              Exception]] = queue.Queue()
+        self.outputs_queue = queue.Queue[Union[EngineCoreOutputs, Exception]]()
 
         # Ensure that the outputs socket processing thread does not have
         # a ref to the client which prevents gc.
@@ -625,8 +624,8 @@ class AsyncMPClient(MPClient):
             log_stats=log_stats,
         )
 
-        self.outputs_queue: asyncio.Queue[Union[EngineCoreOutputs,
-                                                Exception]] = asyncio.Queue()
+        self.outputs_queue = asyncio.Queue[Union[EngineCoreOutputs,
+                                                 Exception]]()
         try:
             # If we are running in an asyncio event loop, start the queue task.
             # Otherwise, it will be started lazily. If it is not started here,

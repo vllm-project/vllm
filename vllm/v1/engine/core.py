@@ -12,7 +12,6 @@ from typing import Any, Callable, Optional, TypeVar, Union
 
 import msgspec
 import zmq
-import zmq.asyncio
 
 from vllm.config import ParallelConfig, VllmConfig
 from vllm.distributed import stateless_destroy_torch_distributed_process_group
@@ -320,8 +319,7 @@ class EngineCoreProc(EngineCore):
         log_stats: bool,
         engine_index: int = 0,
     ):
-        input_queue: queue.Queue[tuple[EngineCoreRequestType,
-                                       Any]] = queue.Queue()
+        input_queue = queue.Queue[tuple[EngineCoreRequestType, Any]]()
 
         executor_fail_callback = lambda: input_queue.put_nowait(
             (EngineCoreRequestType.EXECUTOR_FAILED, b''))
@@ -339,8 +337,7 @@ class EngineCoreProc(EngineCore):
         # model forward pass.
         # Threads handle Socket <-> Queues and core_busy_loop uses Queue.
         self.input_queue = input_queue
-        self.output_queue: queue.Queue[Union[EngineCoreOutputs,
-                                             bytes]] = queue.Queue()
+        self.output_queue = queue.Queue[Union[EngineCoreOutputs, bytes]]()
         threading.Thread(target=self.process_input_socket,
                          args=(input_path, engine_index),
                          daemon=True).start()
