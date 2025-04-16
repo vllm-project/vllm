@@ -7,7 +7,9 @@ from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_utils import BlockHashType, KVCacheBlock
 from vllm.v1.core.specialized_manager import (FullAttentionAllocator,
                                               SlidingWindowAllocator,
-                                              SpecializedAllocator)
+                                              SpecializedAllocator,
+                                              get_specialized_allocator)
+from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.request import Request
 
 
@@ -340,3 +342,22 @@ class FullAndSwaMemoryAllocator(HybridMemoryAllocator):
             for group_id in group_ids
             if not (block := blocks[group_id][i]).is_null
         ]
+
+
+def get_hybrid_allocator(
+    kv_cache_config: KVCacheConfig,
+    block_pool: BlockPool,
+) -> HybridMemoryAllocator:
+    num_groups = len(kv_cache_config.kv_cache_groups)
+    if num_groups == 1:
+        kv_cache_spec = kv_cache_config.kv_cache_groups[0].kv_cache_spec
+        allocator = get_specialized_allocator(
+            block_pool=block_pool,
+            kv_cache_spec=kv_cache_spec,
+        )
+        return SingleMemoryAllocator(
+            block_pool=block_pool,
+            allocator=allocator,
+        )
+    else:
+        raise NotImplementedError

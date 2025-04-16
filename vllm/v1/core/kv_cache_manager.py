@@ -5,7 +5,7 @@ from typing import Optional
 from vllm.logger import init_logger
 from vllm.utils import sha256
 from vllm.v1.core.block_pool import BlockPool
-from vllm.v1.core.hybrid_allocator import HybridMemoryAllocator
+from vllm.v1.core.hybrid_allocator import get_hybrid_allocator
 from vllm.v1.core.kv_cache_utils import KVCacheBlock
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.metrics.stats import PrefixCacheStats
@@ -48,7 +48,10 @@ class KVCacheManager:
         # data for reempted ones.
         self.num_cached_blocks: dict[str, list[int]] = {}
 
-        self.allocator = HybridMemoryAllocator()
+        self.allocator = get_hybrid_allocator(
+            kv_cache_config=kv_cache_config,
+            block_pool=self.block_pool,
+        )
 
     @property
     def usage(self) -> float:
