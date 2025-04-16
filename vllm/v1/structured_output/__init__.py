@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, Optional
 
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
-from vllm.v1.structured_output.backend_guidance import GuidanceBackend
+from vllm.transformers_utils.tokenizer_group import init_tokenizer_from_configs
 from vllm.v1.structured_output.backend_types import (StructuredOutputBackend,
                                                      StructuredOutputGrammar)
 
@@ -45,14 +45,36 @@ class StructuredOutputManager:
         # NOTE: We only support a single backend. We do NOT support different
         # backends on a per-request basis in V1 (for now, anyway...).
         if self.backend is None:
-            backend_name = request.sampling_params.guided_decoding.backend_name
+            # NOTE: We already setup guided_decoding in sampling_params
+            # from vllm/v1/processor.py#L135, hence "type: ignore" directive.
+            backend_name = request.sampling_params.guided_decoding.backend_name  # type: ignore[union-attr]
+            tokenizer_group = init_tokenizer_from_configs(
+                model_config=self.vllm_config.model_config,
+                scheduler_config=self.vllm_config.scheduler_config,
+                parallel_config=self.vllm_config.parallel_config,
+                lora_config=self.vllm_config.lora_config)
+            tokenizer_group.ping()
+            tokenizer = tokenizer_group.get_lora_tokenizer(None)
+            vocab_size = self.vllm_config.model_config.get_vocab_size()
+
             if backend_name == "xgrammar":
                 from vllm.v1.structured_output.backend_xgrammar import (
                     XgrammarBackend)
 
-                self.backend = XgrammarBackend(self.vllm_config)
+                self.backend = XgrammarBackend(
+                    vllm_config=self.vllm_config,
+                    tokenizer=tokenizer,
+                    vocab_size=vocab_size,
+                )
             elif backend_name == "guidance":
-                self.backend = GuidanceBackend(self.vllm_config)
+                from vllm.v1.structured_output.backend_guidance import (
+                    GuidanceBackend)
+
+                self.backend = GuidanceBackend(
+                    vllm_config=self.vllm_config,
+                    tokenizer=tokenizer,
+                    vocab_size=vocab_size,
+                )
             else:
                 raise ValueError(
                     f"Unsupported structured output backend: {backend_name}")
