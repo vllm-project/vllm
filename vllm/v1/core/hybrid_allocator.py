@@ -243,8 +243,8 @@ class FullAndSwaMemoryAllocator(HybridMemoryAllocator):
         if self.block_size != swa_allocator.block_size:
             raise ValueError(
                 f"The block size of full attention ({self.block_size}) and "
-                f"sliding window attention ({swa_allocator.block_size}) must be "
-                "the same.")
+                f"sliding window attention ({swa_allocator.block_size}) must "
+                "be the same.")
 
     def _get_block_hashes(
         self,
@@ -333,10 +333,10 @@ class FullAndSwaMemoryAllocator(HybridMemoryAllocator):
         self,
         blocks: list[list[KVCacheBlock]],
     ) -> Iterable[KVCacheBlock]:
-        ordered_blocks: list[list[KVCacheBlock]] = []
         num_blocks = len(blocks[0])
-        for i in reversed(range(num_blocks)):
-            ordered_blocks.extend(
-                block for group_id in self.all_group_ids
-                if not (block := blocks[group_id][i]).is_null)
-        return ordered_blocks
+        group_ids = self.all_group_ids
+        return [
+            block for i in reversed(range(num_blocks))
+            for group_id in group_ids
+            if not (block := blocks[group_id][i]).is_null
+        ]
