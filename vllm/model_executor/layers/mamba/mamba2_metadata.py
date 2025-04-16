@@ -80,13 +80,12 @@ def prepare_mamba2_metadata(
     seq_idx = None
     chunk_indices, chunk_offsets = None, None
     if has_prefill:
-        seq_idx = torch.zeros_like(input_ids, dtype=torch.int32)
-        for i, (srt, end) in enumerate(
-                zip(
-                    attn_metadata.query_start_loc,
-                    attn_metadata.query_start_loc[1:],
-                )):
-            seq_idx[srt:end] = i
+        seq_idx = torch.repeat_interleave(torch.arange(
+            len(attn_metadata.query_start_loc) - 1,
+            dtype=torch.int32,
+            device=attn_metadata.query_start_loc.device),
+                                          attn_metadata.query_start_loc.diff(),
+                                          output_size=len(input_ids))
         seq_idx.unsqueeze_(0)
 
         # compute metadata for chunked prefill.
