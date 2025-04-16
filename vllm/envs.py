@@ -704,6 +704,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # It can be changed with this variable if needed for some reason.
     "VLLM_XGRAMMAR_CACHE_MB":
     lambda: int(os.getenv("VLLM_XGRAMMAR_CACHE_MB", "512")),
+
+    # Maximum number of concurrent requests to the API server
+    "VLLM_API_SERVICE_MAX_CONCURRENT_REQUESTS":
+    lambda: int(os.getenv("VLLM_API_SERVICE_MAX_CONCURRENT_REQUESTS", "0")),
 }
 
 # end-env-vars-definition

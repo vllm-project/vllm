@@ -103,6 +103,23 @@ logger = init_logger('vllm.entrypoints.openai.api_server')
 
 _running_tasks: set[asyncio.Task] = set()
 
+# Global request semaphore for concurrency control
+_request_semaphore: Optional[asyncio.Semaphore] = None
+
+
+# Dependency function to limit concurrency
+async def limit_concurrency():
+    if _request_semaphore is not None:
+        if _request_semaphore.locked():
+            raise HTTPException(
+                status_code=503,
+                detail="Server is at maximum capacity. Please try again later."
+            )
+        async with _request_semaphore:
+            yield
+    else:
+        yield
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -464,7 +481,8 @@ async def show_version():
 
 
 @router.post("/v1/chat/completions",
-             dependencies=[Depends(validate_json_request)])
+             dependencies=[Depends(validate_json_request),
+                           Depends(limit_concurrency)])
 @with_cancellation
 @load_aware_call
 async def create_chat_completion(request: ChatCompletionRequest,
@@ -486,7 +504,8 @@ async def create_chat_completion(request: ChatCompletionRequest,
     return StreamingResponse(content=generator, media_type="text/event-stream")
 
 
-@router.post("/v1/completions", dependencies=[Depends(validate_json_request)])
+@router.post("/v1/completions", dependencies=[Depends(validate_json_request),
+                                              Depends(limit_concurrency)])
 @with_cancellation
 @load_aware_call
 async def create_completion(request: CompletionRequest, raw_request: Request):
@@ -1023,6 +1042,14 @@ async def init_app_state(
 
     state.enable_server_load_tracking = args.enable_server_load_tracking
     state.server_load_metrics = 0
+
+    # Initialize request semaphore
+    global _request_semaphore
+    if envs.VLLM_API_SERVICE_MAX_CONCURRENT_REQUESTS > 0:
+        _request_semaphore = asyncio.Semaphore(
+            envs.VLLM_API_SERVICE_MAX_CONCURRENT_REQUESTS)
+        logger.info("Request concurrency limited to %d",
+                    envs.VLLM_API_SERVICE_MAX_CONCURRENT_REQUESTS)
 
 
 def create_server_socket(addr: tuple[str, int]) -> socket.socket:
