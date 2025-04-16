@@ -253,32 +253,31 @@ class FullAndSwaMemoryAllocator(HybridMemoryAllocator):
         # First, find the longest cache hit for full attention.
         full_attn_blocks = self.full_attn_allocator.find_longest_cache_hit(
             block_hashes, self.full_attn_group_ids)
-        if not full_attn_blocks:
+        num_full_attn_blocks = len(
+            full_attn_blocks[self.full_attn_group_ids[0]])
+        if num_full_attn_blocks == 0:
             # No cache hit.
             return {}
 
         # Next, find the cache hit for sliding window attention WITHIN the
         # cache hit of full attention.
-        block_hashes = block_hashes[:len(full_attn_blocks)]
+        block_hashes = block_hashes[:num_full_attn_blocks]
         swa_attn_blocks = self.swa_allocator.find_longest_cache_hit(
             block_hashes, self.swa_group_ids)
-        if not swa_attn_blocks:
+        num_swa_attn_blocks = len(swa_attn_blocks[self.swa_group_ids[0]])
+        if num_swa_attn_blocks == 0:
             # No cache hit.
             return {}
 
         # Truncate the full attention cache hit to the length of the
         # sliding window cache hit.
-        num_blocks = len(swa_attn_blocks)
-        combined_blocks = [{} for _ in range(num_blocks)]
-        # TODO(woosuk): The below loop can be very slow. Optimize it.
-        for i in range(num_blocks):
-            block = combined_blocks[i]
-            full_attn_block = full_attn_blocks[i]
-            for group_id in self.full_attn_group_ids:
-                block[group_id] = full_attn_block[group_id]
-            swa_attn_block = swa_attn_blocks[i]
-            for group_id in self.swa_group_ids:
-                block[group_id] = swa_attn_block[group_id]
+        num_blocks = num_swa_attn_blocks
+        combined_blocks: list[list[KVCacheBlock]] = []
+        for group_id in self.all_group_ids:
+            if group_id in self.full_attn_group_ids:
+                combined_blocks.append(full_attn_blocks[group_id][:num_blocks])
+            else:
+                combined_blocks.append(swa_attn_blocks[group_id])
         return combined_blocks
 
     def remove_skipped_blocks(
