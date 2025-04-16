@@ -204,6 +204,8 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
                                             trust_remote_code=True),
     "PhiMoEForCausalLM": _HfExamplesInfo("microsoft/Phi-3.5-MoE-instruct",
                                          trust_remote_code=True),
+    "Plamo2ForCausalLM": _HfExamplesInfo("pfnet/plamo-2-1b",
+                                        trust_remote_code=True),
     "QWenLMHeadModel": _HfExamplesInfo("Qwen/Qwen-7B-Chat",
                                        trust_remote_code=True),
     "Qwen2ForCausalLM": _HfExamplesInfo("Qwen/Qwen2-7B-Instruct",
@@ -273,6 +275,9 @@ _CROSS_ENCODER_EXAMPLE_MODELS = {
     "BertForSequenceClassification": _HfExamplesInfo("cross-encoder/ms-marco-MiniLM-L-6-v2"),  # noqa: E501
     "RobertaForSequenceClassification": _HfExamplesInfo("cross-encoder/quora-roberta-base"),  # noqa: E501
     "XLMRobertaForSequenceClassification": _HfExamplesInfo("BAAI/bge-reranker-v2-m3"),  # noqa: E501
+    "ModernBertForSequenceClassification":
+        _HfExamplesInfo("Alibaba-NLP/gte-reranker-modernbert-base",
+                        min_transformers_version="4.49"),
 }
 
 _MULTIMODAL_EXAMPLE_MODELS = {
@@ -302,6 +307,9 @@ _MULTIMODAL_EXAMPLE_MODELS = {
                                          trust_remote_code=True),
     "Idefics3ForConditionalGeneration": _HfExamplesInfo("HuggingFaceM4/Idefics3-8B-Llama3",  # noqa: E501
                                                         {"tiny": "HuggingFaceTB/SmolVLM-256M-Instruct"}),  # noqa: E501
+    "KimiVLForConditionalGeneration": _HfExamplesInfo("moonshotai/Kimi-VL-A3B-Instruct",  # noqa: E501
+                                                      extras={"thinking": "moonshotai/Kimi-VL-A3B-Thinking"},  # noqa: E501
+                                                      trust_remote_code=True),
     "Llama4ForConditionalGeneration": _HfExamplesInfo("meta-llama/Llama-4-Scout-17B-16E-Instruct",   # noqa: E501
                                                       min_transformers_version="4.51"),
     "LlavaForConditionalGeneration": _HfExamplesInfo("llava-hf/llava-1.5-7b-hf",

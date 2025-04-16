@@ -1034,6 +1034,20 @@ class BaseProcessingInfo:
         """
         raise NotImplementedError
 
+    def get_allowed_mm_limits(self) -> Mapping[str, int]:
+        """Return the maximum allowed number of items for each modality."""
+        supported_mm_limits = self.get_supported_mm_limits()
+        mm_config = self.ctx.get_mm_config()
+
+        allowed_limits = dict[str, int]()
+        for modality, supported_limit in supported_mm_limits.items():
+            user_limit = mm_config.get_limit_per_prompt(modality)
+
+            allowed_limits[modality] = (user_limit if supported_limit is None
+                                        else min(user_limit, supported_limit))
+
+        return allowed_limits
+
 
 _I = TypeVar("_I", bound=BaseProcessingInfo)
 
@@ -1087,14 +1101,24 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         before passing them to :meth:`_get_hf_mm_data`.
         """
         mm_items = self.data_parser.parse_mm_data(mm_data)
-        mm_config = self.info.ctx.get_mm_config()
+        supported_mm_limits = self.info.get_supported_mm_limits()
+        allowed_mm_limits = self.info.get_allowed_mm_limits()
 
         for modality, items in mm_items.items():
-            limit = mm_config.get_limit_per_prompt(modality)
-            if len(items) > limit:
+            supported_limit = supported_mm_limits.get(modality, 0)
+            allowed_limit = allowed_mm_limits.get(modality, 0)
+            num_items = len(items)
+
+            if supported_limit is not None and num_items > supported_limit:
                 raise ValueError(
-                    f"You set {modality}={limit} (or defaulted to 1) in "
-                    f"`--limit-mm-per-prompt`, but passed {len(items)} "
+                    f"The model only supports at most {supported_limit} "
+                    f"{modality} items, but you passed {num_items} "
+                    f"{modality} items in the same prompt.")
+
+            if num_items > allowed_limit:
+                raise ValueError(
+                    f"You set or defaulted to {modality}={allowed_limit} "
+                    f"in --limit-mm-per-prompt`, but passed {num_items} "
                     f"{modality} items in the same prompt.")
 
         return mm_items

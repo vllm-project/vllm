@@ -209,14 +209,15 @@ def _run_test(
     # will hurt multiprocessing backend with fork method (the default method).
 
     # max_model_len should be greater than image_feature_size
-    with vllm_runner(model,
-                     dtype=dtype,
-                     max_model_len=8192,
-                     max_num_seqs=3,
-                     tensor_parallel_size=tensor_parallel_size,
-                     distributed_executor_backend=distributed_executor_backend,
-                     limit_mm_per_prompt={"image": _LIMIT_IMAGE_PER_PROMPT
-                                          }) as vllm_model:
+    with vllm_runner(
+            model,
+            dtype=dtype,
+            max_model_len=19212,  # 3 max size images
+            max_num_seqs=3,
+            tensor_parallel_size=tensor_parallel_size,
+            distributed_executor_backend=distributed_executor_backend,
+            limit_mm_per_prompt={"image":
+                                 _LIMIT_IMAGE_PER_PROMPT}) as vllm_model:
         vllm_outputs_per_image = [
             vllm_model.generate_greedy_logprobs(prompts,
                                                 max_tokens,
@@ -507,7 +508,7 @@ def test_regression(vllm_runner, image_assets, model, dtype, max_tokens,
             model,
             dtype=dtype,
             max_model_len=8192,
-            max_num_seqs=2,
+            max_num_seqs=4,
             tensor_parallel_size=1,
             limit_mm_per_prompt={"image":
                                  _LIMIT_IMAGE_PER_PROMPT}) as vllm_model:
@@ -546,6 +547,23 @@ def test_regression(vllm_runner, image_assets, model, dtype, max_tokens,
         images = [
             [stop_sign],
             None,
+        ]
+        vllm_model.generate_greedy_logprobs(prompts,
+                                            max_tokens,
+                                            num_logprobs,
+                                            images=images)
+
+        # Mixed batch with text and images with different numbers of tiles
+        prompts = [
+            "<|begin_of_text|>Hello!",
+            "<|begin_of_text|>Some text before.<|image|>What is in the image?",  # noqa: E501
+            "<|begin_of_text|>Some text before.<|image|>What is in the image?",  # noqa: E501
+        ]
+        images = [
+            None,
+            [stop_sign],
+            # smaller image must be 2nd for the repro
+            [stop_sign.resize((448, 448))],
         ]
         vllm_model.generate_greedy_logprobs(prompts,
                                             max_tokens,
@@ -674,3 +692,26 @@ def test_get_full_text_row_masked_out_mask(input_indices) -> None:
                 f"full_text_row_masked_out_mask[{idx}] must be " \
                 f"'{must_be_masked}' "
             idx += 1
+
+
+@pytest.mark.core_model
+@pytest.mark.parametrize("encoder_seq_lens, num_tiles, expected", [
+    ([6404], [[4]], [6404]),
+    ([0, 6404], [[4]], [6404]),
+    ([0, 1601, 8005], [[1], [4, 1]], [1601, 8005]),
+    ([0, 19212, 0, 3202], [[4, 4, 4], [2]], [19212, 3202]),
+])
+def test_parse_and_validate_encoder_lens(encoder_seq_lens, num_tiles,
+                                         expected) -> None:
+
+    dummy = DummyModel()
+    num_tokens_per_tile = 1601
+    actual_encoder_seq_lens = MllamaForConditionalGeneration \
+        ._get_and_validate_encoder_lens(
+            dummy,
+            encoder_seq_lens,
+            num_tiles,
+            num_tokens_per_tile,
+        )
+    assert actual_encoder_seq_lens == expected, \
+        f"Expected {expected} but got {actual_encoder_seq_lens}"
