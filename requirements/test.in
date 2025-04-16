@@ -27,6 +27,7 @@ torch==2.6.0
 torchaudio==2.6.0
 torchvision==0.21.0
 transformers_stream_generator # required for qwen-vl test
+mamba_ssm # required for plamo2 test
 matplotlib # required for qwen-vl test
 mistral_common[opencv] >= 1.5.4 # required for pixtral test
 num2words # required for smolvlm test
