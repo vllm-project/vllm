@@ -102,6 +102,7 @@ class FalconH1SSMDecoderLayer(nn.Module):
     def __init__(
         self,
         config: FalconH1Config,
+        cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
     ) -> None:
         super().__init__()
@@ -344,7 +345,6 @@ class FalconH1ParallelHybrid(nn.Module):
         # Instantiate the attention branch
         self.self_attn = FalconH1AttentionDecoderLayer(
             config=config,
-            layer_idx=layer_idx,
             cache_config=cache_config,
             quant_config=quant_config,
             prefix=prefix,
@@ -352,10 +352,8 @@ class FalconH1ParallelHybrid(nn.Module):
         # Instantiate the SSM branch
         self.mamba = FalconH1SSMDecoderLayer(
             config=config,
-            layer_idx=layer_idx,
             cache_config=cache_config,
             quant_config=quant_config,
-            prefix=prefix,
         )
         self.ssm_out_multiplier = config.ssm_out_multiplier
         self.ssm_in_multiplier = config.ssm_in_multiplier
