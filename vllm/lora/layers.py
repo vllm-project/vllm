@@ -1141,7 +1141,8 @@ class LogitsProcessorWithLoRA(BaseLayerWithLoRA):
             # All tokens should have same lora ids when compute
             # prompt logprobs, just repeat sampler_indices_padded
             # for num_tokens times
-            indices_padded = self.punica_wrapper.sampler_indices_padded.repeat(lora_logits.shape[1])
+            indices_padded = self.punica_wrapper.sampler_indices_padded.repeat(
+                lora_logits.shape[1])
         else:
             indices_padded = self.punica_wrapper.sampler_indices_padded
 
