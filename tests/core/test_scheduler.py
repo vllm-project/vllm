@@ -2,6 +2,7 @@
 
 import time
 from collections import deque
+from typing import Optional
 from unittest.mock import MagicMock
 
 import pytest  # noqa
@@ -992,8 +993,8 @@ def test_no_batches_mixed_with_prompt_tokens_and_prompt_embeds():
     seq_length = 7
     embedding_size = 5
     num_seqs = 11
-    seq_tokens = []
-    seq_embeds = []
+    seq_tokens: list[list[int]] = []
+    seq_embeds: list[Optional[torch.Tensor]] = []
     for i in range(num_seqs):
         if i % 2:
             seq_tokens.append(list(range(seq_length)))
