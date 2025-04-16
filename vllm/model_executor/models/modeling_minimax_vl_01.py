@@ -885,12 +885,7 @@ class MiniMaxVL01ForConditionalGeneration(nn.Module, SupportsMultiModal, Support
         past_key_values = kwargs.pop("past_key_values", None)
         use_cache = kwargs.pop("use_cache", False)
         output_hidden_states = kwargs.pop("output_hidden_states", True)
-
-        vision_feature_select_strategy = (
-            vision_feature_select_strategy
-            if vision_feature_select_strategy is not None
-            else self.config.vision_feature_select_strategy
-        )
+        vision_feature_select_strategy = self.config.vision_feature_select_strategy
         legacy_processing = False
         legacy_processing = (
             (input_ids == self.config.image_token_index).sum(1).max() < self.config.image_seq_length
