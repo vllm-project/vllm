@@ -256,26 +256,15 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         renormalize: bool,
         topk_group: Optional[int] = None,
         num_expert_group: Optional[int] = None,
-        global_num_experts: int = -1,
-        expert_map: Optional[torch.Tensor] = None,
         custom_routing_function: Optional[Callable] = None,
-        scoring_func: str = "softmax",
-        e_score_correction_bias: Optional[torch.Tensor] = None,
-        activation: str = "silu",
-    ) -> torch.Tensor:
-        assert not use_grouped_topk
-        assert num_expert_group is None
-        assert topk_group is None
-        assert custom_routing_function is None
-        assert layer is not None
-        if scoring_func != "softmax":
-            raise NotImplementedError(
-                "Only softmax scoring function is supported for HPU.")
-        if e_score_correction_bias is not None:
-            raise NotImplementedError(
-                "Expert score correction bias is not supported for HPU.")
-        return layer.hpu_fused_moe(x, layer.w13_weight, layer.w2_weight,
-                                   router_logits, top_k)
+        **kwargs,
+    ):
+        assert not use_grouped_topk, 'use_grouped_topk must be False on HPU'
+        assert num_expert_group is None, ('num_expert_group is '
+                                          'not supported on HPU')
+        assert topk_group is None, 'topk_group is not supported on HPU'
+        if layer is not None:
+            return layer.hpu_fused_moe(x, router_logits, top_k)
 
     def forward_tpu(
         self,
