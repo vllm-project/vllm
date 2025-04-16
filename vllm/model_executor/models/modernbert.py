@@ -1,5 +1,4 @@
 # SPDX-License-Identifier: Apache-2.0
-import math
 from typing import Iterable, Optional, Set, Tuple
 
 import torch
@@ -122,22 +121,6 @@ class ModernBertAttention(nn.Module):
         return hidden_states
 
 
-class GELUActivation(nn.Module):
-
-    def __init__(self, use_gelu_python: bool = False):
-        super().__init__()
-        if use_gelu_python:
-            self.act = self._gelu_python
-        else:
-            self.act = nn.functional.gelu
-
-    def _gelu_python(self, input: torch.Tensor) -> torch.Tensor:
-        return input * 0.5 * (1.0 + torch.erf(input / math.sqrt(2.0)))
-
-    def forward(self, input: torch.Tensor) -> torch.Tensor:
-        return self.act(input)
-
-
 class ModernBertMLP(nn.Module):
 
     def __init__(self, config: ModernBertConfig):
@@ -146,7 +129,7 @@ class ModernBertMLP(nn.Module):
         self.Wi = nn.Linear(config.hidden_size,
                             int(config.intermediate_size) * 2,
                             bias=config.mlp_bias)
-        self.act = GELUActivation()
+        self.act = nn.GELU()
         self.Wo = RowParallelLinear(config.intermediate_size,
                                     config.hidden_size,
                                     bias=config.mlp_bias)
@@ -268,7 +251,7 @@ class ModernBertPooler(nn.Module):
         super().__init__()
         self.dense = nn.Linear(config.hidden_size, config.hidden_size,
                                config.classifier_bias)
-        self.act = GELUActivation()
+        self.act = nn.GELU()
         self.norm = nn.LayerNorm(config.hidden_size,
                                  eps=config.norm_eps,
                                  bias=config.norm_bias)
