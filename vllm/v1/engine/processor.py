@@ -157,10 +157,6 @@ class Processor:
             raise ValueError(f"Only {supported_backends} structured output is "
                              "supported in V1.")
         if params.guided_decoding.backend:
-            logger.warning(
-                "Request-level structured output backend selection is not "
-                "supported in V1. Please only specify structured output "
-                "backend at the engine level.")
             if params.guided_decoding.backend != engine_level_backend:
                 raise ValueError(
                     "Request-level structured output backend selection is no "
@@ -169,6 +165,10 @@ class Processor:
                     f"initialised with '{engine_level_backend}'. This error "
                     "can be resolved by removing backend selection from the "
                     "request.")
+            logger.warning(
+                "Request-level structured output backend selection is not "
+                "supported in V1. Please only specify structured output "
+                "backend at the engine level.")
         else:
             params.guided_decoding.backend = engine_level_backend
 
