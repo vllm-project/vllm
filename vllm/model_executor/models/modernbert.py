@@ -1,13 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 import math
-import sys
 from typing import Iterable, Optional, Set, Tuple
 
 import torch
-import torch.nn.functional as F
 from torch import nn
 from transformers import ModernBertConfig
 
+from vllm.attention import Attention, AttentionType
 from vllm.config import VllmConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.linear import (QKVParallelLinear,
@@ -63,48 +62,6 @@ class ModernBertRotaryEmbedding(RotaryEmbedding):
         self.config = config
 
 
-def sdpa_attention_forward(
-    module: "ModernBertAttention",
-    qkv: torch.Tensor,
-    position_ids: Optional[torch.LongTensor],
-    dim: int,
-    num_heads: int,
-    head_dim: int,
-    **_kwargs,
-) -> Tuple[torch.Tensor]:
-    query, key, value = qkv.split([dim] * 3, dim=-1)
-
-    pos_offsets = (position_ids == 0).nonzero(as_tuple=True)[0].int()
-    end_offset = torch.Tensor([sys.maxsize]).int()
-    pos_offsets = torch.cat((pos_offsets, end_offset))
-    start = 0
-    attn_outs = []
-    for offset in pos_offsets:
-        if not offset:
-            continue
-        end = offset.item()
-        pos_ids = position_ids[start:end]
-        q = query[start:end, :]
-        k = key[start:end, :]
-        v = value[start:end, :]
-        q, k = module.rotary_emb(positions=pos_ids, query=q, key=k)
-        q = q.view(1, -1, num_heads, head_dim).transpose(1, 2)
-        k = k.view(1, -1, num_heads, head_dim).transpose(1, 2)
-        v = v.view(1, -1, num_heads, head_dim).transpose(1, 2)
-        attn_output = (F.scaled_dot_product_attention(
-            q,
-            k,
-            v,
-            dropout_p=0.0,
-        ).transpose(1, 2).contiguous())
-        attn_output = attn_output.view(-1, dim)
-        attn_outs.append(attn_output)
-        start = end
-
-    attn_output = torch.cat(attn_outs, dim=0)
-    return attn_output
-
-
 class ModernBertAttention(nn.Module):
 
     def __init__(self,
@@ -142,6 +99,11 @@ class ModernBertAttention(nn.Module):
                                                     head_size=self.head_dim,
                                                     dim=self.head_dim,
                                                     base=rope_theta)
+        self.attn = Attention(self.num_heads,
+                              self.head_dim,
+                              self.scaling,
+                              prefix=f"{layer_id}.attn",
+                              attn_type=AttentionType.ENCODER_ONLY)
         self.Wo = RowParallelLinear(config.hidden_size,
                                     config.hidden_size,
                                     bias=config.attention_bias)
@@ -155,22 +117,9 @@ class ModernBertAttention(nn.Module):
         **kwargs,
     ) -> torch.Tensor:
         qkv, _ = self.Wqkv(hidden_states)
-        attn_outputs = sdpa_attention_forward(
-            self,
-            qkv=qkv,
-            position_ids=position_ids,
-            rotary_emb=self.rotary_emb,
-            local_attention=self.local_attention,
-            dim=self.all_head_size,
-            output_attentions=output_attentions,
-            num_heads=self.num_heads,
-            head_dim=self.head_dim,
-            **kwargs,
-        )
-        #will get wrong score when scoring text pairs.
-        #q, k, v = qkv.split([self.all_head_size] * 3, dim=-1)
-        #q, k = self.rotary_emb(position_ids, q, k)
-        #attn_outputs = self.attn(q, k, v)
+        q, k, v = qkv.split([self.all_head_size] * 3, dim=-1)
+        q, k = self.rotary_emb(position_ids, q, k)
+        attn_outputs = self.attn(q, k, v)
         hidden_states = attn_outputs
         hidden_states, _ = self.Wo(hidden_states)
         return hidden_states
