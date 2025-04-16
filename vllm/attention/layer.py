@@ -414,6 +414,7 @@ def unified_attention_with_output(
     value: torch.Tensor,
     output: torch.Tensor,
     layer_name: str,
+    output_scale: torch.Tensor = None,
 ) -> None:
     wait_for_kv_layer_from_connector(layer_name)
     forward_context: ForwardContext = get_forward_context()
@@ -428,7 +429,8 @@ def unified_attention_with_output(
                       value,
                       kv_cache,
                       attn_metadata,
-                      output=output)
+                      output=output,
+                      output_scale=output_scale)
 
     maybe_save_kv_layer_to_connector(layer_name, kv_cache)
 
@@ -439,6 +441,7 @@ def unified_attention_with_output_fake(
     value: torch.Tensor,
     output: torch.Tensor,
     layer_name: str,
+    output_scale: Optional[torch.Tensor] = None,
 ) -> None:
     return
 

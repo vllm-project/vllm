@@ -607,6 +607,7 @@ class ROCmFlashAttentionImpl(AttentionImpl):
         kv_cache: torch.Tensor,
         attn_metadata: ROCmFlashAttentionMetadata,
         output: Optional[torch.Tensor] = None,
+        output_scale: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Forward pass with FlashAttention and PagedAttention.
 
@@ -658,7 +659,17 @@ class ROCmFlashAttentionImpl(AttentionImpl):
         Returns:
             shape = [num_tokens, num_heads * head_size]
         """
+        if output_scale is not None and not self.use_triton_flash_attn:
+            raise NotImplementedError(
+                "fused output quantization only supported for Triton"
+                " implementation in ROCMFlashAttentionImpl for now")
+
         assert output is not None, "Output tensor must be provided."
+
+        if output_scale is not None and not self.use_triton_flash_attn:
+            raise NotImplementedError(
+                "fused output quantization only supported for Triton"
+                " implementation in ROCMFlashAttentionImpl for now")
 
         query = query.view(-1, self.num_heads, self.head_size)
         if key is not None:
@@ -781,7 +792,6 @@ class ROCmFlashAttentionImpl(AttentionImpl):
                     full_scales = (
                         layer._q_scale, layer._k_scale, layer._v_scale,
                         layer._prob_scale) if use_fp8_scales else None
-                    out_scale = getattr(layer, "_o_scale", None)
                     self.triton_attn_func(
                         query,
                         key,
@@ -796,7 +806,7 @@ class ROCmFlashAttentionImpl(AttentionImpl):
                         attn_masks[0][None]
                         if attn_masks is not None else None,
                         full_scales,
-                        out_scale,
+                        output_scale,
                     )
                 elif self.use_naive_attn:
                     if self.num_kv_heads != self.num_heads:
