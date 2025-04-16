@@ -43,12 +43,8 @@ class MsgpackEncoder:
     Note that unlike vanilla `msgspec` Encoders, this interface is generally
     not thread-safe when encoding tensors / numpy arrays.
 
-    By default, arrays below 256B are serialized inline.
-    Larger will get sent via dedicated messages. 
-    Note that this is a per-tensor limit.
-
-    Sending multiple large messages via zeromq saturates memory very quickly.
-    See: https://github.com/vllm-project/vllm/issues/16185
+    By default, arrays below 256B are serialized inline Larger will get sent 
+    via dedicated messages. Note that this is a per-tensor limit.
     """
 
     def __init__(self, size_threshold: Optional[int] = None):
@@ -77,7 +73,7 @@ class MsgpackEncoder:
     def encode_into(self, obj: Any, buf: bytearray) -> Sequence[bytestr]:
         try:
             self.aux_buffers = [buf]
-            bufs = [buf]
+            bufs = self.aux_buffers
             self.encoder.encode_into(obj, buf)
             return bufs
         finally:
@@ -105,7 +101,7 @@ class MsgpackEncoder:
                 "modality": elem.modality,
                 "key": elem.key,
                 "data": self._encode_nested_tensors(elem.data),
-                "field": self._encode_field(elem.field),
+                "field": self._encode_mm_field(elem.field),
             } for elem in item.values()]
                     for itemlist in mm._items_by_modality.values()
                     for item in itemlist]
@@ -143,7 +139,7 @@ class MsgpackEncoder:
             return self._encode_ndarray(obj.numpy())
         return [self._encode_nested_tensors(x) for x in obj]
 
-    def _encode_field(self, field: BaseMultiModalField):
+    def _encode_mm_field(self, field: BaseMultiModalField):
         # Figure out the factory name for the field type.
         name = MMF_CLASS_TO_FACTORY.get(field.__class__)
         if not name:
