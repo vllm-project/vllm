@@ -306,7 +306,6 @@ class MiniMaxVL01DummyInputsBuilder(BaseDummyInputsBuilder[_I]):
         mm_counts: Mapping[str, int],
     ) -> ProcessorInputs:
         num_images = mm_counts.get("image", 0)
-        num_images = 0
         processor = self.info.get_hf_processor()
         image_token = processor.image_token
         target_width, target_height = \
