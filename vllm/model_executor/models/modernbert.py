@@ -9,7 +9,9 @@ from torch import nn
 from transformers import ModernBertConfig
 
 from vllm.config import VllmConfig
-from vllm.model_executor.layers.linear import RowParallelLinear
+from vllm.distributed import get_tensor_model_parallel_world_size
+from vllm.model_executor.layers.linear import (QKVParallelLinear,
+                                               RowParallelLinear)
 from vllm.model_executor.layers.pooler import CrossEncodingPooler
 from vllm.model_executor.layers.rotary_embedding import RotaryEmbedding
 from vllm.model_executor.layers.vocab_parallel_embedding import (
@@ -69,13 +71,12 @@ def sdpa_attention_forward(
     module: "ModernBertAttention",
     qkv: torch.Tensor,
     position_ids: Optional[torch.LongTensor],
-    bs: int,
     dim: int,
     num_heads: int,
     head_dim: int,
     **_kwargs,
 ) -> Tuple[torch.Tensor]:
-    query, key, value = qkv.split([dim, dim, dim], dim=-1)
+    query, key, value = qkv.split([dim] * 3, dim=-1)
 
     pos_offsets = (position_ids == 0).nonzero(as_tuple=True)[0].int()
     end_offset = torch.Tensor([sys.maxsize]).int()
@@ -115,20 +116,21 @@ class ModernBertAttention(nn.Module):
                  layer_id: Optional[int] = None):
         super().__init__()
         self.config = config
+        self.hidden_size = config.hidden_size
+        tp_size = get_tensor_model_parallel_world_size()
         self.layer_id = layer_id
-
-        if config.hidden_size % config.num_attention_heads != 0:
-            raise ValueError(f"The hidden size ({config.hidden_size}) "
-                             f"is not a multiple of the number of "
-                             f"attention heads ({config.num_attention_heads})")
-
         self.deterministic_flash_attn = config.deterministic_flash_attn
         self.num_heads = config.num_attention_heads
+        assert self.num_heads % tp_size == 0
         self.head_dim = config.hidden_size // config.num_attention_heads
         self.all_head_size = self.head_dim * self.num_heads
-        self.Wqkv = nn.Linear(config.hidden_size,
-                              3 * self.all_head_size,
-                              bias=config.attention_bias)
+        self.scaling = self.head_dim**-0.5
+        self.Wqkv = QKVParallelLinear(
+            config.hidden_size,
+            self.head_dim,
+            self.num_heads,
+            bias=config.attention_bias,
+        )
 
         if layer_id % config.global_attn_every_n_layers != 0:
             self.local_attention = (config.local_attention // 2,
@@ -156,23 +158,25 @@ class ModernBertAttention(nn.Module):
         output_attentions: Optional[bool] = False,
         **kwargs,
     ) -> torch.Tensor:
-        qkv = self.Wqkv(hidden_states)
+        qkv, _ = self.Wqkv(hidden_states)
         attn_outputs = sdpa_attention_forward(
             self,
             qkv=qkv,
             position_ids=position_ids,
             rotary_emb=self.rotary_emb,
             local_attention=self.local_attention,
-            bs=1,
             dim=self.all_head_size,
             output_attentions=output_attentions,
             num_heads=self.num_heads,
             head_dim=self.head_dim,
             **kwargs,
         )
+        #will get wrong score when scoring multi text pairs.
+        #q, k, v = qkv.split([self.all_head_size] * 3, dim=-1)
+        #q, k = self.rotary_emb(position_ids, q, k)
+        #attn_outputs = self.attn(q, k, v)
         hidden_states = attn_outputs
         hidden_states, _ = self.Wo(hidden_states)
-
         return hidden_states
 
 
