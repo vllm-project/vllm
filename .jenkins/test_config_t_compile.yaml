@@ -124,24 +124,24 @@ stages:
         flavor: g3
         command: >
           cd .jenkins/vision &&
-          VLLM_T_COMPILE_FULLGRAPH=True PT_HPU_LAZY_MODE=0 
+          VLLM_T_COMPILE_FULLGRAPH=False PT_HPU_LAZY_MODE=0 
           bash run-tests.sh -c configs/models-small.txt -t 1
       - name: multimodal_small_g3_tp2
         flavor: g3.s
         command: >
           cd .jenkins/vision && 
-          VLLM_T_COMPILE_FULLGRAPH=True PT_HPU_LAZY_MODE=0 
+          VLLM_T_COMPILE_FULLGRAPH=False PT_HPU_LAZY_MODE=0 
           bash run-tests.sh -c configs/models-small.txt -t 2
       - name: multimodal_small_g3_tp1_mss
         flavor: g3
         command: >
-          cd .jenkins/vision && VLLM_T_COMPILE_FULLGRAPH=True PT_HPU_LAZY_MODE=0 
+          cd .jenkins/vision && VLLM_T_COMPILE_FULLGRAPH=False PT_HPU_LAZY_MODE=0 
           bash run-tests.sh -c configs/models-mss.txt -t 1
       - name: multimodal_small_g3_tp2_mss
         flavor: g3.s
         command: >
           cd .jenkins/vision && 
-          VLLM_T_COMPILE_FULLGRAPH=True PT_HPU_LAZY_MODE=0 
+          VLLM_T_COMPILE_FULLGRAPH=False PT_HPU_LAZY_MODE=0 
           bash run-tests.sh -c configs/models-mss.txt -t 2
   - name: tests_int4_quantization
     steps:
