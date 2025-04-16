@@ -974,7 +974,7 @@ class MiniMaxVL01ForConditionalGeneration(nn.Module, SupportsMultiModal, Support
 
                 position_ids = torch.sum(attention_mask, dim=1).unsqueeze(-1) - 1
 
-        outputs = self.language_model(
+        hidden_states = self.language_model.model(
             input_ids=input_ids,
             positions=positions,
             intermediate_tensors=intermediate_tensors,
@@ -986,7 +986,7 @@ class MiniMaxVL01ForConditionalGeneration(nn.Module, SupportsMultiModal, Support
             output_hidden_states=output_hidden_states,
         )
 
-        return outputs.hidden_states
+        return hidden_states
 
     def compute_logits(
         self,
