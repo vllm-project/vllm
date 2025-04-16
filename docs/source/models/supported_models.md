@@ -740,6 +740,11 @@ If your model is not in the above list, we will try to automatically convert the
   * `BAAI/bge-reranker-v2-m3`, etc.
   *
   *
+- * `ModernBertForSequenceClassification`
+  * ModernBert-based
+  * `Alibaba-NLP/gte-reranker-modernbert-base`, etc.
+  *
+  *
 :::
 
 (supported-mm-models)=
