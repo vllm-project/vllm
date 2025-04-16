@@ -11,6 +11,8 @@ For example, the following code downloads the [`facebook/opt-125m`](https://hugg
 and runs it in vLLM using the default configuration.
 
 ```python
+from vllm import LLM
+
 llm = LLM(model="facebook/opt-125m")
 ```
 
@@ -47,6 +49,8 @@ To fix this, explicitly specify the model architecture by passing `config.json` 
 For example:
 
 ```python
+from vllm import LLM
+
 model = LLM(
     model="cerebras/Cerebras-GPT-1.3B",
     hf_overrides={"architectures": ["GPT2LMHeadModel"]},  # GPT-2
@@ -92,6 +96,8 @@ You can further reduce memory usage by limiting the context length of the model 
 and the maximum batch size (`max_num_seqs` option).
 
 ```python
+from vllm import LLM
+
 llm = LLM(model="adept/fuyu-8b",
           max_model_len=2048,
           max_num_seqs=2)
@@ -103,6 +109,30 @@ If you run out of CPU RAM, try the following options:
 
 - (Multi-modal models only) you can set the size of multi-modal input cache using `VLLM_MM_INPUT_CACHE_GIB` environment variable (default 4 GiB).
 - (CPU backend only) you can set the size of KV cache using `VLLM_CPU_KVCACHE_SPACE` environment variable (default 4 GiB).
+
+#### Disable unused modalities
+
+You can disable unused modalities (except for text) by setting its limit to zero.
+
+For example, if your application only accepts image input, there is no need to allocate any memory for videos.
+
+```python
+from vllm import LLM
+
+# Accept images but not videos
+llm = LLM(model="Qwen/Qwen2.5-VL-3B-Instruct",
+          limit_mm_per_prompt={"video": 0})
+```
+
+You can even run a multi-modal model for text-only inference:
+
+```python
+from vllm import LLM
+
+# Don't accept images. Just text.
+llm = LLM(model="google/gemma-3-27b-it",
+          limit_mm_per_prompt={"image": 0})
+```
 
 ### Performance optimization and tuning
 

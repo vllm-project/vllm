@@ -106,19 +106,18 @@ curl http://localhost:8000/v1/completions \
 
 ## Dynamically serving LoRA Adapters
 
-In addition to serving LoRA adapters at server startup, the vLLM server now supports dynamically loading and unloading
-LoRA adapters at runtime through dedicated API endpoints. This feature can be particularly useful when the flexibility
-to change models on-the-fly is needed.
+In addition to serving LoRA adapters at server startup, the vLLM server supports dynamically configuring LoRA adapters at runtime through dedicated API endpoints and plugins. This feature can be particularly useful when the flexibility to change models on-the-fly is needed.
 
 Note: Enabling this feature in production environments is risky as users may participate in model adapter management.
 
-To enable dynamic LoRA loading and unloading, ensure that the environment variable `VLLM_ALLOW_RUNTIME_LORA_UPDATING`
-is set to `True`. When this option is enabled, the API server will log a warning to indicate that dynamic loading is active.
+To enable dynamic LoRA configuration, ensure that the environment variable `VLLM_ALLOW_RUNTIME_LORA_UPDATING`
+is set to `True`.
 
 ```bash
 export VLLM_ALLOW_RUNTIME_LORA_UPDATING=True
 ```
 
+### Using API Endpoints
 Loading a LoRA Adapter:
 
 To dynamically load a LoRA adapter, send a POST request to the `/v1/load_lora_adapter` endpoint with the necessary
@@ -152,6 +151,58 @@ curl -X POST http://localhost:8000/v1/unload_lora_adapter \
     "lora_name": "sql_adapter"
 }'
 ```
+
+### Using Plugins
+Alternatively, you can use the LoRAResolver plugin to dynamically load LoRA adapters. LoRAResolver plugins enable you to load LoRA adapters from both local and remote sources such as local file system and S3. On every request, when there's a new model name that hasn't been loaded yet, the LoRAResolver will try to resolve and load the corresponding LoRA adapter.
+
+You can set up multiple LoRAResolver plugins if you want to load LoRA adapters from different sources. For example, you might have one resolver for local files and another for S3 storage. vLLM will load the first LoRA adapter that it finds.
+
+You can either install existing plugins or implement your own.
+
+Steps to implement your own LoRAResolver plugin:
+1. Implement the LoRAResolver interface.
+
+    Example of a simple S3 LoRAResolver implementation:
+
+    ```python
+    import os
+    import s3fs
+    from vllm.lora.request import LoRARequest
+    from vllm.lora.resolver import LoRAResolver
+
+    class S3LoRAResolver(LoRAResolver):
+        def __init__(self):
+            self.s3 = s3fs.S3FileSystem()
+            self.s3_path_format = os.getenv("S3_PATH_TEMPLATE")
+            self.local_path_format = os.getenv("LOCAL_PATH_TEMPLATE")
+
+        async def resolve_lora(self, base_model_name, lora_name):
+            s3_path = self.s3_path_format.format(base_model_name=base_model_name, lora_name=lora_name)
+            local_path = self.local_path_format.format(base_model_name=base_model_name, lora_name=lora_name)
+
+            # Download the LoRA from S3 to the local path
+            await self.s3._get(
+                s3_path, local_path, recursive=True, maxdepth=1
+            )
+
+            lora_request = LoRARequest(
+                lora_name=lora_name,
+                lora_path=local_path,
+                lora_int_id=abs(hash(lora_name))
+            )
+            return lora_request
+    ```
+
+2. Register LoRAResolver plugin.
+
+     ```python
+    from vllm.lora.resolver import LoRAResolverRegistry
+
+    s3_resolver = S3LoRAResolver()
+    LoRAResolverRegistry.register_resolver("s3_resolver", s3_resolver)
+    ```
+
+    For more details, refer to the [vLLM's Plugins System](../design/plugin_system.md).
 
 ## New format for `--lora-modules`
 

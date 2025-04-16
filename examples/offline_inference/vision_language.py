@@ -8,6 +8,7 @@ on HuggingFace model repository.
 """
 import os
 import random
+from contextlib import contextmanager
 from dataclasses import asdict
 from typing import NamedTuple, Optional
 
@@ -44,7 +45,7 @@ def run_aria(questions: list[str], modality: str) -> ModelRequestData:
         max_model_len=4096,
         max_num_seqs=2,
         dtype="bfloat16",
-        disable_mm_preprocessor_cache=args.disable_mm_preprocessor_cache,
+        limit_mm_per_prompt={"image": 1},
     )
 
     prompts = [(f"<|im_start|>user\n<fim_prefix><|img|><fim_suffix>{question}"
@@ -60,6 +61,28 @@ def run_aria(questions: list[str], modality: str) -> ModelRequestData:
     )
 
 
+# Aya Vision
+def run_aya_vision(questions: list[str], modality: str) -> ModelRequestData:
+    assert modality == "image"
+    model_name = "CohereForAI/aya-vision-8b"
+
+    engine_args = EngineArgs(
+        model=model_name,
+        max_model_len=2048,
+        max_num_seqs=2,
+        mm_processor_kwargs={"crop_to_patches": True},
+        limit_mm_per_prompt={"image": 1},
+    )
+    prompts = [
+        f"<|START_OF_TURN_TOKEN|><|USER_TOKEN|><image>{question}<|END_OF_TURN_TOKEN|><|START_OF_TURN_TOKEN|><|CHATBOT_TOKEN|>"
+        for question in questions
+    ]
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompts=prompts,
+    )
+
+
 # BLIP-2
 def run_blip2(questions: list[str], modality: str) -> ModelRequestData:
     assert modality == "image"
@@ -68,8 +91,8 @@ def run_blip2(questions: list[str], modality: str) -> ModelRequestData:
     # See https://huggingface.co/Salesforce/blip2-opt-2.7b/discussions/15#64ff02f3f8cf9e4f5b038262 #noqa
     prompts = [f"Question: {question} Answer:" for question in questions]
     engine_args = EngineArgs(
-        model="Salesforce/blip2-opt-2.7b",
-        disable_mm_preprocessor_cache=args.disable_mm_preprocessor_cache,
+        model="Salesforce/blip2-opt-6.7b",
+        limit_mm_per_prompt={"image": 1},
     )
 
     return ModelRequestData(
@@ -87,7 +110,7 @@ def run_chameleon(questions: list[str], modality: str) -> ModelRequestData:
         model="facebook/chameleon-7b",
         max_model_len=4096,
         max_num_seqs=2,
-        disable_mm_preprocessor_cache=args.disable_mm_preprocessor_cache,
+        limit_mm_per_prompt={"image": 1},
     )
 
     return ModelRequestData(
@@ -106,8 +129,8 @@ def run_deepseek_vl2(questions: list[str], modality: str) -> ModelRequestData:
         model=model_name,
         max_model_len=4096,
         max_num_seqs=2,
-        disable_mm_preprocessor_cache=args.disable_mm_preprocessor_cache,
         hf_overrides={"architectures": ["DeepseekVLV2ForCausalLM"]},
+        limit_mm_per_prompt={"image": 1},
     )
 
     prompts = [
@@ -128,10 +151,11 @@ def run_florence2(questions: list[str], modality: str) -> ModelRequestData:
     engine_args = EngineArgs(
         model="microsoft/Florence-2-large",
         tokenizer="facebook/bart-large",
-        max_num_seqs=8,
+        max_model_len=4096,
+        max_num_seqs=2,
         trust_remote_code=True,
         dtype="bfloat16",
-        disable_mm_preprocessor_cache=args.disable_mm_preprocessor_cache,
+        limit_mm_per_prompt={"image": 1},
     )
 
     prompts = ["<MORE_DETAILED_CAPTION>" for _ in questions]
@@ -151,7 +175,7 @@ def run_fuyu(questions: list[str], modality: str) -> ModelRequestData:
         model="adept/fuyu-8b",
         max_model_len=2048,
         max_num_seqs=2,
-        disable_mm_preprocessor_cache=args.disable_mm_preprocessor_cache,
+        limit_mm_per_prompt={"image": 1},
     )
 
     return ModelRequestData(
@@ -170,7 +194,7 @@ def run_gemma3(questions: list[str], modality: str) -> ModelRequestData:
         max_model_len=2048,
         max_num_seqs=2,
         mm_processor_kwargs={"do_pan_and_scan": True},
-        disable_mm_preprocessor_cache=args.disable_mm_preprocessor_cache,
+        limit_mm_per_prompt={"image": 1},
     )
 
     prompts = [("<bos><start_of_turn>user\n"
@@ -195,7 +219,7 @@ def run_glm4v(questions: list[str], modality: str) -> ModelRequestData:
         trust_remote_code=True,
         enforce_eager=True,
         hf_overrides={"architectures": ["GLM4VForCausalLM"]},
-        disable_mm_preprocessor_cache=args.disable_mm_preprocessor_cache,
+        limit_mm_per_prompt={"image": 1},
     )
 
     prompts = [
@@ -222,7 +246,7 @@ def run_h2ovl(questions: list[str], modality: str) -> ModelRequestData:
         model=model_name,
         trust_remote_code=True,
         max_model_len=8192,
-        disable_mm_preprocessor_cache=args.disable_mm_preprocessor_cache,
+        limit_mm_per_prompt={"image": 1},
     )
 
     tokenizer = AutoTokenizer.from_pretrained(model_name,
@@ -263,11 +287,39 @@ def run_idefics3(questions: list[str], modality: str) -> ModelRequestData:
                 "longest_edge": 3 * 364
             },
         },
-        disable_mm_preprocessor_cache=args.disable_mm_preprocessor_cache,
+        limit_mm_per_prompt={"image": 1},
     )
     prompts = [(
         f"<|begin_of_text|>User:<image>{question}<end_of_utterance>\nAssistant:"
     ) for question in questions]
+
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompts=prompts,
+    )
+
+
+# SmolVLM2-2.2B-Instruct
+def run_smolvlm(questions: list[str], modality: str) -> ModelRequestData:
+    assert modality == "image"
+    model_name = "HuggingFaceTB/SmolVLM2-2.2B-Instruct"
+
+    engine_args = EngineArgs(
+        model=model_name,
+        max_model_len=8192,
+        max_num_seqs=2,
+        enforce_eager=True,
+        mm_processor_kwargs={
+            "max_image_size": {
+                "longest_edge": 384
+            },
+        },
+        limit_mm_per_prompt={"image": 1},
+    )
+    prompts = [
+        (f"<|im_start|>User:<image>{question}<end_of_utterance>\nAssistant:")
+        for question in questions
+    ]
 
     return ModelRequestData(
         engine_args=engine_args,
@@ -285,7 +337,7 @@ def run_internvl(questions: list[str], modality: str) -> ModelRequestData:
         model=model_name,
         trust_remote_code=True,
         max_model_len=4096,
-        disable_mm_preprocessor_cache=args.disable_mm_preprocessor_cache,
+        limit_mm_per_prompt={"image": 1},
     )
 
     tokenizer = AutoTokenizer.from_pretrained(model_name,
@@ -312,6 +364,29 @@ def run_internvl(questions: list[str], modality: str) -> ModelRequestData:
     )
 
 
+# Kimi-VL
+def run_kimi_vl(questions: list[str], modality: str) -> ModelRequestData:
+    assert modality == "image"
+
+    prompts = [
+        "<|im_user|>user<|im_middle|><|media_start|>image<|media_content|>"
+        f"<|media_pad|><|media_end|>{question}<|im_end|>"
+        "<|im_assistant|>assistant<|im_middle|>" for question in questions
+    ]
+
+    engine_args = EngineArgs(
+        model="moonshotai/Kimi-VL-A3B-Instruct",
+        max_model_len=4096,
+        disable_mm_preprocessor_cache=args.disable_mm_preprocessor_cache,
+        trust_remote_code=True,
+    )
+
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompts=prompts,
+    )
+
+
 # LLaVA-1.5
 def run_llava(questions: list[str], modality: str) -> ModelRequestData:
     assert modality == "image"
@@ -323,7 +398,7 @@ def run_llava(questions: list[str], modality: str) -> ModelRequestData:
     engine_args = EngineArgs(
         model="llava-hf/llava-1.5-7b-hf",
         max_model_len=4096,
-        disable_mm_preprocessor_cache=args.disable_mm_preprocessor_cache,
+        limit_mm_per_prompt={"image": 1},
     )
 
     return ModelRequestData(
@@ -340,7 +415,7 @@ def run_llava_next(questions: list[str], modality: str) -> ModelRequestData:
     engine_args = EngineArgs(
         model="llava-hf/llava-v1.6-mistral-7b-hf",
         max_model_len=8192,
-        disable_mm_preprocessor_cache=args.disable_mm_preprocessor_cache,
+        limit_mm_per_prompt={"image": 1},
     )
 
     return ModelRequestData(
@@ -362,7 +437,7 @@ def run_llava_next_video(questions: list[str],
         model="llava-hf/LLaVA-NeXT-Video-7B-hf",
         max_model_len=8192,
         max_num_seqs=2,
-        disable_mm_preprocessor_cache=args.disable_mm_preprocessor_cache,
+        limit_mm_per_prompt={"image": 1},
     )
 
     return ModelRequestData(
@@ -390,7 +465,7 @@ def run_llava_onevision(questions: list[str],
     engine_args = EngineArgs(
         model="llava-hf/llava-onevision-qwen2-7b-ov-hf",
         max_model_len=16384,
-        disable_mm_preprocessor_cache=args.disable_mm_preprocessor_cache,
+        limit_mm_per_prompt={"image": 1},
     )
 
     return ModelRequestData(
@@ -413,7 +488,7 @@ def run_mantis(questions: list[str], modality: str) -> ModelRequestData:
         model="TIGER-Lab/Mantis-8B-siglip-llama3",
         max_model_len=4096,
         hf_overrides={"architectures": ["MantisForConditionalGeneration"]},
-        disable_mm_preprocessor_cache=args.disable_mm_preprocessor_cache,
+        limit_mm_per_prompt={"image": 1},
     )
     stop_token_ids = [128009]
 
@@ -454,7 +529,7 @@ def run_minicpmv_base(questions: list[str], modality: str, model_name):
         max_model_len=4096,
         max_num_seqs=2,
         trust_remote_code=True,
-        disable_mm_preprocessor_cache=args.disable_mm_preprocessor_cache,
+        limit_mm_per_prompt={"image": 1},
     )
     # NOTE The stop_token_ids are different for various versions of MiniCPM-V
     # 2.0
@@ -497,6 +572,29 @@ def run_minicpmv(questions: list[str], modality: str) -> ModelRequestData:
     return run_minicpmv_base(questions, modality, "openbmb/MiniCPM-V-2_6")
 
 
+# Mistral-3 HF-format
+def run_mistral3(questions: list[str], modality: str) -> ModelRequestData:
+    assert modality == "image"
+
+    model_name = "mistralai/Mistral-Small-3.1-24B-Instruct-2503"
+
+    # NOTE: Need L40 (or equivalent) to avoid OOM
+    engine_args = EngineArgs(
+        model=model_name,
+        max_model_len=8192,
+        max_num_seqs=2,
+        tensor_parallel_size=2,
+        limit_mm_per_prompt={"image": 1},
+    )
+
+    prompts = [f"<s>[INST]{question}\n[IMG][/INST]" for question in questions]
+
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompts=prompts,
+    )
+
+
 # LLama 3.2
 def run_mllama(questions: list[str], modality: str) -> ModelRequestData:
     assert modality == "image"
@@ -510,9 +608,9 @@ def run_mllama(questions: list[str], modality: str) -> ModelRequestData:
     # The configuration below has been confirmed to launch on a single L40 GPU.
     engine_args = EngineArgs(
         model=model_name,
-        max_model_len=4096,
-        max_num_seqs=16,
-        disable_mm_preprocessor_cache=args.disable_mm_preprocessor_cache,
+        max_model_len=8192,
+        max_num_seqs=2,
+        limit_mm_per_prompt={"image": 1},
     )
 
     tokenizer = AutoTokenizer.from_pretrained(model_name)
@@ -536,6 +634,42 @@ def run_mllama(questions: list[str], modality: str) -> ModelRequestData:
     )
 
 
+def run_llama4(questions: list[str], modality: str) -> ModelRequestData:
+    assert modality == "image"
+
+    model_name = "meta-llama/Llama-4-Scout-17B-16E-Instruct"
+
+    engine_args = EngineArgs(
+        model=model_name,
+        max_model_len=8192,
+        max_num_seqs=4,
+        tensor_parallel_size=8,
+        gpu_memory_utilization=0.4,
+        limit_mm_per_prompt={"image": 1},
+    )
+
+    tokenizer = AutoTokenizer.from_pretrained(model_name)
+    messages = [[{
+        "role":
+        "user",
+        "content": [{
+            "type": "image"
+        }, {
+            "type": "text",
+            "text": f"{question}"
+        }]
+    }] for question in questions]
+    prompts = tokenizer.apply_chat_template(messages,
+                                            add_generation_prompt=True,
+                                            tokenize=False)
+    stop_token_ids = None
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompts=prompts,
+        stop_token_ids=stop_token_ids,
+    )
+
+
 # Molmo
 def run_molmo(questions: list[str], modality: str) -> ModelRequestData:
     assert modality == "image"
@@ -546,7 +680,7 @@ def run_molmo(questions: list[str], modality: str) -> ModelRequestData:
         model=model_name,
         trust_remote_code=True,
         dtype="bfloat16",
-        disable_mm_preprocessor_cache=args.disable_mm_preprocessor_cache,
+        limit_mm_per_prompt={"image": 1},
     )
 
     prompts = [
@@ -572,7 +706,7 @@ def run_nvlm_d(questions: list[str], modality: str) -> ModelRequestData:
         trust_remote_code=True,
         max_model_len=4096,
         tensor_parallel_size=4,
-        disable_mm_preprocessor_cache=args.disable_mm_preprocessor_cache,
+        limit_mm_per_prompt={"image": 1},
     )
 
     tokenizer = AutoTokenizer.from_pretrained(model_name,
@@ -599,7 +733,8 @@ def run_paligemma(questions: list[str], modality: str) -> ModelRequestData:
     prompts = ["caption en" for _ in questions]
     engine_args = EngineArgs(
         model="google/paligemma-3b-mix-224",
-        disable_mm_preprocessor_cache=args.disable_mm_preprocessor_cache)
+        limit_mm_per_prompt={"image": 1},
+    )
 
     return ModelRequestData(
         engine_args=engine_args,
@@ -615,7 +750,8 @@ def run_paligemma2(questions: list[str], modality: str) -> ModelRequestData:
     prompts = ["caption en" for _ in questions]
     engine_args = EngineArgs(
         model="google/paligemma2-3b-ft-docci-448",
-        disable_mm_preprocessor_cache=args.disable_mm_preprocessor_cache)
+        limit_mm_per_prompt={"image": 1},
+    )
 
     return ModelRequestData(
         engine_args=engine_args,
@@ -651,7 +787,7 @@ def run_phi3v(questions: list[str], modality: str) -> ModelRequestData:
         max_num_seqs=2,
         # Note - mm_processor_kwargs can also be passed to generate/chat calls
         mm_processor_kwargs={"num_crops": 16},
-        disable_mm_preprocessor_cache=args.disable_mm_preprocessor_cache,
+        limit_mm_per_prompt={"image": 1},
     )
 
     return ModelRequestData(
@@ -682,6 +818,7 @@ def run_phi4mm(questions: list[str], modality: str) -> ModelRequestData:
         max_num_seqs=2,
         enable_lora=True,
         max_lora_rank=320,
+        limit_mm_per_prompt={"image": 1},
     )
 
     return ModelRequestData(
@@ -700,9 +837,9 @@ def run_pixtral_hf(questions: list[str], modality: str) -> ModelRequestData:
     # NOTE: Need L40 (or equivalent) to avoid OOM
     engine_args = EngineArgs(
         model=model_name,
-        max_model_len=8192,
+        max_model_len=6144,
         max_num_seqs=2,
-        disable_mm_preprocessor_cache=args.disable_mm_preprocessor_cache,
+        limit_mm_per_prompt={"image": 1},
     )
 
     prompts = [f"<s>[INST]{question}\n[IMG][/INST]" for question in questions]
@@ -723,7 +860,7 @@ def run_qwen_vl(questions: list[str], modality: str) -> ModelRequestData:
         max_model_len=1024,
         max_num_seqs=2,
         hf_overrides={"architectures": ["QwenVLForConditionalGeneration"]},
-        disable_mm_preprocessor_cache=args.disable_mm_preprocessor_cache,
+        limit_mm_per_prompt={"image": 1},
     )
 
     prompts = [f"{question}Picture 1: <img></img>\n" for question in questions]
@@ -748,7 +885,7 @@ def run_qwen2_vl(questions: list[str], modality: str) -> ModelRequestData:
             "min_pixels": 28 * 28,
             "max_pixels": 1280 * 28 * 28,
         },
-        disable_mm_preprocessor_cache=args.disable_mm_preprocessor_cache,
+        limit_mm_per_prompt={"image": 1},
     )
 
     if modality == "image":
@@ -783,7 +920,7 @@ def run_qwen2_5_vl(questions: list[str], modality: str) -> ModelRequestData:
             "max_pixels": 1280 * 28 * 28,
             "fps": 1,
         },
-        disable_mm_preprocessor_cache=args.disable_mm_preprocessor_cache,
+        limit_mm_per_prompt={"image": 1},
     )
 
     if modality == "image":
@@ -804,8 +941,44 @@ def run_qwen2_5_vl(questions: list[str], modality: str) -> ModelRequestData:
     )
 
 
+# SkyworkR1V
+def run_skyworkr1v(questions: list[str], modality: str) -> ModelRequestData:
+    assert modality == "image"
+
+    model_name = "Skywork/Skywork-R1V-38B"
+
+    engine_args = EngineArgs(
+        model=model_name,
+        trust_remote_code=True,
+        max_model_len=4096,
+        limit_mm_per_prompt={"image": 1},
+    )
+
+    tokenizer = AutoTokenizer.from_pretrained(model_name,
+                                              trust_remote_code=True)
+    messages = [[{
+        'role': 'user',
+        'content': f"<image>\n{question}"
+    }] for question in questions]
+    prompts = tokenizer.apply_chat_template(messages,
+                                            tokenize=False,
+                                            add_generation_prompt=True)
+
+    # Stop tokens for SkyworkR1V
+    # https://huggingface.co/Skywork/Skywork-R1V-38B/blob/main/conversation.py
+    stop_tokens = ["<｜end▁of▁sentence｜>", "<|endoftext|>"]
+    stop_token_ids = [tokenizer.convert_tokens_to_ids(i) for i in stop_tokens]
+
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompts=prompts,
+        stop_token_ids=stop_token_ids,
+    )
+
+
 model_example_map = {
     "aria": run_aria,
+    "aya_vision": run_aya_vision,
     "blip-2": run_blip2,
     "chameleon": run_chameleon,
     "deepseek_vl_v2": run_deepseek_vl2,
@@ -816,6 +989,7 @@ model_example_map = {
     "h2ovl_chat": run_h2ovl,
     "idefics3": run_idefics3,
     "internvl_chat": run_internvl,
+    "kimi_vl": run_kimi_vl,
     "llava": run_llava,
     "llava-next": run_llava_next,
     "llava-next-video": run_llava_next_video,
@@ -823,7 +997,9 @@ model_example_map = {
     "mantis": run_mantis,
     "minicpmo": run_minicpmo,
     "minicpmv": run_minicpmv,
+    "mistral3": run_mistral3,
     "mllama": run_mllama,
+    "llama4": run_llama4,
     "molmo": run_molmo,
     "NVLM_D": run_nvlm_d,
     "paligemma": run_paligemma,
@@ -834,6 +1010,8 @@ model_example_map = {
     "qwen_vl": run_qwen_vl,
     "qwen2_vl": run_qwen2_vl,
     "qwen2_5_vl": run_qwen2_5_vl,
+    "skywork_chat": run_skyworkr1v,
+    "smolvlm": run_smolvlm,
 }
 
 
@@ -905,80 +1083,21 @@ def apply_image_repeat(image_repeat_prob, num_prompts, data,
     return inputs
 
 
-def main(args):
-    model = args.model_type
-    if model not in model_example_map:
-        raise ValueError(f"Model type {model} is not supported.")
-
-    modality = args.modality
-    mm_input = get_multi_modal_input(args)
-    data = mm_input["data"]
-    questions = mm_input["questions"]
-
-    req_data = model_example_map[model](questions, modality)
-
-    engine_args = asdict(req_data.engine_args) | {"seed": args.seed}
-    llm = LLM(**engine_args)
-
-    # To maintain code compatibility in this script, we add LoRA here.
-    # You can also add LoRA using:
-    # llm.generate(prompts, lora_request=lora_request,...)
-    if req_data.lora_requests:
-        for lora_request in req_data.lora_requests:
-            llm.llm_engine.add_lora(lora_request=lora_request)
-
-    # Don't want to check the flag multiple times, so just hijack `prompts`.
-    prompts = req_data.prompts if args.use_different_prompt_per_request else [
-        req_data.prompts[0]
-    ]
-
-    # We set temperature to 0.2 so that outputs can be different
-    # even when all prompts are identical when running batch inference.
-    sampling_params = SamplingParams(temperature=0.2,
-                                     max_tokens=64,
-                                     stop_token_ids=req_data.stop_token_ids)
-
-    assert args.num_prompts > 0
-    if args.num_prompts == 1:
-        # Single inference
-        inputs = {
-            "prompt": prompts[0],
-            "multi_modal_data": {
-                modality: data
-            },
-        }
-    else:
-        # Batch inference
-        if args.image_repeat_prob is not None:
-            # Repeat images with specified probability of "image_repeat_prob"
-            inputs = apply_image_repeat(args.image_repeat_prob,
-                                        args.num_prompts, data, prompts,
-                                        modality)
-        else:
-            # Use the same image for all prompts
-            inputs = [{
-                "prompt": prompts[i % len(prompts)],
-                "multi_modal_data": {
-                    modality: data
-                },
-            } for i in range(args.num_prompts)]
-
-    if args.time_generate:
+@contextmanager
+def time_counter(enable: bool):
+    if enable:
         import time
         start_time = time.time()
-        outputs = llm.generate(inputs, sampling_params=sampling_params)
+        yield
         elapsed_time = time.time() - start_time
+        print("-" * 50)
         print("-- generate time = {}".format(elapsed_time))
-
+        print("-" * 50)
     else:
-        outputs = llm.generate(inputs, sampling_params=sampling_params)
-
-    for o in outputs:
-        generated_text = o.outputs[0].text
-        print(generated_text)
+        yield
 
 
-if __name__ == "__main__":
+def parse_args():
     parser = FlexibleArgumentParser(
         description='Demo on using vLLM for offline inference with '
         'vision language models for text generation')
@@ -1028,6 +1147,86 @@ if __name__ == "__main__":
         action='store_true',
         help='If True, then use different prompt (with the same multi-modal '
         'data) for each request.')
+    return parser.parse_args()
 
-    args = parser.parse_args()
+
+def main(args):
+    model = args.model_type
+    if model not in model_example_map:
+        raise ValueError(f"Model type {model} is not supported.")
+
+    modality = args.modality
+    mm_input = get_multi_modal_input(args)
+    data = mm_input["data"]
+    questions = mm_input["questions"]
+
+    req_data = model_example_map[model](questions, modality)
+
+    # Disable other modalities to save memory
+    default_limits = {"image": 0, "video": 0, "audio": 0}
+    req_data.engine_args.limit_mm_per_prompt = default_limits | dict(
+        req_data.engine_args.limit_mm_per_prompt or {})
+
+    engine_args = asdict(req_data.engine_args) | {
+        "seed": args.seed,
+        "disable_mm_preprocessor_cache": args.disable_mm_preprocessor_cache,
+    }
+    llm = LLM(**engine_args)
+
+    # Don't want to check the flag multiple times, so just hijack `prompts`.
+    prompts = req_data.prompts if args.use_different_prompt_per_request else [
+        req_data.prompts[0]
+    ]
+
+    # We set temperature to 0.2 so that outputs can be different
+    # even when all prompts are identical when running batch inference.
+    sampling_params = SamplingParams(temperature=0.2,
+                                     max_tokens=64,
+                                     stop_token_ids=req_data.stop_token_ids)
+
+    assert args.num_prompts > 0
+    if args.num_prompts == 1:
+        # Single inference
+        inputs = {
+            "prompt": prompts[0],
+            "multi_modal_data": {
+                modality: data
+            },
+        }
+    else:
+        # Batch inference
+        if args.image_repeat_prob is not None:
+            # Repeat images with specified probability of "image_repeat_prob"
+            inputs = apply_image_repeat(args.image_repeat_prob,
+                                        args.num_prompts, data, prompts,
+                                        modality)
+        else:
+            # Use the same image for all prompts
+            inputs = [{
+                "prompt": prompts[i % len(prompts)],
+                "multi_modal_data": {
+                    modality: data
+                },
+            } for i in range(args.num_prompts)]
+
+    # Add LoRA request if applicable
+    lora_request = (req_data.lora_requests *
+                    args.num_prompts if req_data.lora_requests else None)
+
+    with time_counter(args.time_generate):
+        outputs = llm.generate(
+            inputs,
+            sampling_params=sampling_params,
+            lora_request=lora_request,
+        )
+
+    print("-" * 50)
+    for o in outputs:
+        generated_text = o.outputs[0].text
+        print(generated_text)
+        print("-" * 50)
+
+
+if __name__ == "__main__":
+    args = parse_args()
     main(args)

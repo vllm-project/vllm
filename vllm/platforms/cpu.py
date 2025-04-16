@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import os
+import sys
+from importlib.util import find_spec
 from typing import TYPE_CHECKING, Optional
 
 import psutil
@@ -67,8 +69,15 @@ class CpuPlatform(Platform):
 
         cache_config = vllm_config.cache_config
 
+        ipex_available = find_spec("intel_extension_for_pytorch") is not None
+
         if cache_config and cache_config.block_size is None:
-            cache_config.block_size = 16
+            cache_config.block_size = 128 if ipex_available else 16
+
+        if not ipex_available and cache_config.block_size != 16:
+            raise RuntimeError(
+                f"--block-size={cache_config.block_size} requires"
+                " intel_extension_for_pytorch")
 
         scheduler_config = vllm_config.scheduler_config
         if ((scheduler_config.chunked_prefill_enabled
@@ -148,6 +157,13 @@ class CpuPlatform(Platform):
         # To hint IPEX uses shared memory based AllReduce
         os.environ["LOCAL_WORLD_SIZE"] = str(
             vllm_config.parallel_config.tensor_parallel_size)
+        if sys.platform == "darwin" and \
+                envs.VLLM_WORKER_MULTIPROC_METHOD == "fork":
+            if os.environ.get('VLLM_WORKER_MULTIPROC_METHOD', None) is None:
+                logger.warning(
+                    "Default to spawn method on MacOS. If this is not desired,"
+                    " set VLLM_WORKER_MULTIPROC_METHOD to fork explicitly.")
+                os.environ['VLLM_WORKER_MULTIPROC_METHOD'] = 'spawn'
 
     @classmethod
     def is_pin_memory_available(cls) -> bool:

@@ -119,11 +119,13 @@ def all_reduce_fake(tensor: torch.Tensor, group_name: str) -> torch.Tensor:
 
 
 if supports_custom_op():
+    from vllm.platforms import current_platform
     direct_register_custom_op(
         op_name="all_reduce",
         op_func=all_reduce,
         mutates_args=[],
         fake_impl=all_reduce_fake,
+        dispatch_key=current_platform.dispatch_key,
     )
 
 
@@ -192,9 +194,11 @@ class GroupCoordinator:
 
         from vllm.platforms import current_platform
 
-        # TODO: fix it for other platforms
         if current_platform.is_cuda_alike():
             self.device = torch.device(f"cuda:{local_rank}")
+        elif current_platform.is_out_of_tree():
+            self.device = torch.device(
+                f"{current_platform.device_name}:{local_rank}")
         else:
             self.device = torch.device("cpu")
 
@@ -219,7 +223,8 @@ class GroupCoordinator:
                 self.cpu_group, 1 << 22, 6)
 
         from vllm.platforms import current_platform
-        self.use_custom_op_call = current_platform.is_cuda_alike()
+        self.use_custom_op_call = (current_platform.is_cuda_alike()
+                                   or current_platform.is_tpu())
 
     @property
     def first_rank(self):

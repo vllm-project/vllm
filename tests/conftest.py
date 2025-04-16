@@ -29,12 +29,11 @@ from vllm.distributed import (cleanup_dist_env_and_memory,
                               init_distributed_environment,
                               initialize_model_parallel)
 from vllm.inputs import (ExplicitEncoderDecoderPrompt, TextPrompt,
-                         TokensPrompt, to_enc_dec_tuple_list,
-                         zip_enc_dec_prompts)
+                         to_enc_dec_tuple_list, zip_enc_dec_prompts)
 from vllm.logger import init_logger
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import BeamSearchParams
-from vllm.utils import cuda_device_count_stateless, is_list_of
+from vllm.utils import cuda_device_count_stateless
 
 logger = init_logger(__name__)
 
@@ -469,12 +468,19 @@ class HfRunner:
         prompts: list[str],
         beam_width: int,
         max_tokens: int,
+        images: Optional[PromptImageInput] = None,
+        videos: Optional[PromptVideoInput] = None,
+        audios: Optional[PromptAudioInput] = None,
     ) -> list[tuple[list[list[int]], list[str]]]:
         outputs = self.generate(prompts,
                                 do_sample=False,
                                 max_new_tokens=max_tokens,
                                 num_beams=beam_width,
-                                num_return_sequences=beam_width)
+                                num_return_sequences=beam_width,
+                                images=images,
+                                videos=videos,
+                                audios=audios)
+
         for i in range(len(outputs)):
             output_ids, output_str = outputs[i]
             for j in range(len(output_ids)):
@@ -671,8 +677,9 @@ class HfRunner:
         return [(output_ids, output_str, output_logprobs)
                 for output_ids, output_str, output_logprobs in outputs]
 
-    def encode(self, prompts: list[str]) -> list[list[torch.Tensor]]:
-        return self.model.encode(prompts)
+    def encode(self, prompts: list[str], *args,
+               **kwargs) -> list[list[torch.Tensor]]:
+        return self.model.encode(prompts, *args, **kwargs)
 
     def predict(self, prompts: list[list[str]]) -> torch.Tensor:
         return self.model.predict(prompts, convert_to_tensor=True)
@@ -747,30 +754,27 @@ class VllmRunner:
         videos: Optional[PromptVideoInput] = None,
         audios: Optional[PromptAudioInput] = None,
     ) -> list[TextPrompt]:
-        if images is not None:
-            assert len(prompts) == len(images)
 
-        if videos is not None:
-            assert len(prompts) == len(videos)
+        if any(x is not None and len(x) != len(prompts)
+               for x in [images, videos, audios]):
+            raise ValueError(
+                "All non-None multimodal inputs must have the same length as "
+                "prompts")
 
-        if audios is not None:
-            assert len(prompts) == len(audios)
+        inputs = []
+        for i, prompt in enumerate(prompts):
+            multi_modal_data = {}
+            if images is not None and (image := images[i]) is not None:
+                multi_modal_data["image"] = image
+            if videos is not None and (video := videos[i]) is not None:
+                multi_modal_data["video"] = video
+            if audios is not None and (audio := audios[i]) is not None:
+                multi_modal_data["audio"] = audio
 
-        inputs = [TextPrompt(prompt=prompt) for prompt in prompts]
-        if images is not None:
-            for i, image in enumerate(images):
-                if image is not None:
-                    inputs[i]["multi_modal_data"] = {"image": image}
-
-        if videos is not None:
-            for i, video in enumerate(videos):
-                if video is not None:
-                    inputs[i]["multi_modal_data"] = {"video": video}
-
-        if audios is not None:
-            for i, audio in enumerate(audios):
-                if audio is not None:
-                    inputs[i]["multi_modal_data"] = {"audio": audio}
+            inputs.append(
+                TextPrompt(prompt=prompt,
+                           multi_modal_data=multi_modal_data
+                           if multi_modal_data else None))
 
         return inputs
 
@@ -938,18 +942,20 @@ class VllmRunner:
 
     def generate_beam_search(
         self,
-        prompts: Union[list[str], list[list[int]]],
+        prompts: list[str],
         beam_width: int,
         max_tokens: int,
+        images: Optional[PromptImageInput] = None,
+        videos: Optional[PromptVideoInput] = None,
+        audios: Optional[PromptAudioInput] = None,
     ) -> list[tuple[list[list[int]], list[str]]]:
-        if is_list_of(prompts, str, check="all"):
-            prompts = [TextPrompt(prompt=prompt) for prompt in prompts]
-        else:
-            prompts = [
-                TokensPrompt(prompt_token_ids=tokens) for tokens in prompts
-            ]
+        inputs = self.get_inputs(prompts,
+                                 images=images,
+                                 videos=videos,
+                                 audios=audios)
+
         outputs = self.model.beam_search(
-            prompts,
+            inputs,
             BeamSearchParams(beam_width=beam_width, max_tokens=max_tokens))
         returned_outputs = []
         for output in outputs:
@@ -962,19 +968,19 @@ class VllmRunner:
         req_outputs = self.model.classify(prompts)
         return [req_output.outputs.probs for req_output in req_outputs]
 
-    def encode(
-        self,
-        prompts: list[str],
-        images: Optional[PromptImageInput] = None,
-        videos: Optional[PromptVideoInput] = None,
-        audios: Optional[PromptAudioInput] = None,
-    ) -> list[list[float]]:
+    def encode(self,
+               prompts: list[str],
+               images: Optional[PromptImageInput] = None,
+               videos: Optional[PromptVideoInput] = None,
+               audios: Optional[PromptAudioInput] = None,
+               *args,
+               **kwargs) -> list[list[float]]:
         inputs = self.get_inputs(prompts,
                                  images=images,
                                  videos=videos,
                                  audios=audios)
 
-        req_outputs = self.model.embed(inputs)
+        req_outputs = self.model.embed(inputs, *args, **kwargs)
         return [req_output.outputs.embedding for req_output in req_outputs]
 
     def score(
@@ -1120,3 +1126,15 @@ def pytest_collection_modifyitems(config, items):
     for item in items:
         if "optional" in item.keywords:
             item.add_marker(skip_optional)
+
+
+@pytest.fixture(scope="session")
+def cli_config_file():
+    """Return the path to the CLI config file."""
+    return os.path.join(_TEST_DIR, "config", "test_config.yaml")
+
+
+@pytest.fixture(scope="session")
+def cli_config_file_with_model():
+    """Return the path to the CLI config file with model."""
+    return os.path.join(_TEST_DIR, "config", "test_config_with_model.yaml")

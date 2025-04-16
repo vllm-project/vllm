@@ -10,7 +10,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange
-from transformers import BatchFeature, PretrainedConfig
+from transformers import BartTokenizer, BatchFeature, PretrainedConfig
 
 from vllm.config import VllmConfig
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
@@ -21,13 +21,14 @@ from vllm.model_executor.models.bart import (BartDecoder, BartEncoder,
                                              BartScaledWordEmbedding)
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.inputs import MultiModalFieldConfig, MultiModalKwargs
-from vllm.multimodal.parse import MultiModalDataDict, MultiModalDataItems
+from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig,
+                                    MultiModalKwargs)
+from vllm.multimodal.parse import MultiModalDataItems
 from vllm.multimodal.processing import (BaseProcessingInfo,
                                         EncDecMultiModalProcessor,
                                         PromptIndexTargets, PromptInsertion,
                                         PromptUpdate)
-from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
+from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
 
 from .interfaces import (MultiModalEmbeddings, SupportsMultiModal,
@@ -764,41 +765,32 @@ class Florence2ProcessingInfo(BaseProcessingInfo):
     def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
         return {"image": 1}
 
-    def get_max_image_tokens(self) -> int:
+    def get_num_image_tokens(self) -> int:
         processor_config = self.ctx.get_hf_image_processor_config()
         return processor_config["image_seq_length"]
-
-    def get_mm_max_tokens_per_item(
-        self,
-        seq_len: int,
-        mm_counts: Mapping[str, int],
-    ) -> Mapping[str, int]:
-        return {"image": self.get_max_image_tokens()}
 
 
 class Florence2DummyInputsBuilder(
         BaseDummyInputsBuilder[Florence2ProcessingInfo]):
 
-    def get_dummy_processor_inputs(
+    def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
+        return ""
+
+    def get_dummy_mm_data(
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-    ) -> ProcessorInputs:
+    ) -> MultiModalDataDict:
         num_images = mm_counts.get("image", 0)
 
         target_width = target_height = self.info.get_hf_config().projection_dim
 
-        mm_data = {
+        return {
             "image":
             self._get_dummy_images(width=target_width,
                                    height=target_height,
                                    num_images=num_images)
         }
-
-        return ProcessorInputs(
-            prompt_text="",
-            mm_data=mm_data,
-        )
 
 
 class Florence2MultiModalProcessor(
@@ -825,6 +817,18 @@ class Florence2MultiModalProcessor(
         mm_data: MultiModalDataDict,
     ) -> Union[str, list[int]]:
         return [self.info.get_hf_config().eos_token_id]
+
+    def _apply_hf_processor_tokens_only(
+        self,
+        prompt_tokens: list[int],
+    ) -> list[int]:
+        hf_processor = self.info.get_hf_processor()
+        tokenizer: BartTokenizer = hf_processor.tokenizer
+        prompt_text = tokenizer.decode(prompt_tokens)
+        # convert task tokens to prompt
+        prompt_text = hf_processor._construct_prompts([prompt_text])[0]
+        prompt_tokens = tokenizer.encode(prompt_text, add_special_tokens=False)
+        return prompt_tokens
 
     def _call_hf_processor(
         self,
@@ -859,7 +863,7 @@ class Florence2MultiModalProcessor(
     ) -> Sequence[PromptUpdate]:
         hf_config = self.info.get_hf_config()
         pad_token_id = hf_config.pad_token_id
-        num_image_tokens = self.info.get_max_image_tokens()
+        num_image_tokens = self.info.get_num_image_tokens()
         image_tokens = [pad_token_id] * num_image_tokens
 
         return [
@@ -875,7 +879,8 @@ class Florence2MultiModalProcessor(
     Florence2MultiModalProcessor,
     info=Florence2ProcessingInfo,
     dummy_inputs=Florence2DummyInputsBuilder)
-class Florence2ForConditionalGeneration(nn.Module, SupportsMultiModal):
+class Florence2ForConditionalGeneration(nn.Module, SupportsMultiModal,
+                                        SupportsV0Only):
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
@@ -1036,6 +1041,9 @@ class Florence2ForConditionalGeneration(nn.Module, SupportsMultiModal):
         assert image_input["type"] == "pixel_values"
         pixel_values = image_input["data"]
         return self._encode_image(pixel_values)
+
+    def get_language_model(self) -> torch.nn.Module:
+        return self.language_model
 
     def get_multimodal_embeddings(
             self, **kwargs: object) -> Optional[MultiModalEmbeddings]:

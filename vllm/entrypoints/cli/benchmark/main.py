@@ -1,14 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 import argparse
 
+import vllm.entrypoints.cli.benchmark.latency
 import vllm.entrypoints.cli.benchmark.serve
+import vllm.entrypoints.cli.benchmark.throughput
 from vllm.entrypoints.cli.types import CLISubcommand
 from vllm.utils import FlexibleArgumentParser
 
-# TODO: Add the rest of the benchmark subcommands here,
-# e.g., throughput, latency, etc.
 BENCHMARK_CMD_MODULES = [
+    vllm.entrypoints.cli.benchmark.latency,
     vllm.entrypoints.cli.benchmark.serve,
+    vllm.entrypoints.cli.benchmark.throughput,
 ]
 
 
@@ -33,6 +35,7 @@ class BenchmarkSubcommand(CLISubcommand):
         bench_parser = subparsers.add_parser(
             "bench",
             help="vLLM bench subcommand.",
+            description="vLLM bench subcommand.",
             usage="vllm bench <bench_type> [options]")
         bench_subparsers = bench_parser.add_subparsers(required=True,
                                                        dest="bench_type")

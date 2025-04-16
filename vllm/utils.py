@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import argparse
 import asyncio
 import concurrent
 import contextlib
@@ -10,6 +9,7 @@ import datetime
 import enum
 import gc
 import getpass
+import hashlib
 import importlib
 import importlib.metadata
 import importlib.util
@@ -17,12 +17,14 @@ import inspect
 import ipaddress
 import multiprocessing
 import os
+import pickle
 import re
 import signal
 import socket
 import subprocess
 import sys
 import tempfile
+import textwrap
 import threading
 import time
 import traceback
@@ -30,16 +32,20 @@ import types
 import uuid
 import warnings
 import weakref
+from argparse import (Action, ArgumentDefaultsHelpFormatter, ArgumentParser,
+                      ArgumentTypeError)
 from asyncio import FIRST_COMPLETED, AbstractEventLoop, Task
-from collections import OrderedDict, UserDict, defaultdict
+from collections import UserDict, defaultdict
 from collections.abc import (AsyncGenerator, Awaitable, Generator, Hashable,
-                             Iterable, Iterator, Mapping)
+                             Iterable, Iterator, KeysView, Mapping)
 from dataclasses import dataclass, field
 from functools import cache, lru_cache, partial, wraps
+from types import MappingProxyType
 from typing import (TYPE_CHECKING, Any, Callable, Generic, Literal, NamedTuple,
-                    Optional, Type, TypeVar, Union)
+                    Optional, Tuple, Type, TypeVar, Union, cast, overload)
 from uuid import uuid4
 
+import cachetools
 import cloudpickle
 import numpy as np
 import numpy.typing as npt
@@ -49,6 +55,7 @@ import torch.types
 import yaml
 import zmq
 import zmq.asyncio
+from packaging import version
 from packaging.version import Version
 from torch.library import Library
 from typing_extensions import Never, ParamSpec, TypeIs, assert_never
@@ -57,7 +64,7 @@ import vllm.envs as envs
 from vllm.logger import enable_trace_function_call, init_logger
 
 if TYPE_CHECKING:
-    from vllm.config import VllmConfig
+    from vllm.config import ModelConfig, VllmConfig
 
 logger = init_logger(__name__)
 
@@ -171,6 +178,7 @@ U = TypeVar("U")
 
 _K = TypeVar("_K", bound=Hashable)
 _V = TypeVar("_V")
+_T = TypeVar("_T")
 
 
 class _Sentinel:
@@ -204,6 +212,19 @@ class Counter:
         self.counter = 0
 
 
+class _MappingOrderCacheView(UserDict[_K, _V]):
+
+    def __init__(self, data: Mapping[_K, _V], ordered_keys: Mapping[_K, None]):
+        super().__init__(data)
+        self.ordered_keys = ordered_keys
+
+    def __iter__(self) -> Iterator[_K]:
+        return iter(self.ordered_keys)
+
+    def keys(self) -> KeysView[_K]:
+        return KeysView(self.ordered_keys)
+
+
 class CacheInfo(NamedTuple):
     hits: int
     total: int
@@ -215,46 +236,105 @@ class CacheInfo(NamedTuple):
 
         return self.hits / self.total
 
+    def __sub__(self, other: CacheInfo):
+        return CacheInfo(
+            hits=self.hits - other.hits,
+            total=self.total - other.total,
+        )
 
-class LRUCache(Generic[_K, _V]):
-    """Note: This class is not thread safe!"""
 
-    def __init__(self, capacity: int) -> None:
-        self.cache = OrderedDict[_K, _V]()
+class LRUCache(cachetools.LRUCache[_K, _V], Generic[_K, _V]):
+
+    def __init__(self,
+                 capacity: float,
+                 getsizeof: Optional[Callable[[_V], float]] = None):
+        super().__init__(capacity, getsizeof)
+
         self.pinned_items = set[_K]()
-        self.capacity = capacity
 
         self._hits = 0
         self._total = 0
+        self._last_info = CacheInfo(hits=0, total=0)
 
-    def __contains__(self, key: _K) -> bool:
-        return key in self.cache
+    def __getitem__(self, key: _K, *, update_info: bool = True) -> _V:
+        value = super().__getitem__(key)
 
-    def __len__(self) -> int:
-        return len(self.cache)
+        if update_info:
+            self._hits += 1
+            self._total += 1
 
-    def __getitem__(self, key: _K) -> _V:
-        value = self.cache[key]  # Raise KeyError if not exists
-        self.cache.move_to_end(key)
         return value
 
-    def __setitem__(self, key: _K, value: _V) -> None:
-        self.put(key, value)
-
     def __delitem__(self, key: _K) -> None:
-        self.pop(key)
+        run_on_remove = key in self
+        value = self.__getitem__(key,
+                                 update_info=False)  # type: ignore[call-arg]
+        super().__delitem__(key)
+        if key in self.pinned_items:
+            # Todo: add warning to inform that del pinned item
+            self._unpin(key)
+        if run_on_remove:
+            self._on_remove(key, value)
 
-    def stat(self) -> CacheInfo:
-        return CacheInfo(hits=self._hits, total=self._total)
+    @property
+    def cache(self) -> Mapping[_K, _V]:
+        """Return the internal cache dictionary in order (read-only)."""
+        return _MappingOrderCacheView(
+            self._Cache__data,  # type: ignore
+            self.order)
+
+    @property
+    def order(self) -> Mapping[_K, None]:
+        """Return the internal order dictionary (read-only)."""
+        return MappingProxyType(self._LRUCache__order)  # type: ignore
+
+    @property
+    def capacity(self) -> float:
+        return self.maxsize
+
+    @property
+    def usage(self) -> float:
+        if self.maxsize == 0:
+            return 0
+
+        return self.currsize / self.maxsize
+
+    def stat(self, *, delta: bool = False) -> CacheInfo:
+        """
+        Gets the cumulative number of hits and queries against this cache.
+
+        If :code:`delta=True`, instead gets these statistics
+        since the last call that also passed :code:`delta=True`.
+        """
+        info = CacheInfo(hits=self._hits, total=self._total)
+
+        if delta:
+            info_delta = info - self._last_info
+            self._last_info = info
+            info = info_delta
+
+        return info
 
     def touch(self, key: _K) -> None:
-        self.cache.move_to_end(key)
+        self._LRUCache__update(key)  # type: ignore
 
-    def get(self, key: _K, default: Optional[_V] = None) -> Optional[_V]:
-        value: Optional[_V]
-        if key in self.cache:
-            value = self.cache[key]
-            self.cache.move_to_end(key)
+    @overload
+    def get(self, key: _K, /) -> Optional[_V]:
+        ...
+
+    @overload
+    def get(self, key: _K, /, default: Union[_V, _T]) -> Union[_V, _T]:
+        ...
+
+    def get(self,
+            key: _K,
+            /,
+            default: Optional[Union[_V,
+                                    _T]] = None) -> Optional[Union[_V, _T]]:
+        value: Optional[Union[_V, _T]]
+        if key in self:
+            value = self.__getitem__(
+                key, update_info=False)  # type: ignore[call-arg]
 
             self._hits += 1
         else:
@@ -263,60 +343,81 @@ class LRUCache(Generic[_K, _V]):
         self._total += 1
         return value
 
+    @overload
+    def pop(self, key: _K) -> _V:
+        ...
+
+    @overload
+    def pop(self, key: _K, default: Union[_V, _T]) -> Union[_V, _T]:
+        ...
+
+    def pop(self,
+            key: _K,
+            default: Optional[Union[_V,
+                                    _T]] = None) -> Optional[Union[_V, _T]]:
+        value: Optional[Union[_V, _T]]
+        if key not in self:
+            return default
+
+        value = self.__getitem__(key,
+                                 update_info=False)  # type: ignore[call-arg]
+        self.__delitem__(key)
+        return value
+
     def put(self, key: _K, value: _V) -> None:
-        self.cache[key] = value
-        self.cache.move_to_end(key)
-        self._remove_old_if_needed()
+        self.__setitem__(key, value)
 
     def pin(self, key: _K) -> None:
         """
         Pins a key in the cache preventing it from being
         evicted in the LRU order.
         """
-        if key not in self.cache:
+        if key not in self:
             raise ValueError(f"Cannot pin key: {key} not in cache.")
         self.pinned_items.add(key)
 
     def _unpin(self, key: _K) -> None:
+        """
+        Unpins a key in the cache allowing it to be
+        evicted in the LRU order.
+        """
         self.pinned_items.remove(key)
 
     def _on_remove(self, key: _K, value: Optional[_V]) -> None:
         pass
 
     def remove_oldest(self, *, remove_pinned: bool = False) -> None:
-        if not self.cache:
+        if len(self) == 0:
             return
 
+        self.popitem(remove_pinned=remove_pinned)
+
+    def _remove_old_if_needed(self) -> None:
+        while self.currsize > self.capacity:
+            self.remove_oldest()
+
+    def popitem(self, remove_pinned: bool = False):
+        """Remove and return the `(key, value)` pair least recently used."""
         if not remove_pinned:
             # pop the oldest item in the cache that is not pinned
             lru_key = next(
-                (key for key in self.cache if key not in self.pinned_items),
+                (key for key in self.order if key not in self.pinned_items),
                 ALL_PINNED_SENTINEL)
             if lru_key is ALL_PINNED_SENTINEL:
                 raise RuntimeError("All items are pinned, "
                                    "cannot remove oldest from the cache.")
         else:
-            lru_key = next(iter(self.cache))
-        self.pop(lru_key)  # type: ignore
-
-    def _remove_old_if_needed(self) -> None:
-        while len(self.cache) > self.capacity:
-            self.remove_oldest()
-
-    def pop(self, key: _K, default: Optional[_V] = None) -> Optional[_V]:
-        run_on_remove = key in self.cache
-        value = self.cache.pop(key, default)
-        # remove from pinned items
-        if key in self.pinned_items:
-            self._unpin(key)
-        if run_on_remove:
-            self._on_remove(key, value)
-        return value
+            lru_key = next(iter(self.order))
+        value = self.pop(cast(_K, lru_key))
+        return (lru_key, value)
 
     def clear(self) -> None:
-        while len(self.cache) > 0:
+        while len(self) > 0:
             self.remove_oldest(remove_pinned=True)
-        self.cache.clear()
+
+        self._hits = 0
+        self._total = 0
+        self._last_info = CacheInfo(hits=0, total=0)
 
 
 class PyObjectCache:
@@ -527,7 +628,7 @@ def get_open_port() -> int:
         dp_port = envs.VLLM_DP_MASTER_PORT
         while True:
             port = _get_open_port()
-            if port >= dp_port and port < dp_port + 10:
+            if dp_port <= port < dp_port + 10:
                 continue
             return port
     return _get_open_port()
@@ -742,6 +843,14 @@ def create_kv_caches_with_random(
 def is_pin_memory_available() -> bool:
     from vllm.platforms import current_platform
     return current_platform.is_pin_memory_available()
+
+
+@cache
+def is_uva_available() -> bool:
+    """Check if Unified Virtual Addressing (UVA) is available."""
+    # UVA requires pinned memory.
+    # TODO: Add more requirements for UVA if needed.
+    return is_pin_memory_available()
 
 
 class DeviceMemoryProfiler:
@@ -1149,7 +1258,7 @@ def run_once(f: Callable[P, None]) -> Callable[P, None]:
     return wrapper
 
 
-class StoreBoolean(argparse.Action):
+class StoreBoolean(Action):
 
     def __call__(self, parser, namespace, values, option_string=None):
         if values.lower() == "true":
@@ -1161,15 +1270,28 @@ class StoreBoolean(argparse.Action):
                              "Expected 'true' or 'false'.")
 
 
-class SortedHelpFormatter(argparse.HelpFormatter):
+class SortedHelpFormatter(ArgumentDefaultsHelpFormatter):
     """SortedHelpFormatter that sorts arguments by their option strings."""
+
+    def _split_lines(self, text, width):
+        """
+        1. Sentences split across lines have their single newlines removed.
+        2. Paragraphs and explicit newlines are split into separate lines.
+        3. Each line is wrapped to the specified width (width of terminal).
+        """
+        # The patterns also include whitespace after the newline
+        single_newline = re.compile(r"(?<!\n)\n(?!\n)\s*")
+        multiple_newlines = re.compile(r"\n{2,}\s*")
+        text = single_newline.sub(' ', text)
+        lines = re.split(multiple_newlines, text)
+        return sum([textwrap.wrap(line, width) for line in lines], [])
 
     def add_arguments(self, actions):
         actions = sorted(actions, key=lambda x: x.option_strings)
         super().add_arguments(actions)
 
 
-class FlexibleArgumentParser(argparse.ArgumentParser):
+class FlexibleArgumentParser(ArgumentParser):
     """ArgumentParser that allows both underscore and dash in names."""
 
     def __init__(self, *args, **kwargs):
@@ -1181,6 +1303,16 @@ class FlexibleArgumentParser(argparse.ArgumentParser):
     def parse_args(self, args=None, namespace=None):
         if args is None:
             args = sys.argv[1:]
+
+        # Check for --model in command line arguments first
+        if args and args[0] == "serve":
+            model_in_cli_args = any(arg == '--model' for arg in args)
+
+            if model_in_cli_args:
+                raise ValueError(
+                    "With `vllm serve`, you should provide the model as a "
+                    "positional argument or in a config file instead of via "
+                    "the `--model` option.")
 
         if '--config' in args:
             args = self._pull_args_from_config(args)
@@ -1210,11 +1342,10 @@ class FlexibleArgumentParser(argparse.ArgumentParser):
             value = int(value)
         except ValueError:
             msg = "Port must be an integer"
-            raise argparse.ArgumentTypeError(msg) from None
+            raise ArgumentTypeError(msg) from None
 
         if not (1024 <= value <= 65535):
-            raise argparse.ArgumentTypeError(
-                "Port must be between 1024 and 65535")
+            raise ArgumentTypeError("Port must be between 1024 and 65535")
 
         return value
 
@@ -1265,19 +1396,29 @@ class FlexibleArgumentParser(argparse.ArgumentParser):
         config_args = self._load_config_file(file_path)
 
         # 0th index is for {serve,chat,complete}
-        # followed by model_tag (only for serve)
+        # optionally followed by model_tag (only for serve)
         # followed by config args
         # followed by rest of cli args.
         # maintaining this order will enforce the precedence
         # of cli > config > defaults
         if args[0] == "serve":
-            if index == 1:
+            model_in_cli = len(args) > 1 and not args[1].startswith('-')
+            model_in_config = any(arg == '--model' for arg in config_args)
+
+            if not model_in_cli and not model_in_config:
                 raise ValueError(
-                    "No model_tag specified! Please check your command-line"
-                    " arguments.")
-            args = [args[0]] + [
-                args[1]
-            ] + config_args + args[2:index] + args[index + 2:]
+                    "No model specified! Please specify model either "
+                    "as a positional argument or in a config file.")
+
+            if model_in_cli:
+                # Model specified as positional arg, keep CLI version
+                args = [args[0]] + [
+                    args[1]
+                ] + config_args + args[2:index] + args[index + 2:]
+            else:
+                # No model in CLI, use config if available
+                args = [args[0]
+                        ] + config_args + args[1:index] + args[index + 2:]
         else:
             args = [args[0]] + config_args + args[1:index] + args[index + 2:]
 
@@ -1295,9 +1436,7 @@ class FlexibleArgumentParser(argparse.ArgumentParser):
                 '--port': '12323',
                 '--tensor-parallel-size': '4'
             ]
-
         """
-
         extension: str = file_path.split('.')[-1]
         if extension not in ('yaml', 'yml'):
             raise ValueError(
@@ -1566,18 +1705,21 @@ class ClassRegistry(UserDict[Type[T], _V]):
         return any(cls in self.data for cls in key.mro())
 
 
-def weak_ref_tensor(tensor: torch.Tensor) -> torch.Tensor:
+def weak_ref_tensor(tensor: Any) -> Any:
     """
     Create a weak reference to a tensor.
     The new tensor will share the same data as the original tensor,
     but will not keep the original tensor alive.
     """
-    return torch.ops._C.weak_ref_tensor(tensor)
+    if isinstance(tensor, torch.Tensor):
+        return torch.ops._C.weak_ref_tensor(tensor)
+    else:
+        return tensor
 
 
 def weak_ref_tensors(
     tensors: Union[torch.Tensor, list[torch.Tensor], tuple[torch.Tensor]]
-) -> Union[torch.Tensor, list[torch.Tensor], tuple[torch.Tensor]]:
+) -> Union[torch.Tensor, list[Any], tuple[Any], Any]:
     """
     Convenience function to create weak references to tensors,
     for single tensor, list of tensors or tuple of tensors.
@@ -1589,6 +1731,14 @@ def weak_ref_tensors(
     if isinstance(tensors, tuple):
         return tuple(weak_ref_tensor(t) for t in tensors)
     raise ValueError("Invalid type for tensors")
+
+
+def get_cuda_view_from_cpu_tensor(cpu_tensor: torch.Tensor) -> torch.Tensor:
+    """
+    Get a CUDA view of a CPU tensor using Unified Virtual Addressing (UVA).
+    """
+    assert cpu_tensor.is_pinned(), "CPU tensor must be pinned"
+    return torch.ops._C.get_cuda_view_from_cpu_tensor(cpu_tensor)
 
 
 def is_in_doc_build() -> bool:
@@ -1847,12 +1997,13 @@ vllm_lib = Library("vllm", "FRAGMENT")  # noqa
 
 
 def direct_register_custom_op(
-    op_name: str,
-    op_func: Callable,
-    mutates_args: list[str],
-    fake_impl: Optional[Callable] = None,
-    target_lib: Optional[Library] = None,
-    dispatch_key: str = "CUDA",
+        op_name: str,
+        op_func: Callable,
+        mutates_args: list[str],
+        fake_impl: Optional[Callable] = None,
+        target_lib: Optional[Library] = None,
+        dispatch_key: str = "CUDA",
+        tags: Tuple[torch.Tag, ...] = (),
 ):
     """
     `torch.library.custom_op` can have significant overhead because it
@@ -1891,7 +2042,7 @@ def direct_register_custom_op(
         import torch._custom_op.impl
         schema_str = torch._custom_op.impl.infer_schema(op_func, mutates_args)
     my_lib = target_lib or vllm_lib
-    my_lib.define(op_name + schema_str)
+    my_lib.define(op_name + schema_str, tags=tags)
     my_lib.impl(op_name, op_func, dispatch_key=dispatch_key)
     if fake_impl is not None:
         my_lib._register_fake(op_name, fake_impl)
@@ -2101,6 +2252,8 @@ def make_zmq_socket(
     ctx: Union[zmq.asyncio.Context, zmq.Context],  # type: ignore[name-defined]
     path: str,
     socket_type: Any,
+    bind: Optional[bool] = None,
+    identity: Optional[bytes] = None,
 ) -> Union[zmq.Socket, zmq.asyncio.Socket]:  # type: ignore[name-defined]
     """Make a ZMQ socket with the proper bind/connect semantics."""
 
@@ -2119,33 +2272,50 @@ def make_zmq_socket(
     else:
         buf_size = -1  # Use system default buffer size
 
-    if socket_type == zmq.constants.PULL:
-        socket.setsockopt(zmq.constants.RCVHWM, 0)
-        socket.setsockopt(zmq.constants.RCVBUF, buf_size)
-        socket.connect(path)
-    elif socket_type == zmq.constants.PUSH:
-        socket.setsockopt(zmq.constants.SNDHWM, 0)
-        socket.setsockopt(zmq.constants.SNDBUF, buf_size)
+    if bind is None:
+        bind = socket_type != zmq.PUSH
+
+    if socket_type in (zmq.PULL, zmq.DEALER, zmq.ROUTER):
+        socket.setsockopt(zmq.RCVHWM, 0)
+        socket.setsockopt(zmq.RCVBUF, buf_size)
+
+    if socket_type in (zmq.PUSH, zmq.DEALER, zmq.ROUTER):
+        socket.setsockopt(zmq.SNDHWM, 0)
+        socket.setsockopt(zmq.SNDBUF, buf_size)
+
+    if identity is not None:
+        socket.setsockopt(zmq.IDENTITY, identity)
+
+    if bind:
         socket.bind(path)
     else:
-        raise ValueError(f"Unknown Socket Type: {socket_type}")
+        socket.connect(path)
 
     return socket
 
 
 @contextlib.contextmanager
-def zmq_socket_ctx(path: str, socket_type: Any) -> Iterator[zmq.Socket]:
+def zmq_socket_ctx(
+    path: str,
+    socket_type: Any,
+    bind: Optional[bool] = None,
+    linger: int = 0,
+    identity: Optional[bytes] = None,
+) -> Iterator[zmq.Socket]:
     """Context manager for a ZMQ socket"""
 
     ctx = zmq.Context()  # type: ignore[attr-defined]
     try:
-        yield make_zmq_socket(ctx, path, socket_type)
-
+        yield make_zmq_socket(ctx,
+                              path,
+                              socket_type,
+                              bind=bind,
+                              identity=identity)
     except KeyboardInterrupt:
         logger.debug("Got Keyboard Interrupt.")
 
     finally:
-        ctx.destroy(linger=0)
+        ctx.destroy(linger=linger)
 
 
 def is_in_ray_actor():
@@ -2442,3 +2612,50 @@ def cprofile(save_file: Optional[str] = None, enabled: bool = True):
         return wrapper
 
     return decorator
+
+
+# Only relevant for models using ALiBi (e.g, MPT)
+def check_use_alibi(model_config: ModelConfig) -> bool:
+    return (getattr(model_config.hf_text_config, "alibi", False)  # Falcon
+            or ("BloomForCausalLM" in getattr(model_config.hf_config,
+                                              "architectures", []))  # Bloom
+            or getattr(model_config.hf_text_config, "position_encoding_type",
+                       "") == "alibi"  # codellm_1b_alibi
+            or
+            (hasattr(model_config.hf_text_config, "attn_config")  # MPT
+             and model_config.hf_text_config.attn_config.get("alibi", False)))
+
+
+def sha256(input) -> int:
+    """Hash any picklable Python object using SHA-256.
+
+    The input is serialized using pickle before hashing, which allows
+    arbitrary Python objects to be used. Note that this function does
+    not use a hash seed—if you need one, prepend it explicitly to the input.
+
+    Args:
+        input: Any picklable Python object.
+
+    Returns:
+        An integer representing the SHA-256 hash of the serialized input.
+    """
+    input_bytes = pickle.dumps(input, protocol=pickle.HIGHEST_PROTOCOL)
+    return int.from_bytes(hashlib.sha256(input_bytes).digest(),
+                          byteorder="big")
+
+
+def is_torch_equal_or_newer(target: str) -> bool:
+    """Check if the installed torch version is >= the target version.
+
+    Args:
+        target: a version string, like "2.6.0".
+
+    Returns:
+        Whether the condition meets.
+    """
+    try:
+        torch_version = version.parse(str(torch.__version__))
+        return torch_version >= version.parse(target)
+    except Exception:
+        # Fallback to PKG-INFO to load the package info, needed by the doc gen.
+        return Version(importlib.metadata.version('torch')) >= Version(target)

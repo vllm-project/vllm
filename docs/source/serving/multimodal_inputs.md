@@ -21,6 +21,8 @@ To input multi-modal data, follow this schema in {class}`vllm.inputs.PromptType`
 You can pass a single image to the `'image'` field of the multi-modal dictionary, as shown in the following examples:
 
 ```python
+from vllm import LLM
+
 llm = LLM(model="llava-hf/llava-1.5-7b-hf")
 
 # Refer to the HuggingFace repo for the correct format to use
@@ -65,6 +67,8 @@ Full example: <gh-file:examples/offline_inference/vision_language.py>
 To substitute multiple images inside the same text prompt, you can pass in a list of images instead:
 
 ```python
+from vllm import LLM
+
 llm = LLM(
     model="microsoft/Phi-3.5-vision-instruct",
     trust_remote_code=True,  # Required to load Phi-3.5-vision
@@ -96,6 +100,8 @@ Full example: <gh-file:examples/offline_inference/vision_language_multi_image.py
 Multi-image input can be extended to perform video captioning. We show this with [Qwen2-VL](https://huggingface.co/Qwen/Qwen2-VL-2B-Instruct) as it supports videos:
 
 ```python
+from vllm import LLM
+
 # Specify the maximum number of frames per video to be 4. This can be changed.
 llm = LLM("Qwen/Qwen2-VL-2B-Instruct", limit_mm_per_prompt={"image": 4})
 
@@ -139,6 +145,8 @@ To input pre-computed embeddings belonging to a data type (i.e. image, video, or
 pass a tensor of shape `(num_items, feature_size, hidden_size of LM)` to the corresponding field of the multi-modal dictionary.
 
 ```python
+from vllm import LLM
+
 # Inference with image embeddings as input
 llm = LLM(model="llava-hf/llava-1.5-7b-hf")
 

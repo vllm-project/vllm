@@ -96,7 +96,7 @@ class CompressedTensorsConfig(QuantizationConfig):
         if isinstance(layer, Attention):
             return CompressedTensorsKVCacheMethod(self)
         if isinstance(layer, FusedMoE):
-            return CompressedTensorsMoEMethod.get_moe_method(self)
+            return CompressedTensorsMoEMethod.get_moe_method(self, layer)
         return None
 
     @classmethod
@@ -191,17 +191,26 @@ class CompressedTensorsConfig(QuantizationConfig):
 
     def _check_scheme_supported(self,
                                 min_capability: int,
-                                error: bool = True) -> bool:
+                                error: bool = True,
+                                match_exact: bool = False) -> bool:
         capability_tuple = current_platform.get_device_capability()
 
         if capability_tuple is not None:
             capability = capability_tuple.to_int()
-            supported = capability >= min_capability
-            if error and not supported:
-                raise RuntimeError(
-                    "Quantization scheme is not supported for ",
-                    f"the current GPU. Min capability: {min_capability}. ",
-                    f"Current capability: {capability}.")
+            if match_exact:
+                supported = capability == min_capability
+                if error and not supported:
+                    raise RuntimeError(
+                        "Quantization scheme is not supported for ",
+                        "the current GPU. Required capability: ",
+                        f"{min_capability}. Current capability: {capability}.")
+            else:
+                supported = capability >= min_capability
+                if error and not supported:
+                    raise RuntimeError(
+                        "Quantization scheme is not supported for ",
+                        f"the current GPU. Min capability: {min_capability}. ",
+                        f"Current capability: {capability}.")
             return supported
         else:
             return False
@@ -262,6 +271,11 @@ class CompressedTensorsConfig(QuantizationConfig):
             input_quant.strategy == QuantizationStrategy.TENSOR)
         return is_symmetric_activation and is_per_tensor_activation
 
+    def _is_fp8_w8a8_sm90(self, weight_quant: BaseModel,
+                          input_quant: BaseModel) -> bool:
+        return (self._check_scheme_supported(90, error=False, match_exact=True)
+                and self._is_fp8_w8a8(weight_quant, input_quant))
+
     def _is_fp8_w8a16(self, weight_quant: BaseModel,
                       input_quant: BaseModel) -> bool:
         # Confirm weights quantized.
@@ -288,14 +302,12 @@ class CompressedTensorsConfig(QuantizationConfig):
     def _is_wNa16_group_channel(self, weight_quant: BaseModel,
                                 input_quant: BaseModel) -> bool:
         input_quant_none = input_quant is None
-        is_symmetric = weight_quant.symmetric
         is_channel_group = (
             weight_quant.strategy == QuantizationStrategy.CHANNEL.value
             or weight_quant.strategy == QuantizationStrategy.GROUP.value)
         is_static = not weight_quant.dynamic
 
-        return (is_channel_group and input_quant_none and is_symmetric
-                and is_static)
+        return (is_channel_group and input_quant_none and is_static)
 
     def _get_scheme_from_parts(
             self, weight_quant: BaseModel,
@@ -305,6 +317,7 @@ class CompressedTensorsConfig(QuantizationConfig):
         if self._is_wNa16_group_channel(weight_quant, input_quant):
             if (self.quant_format == CompressionFormat.marlin_24.value
                     and weight_quant.num_bits in W4A16SPARSE24_SUPPORTED_BITS):
+                assert weight_quant.symmetric
                 return CompressedTensorsW4A16Sparse24(
                     strategy=weight_quant.strategy,
                     num_bits=weight_quant.num_bits,
@@ -314,6 +327,7 @@ class CompressedTensorsConfig(QuantizationConfig):
                 return CompressedTensorsWNA16(
                     num_bits=weight_quant.num_bits,
                     strategy=weight_quant.strategy,
+                    symmetric=weight_quant.symmetric,
                     group_size=weight_quant.group_size,
                     actorder=weight_quant.actorder)
 
