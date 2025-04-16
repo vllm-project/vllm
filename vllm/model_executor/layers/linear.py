@@ -14,6 +14,7 @@ from vllm.distributed import (divide, get_tensor_model_parallel_rank,
                               split_tensor_along_last_dim,
                               tensor_model_parallel_all_gather,
                               tensor_model_parallel_all_reduce)
+from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig, QuantizeMethodBase)
@@ -1107,6 +1108,7 @@ class QKVParallelLinear(ColumnParallelLinear):
         param_data.copy_(loaded_weight)
 
 
+backup_stream = torch.cuda.Stream()
 class RowParallelLinear(LinearBase):
     """Linear layer with row parallelism.
 
@@ -1255,13 +1257,37 @@ class RowParallelLinear(LinearBase):
         # Only fuse bias add into GEMM for rank 0 (this ensures that
         # bias will not get added more than once in TP>1 case)
         bias_ = None if (self.tp_rank > 0 or self.skip_bias_add) else self.bias
-        output_parallel = self.quant_method.apply(self,
-                                                  input_parallel,
-                                                  bias=bias_)
-        if self.reduce_results and self.tp_size > 1:
-            output = tensor_model_parallel_all_reduce(output_parallel)
+        event = torch.cuda.Event()
+        m_over_two = input_parallel.shape[0] // 2
+        if m_over_two > 1024:
+            first_output_parallel = self.quant_method.apply(self,
+                                                input_parallel[:m_over_two],
+                                                bias=bias_)
+            event.record()
+            if self.reduce_results and self.tp_size > 1:
+                first_output = tensor_model_parallel_all_reduce(first_output_parallel)
+            else:
+                first_output = first_output_parallel
+
+            with torch.cuda.stream(backup_stream):
+                event.wait()
+                second_output_parallel = self.quant_method.apply(self,
+                                                        input_parallel[m_over_two:],
+                                                        bias=bias_)
+                if self.reduce_results and self.tp_size > 1:
+                    second_output = tensor_model_parallel_all_reduce(second_output_parallel)
+                else:
+                    second_output = second_output_parallel
+            torch.cuda.synchronize()
+            output = torch.cat((first_output, second_output), dim=0)
         else:
-            output = output_parallel
+            output_parallel= self.quant_method.apply(self,
+                                            input_parallel,
+                                            bias=bias_)
+            if self.reduce_results and self.tp_size > 1:
+                output = tensor_model_parallel_all_reduce(output_parallel)
+            else:
+                output = output_parallel
 
         output_bias = self.bias if self.skip_bias_add else None
 
