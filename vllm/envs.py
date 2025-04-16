@@ -537,19 +537,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
              ("true", "1") and os.getenv("VLLM_ROCM_USE_AITER_LINEAR", "True"
                                          ).lower() in ("true", "1")),
 
-    # Disable aiter ops unless specifically enabled.
-    # Acts as a parent switch to enable the rest of the other operations.
-    "VLLM_ROCM_USE_AITER":
-    lambda: (os.getenv("VLLM_ROCM_USE_AITER", "False").lower() in
-             ("true", "1")),
-
-    # use aiter linear op if aiter ops are enabled
-    # The following list of related ops
-    # - scaled_mm (per-tensor / rowwise)
-    "VLLM_ROCM_USE_AITER_LINEAR":
-    lambda: (os.getenv("VLLM_ROCM_USE_AITER_LINEAR", "True").lower() in
-             ("true", "1")),
-
     # Whether to use aiter moe ops.
     # By default is enabled.
     "VLLM_ROCM_USE_AITER_MOE":
