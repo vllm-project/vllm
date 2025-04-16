@@ -5,6 +5,7 @@
 ray
 triton==3.1.0
 pandas
+numpy==1.26.4
 tabulate
 setuptools>=61
 setuptools-scm>=8

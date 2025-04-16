@@ -176,6 +176,10 @@ class AudioProcessorItems(ProcessorBatchItems[HfAudioItem]):
     def __init__(self, data: Sequence[HfAudioItem]) -> None:
         super().__init__(data, "audio")
 
+    def get_audio_length(self, item_idx: int) -> int:
+        audio = self.get(item_idx)
+        return len(audio)
+
 
 class AudioEmbeddingItems(EmbeddingItems):
 
@@ -291,7 +295,7 @@ class MultiModalDataItems(UserDict[str, ModalityDataItems[Any, Any]]):
 
 
 ModalityDataParser: TypeAlias = Callable[[ModalityData[Any]],
-                                         ModalityDataItems[Any, Any]]
+                                         Optional[ModalityDataItems[Any, Any]]]
 
 
 class MultiModalDataParser:
@@ -315,7 +319,15 @@ class MultiModalDataParser:
         if isinstance(data, torch.Tensor):
             return data.ndim == 3
         if is_list_of(data, torch.Tensor):
-            return len(data) == 0 or data[0].ndim == 2
+            return data[0].ndim == 2
+
+        return False
+
+    def _is_empty(self, data: object) -> TypeGuard[None]:
+        if isinstance(data, list):
+            return len(data) == 0
+        if isinstance(data, (np.ndarray, torch.Tensor)):
+            return data.size == 0
 
         return False
 
@@ -337,7 +349,12 @@ class MultiModalDataParser:
     def _parse_audio_data(
         self,
         data: ModalityData[AudioItem],
-    ) -> ModalityDataItems[Any, Any]:
+    ) -> Optional[ModalityDataItems[Any, Any]]:
+        # also check single audio item with sampling rate
+        if self._is_empty(data) or (isinstance(data, tuple)
+                                    and self._is_empty(data[0])):
+            return None
+
         if self._is_embeddings(data):
             return AudioEmbeddingItems(data)
 
@@ -374,7 +391,10 @@ class MultiModalDataParser:
     def _parse_image_data(
         self,
         data: ModalityData[ImageItem],
-    ) -> ModalityDataItems[Any, Any]:
+    ) -> Optional[ModalityDataItems[Any, Any]]:
+        if self._is_empty(data):
+            return None
+
         if self._is_embeddings(data):
             return ImageEmbeddingItems(data)
 
@@ -392,7 +412,10 @@ class MultiModalDataParser:
     def _parse_video_data(
         self,
         data: ModalityData[VideoItem],
-    ) -> ModalityDataItems[Any, Any]:
+    ) -> Optional[ModalityDataItems[Any, Any]]:
+        if self._is_empty(data):
+            return None
+
         if self._is_embeddings(data):
             return VideoEmbeddingItems(data)
 
@@ -423,6 +446,8 @@ class MultiModalDataParser:
             if k not in subparsers:
                 raise ValueError(f"Unsupported modality: {k}")
 
-            mm_items[k] = subparsers[k](v)
+            # ignore empty embedding data
+            if (parsed_data := subparsers[k](v)) is not None:
+                mm_items[k] = parsed_data
 
         return mm_items

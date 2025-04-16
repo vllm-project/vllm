@@ -134,57 +134,29 @@ class RequestOutput:
         self.encoder_prompt_token_ids = encoder_prompt_token_ids
         self.num_cached_tokens = num_cached_tokens
 
-    @classmethod
-    def new(
-        cls,
-        request_id: str,
-        prompt: Optional[str],
-        prompt_token_ids: Optional[list[int]],
-        text: str,
-        token_ids: list[int],
-        logprobs: Optional[SampleLogprobs],
-        prompt_logprobs: Optional[PromptLogprobs],
-        cumulative_logprob: Optional[float],
-        finished: bool = False,
-    ) -> "RequestOutput":
-        """Initialize a new RequestOutput object."""
-
-        # TODO: Support `n` > 1.
-        completion_output = CompletionOutput(
-            index=0,
-            text=text,
-            token_ids=token_ids,
-            cumulative_logprob=cumulative_logprob,
-            logprobs=logprobs)
-
-        return RequestOutput(
-            request_id=request_id,
-            prompt=prompt,
-            prompt_token_ids=prompt_token_ids,
-            prompt_logprobs=prompt_logprobs,
-            outputs=[completion_output],
-            finished=finished,
-        )
-
     def add(self, next_output: "RequestOutput") -> None:
         """Merge subsequent RequestOutput into this one"""
 
-        self.prompt = next_output.prompt
-        self.prompt_token_ids = next_output.prompt_token_ids
-        self.prompt_logprobs = next_output.prompt_logprobs
         self.finished |= next_output.finished
 
-        #TODO assuming n == 1 for now
-        completion = self.outputs[0]
-        next_completion = next_output.outputs[0]
-        completion.text += next_completion.text
-        if not isinstance(completion.token_ids, MutableSequence):
-            completion.token_ids = list(completion.token_ids)
-        completion.token_ids.extend(next_completion.token_ids)
-        if next_completion.logprobs:
-            assert completion.logprobs is not None
-            completion.logprobs.extend(next_completion.logprobs)
-        completion.cumulative_logprob = next_completion.cumulative_logprob
+        for next_completion in next_output.outputs:
+            for completion in self.outputs:
+                if completion.index == next_completion.index:
+                    # Merge outputs with same index
+                    completion.text += next_completion.text
+                    if not isinstance(completion.token_ids, MutableSequence):
+                        completion.token_ids = list(completion.token_ids)
+                    completion.token_ids.extend(next_completion.token_ids)
+                    if next_completion.logprobs:
+                        assert completion.logprobs is not None
+                        completion.logprobs.extend(next_completion.logprobs)
+                    completion.cumulative_logprob = (
+                        next_completion.cumulative_logprob)
+                    completion.finish_reason = next_completion.finish_reason
+                    completion.stop_reason = next_completion.stop_reason
+                    break
+            else:
+                self.outputs.append(next_completion)
 
     @classmethod
     def from_seq_group(
@@ -251,7 +223,12 @@ class RequestOutput:
             if delta:
                 # Slice logprobs delta if applicable
                 if output_logprobs:
-                    output_logprobs = output_logprobs[-num_output_tokens:]
+                    # num_output_tokens can be 0 when n > 1 and request finishes
+                    # before the others
+                    if num_output_tokens > 0:
+                        output_logprobs = output_logprobs[-num_output_tokens:]
+                    else:
+                        output_logprobs = None
                 # Don't include prompt if this is after the first output
                 # containing decode token ids
                 if include_prompt and seq.get_output_len() > num_output_tokens:

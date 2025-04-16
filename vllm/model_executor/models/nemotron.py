@@ -63,8 +63,8 @@ def _cast_if_autocast_enabled(*args):
     if not torch.is_autocast_enabled():
         return args
     else:
-        return torch.cuda.amp.autocast_mode._cast(
-            args, torch.get_autocast_gpu_dtype())
+        return torch.amp.autocast_mode._cast(
+            args, device_type="cuda", dtype=torch.get_autocast_gpu_dtype())
 
 
 class NemotronLayerNorm1P(nn.LayerNorm):
@@ -89,7 +89,7 @@ class NemotronLayerNorm1P(nn.LayerNorm):
             residual = x
         args = _cast_if_autocast_enabled(x, self.normalized_shape,
                                          self.weight + 1, self.bias, self.eps)
-        with torch.cuda.amp.autocast(enabled=False):
+        with torch.amp.autocast("cuda", enabled=False):
             x = torch.nn.functional.layer_norm(*args)
             return x if residual is None else (x, residual)
 

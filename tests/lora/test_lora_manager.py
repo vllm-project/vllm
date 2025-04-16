@@ -32,6 +32,17 @@ DEVICES = ([
 ] if current_platform.is_cuda_alike() else ["cpu"])
 
 
+@pytest.fixture(scope="function", autouse=True)
+def use_v0_only(monkeypatch: pytest.MonkeyPatch):
+    """
+    Some tests depend on V0 internals. Since both V0 and V1 use the same
+    LoRAModelManager it is okay to just test V0.
+    """
+    with monkeypatch.context() as m:
+        m.setenv('VLLM_USE_V1', '0')
+        yield
+
+
 @pytest.mark.parametrize("device", DEVICES)
 def test_from_lora_tensors(sql_lora_files, device):
     tensors = load_file(

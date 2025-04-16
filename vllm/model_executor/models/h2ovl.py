@@ -249,20 +249,15 @@ class H2OVLProcessor(BaseInternVLProcessor):
     def image_token_id(self) -> int:
         return self.tokenizer.get_vocab()[IMG_CONTEXT]
 
-    def get_image_repl_features(
+    def get_image_repl(
         self,
         feature_size: int,
         num_patches: Optional[int],
-    ) -> str:
-        return IMG_CONTEXT * feature_size
+    ) -> PromptUpdateDetails[str]:
+        repl_features = IMG_CONTEXT * feature_size
+        repl_full = IMG_START + repl_features + IMG_END
 
-    def get_image_repl_full(
-        self,
-        feature_size: int,
-        num_patches: Optional[int],
-    ) -> str:
-        features = self.get_image_repl_features(feature_size, num_patches)
-        return IMG_START + features + IMG_END
+        return PromptUpdateDetails.select_text(repl_full, IMG_CONTEXT)
 
     def resolve_min_max_num(
         self,
@@ -417,19 +412,6 @@ class H2OVLProcessingInfo(BaseInternVLProcessingInfo):
             **kwargs,
         )
 
-    def get_mm_max_tokens_per_item(
-        self,
-        seq_len: int,
-        mm_counts: Mapping[str, int],
-    ) -> Mapping[str, int]:
-        max_tokens_one_image = self.get_max_image_tokens(use_msac=None)
-        if mm_counts.get("image", 0) <= 1:
-            max_tokens_per_image = max_tokens_one_image
-        else:
-            max_tokens_per_image = self.get_max_image_tokens(use_msac=False)
-
-        return {"image": max_tokens_per_image}
-
     def get_num_image_tokens(
         self,
         *,
@@ -444,16 +426,6 @@ class H2OVLProcessingInfo(BaseInternVLProcessingInfo):
         return processor.get_num_image_tokens(
             image_width=image_width,
             image_height=image_height,
-            use_msac=use_msac,
-        )
-
-    def get_max_image_tokens(self, use_msac: Optional[bool] = None) -> int:
-        target_width, target_height = self.get_image_size_with_most_features()
-
-        return self.get_num_image_tokens(
-            image_width=target_width,
-            image_height=target_height,
-            processor=None,
             use_msac=use_msac,
         )
 
@@ -501,12 +473,7 @@ class H2OVLMultiModalProcessor(InternVLMultiModalProcessor[H2OVLProcessingInfo]
             if num_patches is not None:
                 assert isinstance(num_patches, int)
 
-            return PromptUpdateDetails(
-                full=hf_processor.get_image_repl_full(feature_size,
-                                                      num_patches),
-                features=hf_processor.get_image_repl_features(
-                    feature_size, num_patches),
-            )
+            return hf_processor.get_image_repl(feature_size, num_patches)
 
         return [
             PromptReplacement(

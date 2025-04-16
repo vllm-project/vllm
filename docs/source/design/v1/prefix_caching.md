@@ -15,12 +15,13 @@ Block 3: |<------------------ prefix -------------------->| |<--- block tokens -
 In the example above, the KV cache in the first block can be uniquely identified with the token “A gentle breeze stirred”. The third block can be uniquely identified with the tokens in the block “laughed in the distance”, along with the prefix tokens “A gentle breeze stirred the leaves as children”. Therefore, we can build the block hash of `hash(tuple[components])`, where components are:
 
 * Parent hash value: The hash value of the parent hash block.
-* Block tokens: A tuple of tokens in this block. The reason to include the exact tokens is to reduce potential hash value collision.  
+* Block tokens: A tuple of tokens in this block. The reason to include the exact tokens is to reduce potential hash value collision.
 * Extra hashes: Other values required to make this block unique, such as LoRA IDs and multi-modality input hashes (see the example below).
 
-Note 1: We only cache full blocks.
+> **Note 1:** We only cache full blocks.
 
-Note 2: The above hash key structure is not 100% collision free. Theoretically it’s still possible for the different prefix tokens to have the same hash value, but this should be nearly impossible to happen. Of course, contributions are welcome if you have an awesome idea to eliminate collusion entirely.
+> **Note 2:** The above hash key structure is not 100% collision free. Theoretically it’s still possible for the different prefix tokens to have the same hash value. To avoid any hash collisions **in a multi-tenant setup, we advise to use SHA256** as hash function instead of the default builtin hash.
+SHA256 is supported since vLLM v0.8.3 and must be enabled with a command line argument. It comes with a performance impact of about 100-200ns per token (~6ms for 50k tokens of context).
 
 **A hashing example with multi-modality inputs**  
 In this example, we illustrate how prefix caching works with multi-modality inputs (e.g., images). Assuming we have a request with the following messages:
@@ -191,7 +192,7 @@ When the head block (least recently used block) of the free queue is cached, we 
 
 In this example, we assume the block size is 4 (each block can cache 4 tokens), and we have 10 blocks in the KV-cache manager in total.
 
-**Time 1: The cache is empty and a new request comes in.** We allocate 4 blocks. 3 of them are already full and cached. The fourth block is partially full with 2 of 4 tokens.
+**Time 1: The cache is empty and a new request comes in.** We allocate 4 blocks. 3 of them are already full and cached. The fourth block is partially full with 3 of 4 tokens.
 
 :::{image} /assets/design/v1/prefix_caching/example-time-1.png
 :alt: Example Time 1
@@ -203,7 +204,7 @@ In this example, we assume the block size is 4 (each block can cache 4 tokens), 
 :alt: Example Time 3
 :::
 
-**Time 4: Request 1 comes in with the 14 prompt tokens, where the first 11 tokens are the same as request 0.** We can see that only 2 blocks (11 tokens) hit the cache, because the 3rd block only matches 3 of 4 tokens.
+**Time 4: Request 1 comes in with the 14 prompt tokens, where the first 10 tokens are the same as request 0.** We can see that only the first 2 blocks (8 tokens) hit the cache, because the 3rd block only matches 2 of 4 tokens.
 
 :::{image} /assets/design/v1/prefix_caching/example-time-4.png
 :alt: Example Time 4

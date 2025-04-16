@@ -4,8 +4,7 @@ from typing import Optional, overload
 
 import pytest
 import torch
-from transformers import (AutoConfig, AutoModelForVision2Seq, AutoTokenizer,
-                          BatchEncoding)
+from transformers import AutoConfig, AutoModelForImageTextToText, AutoTokenizer
 
 from vllm import LLM, SamplingParams
 from vllm.attention.backends.flash_attn import FlashAttentionMetadata
@@ -17,6 +16,7 @@ from vllm.sequence import SampleLogprobs
 
 from ....conftest import (IMAGE_ASSETS, HfRunner, PromptImageInput, VllmRunner,
                           _ImageAssets)
+from ....quantization.utils import is_quant_method_supported
 from ....utils import large_gpu_test
 from ...utils import check_logprobs_close
 
@@ -209,15 +209,15 @@ def _run_test(
     # will hurt multiprocessing backend with fork method (the default method).
 
     # max_model_len should be greater than image_feature_size
-    with vllm_runner(model,
-                     dtype=dtype,
-                     max_model_len=4096,
-                     max_num_seqs=2,
-                     tensor_parallel_size=tensor_parallel_size,
-                     distributed_executor_backend=distributed_executor_backend,
-                     enforce_eager=True,
-                     limit_mm_per_prompt={"image": _LIMIT_IMAGE_PER_PROMPT
-                                          }) as vllm_model:
+    with vllm_runner(
+            model,
+            dtype=dtype,
+            max_model_len=19212,  # 3 max size images
+            max_num_seqs=3,
+            tensor_parallel_size=tensor_parallel_size,
+            distributed_executor_backend=distributed_executor_backend,
+            limit_mm_per_prompt={"image":
+                                 _LIMIT_IMAGE_PER_PROMPT}) as vllm_model:
         vllm_outputs_per_image = [
             vllm_model.generate_greedy_logprobs(prompts,
                                                 max_tokens,
@@ -226,14 +226,10 @@ def _run_test(
             for prompts, images in inputs
         ]
 
-    def process(hf_inputs: BatchEncoding, **kwargs):
-        return hf_inputs
-
     with hf_runner(model,
                    dtype=dtype,
                    model_kwargs={"device_map": "auto"},
-                   postprocess_inputs=process,
-                   auto_cls=AutoModelForVision2Seq) as hf_model:
+                   auto_cls=AutoModelForImageTextToText) as hf_model:
         hf_outputs_per_image = [
             hf_model.generate_greedy_logprobs_limit(prompts,
                                                     max_tokens,
@@ -400,6 +396,48 @@ def test_models_interleaved_images(hf_runner, vllm_runner, image_assets, model,
 @large_gpu_test(min_gb=48)
 @pytest.mark.core_model
 @pytest.mark.parametrize("model", models)
+@pytest.mark.parametrize("dtype", ["float16"])
+@pytest.mark.parametrize("max_tokens", [32])
+@pytest.mark.skipif(not is_quant_method_supported("bitsandbytes"),
+                    reason='bitsandbytes is not supported on this GPU type.')
+def test_bnb_regression(
+    image_assets: _ImageAssets,
+    model: str,
+    dtype: str,
+    max_tokens: int,
+):
+    stop_sign = image_assets[0].pil_image
+    prompts = [
+        {
+            "prompt": "<|begin_of_text|>The content of the image <|image|> is",
+            "multi_modal_data": {
+                "image": stop_sign
+            },
+        },
+        {
+            "prompt":
+            "The color of the sky is blue but sometimes it can also be",
+        },
+    ]
+    # Test regression about QKVCrossParallelLinear
+    llm = LLM(
+        model=model,
+        dtype=dtype,
+        max_model_len=8192,
+        max_num_seqs=2,
+        quantization="bitsandbytes",
+    )
+    sampling_params = SamplingParams(
+        temperature=0,
+        max_tokens=max_tokens,
+    )
+    outputs = llm.generate(prompts, sampling_params)
+    assert outputs
+
+
+@large_gpu_test(min_gb=48)
+@pytest.mark.core_model
+@pytest.mark.parametrize("model", models)
 @pytest.mark.parametrize("dtype", ["bfloat16"])
 @pytest.mark.parametrize("max_tokens", [32])
 def test_explicit_implicit_prompt(
@@ -438,10 +476,9 @@ def test_explicit_implicit_prompt(
     llm = LLM(
         model=model,
         dtype=dtype,
-        max_model_len=4096,
+        max_model_len=8192,
         max_num_seqs=2,
         tensor_parallel_size=1,
-        enforce_eager=True,
     )
     sampling_params = SamplingParams(
         temperature=0,
@@ -470,10 +507,9 @@ def test_regression(vllm_runner, image_assets, model, dtype, max_tokens,
     with global_force_attn_backend_context_manager(attn_backend), vllm_runner(
             model,
             dtype=dtype,
-            max_model_len=4096,
-            max_num_seqs=2,
+            max_model_len=8192,
+            max_num_seqs=4,
             tensor_parallel_size=1,
-            enforce_eager=True,
             limit_mm_per_prompt={"image":
                                  _LIMIT_IMAGE_PER_PROMPT}) as vllm_model:
 
@@ -511,6 +547,23 @@ def test_regression(vllm_runner, image_assets, model, dtype, max_tokens,
         images = [
             [stop_sign],
             None,
+        ]
+        vllm_model.generate_greedy_logprobs(prompts,
+                                            max_tokens,
+                                            num_logprobs,
+                                            images=images)
+
+        # Mixed batch with text and images with different numbers of tiles
+        prompts = [
+            "<|begin_of_text|>Hello!",
+            "<|begin_of_text|>Some text before.<|image|>What is in the image?",  # noqa: E501
+            "<|begin_of_text|>Some text before.<|image|>What is in the image?",  # noqa: E501
+        ]
+        images = [
+            None,
+            [stop_sign],
+            # smaller image must be 2nd for the repro
+            [stop_sign.resize((448, 448))],
         ]
         vllm_model.generate_greedy_logprobs(prompts,
                                             max_tokens,
@@ -639,3 +692,26 @@ def test_get_full_text_row_masked_out_mask(input_indices) -> None:
                 f"full_text_row_masked_out_mask[{idx}] must be " \
                 f"'{must_be_masked}' "
             idx += 1
+
+
+@pytest.mark.core_model
+@pytest.mark.parametrize("encoder_seq_lens, num_tiles, expected", [
+    ([6404], [[4]], [6404]),
+    ([0, 6404], [[4]], [6404]),
+    ([0, 1601, 8005], [[1], [4, 1]], [1601, 8005]),
+    ([0, 19212, 0, 3202], [[4, 4, 4], [2]], [19212, 3202]),
+])
+def test_parse_and_validate_encoder_lens(encoder_seq_lens, num_tiles,
+                                         expected) -> None:
+
+    dummy = DummyModel()
+    num_tokens_per_tile = 1601
+    actual_encoder_seq_lens = MllamaForConditionalGeneration \
+        ._get_and_validate_encoder_lens(
+            dummy,
+            encoder_seq_lens,
+            num_tiles,
+            num_tokens_per_tile,
+        )
+    assert actual_encoder_seq_lens == expected, \
+        f"Expected {expected} but got {actual_encoder_seq_lens}"

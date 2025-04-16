@@ -10,10 +10,13 @@ import pytest
 import torch
 
 from tests.quantization.utils import is_quant_method_supported
-from tests.utils import compare_two_settings, fork_new_process_for_each_test
+
+from ..utils import compare_two_settings, create_new_process_for_each_test
 
 models_4bit_to_test = [
     ("facebook/opt-125m", "quantize opt model inflight"),
+    ("mistralai/Mistral-7B-Instruct-v0.3",
+     "quantize inflight model with both HF and Mistral format weights")
 ]
 
 models_pre_qaunt_4bit_to_test = [
@@ -32,37 +35,37 @@ models_pre_quant_8bit_to_test = [
 @pytest.mark.skipif(not is_quant_method_supported("bitsandbytes"),
                     reason='bitsandbytes is not supported on this GPU type.')
 @pytest.mark.parametrize("model_name, description", models_4bit_to_test)
-@fork_new_process_for_each_test
+@create_new_process_for_each_test()
 def test_load_4bit_bnb_model(hf_runner, vllm_runner, example_prompts,
                              model_name, description) -> None:
 
     hf_model_kwargs = {"load_in_4bit": True}
     validate_generated_texts(hf_runner, vllm_runner, example_prompts[:1],
-                             model_name, hf_model_kwargs)
+                             model_name, False, hf_model_kwargs)
 
 
 @pytest.mark.skipif(not is_quant_method_supported("bitsandbytes"),
                     reason='bitsandbytes is not supported on this GPU type.')
 @pytest.mark.parametrize("model_name, description",
                          models_pre_qaunt_4bit_to_test)
-@fork_new_process_for_each_test
+@create_new_process_for_each_test()
 def test_load_pre_quant_4bit_bnb_model(hf_runner, vllm_runner, example_prompts,
                                        model_name, description) -> None:
 
     validate_generated_texts(hf_runner, vllm_runner, example_prompts[:1],
-                             model_name)
+                             model_name, True)
 
 
 @pytest.mark.skipif(not is_quant_method_supported("bitsandbytes"),
                     reason='bitsandbytes is not supported on this GPU type.')
 @pytest.mark.parametrize("model_name, description",
                          models_pre_quant_8bit_to_test)
-@fork_new_process_for_each_test
+@create_new_process_for_each_test()
 def test_load_8bit_bnb_model(hf_runner, vllm_runner, example_prompts,
                              model_name, description) -> None:
 
     validate_generated_texts(hf_runner, vllm_runner, example_prompts[:1],
-                             model_name)
+                             model_name, True)
 
 
 @pytest.mark.skipif(torch.cuda.device_count() < 2,
@@ -70,7 +73,7 @@ def test_load_8bit_bnb_model(hf_runner, vllm_runner, example_prompts,
 @pytest.mark.skipif(not is_quant_method_supported("bitsandbytes"),
                     reason='bitsandbytes is not supported on this GPU type.')
 @pytest.mark.parametrize("model_name, description", models_4bit_to_test)
-@fork_new_process_for_each_test
+@create_new_process_for_each_test()
 def test_load_tp_4bit_bnb_model(hf_runner, vllm_runner, example_prompts,
                                 model_name, description) -> None:
 
@@ -79,6 +82,7 @@ def test_load_tp_4bit_bnb_model(hf_runner, vllm_runner, example_prompts,
                              vllm_runner,
                              example_prompts[:1],
                              model_name,
+                             False,
                              hf_model_kwargs,
                              vllm_tp_size=2)
 
@@ -88,7 +92,7 @@ def test_load_tp_4bit_bnb_model(hf_runner, vllm_runner, example_prompts,
 @pytest.mark.skipif(not is_quant_method_supported("bitsandbytes"),
                     reason='bitsandbytes is not supported on this GPU type.')
 @pytest.mark.parametrize("model_name, description", models_4bit_to_test)
-@fork_new_process_for_each_test
+@create_new_process_for_each_test()
 def test_load_pp_4bit_bnb_model(model_name, description) -> None:
     common_args = [
         "--disable-log-stats",
@@ -97,8 +101,6 @@ def test_load_pp_4bit_bnb_model(model_name, description) -> None:
         "bfloat16",
         "--enable-prefix-caching",
         "--quantization",
-        "bitsandbytes",
-        "--load-format",
         "bitsandbytes",
         "--gpu-memory-utilization",
         "0.7",
@@ -127,14 +129,14 @@ def validate_generated_texts(hf_runner,
                              vllm_runner,
                              prompts,
                              model_name,
+                             pre_quant=False,
                              hf_model_kwargs=None,
                              vllm_tp_size=1):
 
     # NOTE: run vLLM first, as it requires a clean process
     # when using distributed inference
     with vllm_runner(model_name,
-                     quantization='bitsandbytes',
-                     load_format='bitsandbytes',
+                     quantization=None if pre_quant else 'bitsandbytes',
                      tensor_parallel_size=vllm_tp_size,
                      enforce_eager=False) as llm:
         vllm_outputs = llm.generate_greedy(prompts, 8)

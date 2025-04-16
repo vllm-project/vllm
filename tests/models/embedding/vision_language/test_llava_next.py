@@ -2,11 +2,28 @@
 
 import pytest
 import torch.nn.functional as F
-from transformers import AutoModelForVision2Seq
+from transformers import AutoModelForImageTextToText
+
+from vllm.platforms import current_platform
 
 from ....conftest import IMAGE_ASSETS, HfRunner, PromptImageInput, VllmRunner
 from ....utils import large_gpu_test
 from ..utils import check_embeddings_close
+
+# Llava Next embedding implementation is only supported by CUDA.
+# If run on ROCm, hf_model.model.resize_token_embeddings will
+# cause the following error:
+#    RuntimeError: Calling torch.linalg.cholesky on a CUDA tensor
+#    requires compiling PyTorch with MAGMA. Please use PyTorch
+#    built with MAGMA support.
+# If run on CPU, hf_model.model.resize_token_embeddings will
+# cause the following error:
+#    RuntimeError: Calling torch.linalg.cholesky on a CPU tensor
+#    requires compiling PyTorch with LAPACK. Please use PyTorch
+#    built with LAPACK support.
+pytestmark = pytest.mark.skipif(
+    not current_platform.is_cuda(),
+    reason="Llava Next model uses op that is only supported in CUDA")
 
 llama3_template = '<|start_header_id|>user<|end_header_id|>\n\n{}<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n \n'  # noqa: E501
 
@@ -53,7 +70,7 @@ def _run_test(
         vllm_outputs = vllm_model.encode(input_texts, images=input_images)
 
     with hf_runner(model, dtype=dtype,
-                   auto_cls=AutoModelForVision2Seq) as hf_model:
+                   auto_cls=AutoModelForImageTextToText) as hf_model:
         # Patch the issue where generation_config.json is missing
         hf_model.processor.patch_size = \
             hf_model.model.config.vision_config.patch_size
@@ -69,8 +86,7 @@ def _run_test(
         for inputs in all_inputs:
             # Based on: https://huggingface.co/royokong/e5-v
             outputs = hf_model.model(
-                **hf_model.wrap_device(inputs,
-                                       device=hf_model.model.device.type),
+                **hf_model.wrap_device(inputs),
                 return_dict=True,
                 output_hidden_states=True,
             )

@@ -85,6 +85,7 @@ html_static_path = ["_static"]
 html_js_files = ["custom.js"]
 html_css_files = ["custom.css"]
 
+myst_heading_anchors = 2
 myst_url_schemes = {
     'http': None,
     'https': None,
@@ -100,6 +101,11 @@ myst_url_schemes = {
         "url":
         "https://github.com/vllm-project/vllm/pull/{{path}}#{{fragment}}",
         "title": "Pull Request #{{path}}",
+        "classes": ["github"],
+    },
+    "gh-project": {
+        "url": "https://github.com/orgs/vllm-project/projects/{{path}}",
+        "title": "Project #{{path}}",
         "classes": ["github"],
     },
     "gh-dir": {

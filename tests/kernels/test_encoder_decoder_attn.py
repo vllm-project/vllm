@@ -22,6 +22,16 @@ from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.forward_context import set_forward_context
 from vllm.platforms import current_platform
 
+
+@pytest.fixture(scope="function", autouse=True)
+def use_v0_only(monkeypatch):
+    """
+    Encoder-decoder is only supported on V0, so set 
+    VLLM_USE_V1=0 for all tests in the module.
+    """
+    monkeypatch.setenv('VLLM_USE_V1', '0')
+
+
 # List of support backends for encoder/decoder models
 LIST_ENC_DEC_SUPPORTED_BACKENDS = [_Backend.XFORMERS, _Backend.FLASH_ATTN]
 HEAD_SIZES = [64, 256]

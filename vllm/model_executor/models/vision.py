@@ -34,10 +34,6 @@ class VisionEncoderInfo(ABC, Generic[_C]):
         raise NotImplementedError
 
     @abstractmethod
-    def get_max_image_tokens(self) -> int:
-        raise NotImplementedError
-
-    @abstractmethod
     def get_image_size(self) -> int:
         raise NotImplementedError
 
@@ -65,6 +61,9 @@ def get_vision_encoder_info(
     if isinstance(vision_config, CLIPVisionConfig):
         return CLIPEncoderInfo(vision_config)
     if isinstance(vision_config, PixtralVisionConfig):
+        # Need to sneak in spatial_merge_size for Mistral3
+        vision_config.spatial_merge_size = getattr(hf_config,
+                                                   "spatial_merge_size", 1)
         return PixtralHFEncoderInfo(vision_config)
     if isinstance(vision_config, SiglipVisionConfig):
         return SiglipEncoderInfo(vision_config)

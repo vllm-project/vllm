@@ -2,6 +2,7 @@
 # Adapted from
 # https://github.com/THUDM/ChatGLM2-6B
 """Inference-only ChatGLM model compatible with THUDM weights."""
+import json
 from typing import Iterable, Optional, Set, Tuple, Union
 
 import torch
@@ -9,6 +10,7 @@ from torch import nn
 from torch.nn import LayerNorm
 
 from vllm.attention import Attention
+from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import SiluAndMul
@@ -27,7 +29,7 @@ from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs import ChatGLMConfig
 
-from .interfaces import SupportsLoRA, SupportsPP
+from .interfaces import SupportsLoRA, SupportsPP, SupportsQuant
 from .utils import (AutoWeightsLoader, WeightsMapper, is_pp_missing_parameter,
                     make_empty_intermediate_tensors_factory, make_layers,
                     maybe_prefix)
@@ -292,7 +294,12 @@ class GLMTransformer(nn.Module):
         return hidden_states
 
 
-class ChatGLMModel(nn.Module):
+@support_torch_compile
+class ChatGLMModel(nn.Module, SupportsQuant):
+    packed_modules_mapping = {
+        "linear_proj.merged_proj":
+        ["linear_proj.gate_proj", "linear_proj.dense_h_to_4h"]
+    }
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
@@ -392,7 +399,6 @@ class ChatGLMModel(nn.Module):
 
 
 class ChatGLMBaseModel(nn.Module):
-
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_substr={".word_embeddings": ""}, )
 
@@ -449,7 +455,8 @@ class ChatGLMBaseModel(nn.Module):
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
 
-class ChatGLMForCausalLM(ChatGLMBaseModel, SupportsLoRA, SupportsPP):
+class ChatGLMForCausalLM(ChatGLMBaseModel, SupportsLoRA, SupportsPP,
+                         SupportsQuant):
     packed_modules_mapping = {
         "query_key_value": ["query_key_value"],
         "dense_h_to_4h": ["dense_h_to_4h"]
@@ -463,7 +470,7 @@ class ChatGLMForCausalLM(ChatGLMBaseModel, SupportsLoRA, SupportsPP):
                 "The configuration of this model indicates that it supports "
                 "vision inputs, but you instantiated the text-only version "
                 "of this model. Please use the vision model by setting "
-                f"`--hf-overrides {hf_overrides!r}`")
+                f"`--hf-overrides '{json.dumps(hf_overrides)}'`")
 
         super().__init__(vllm_config=vllm_config, prefix=prefix)
 
