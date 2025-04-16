@@ -182,6 +182,8 @@ class Grok1Attention(nn.Module):
                               quant_config=quant_config,
                               logits_soft_cap=attn_logits_soft_cap,
                               prefix=f"{prefix}.attn")
+        self.attn_multiplier = getattr(self.config, "attn_output_multiplier",
+                                       1.0) if self.config else 1.0
 
     def forward(
         self,
@@ -193,12 +195,7 @@ class Grok1Attention(nn.Module):
         q, k = self.rotary_emb(positions, q, k)
         attn_output = self.attn(q, k, v)
         output, _ = self.o_proj(attn_output)
-
-        # Apply attention output multiplier if specified in config
-        attn_multiplier = getattr(self.config, "attn_output_multiplier",
-                                  None) if self.config else None
-        if attn_multiplier is not None:
-            output = output * attn_multiplier
+        output *= self.attn_multiplier
         return output
 
 
