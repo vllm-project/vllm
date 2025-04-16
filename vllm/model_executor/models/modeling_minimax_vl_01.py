@@ -9,12 +9,11 @@ from typing import (Final, Literal, Optional, Protocol, Set, Tuple, TypedDict,
 import torch
 import torch.nn as nn
 from packaging.version import Version
-from transformers import (BatchFeature, CLIPVisionConfig, LlavaConfig,
+from transformers import (BatchFeature, CLIPVisionConfig,
                           PixtralVisionConfig, PretrainedConfig,
                           SiglipVisionConfig)
 from transformers import __version__ as TRANSFORMERS_VERSION
-from transformers.models.llava import LlavaProcessor
-from transformers.models.pixtral import PixtralProcessor
+from processing_minimax_vl_01 import MiniMaxVL01Processor
 
 from vllm.config import VllmConfig
 from vllm.inputs import InputProcessingContext
@@ -47,7 +46,7 @@ from .vision import (get_vision_encoder_info, scatter_patch_features,
 from vllm.transformers_utils.configs.configuration_minimax_vl_01 import MiniMaxVL01Config
 
 
-class LlavaImagePixelInputs(TypedDict):
+class MiniMaxVL01ImagePixelInputs(TypedDict):
     type: Literal["pixel_values"]
     pixel_values: torch.Tensor
     """
@@ -58,7 +57,7 @@ class LlavaImagePixelInputs(TypedDict):
     """
 
 
-class PixtralHFImagePixelInputs(TypedDict):
+class MiniMaxVL01HFImagePixelInputs(TypedDict):
     type: Literal["pixel_values_pixtral"]
     pixel_values: Union[torch.Tensor, list[torch.Tensor]]
     """
@@ -77,7 +76,7 @@ class PixtralHFImagePixelInputs(TypedDict):
     """
 
 
-class LlavaImageEmbeddingInputs(TypedDict):
+class MiniMaxVL01ImageEmbeddingInputs(TypedDict):
     type: Literal["image_embeds"]
     data: torch.Tensor
     """Shape: `(batch_size * num_images, image_feature_size, hidden_size)`
@@ -86,11 +85,11 @@ class LlavaImageEmbeddingInputs(TypedDict):
     """
 
 
-LlavaImageInputs = Union[LlavaImagePixelInputs, PixtralHFImagePixelInputs,
-                         LlavaImageEmbeddingInputs]
+MiniMaxVL01ImageInputs = Union[MiniMaxVL01ImagePixelInputs, MiniMaxVL01HFImagePixelInputs,
+                         MiniMaxVL01ImageEmbeddingInputs]
 
 
-class LlavaMultiModalProjector(nn.Module):
+class MiniMaxVL01MultiModalProjector(nn.Module):
 
     def __init__(self,
                  vision_hidden_size: int,
@@ -120,27 +119,27 @@ class LlavaMultiModalProjector(nn.Module):
         return hidden_states
 
 
-class LlavaLikeConfig(Protocol):
+class MiniMaxVL01LikeConfig(Protocol):
     vision_config: Final[PretrainedConfig]
     image_token_index: Final[int]
     vision_feature_select_strategy: Final[str]
     vision_feature_layer: Final[Union[int, list[int]]]
 
 
-class LlavaLikeProcessor(Protocol):
+class MiniMaxVL01LikeProcessor(Protocol):
     image_token: Final[str]
 
 
-class BaseLlavaProcessingInfo(BaseProcessingInfo):
+class BaseMiniMaxVL01ProcessingInfo(BaseProcessingInfo):
 
-    def get_hf_config(self) -> LlavaLikeConfig:
+    def get_hf_config(self) -> MiniMaxVL01LikeConfig:
         return self.ctx.get_hf_config(MiniMaxVL01Config)
 
     def get_vision_encoder_info(self):
         return get_vision_encoder_info(self.get_hf_config())
 
     @abstractmethod
-    def get_hf_processor(self, **kwargs: object) -> LlavaLikeProcessor:
+    def get_hf_processor(self, **kwargs: object) -> MiniMaxVL01LikeProcessor:
         raise NotImplementedError
 
     def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
@@ -197,10 +196,10 @@ class BaseLlavaProcessingInfo(BaseProcessingInfo):
         )
 
 
-_I = TypeVar("_I", bound=BaseLlavaProcessingInfo)
+_I = TypeVar("_I", bound=BaseMiniMaxVL01ProcessingInfo)
 
 
-class LlavaDummyInputsBuilder(BaseDummyInputsBuilder[_I]):
+class MiniMaxVL01DummyInputsBuilder(BaseDummyInputsBuilder[_I]):
 
     def get_dummy_processor_inputs(
         self,
@@ -227,10 +226,10 @@ class LlavaDummyInputsBuilder(BaseDummyInputsBuilder[_I]):
         )
 
 
-class LlavaProcessingInfo(BaseLlavaProcessingInfo):
+class MiniMaxVL01ProcessingInfo(BaseMiniMaxVL01ProcessingInfo):
 
     def get_hf_processor(self, **kwargs: object):
-        hf_processor = self.ctx.get_hf_processor(LlavaProcessor, **kwargs)
+        hf_processor = self.ctx.get_hf_processor(MiniMaxVL01Processor, **kwargs)
         # In case patch_size is omitted from `processor_config.json`
         # e.g. for E5-V: https://huggingface.co/royokong/e5-v
         if hf_processor.patch_size is None:
@@ -239,7 +238,7 @@ class LlavaProcessingInfo(BaseLlavaProcessingInfo):
         return hf_processor
 
 
-class BaseLlavaMultiModalProcessor(BaseMultiModalProcessor[_I]):
+class BaseMiniMaxVL01MultiModalProcessor(BaseMultiModalProcessor[_I]):
 
     # Copied from BaseMultiModalProcessor
     @abstractmethod
@@ -283,8 +282,8 @@ class BaseLlavaMultiModalProcessor(BaseMultiModalProcessor[_I]):
         ]
 
 
-class LlavaMultiModalProcessor(
-        BaseLlavaMultiModalProcessor[LlavaProcessingInfo]):
+class MiniMaxVL01MultiModalProcessor(
+        BaseMiniMaxVL01MultiModalProcessor[MiniMaxVL01ProcessingInfo]):
 
     def _get_mm_fields_config(
         self,
@@ -296,7 +295,7 @@ class LlavaMultiModalProcessor(
             image_embeds=MultiModalFieldConfig.batched("image"),
         )
 
-def _get_num_hidden_layers(hf_config: LlavaLikeConfig) -> int:
+def _get_num_hidden_layers(hf_config: MiniMaxVL01LikeConfig) -> int:
     """Determine the number of hidden layers to initialize up to in the
     visual encoder.
     
@@ -330,8 +329,8 @@ def _get_layer_index(feature_layer_index: int, num_hidden_layers: int) -> int:
     return feature_layer_index
 
 
-def init_vision_tower_for_llava(
-    hf_config: LlavaLikeConfig,
+def init_vision_tower_for_MiniMaxVL01(
+    hf_config: MiniMaxVL01LikeConfig,
     quant_config: Optional[QuantizationConfig],
     *,
     require_post_norm: Optional[bool] = None,
@@ -371,9 +370,9 @@ def init_vision_tower_for_llava(
     raise NotImplementedError(msg)
 
 
-@MULTIMODAL_REGISTRY.register_processor(LlavaMultiModalProcessor,
-                                        info=LlavaProcessingInfo,
-                                        dummy_inputs=LlavaDummyInputsBuilder)
+@MULTIMODAL_REGISTRY.register_processor(MiniMaxVL01MultiModalProcessor,
+                                        info=MiniMaxVL01ProcessingInfo,
+                                        dummy_inputs=MiniMaxVL01DummyInputsBuilder)
 class MiniMaxVL01ForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
 
     packed_modules_mapping = {
@@ -401,12 +400,12 @@ class MiniMaxVL01ForConditionalGeneration(nn.Module, SupportsMultiModal, Support
             config.projector_hidden_act = "gelu"
 
         # TODO: Optionally initializes this for supporting embeddings.
-        self.vision_tower = init_vision_tower_for_llava(
+        self.vision_tower = init_vision_tower_for_MiniMaxVL01(
             config,
             quant_config,
             require_post_norm=False,
             prefix=maybe_prefix(prefix, "vision_tower"))
-        self.multi_modal_projector = LlavaMultiModalProjector(
+        self.multi_modal_projector = MiniMaxVL01MultiModalProjector(
             vision_hidden_size=config.vision_config.hidden_size,
             text_hidden_size=config.text_config.hidden_size,
             projector_hidden_act=config.projector_hidden_act,
@@ -445,7 +444,7 @@ class MiniMaxVL01ForConditionalGeneration(nn.Module, SupportsMultiModal, Support
         return data
 
     def _parse_and_validate_image_input(
-            self, **kwargs: object) -> Optional[LlavaImageInputs]:
+            self, **kwargs: object) -> Optional[MiniMaxVL01ImageInputs]:
         pixel_values = kwargs.pop("pixel_values", None)
         image_embeds = kwargs.pop("image_embeds", None)
 
@@ -465,13 +464,13 @@ class MiniMaxVL01ForConditionalGeneration(nn.Module, SupportsMultiModal, Support
 
                 embed_is_patch = flatten_bn(embed_is_patch)
 
-                return PixtralHFImagePixelInputs(
+                return MiniMaxVL01HFImagePixelInputs(
                     type="pixel_values_pixtral",
                     pixel_values=flatten_bn(pixel_values),
                     embed_is_patch=embed_is_patch,
                 )
 
-            return LlavaImagePixelInputs(
+            return MiniMaxVL01ImagePixelInputs(
                 type="pixel_values",
                 pixel_values=self._validate_pixel_values(
                     flatten_bn(pixel_values, concat=True)),
@@ -485,7 +484,7 @@ class MiniMaxVL01ForConditionalGeneration(nn.Module, SupportsMultiModal, Support
             if self.config.vision_config.model_type == "pixtral":
                 raise ValueError("Pixtral-HF does not support image_embeds.")
 
-            return LlavaImageEmbeddingInputs(
+            return MiniMaxVL01ImageEmbeddingInputs(
                 type="image_embeds",
                 data=flatten_bn(image_embeds, concat=True),
             )
@@ -525,7 +524,7 @@ class MiniMaxVL01ForConditionalGeneration(nn.Module, SupportsMultiModal, Support
 
     def _process_image_pixels(
         self,
-        inputs: Union[LlavaImagePixelInputs, PixtralHFImagePixelInputs],
+        inputs: Union[MiniMaxVL01ImagePixelInputs, MiniMaxVL01HFImagePixelInputs],
     ) -> Union[torch.Tensor, tuple[torch.Tensor, ...]]:
         assert self.vision_tower is not None
 
@@ -535,7 +534,7 @@ class MiniMaxVL01ForConditionalGeneration(nn.Module, SupportsMultiModal, Support
 
     def _process_image_input(
         self,
-        image_input: LlavaImageInputs,
+        image_input: MiniMaxVL01ImageInputs,
     ) -> Union[torch.Tensor, tuple[torch.Tensor, ...]]:
         if image_input["type"] == "image_embeds":
             return image_input["data"]
@@ -594,7 +593,7 @@ class MiniMaxVL01ForConditionalGeneration(nn.Module, SupportsMultiModal, Support
         inputs_embeds: Optional[torch.Tensor] = None,
         **kwargs: object,
     ) -> Union[torch.Tensor, IntermediateTensors]:
-        """Run forward pass for LLaVA-1.5.
+        """Run forward pass.
 
         One key thing to understand is the `input_ids` already accounts for the
         positions of the to-be-inserted image embeddings.
@@ -627,7 +626,7 @@ class MiniMaxVL01ForConditionalGeneration(nn.Module, SupportsMultiModal, Support
             pixel_values: The pixels in each input image.
 
         See also:
-            :class:`LlavaImageInputs`
+            :class:`MiniMaxVL01ImageInputs`
         """
         if intermediate_tensors is not None:
             inputs_embeds = None
