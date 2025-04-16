@@ -8,6 +8,7 @@ from vllm.config import VllmConfig
 from vllm.inputs import ProcessorInputs, PromptType, SingletonInputs
 from vllm.inputs.parse import split_enc_dec_inputs
 from vllm.inputs.preprocess import InputPreprocessor
+from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.multimodal import (MULTIMODAL_REGISTRY, MultiModalKwargs,
                              MultiModalRegistry)
@@ -24,6 +25,8 @@ from vllm.v1.structured_output.backend_guidance import (
     validate_guidance_grammar)
 from vllm.v1.structured_output.backend_xgrammar import (
     validate_xgrammar_grammar)
+
+logger = init_logger(__name__)
 
 
 class Processor:
@@ -154,11 +157,16 @@ class Processor:
             raise ValueError(f"Only {supported_backends} structured output is "
                              "supported in V1.")
         if params.guided_decoding.backend:
+            logger.warning(
+                "Request-level structured output backend selection is not "
+                "supported in V1. Please only specify structured output "
+                "backend at the engine level.")
             if params.guided_decoding.backend != engine_level_backend:
-                raise ValueError("Request-level structured output backend "
-                                 "must match engine-level backend. "
-                                 f"{params.guided_decoding.backend}"
-                                 f" != {engine_level_backend}")
+                raise ValueError(
+                    "Request-level structured output backend must match "
+                    "engine-level backend. The request specified "
+                    f"'{params.guided_decoding.backend}', but the engine was "
+                    f"initialised with '{engine_level_backend}'.")
         else:
             params.guided_decoding.backend = engine_level_backend
 
