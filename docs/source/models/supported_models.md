@@ -497,6 +497,11 @@ See [this page](#generative-models) for more information on how to use generativ
   * `adept/persimmon-8b-base`, `adept/persimmon-8b-chat`, etc.
   *
   * ✅︎
+- * `Plamo2ForCausalLM`
+  * PLaMo2
+  * `pfnet/plamo-2-1b`, `pfnet/plamo-2-8b`, etc.
+  *
+  *
 - * `QWenLMHeadModel`
   * Qwen
   * `Qwen/Qwen-7B`, `Qwen/Qwen-7B-Chat`, etc.
