@@ -883,32 +883,51 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
         ) and not self.vllm_config.model_config.enforce_eager:
             fullgraph = os.getenv('VLLM_T_COMPILE_FULLGRAPH',
                                   'false').strip().lower() in ("1", "true")
+            dynamic = os.getenv('VLLM_T_COMPILE_DYNAMIC_SHAPES',
+                                'false').strip().lower() in ("1", "true")
+
             if os.getenv('VLLM_REGIONAL_COMPILATION',
                          'true').strip().lower() in ("1", "true"):
                 compiled_methods = [self.model._set_block_mapping]
                 for method in compiled_methods:
-                    method = torch.compile(method,
-                                           backend='hpu_backend',
-                                           fullgraph=fullgraph,
-                                           dynamic=False)
+                    if dynamic:
+                        method = torch.compile(
+                            method,
+                            backend='hpu_backend',
+                            fullgraph=fullgraph,
+                            options={"force_static_compile": True})
+                    else:
+                        method = torch.compile(method,
+                                               backend='hpu_backend',
+                                               fullgraph=fullgraph,
+                                               dynamic=False)
+
                 self.regional_compilation_layers_list = [
                     RMSNorm, VocabParallelEmbedding
                 ]
-                self._regional_compilation(self.model, fullgraph)
+                self._regional_compilation(self.model, fullgraph, dynamic)
             else:
-                self.model = torch.compile(self.model,
-                                           backend='hpu_backend',
-                                           fullgraph=fullgraph,
-                                           dynamic=False)
+                if dynamic:
+                    self.model = torch.compile(
+                        self.model,
+                        backend='hpu_backend',
+                        fullgraph=fullgraph,
+                        options={"force_static_compile": True})
+                else:
+                    self.model = torch.compile(self.model,
+                                               backend='hpu_backend',
+                                               fullgraph=fullgraph,
+                                               dynamic=False)
 
     def _regional_compilation(self,
                               module,
                               fullgraph,
+                              dynamic,
                               parent_module=None,
                               module_name=None):
         if isinstance(module, torch.nn.ModuleList):
             for children_name, children_module in module.named_children():
-                self._compile_region(module, fullgraph, children_name,
+                self._compile_region(module, fullgraph, dynamic, children_name,
                                      children_module)
         elif any(
                 isinstance(module, layer)
@@ -916,25 +935,33 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
             self._compile_region(
                 parent_module,
                 fullgraph,
+                dynamic,
                 module_name,
                 module,
             )
         else:
             for children_name, children_module in module.named_children():
-                self._regional_compilation(children_module, fullgraph, module,
-                                           children_name)
+                self._regional_compilation(children_module, fullgraph, dynamic,
+                                           module, children_name)
 
     def _compile_region(
         self,
         model,
         fullgraph,
+        dynamic,
         name,
         module,
     ):
-        module = torch.compile(module,
-                               backend='hpu_backend',
-                               fullgraph=fullgraph,
-                               dynamic=False)
+        if dynamic:
+            module = torch.compile(module,
+                                   backend='hpu_backend',
+                                   fullgraph=fullgraph,
+                                   options={"force_static_compile": True})
+        else:
+            module = torch.compile(module,
+                                   backend='hpu_backend',
+                                   fullgraph=fullgraph,
+                                   dynamic=False)
         setattr(model, name, module)
 
     def get_model(self) -> torch.nn.Module:
