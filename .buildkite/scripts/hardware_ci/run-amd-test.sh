@@ -72,7 +72,6 @@ HF_CACHE="$(realpath ~)/huggingface"
 mkdir -p "${HF_CACHE}"
 HF_MOUNT="/root/.cache/huggingface"
 
-
 commands=$@
 echo "Commands:$commands"
 #ignore certain kernels tests

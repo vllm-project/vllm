@@ -327,7 +327,6 @@ class Fp8LinearOp:
         # ops.scaled_fp8_quant supports both dynamic and static quant.
         #   If dynamic, layer.input_scale is None and x_scale computed from x.
         #   If static, layer.input_scale is scalar and x_scale is input_scale.
-
         # View input as 2D matrix for fp8 methods
 
         input_2d = input.view(-1, input.shape[-1])
