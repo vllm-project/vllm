@@ -51,12 +51,8 @@ class ModernBertEmbeddings(nn.Module):
 
 class ModernBertRotaryEmbedding(RotaryEmbedding):
 
-    def __init__(self,
-                 config: ModernBertConfig,
-                 head_size: int,
-                 dim: int,
-                 base: float,
-                 device: Optional[torch.device] = None):
+    def __init__(self, config: ModernBertConfig, head_size: int, dim: int,
+                 base: float):
         super().__init__(
             head_size=head_size,
             rotary_dim=dim,
@@ -171,7 +167,7 @@ class ModernBertAttention(nn.Module):
             head_dim=self.head_dim,
             **kwargs,
         )
-        #will get wrong score when scoring multi text pairs.
+        #will get wrong score when scoring text pairs.
         #q, k, v = qkv.split([self.all_head_size] * 3, dim=-1)
         #q, k = self.rotary_emb(position_ids, q, k)
         #attn_outputs = self.attn(q, k, v)
