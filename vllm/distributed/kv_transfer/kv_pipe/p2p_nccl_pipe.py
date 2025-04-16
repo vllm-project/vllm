@@ -182,9 +182,12 @@ class P2pNcclPipe:
         if self.send_type == "PUT" or self.send_type == "PUT_ASYNC":
             start_time = time.time()
             with self.recv_store_cv:
-                if tensor_id not in self.recv_store:
-                    self.recv_store_cv.wait(timeout=0.001)
-                tensor = self.recv_store.pop(tensor_id, None)
+                while tensor_id not in self.recv_store:
+                    self.recv_store_cv.wait()
+                # TODO:Abatom, To avoid an overly large dictionary.
+                # tensor = self.recv_store.pop(tensor_id)
+                tensor = self.recv_store[tensor_id]
+                self.recv_store[tensor_id] = None
             duration = time.time() - start_time
             if tensor is not None:
                 self.buffer_size -= (tensor.element_size() * tensor.numel())
@@ -271,22 +274,22 @@ class P2pNcclPipe:
                                 "🔴[PUT]Recv Tensor, Out Of Threshold, "
                                 "%s👈%s, data:%s", self.zmq_address,
                                 remote_address.decode(), data)
-                            continue
-
-                        self.buffer_size += tensor_size
-                        self.router_socket.send_multipart(
-                            [remote_address, b"0"])
-                        comm, rank = self.comms[remote_address.decode()]
-                        self._recv(comm, tensor, rank ^ 1)
+                            tensor = None
+                        else:
+                            self.buffer_size += tensor_size
+                            self.router_socket.send_multipart(
+                                [remote_address, b"0"])
+                            comm, rank = self.comms[remote_address.decode()]
+                            self._recv(comm, tensor, rank ^ 1)
+                            logger.info(
+                                "🔵[PUT]Recv Tensor, %s👈%s, MyRank:%s, data:%s, "
+                                "shape:%s", self.zmq_address,
+                                remote_address.decode(), rank, data, tensor.shape)
 
                         tensor_id = data["tensor_id"]
                         with self.recv_store_cv:
                             self.recv_store[tensor_id] = tensor
                             self.recv_store_cv.notify()
-                        logger.info(
-                            "🔵[PUT]Recv Tensor, %s👈%s, MyRank:%s, data:%s, "
-                            "shape:%s", self.zmq_address,
-                            remote_address.decode(), rank, data, tensor.shape)
 
                     except torch.cuda.OutOfMemoryError:
                         self.router_socket.send_multipart(
