@@ -121,7 +121,6 @@ class ModernBertAttention(nn.Module):
                              f"is not a multiple of the number of "
                              f"attention heads ({config.num_attention_heads})")
 
-        self.attention_dropout = config.attention_dropout
         self.deterministic_flash_attn = config.deterministic_flash_attn
         self.num_heads = config.num_attention_heads
         self.head_dim = config.hidden_size // config.num_attention_heads
@@ -147,9 +146,6 @@ class ModernBertAttention(nn.Module):
         self.Wo = nn.Linear(config.hidden_size,
                             config.hidden_size,
                             bias=config.attention_bias)
-        self.out_drop = nn.Dropout(
-            config.attention_dropout
-        ) if config.attention_dropout > 0.0 else nn.Identity()
         self.pruned_heads = set()
 
     def forward(
@@ -204,14 +200,13 @@ class ModernBertMLP(nn.Module):
                             int(config.intermediate_size) * 2,
                             bias=config.mlp_bias)
         self.act = GELUActivation()
-        self.drop = nn.Dropout(config.mlp_dropout)
         self.Wo = nn.Linear(config.intermediate_size,
                             config.hidden_size,
                             bias=config.mlp_bias)
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         input, gate = self.Wi(hidden_states).chunk(2, dim=-1)
-        return self.Wo(self.drop(self.act(input) * gate))
+        return self.Wo(self.act(input) * gate)
 
 
 class ModernBertLayer(nn.Module):
