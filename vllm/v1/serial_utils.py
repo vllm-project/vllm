@@ -69,7 +69,6 @@ class MsgpackEncoder:
         finally:
             self.aux_buffers = None
 
-    # TODO: would be nice to make this automatic
     def encode_into(self, obj: Any, buf: bytearray) -> Sequence[bytestr]:
         try:
             self.aux_buffers = [buf]
