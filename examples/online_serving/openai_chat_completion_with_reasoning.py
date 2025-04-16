@@ -3,8 +3,8 @@
 An example shows how to generate chat completions from reasoning models
 like DeepSeekR1.
 
-To run this example, you need to start the vLLM server with the reasoning 
-parser:
+To run this example, you need to start the vLLM server
+with the reasoning parser:
 
 ```bash
 vllm serve deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B \
@@ -21,35 +21,44 @@ from openai import OpenAI
 openai_api_key = "EMPTY"
 openai_api_base = "http://localhost:8000/v1"
 
-client = OpenAI(
-    api_key=openai_api_key,
-    base_url=openai_api_base,
-)
 
-models = client.models.list()
-model = models.data[0].id
+def main():
+    client = OpenAI(
+        api_key=openai_api_key,
+        base_url=openai_api_base,
+    )
 
-# Round 1
-messages = [{"role": "user", "content": "9.11 and 9.8, which is greater?"}]
-# For granite, add: `extra_body={"chat_template_kwargs": {"thinking": True}}`
-response = client.chat.completions.create(model=model, messages=messages)
+    models = client.models.list()
+    model = models.data[0].id
 
-reasoning_content = response.choices[0].message.reasoning_content
-content = response.choices[0].message.content
+    # Round 1
+    messages = [{"role": "user", "content": "9.11 and 9.8, which is greater?"}]
+    # ruff: noqa: E501
+    # For granite, add: `extra_body={"chat_template_kwargs": {"thinking": True}}`
+    response = client.chat.completions.create(model=model, messages=messages)
 
-print("reasoning_content for Round 1:", reasoning_content)
-print("content for Round 1:", content)
+    reasoning_content = response.choices[0].message.reasoning_content
+    content = response.choices[0].message.content
 
-# Round 2
-messages.append({"role": "assistant", "content": content})
-messages.append({
-    "role": "user",
-    "content": "How many Rs are there in the word 'strawberry'?",
-})
-response = client.chat.completions.create(model=model, messages=messages)
+    print("reasoning_content for Round 1:", reasoning_content)
+    print("content for Round 1:", content)
 
-reasoning_content = response.choices[0].message.reasoning_content
-content = response.choices[0].message.content
+    # Round 2
+    messages.append({"role": "assistant", "content": content})
+    messages.append({
+        "role":
+        "user",
+        "content":
+        "How many Rs are there in the word 'strawberry'?",
+    })
+    response = client.chat.completions.create(model=model, messages=messages)
 
-print("reasoning_content for Round 2:", reasoning_content)
-print("content for Round 2:", content)
+    reasoning_content = response.choices[0].message.reasoning_content
+    content = response.choices[0].message.content
+
+    print("reasoning_content for Round 2:", reasoning_content)
+    print("content for Round 2:", content)
+
+
+if __name__ == "__main__":
+    main()
