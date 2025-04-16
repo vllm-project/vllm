@@ -23,10 +23,6 @@ import gradio as gr
 from openai import OpenAI
 
 
-def create_openai_client(api_key, base_url):
-    return OpenAI(api_key=api_key, base_url=base_url)
-
-
 def format_history_to_openai(history):
     history_openai_format = [{
         "role": "system",
