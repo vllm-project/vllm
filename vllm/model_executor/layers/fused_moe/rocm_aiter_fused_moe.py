@@ -41,9 +41,8 @@ def rocm_aiter_fused_experts(
         per_token_group_quant_fp8)
 
     if apply_router_weight_on_input:
-        assert (
-            topk_weights.dim() == 2
-        ), "`topk_weights` should be in shape (num_tokens, topk)"
+        assert (topk_weights.dim() == 2
+                ), "`topk_weights` should be in shape (num_tokens, topk)"
         _, topk = topk_weights.shape
         assert (
             topk == 1
