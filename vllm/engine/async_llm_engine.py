@@ -487,7 +487,10 @@ class _AsyncLLMEngine(LLMEngine):
             raise ValueError(f"Got priority {priority} but "
                              "Priority scheduling is not enabled.")
         if arrival_time is None:
-            arrival_time = time.time()
+            if envs.VLLM_USE_V1:
+                arrival_time = time.monotonic()
+            else:
+                arrival_time = time.time()
 
         if self.tokenizer is not None:
             tokenizer = await self.get_tokenizer_async(lora_request)
