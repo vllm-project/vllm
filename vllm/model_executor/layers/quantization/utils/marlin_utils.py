@@ -332,6 +332,7 @@ def apply_gptq_marlin_linear(
         wtype: ScalarType,
         output_size_per_partition: int,
         input_size_per_partition: int,
+        has_zp: bool,
         is_k_full: bool,
         bias: Optional[torch.Tensor] = None,
         use_fp32_reduce: bool = USE_FP32_REDUCE_DEFAULT) -> torch.Tensor:
@@ -356,8 +357,8 @@ def apply_gptq_marlin_linear(
                                   size_n=output_size_per_partition,
                                   size_k=input_size_per_partition,
                                   is_k_full=is_k_full,
-                                  has_zp=False,
                                   use_atomic_add=use_atomic_add,
+                                  has_zp=has_zp,
                                   use_fp32_reduce=use_fp32_reduce,
                                   is_zp_float=False)
 
