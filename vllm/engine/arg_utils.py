@@ -50,12 +50,11 @@ TypeHint = Union[type[Any], object]
 TypeHintT = Union[type[T], object]
 
 
-def optional_arg(val: str, return_type: Union[type[T],
-                                              Callable]) -> Optional[T]:
+def optional_arg(val: str, return_type: Callable[[str], T]) -> Optional[T]:
     if val == "" or val == "None":
         return None
     try:
-        return cast(Callable, return_type)(val)
+        return return_type(val)
     except ValueError as e:
         raise argparse.ArgumentTypeError(
             f"Value {val} cannot be converted to {return_type}.") from e
