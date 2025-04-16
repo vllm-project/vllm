@@ -6,11 +6,6 @@ import torch
 from torch import nn
 
 from vllm.attention.backends.abstract import AttentionMetadata
-from vllm.attention.backends.flash_attn import FlashAttentionMetadata
-from vllm.attention.backends.placeholder_attn import (
-    PlaceholderAttentionMetadata,
-)
-from vllm.attention.backends.xformers import XFormersMetadata
 from vllm.distributed import (
     divide,
     get_tensor_model_parallel_rank,
@@ -240,7 +235,6 @@ class MambaMixer2(CustomOp):
         head_dim: int = 64,
         rms_norm_eps: float = 1e-5,
         activation="silu",
-        chunk_size: int = 256,
         use_rms_norm: bool = True,
         quant_config: Optional[QuantizationConfig] = None,
     ):
