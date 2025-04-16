@@ -14,7 +14,7 @@ from transformers import (BatchFeature, CLIPVisionConfig,
                           PixtralVisionConfig, PretrainedConfig,
                           SiglipVisionConfig)
 from transformers import __version__ as TRANSFORMERS_VERSION
-from .processing_minimax_vl_01 import MiniMaxVL01Processor
+from .minimax_vl_01_processing import MiniMaxVL01Processor
 
 from vllm.config import VllmConfig
 from vllm.inputs import InputProcessingContext

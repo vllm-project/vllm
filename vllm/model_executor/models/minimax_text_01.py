@@ -108,35 +108,25 @@ class MiniMaxText01RMSNormTP(CustomOp):
         assert residual is None, "RMSNorm does not support residual connection."
         orig_dtype = x.dtype
         x = x.to(torch.float32)
-        
-        # 处理多种可能的维度情况
         if x.dim() == 0:
-            # 标量情况，直接返回
             return x.to(orig_dtype)
         
-        # 获取最后一个维度的大小
         last_dim = x.size(-1)
         weight_dim = self.weight.size(0)
         
-        # 处理维度不匹配的情况
         if last_dim != weight_dim:
-            # 情况1: 输入维度小于权重维度 - 截断权重以匹配输入
             if last_dim < weight_dim:
                 weight = self.weight[:last_dim]
-            # 情况2: 输入维度大于权重维度 - 填充权重以匹配输入
             else:
-                # 创建与输入最后维度相同大小的权重张量，使用原始权重值填充，其余部分填充1
                 weight = torch.ones(last_dim, dtype=self.weight.dtype, device=self.weight.device)
                 weight[:weight_dim] = self.weight
         else:
             weight = self.weight
         
-        # 确保 weight 的形状适合于广播操作
         if x.dim() > 1:
             weight_shape = [1] * (x.dim() - 1) + [weight.size(0)]
             weight = weight.view(weight_shape)
         
-        # 对最后一个维度进行标准化
         var = torch.mean(x * x, dim=-1, keepdim=True)
         x_norm = x * torch.rsqrt(var + self.variance_epsilon)
         result = weight * x_norm
@@ -478,42 +468,14 @@ class MiniMaxText01LinearAttention(nn.Module):
 
     def _decode_infer(self, q, k, v, kv_cache, state_indices_tensor,
                       attn_metadata):
-        num_prefill_tokens = attn_metadata.num_prefill_tokens
-        if num_prefill_tokens >= q.size(0):
-            return torch.empty((0, q.size(-1)), device=q.device, dtype=q.dtype)
-            
-        q = q[num_prefill_tokens:].unsqueeze(2).contiguous()
-        k = k[num_prefill_tokens:].unsqueeze(2).contiguous()
-        v = v[num_prefill_tokens:].unsqueeze(2).contiguous()
-        
-        # 检查张量是否为空
-        if q.size(0) == 0 or k.size(0) == 0 or v.size(0) == 0:
-            return torch.empty((0, q.size(-1)), device=q.device, dtype=q.dtype)
-            
-        # 检查slot_id是否有效
-        slot_id = state_indices_tensor[getattr(attn_metadata, "num_prefills", 0):]
-        if slot_id.size(0) == 0:
-            return torch.empty((0, q.size(-1)), device=q.device, dtype=q.dtype)
-            
-        # 检查KV缓存是否有效
-        if kv_cache is None or kv_cache.size(0) == 0:
-            return torch.empty((0, q.size(-1)), device=q.device, dtype=q.dtype)
-            
-        # 检查slope_rate是否有效
-        if self.tp_slope is None or self.tp_slope.size(0) == 0:
-            return torch.empty((0, q.size(-1)), device=q.device, dtype=q.dtype)
-            
-        try:
-            hidden = linear_decode_forward_triton(q, k, v, kv_cache, self.tp_slope,
-                                                 slot_id, 32)
-            return hidden
-        except Exception as e:
-            print(f"Error in linear_decode_forward_triton: {e}")
-            print(f"q shape: {q.shape}, k shape: {k.shape}, v shape: {v.shape}")
-            print(f"kv_cache shape: {kv_cache.shape}, slot_id shape: {slot_id.shape}")
-            print(f"tp_slope shape: {self.tp_slope.shape}")
-            # 失败时返回空张量
-            return torch.empty((0, q.size(-1)), device=q.device, dtype=q.dtype)
+        q = q[attn_metadata.num_prefill_tokens:].unsqueeze(2).contiguous()
+        k = k[attn_metadata.num_prefill_tokens:].unsqueeze(2).contiguous()
+        v = v[attn_metadata.num_prefill_tokens:].unsqueeze(2).contiguous()
+        slot_id = state_indices_tensor[getattr(attn_metadata, "num_prefills", 0
+                                               ):]
+        hidden = linear_decode_forward_triton(q, k, v, kv_cache, self.tp_slope,
+                                              slot_id, 32)
+        return hidden
 
     def forward(self, hidden_states: torch.Tensor, positions: torch.Tensor,
                 kv_caches: MinimaxCacheParams, **kwargs) -> torch.Tensor:
@@ -536,28 +498,8 @@ class MiniMaxText01LinearAttention(nn.Module):
             hidden = self._decode_infer(q, k, v, kv_cache,
                                         state_indices_tensor, attn_metadata)
 
-        # 如果 hidden 是空张量，直接返回
-        if hidden.size(0) == 0:
-            return hidden
-
-        hidden = self.norm(hidden)
+        hidden = self.norm._forward(hidden)
         gate, _ = self.output_gate(hidden_states)
-        
-        # 确保 gate 和 hidden 的维度匹配
-        if gate.size(0) != hidden.size(0):
-            # 如果 batch size 不匹配，截断 gate
-            gate = gate[:hidden.size(0)]
-        
-        # 确保 gate 和 hidden 的其他维度也匹配
-        if gate.size(-1) != hidden.size(-1):
-            # 如果特征维度不匹配，调整 gate 的大小
-            if gate.size(-1) > hidden.size(-1):
-                gate = gate[..., :hidden.size(-1)]
-            else:
-                # 如果 gate 的特征维度小于 hidden，需要扩展
-                pad_size = hidden.size(-1) - gate.size(-1)
-                gate = torch.nn.functional.pad(gate, (0, pad_size))
-        
         hidden = F.sigmoid(gate) * hidden
         hidden = hidden.to(hidden_states.dtype)
         hidden, _ = self.out_proj(hidden)
@@ -786,33 +728,8 @@ class MiniMaxText01DecoderLayer(nn.Module):
         )
 
         residual = residual * self.layernorm_attention_alpha
-        
-        # 检查self_attention_output是否为空张量或尺寸为0
-        if self_attention_output.numel() == 0 or 0 in self_attention_output.shape:
-            self_attention_output = torch.zeros_like(residual)
-        else:
-            self_attention_output = self_attention_output * self.layernorm_attention_beta
-            
-            # 处理形状不匹配
-            if residual.shape != self_attention_output.shape:
-                # 获取两个张量的维度数
-                residual_dims = residual.dim()
-                output_dims = self_attention_output.dim()
-                
-                # 统一维度数
-                if residual_dims > output_dims:
-                    # 扩展 self_attention_output 的维度
-                    for _ in range(residual_dims - output_dims):
-                        self_attention_output = self_attention_output.unsqueeze(-1)
-                elif output_dims > residual_dims:
-                    # 扩展 residual 的维度
-                    for _ in range(output_dims - residual_dims):
-                        residual = residual.unsqueeze(-1)
-                
-                # 确保形状匹配，如果不匹配，调整到最小的共同尺寸
-                min_shape = [min(s1, s2) for s1, s2 in zip(residual.shape, self_attention_output.shape)]
-                residual = residual[[slice(0, s) for s in min_shape]]
-                self_attention_output = self_attention_output[[slice(0, s) for s in min_shape]]
+        self_attention_output = (self_attention_output *
+                                 self.layernorm_attention_beta)
         
         layernorm_input = residual + self_attention_output
         layernorm_output = self.post_attention_layernorm(layernorm_input)
