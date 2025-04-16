@@ -333,4 +333,10 @@ class FullAndSwaMemoryAllocator(HybridMemoryAllocator):
         self,
         blocks: list[list[KVCacheBlock]],
     ) -> Iterable[KVCacheBlock]:
-        pass
+        ordered_blocks: list[list[KVCacheBlock]] = []
+        num_blocks = len(blocks[0])
+        for i in reversed(range(num_blocks)):
+            ordered_blocks.extend(
+                block for group_id in self.all_group_ids
+                if not (block := blocks[group_id][i]).is_null)
+        return ordered_blocks
