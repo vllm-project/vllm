@@ -175,10 +175,7 @@ def has_xgrammar_unsupported_json_features(schema: dict[str, Any]) -> bool:
             return True
 
         # Check for numeric ranges
-        if obj.get("type") in ("integer", "number") and any(
-                key in obj
-                for key in ("minimum", "maximum", "exclusiveMinimum",
-                            "exclusiveMaximum", "multipleOf")):
+        if obj.get("type") in ("integer", "number") and ("multipleOf" in obj):
             return True
 
         # Check for array unsupported keywords
