@@ -14,6 +14,9 @@ from vllm import _custom_ops as ops
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import (FusedMoE, FusedMoEMethodBase,
                                                   FusedMoeWeightScaleSupported)
+from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
+    is_rocm_aiter_channel_scaled_moe_enabled, rocm_aiter_fused_experts,
+    shuffle_weights)
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
     WNA16_SUPPORTED_BITS)
 from vllm.model_executor.layers.quantization.utils import replace_parameter
@@ -36,6 +39,7 @@ __all__ = [
     "CompressedTensorsW8A8Fp8MoECutlassMethod",
     "CompressedTensorsWNA16MarlinMoEMethod",
     "CompressedTensorsWNA16MoEMethod",
+    "CompressedTensorsW8A8Fp8MoEAiterMethod",
 ]
 
 
@@ -70,6 +74,8 @@ class CompressedTensorsMoEMethod(FusedMoEMethodBase):
               and layer.activation == "silu" and layer.expert_map is None):
             return CompressedTensorsW8A8Fp8MoECutlassMethod(quant_config)
         elif quant_config._is_fp8_w8a8(weight_quant, input_quant):
+            if is_rocm_aiter_channel_scaled_moe_enabled():
+                return CompressedTensorsW8A8Fp8MoEAiterMethod(quant_config)
             return CompressedTensorsW8A8Fp8MoEMethod(quant_config)
         else:
             raise RuntimeError(
@@ -300,6 +306,69 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
             w2_scale=layer.w2_weight_scale,
             a1_scale=layer.w13_input_scale,
             a2_scale=layer.w2_input_scale)
+
+
+class CompressedTensorsW8A8Fp8MoEAiterMethod(CompressedTensorsW8A8Fp8MoEMethod
+                                             ):
+
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        super().process_weights_after_loading(layer)
+
+        # reshaping weights is required for aiter moe kernel.
+        shuffled_w13, shuffled_w2 = shuffle_weights(layer.w13_weight.data,
+                                                    layer.w2_weight.data)
+
+        layer.w13_weight = torch.nn.Parameter(shuffled_w13,
+                                              requires_grad=False)
+        layer.w2_weight = torch.nn.Parameter(shuffled_w2, requires_grad=False)
+
+    def apply(
+        self,
+        layer: torch.nn.Module,
+        x: torch.Tensor,
+        router_logits: torch.Tensor,
+        top_k: int,
+        renormalize: bool,
+        use_grouped_topk: bool = False,
+        topk_group: Optional[int] = None,
+        num_expert_group: Optional[int] = None,
+        global_num_experts: int = -1,
+        expert_map: Optional[torch.Tensor] = None,
+        custom_routing_function: Optional[Callable] = None,
+        scoring_func: str = "softmax",
+        e_score_correction_bias: Optional[torch.Tensor] = None,
+        apply_router_weight_on_input: bool = False,
+        activation: str = "silu",
+    ) -> torch.Tensor:
+
+        assert activation in ["silu", "gelu"]
+        assert global_num_experts == layer.w13_weight.shape[0]
+        assert expert_map is None
+
+        topk_weights, topk_ids = FusedMoE.select_experts(
+            hidden_states=x,
+            router_logits=router_logits,
+            use_grouped_topk=use_grouped_topk,
+            top_k=top_k,
+            renormalize=renormalize,
+            topk_group=topk_group,
+            num_expert_group=num_expert_group,
+            custom_routing_function=custom_routing_function,
+            scoring_func=scoring_func,
+            e_score_correction_bias=e_score_correction_bias)
+
+        return rocm_aiter_fused_experts(
+            hidden_states=x,
+            w1=layer.w13_weight,
+            w2=layer.w2_weight,
+            topk_weights=topk_weights,
+            topk_ids=topk_ids,
+            use_fp8_w8a8=True,
+            w1_scale=layer.w13_weight_scale,
+            w2_scale=layer.w2_weight_scale,
+            activation=activation,
+            expert_map=expert_map,
+            apply_router_weight_on_input=apply_router_weight_on_input)
 
 
 class CompressedTensorsW8A8Fp8MoECutlassMethod(CompressedTensorsMoEMethod):
