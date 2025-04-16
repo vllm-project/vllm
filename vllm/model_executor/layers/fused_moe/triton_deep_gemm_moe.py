@@ -70,6 +70,7 @@ class TritonOrDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         a2_scale: Optional[torch.Tensor],
         workspace13: torch.Tensor,
         workspace2: torch.Tensor,
+        expert_num_tokens: Optional[torch.Tensor],
     ) -> torch.Tensor:
         N = w1.shape[1]
         if (self.allow_deep_gemm and self.use_fp8_w8a8 and N > 512
@@ -90,6 +91,7 @@ class TritonOrDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
                 a2_scale,
                 workspace13,
                 workspace2,
+                expert_num_tokens,
             )
         else:
             return self.triton_expert(
@@ -108,4 +110,5 @@ class TritonOrDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
                 a2_scale,
                 workspace13,
                 workspace2,
+                expert_num_tokens,
             )

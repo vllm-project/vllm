@@ -75,7 +75,7 @@ class PplxDispatchCombine(mk.FusedMoEQuantizeDispatchCombine):
             dtype=torch.int32,
             device=device,
         )
-        expert_num_tokens.fill_(-1)  # debugging remove
+        #expert_num_tokens.fill_(-1)  # debugging remove
 
         num_dp = self.world_size // self.dp_size
         expert_x = torch.empty(
