@@ -521,7 +521,6 @@ class FalconH1Model(nn.Module):
                 positions=positions,
                 hidden_states=hidden_states,
                 mamba_cache_params=layer_mamba_cache_params,
-                layer_idx = i,
                 sequence_idx=seq_idx,
             )
         if not get_pp_group().is_last_rank:
