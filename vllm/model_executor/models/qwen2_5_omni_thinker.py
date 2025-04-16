@@ -63,7 +63,7 @@ from vllm.multimodal.parse import (AudioProcessorItems, DictEmbeddingItems,
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
                                         PlaceholderFeaturesInfo,
                                         PromptReplacement, PromptUpdate)
-from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
+from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.tokenizer import decode_tokens
 
@@ -196,21 +196,32 @@ class Qwen2_5OmniThinkerProcessingInfo(Qwen2AudioProcessingInfo,
 class Qwen2_5OmniThinkerDummyInputsBuilder(
         BaseDummyInputsBuilder[Qwen2_5OmniThinkerProcessingInfo]):
 
-    def get_dummy_processor_inputs(
-        self,
-        seq_len: int,
-        mm_counts: Mapping[str, int],
-    ) -> ProcessorInputs:
+    def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
         num_audios = mm_counts.get("audio", 0)
         num_images = mm_counts.get("image", 0)
         num_videos = mm_counts.get("video", 0)
 
         hf_processor = self.info.get_hf_processor()
-        feature_extractor = self.info.get_feature_extractor()
 
         audio_token: str = hf_processor.audio_token
         image_token: str = hf_processor.image_token
         video_token: str = hf_processor.video_token
+
+        return (audio_token * num_audios + image_token * num_images +
+                video_token * num_videos)
+
+    # TODO: @abstractmethod after transition
+    def get_dummy_mm_data(
+        self,
+        seq_len: int,
+        mm_counts: Mapping[str, int],
+    ) -> MultiModalDataDict:
+        num_audios = mm_counts.get("audio", 0)
+        num_images = mm_counts.get("image", 0)
+        num_videos = mm_counts.get("video", 0)
+
+        feature_extractor = self.info.get_feature_extractor()
+
         target_audio_length = min(
             feature_extractor.chunk_length,
             30,
@@ -235,12 +246,7 @@ class Qwen2_5OmniThinkerDummyInputsBuilder(
                                    num_videos=num_videos),
         }
 
-        inputs = ProcessorInputs(
-            prompt_text=(audio_token * num_audios + image_token * num_images +
-                         video_token * num_videos),
-            mm_data=mm_data,
-        )
-        return inputs
+        return mm_data
 
 
 class Qwen2_5OmniThinkerMultiModalProcessor(
