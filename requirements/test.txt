@@ -111,6 +111,7 @@ einops==0.8.0
     # via
     #   -r requirements/test.in
     #   encodec
+    #   mamba-ssm
     #   vector-quantize-pytorch
     #   vocos
 einx==0.3.0
@@ -233,6 +234,8 @@ lxml==5.3.0
     # via
     #   blobfile
     #   sacrebleu
+mamba-ssm==2.2.4
+    # via -r requirements/test.in
 markdown-it-py==3.0.0
     # via rich
 markupsafe==3.0.2
@@ -268,6 +271,8 @@ mypy-extensions==1.0.0
     # via black
 networkx==3.2.1
     # via torch
+ninja==1.11.1.3
+    # via mamba-ssm
 nltk==3.9.1
     # via rouge-score
 num2words==0.5.14
@@ -360,6 +365,7 @@ packaging==24.1
     #   fastparquet
     #   huggingface-hub
     #   lazy-loader
+    #   mamba-ssm
     #   matplotlib
     #   peft
     #   plotly
@@ -571,6 +577,7 @@ sentencepiece==0.2.0
     # via mistral-common
 setuptools==75.8.0
     # via
+    #   mamba-ssm
     #   pytablewriter
     #   torch
 shellingham==1.5.4
@@ -627,6 +634,7 @@ torch==2.6.0
     #   encodec
     #   fastsafetensors
     #   lm-eval
+    #   mamba-ssm
     #   peft
     #   runai-model-streamer
     #   sentence-transformers
@@ -664,6 +672,7 @@ transformers==4.51.1
     #   -r requirements/test.in
     #   genai-perf
     #   lm-eval
+    #   mamba-ssm
     #   peft
     #   sentence-transformers
     #   transformers-stream-generator
