@@ -204,6 +204,8 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
                                             trust_remote_code=True),
     "PhiMoEForCausalLM": _HfExamplesInfo("microsoft/Phi-3.5-MoE-instruct",
                                          trust_remote_code=True),
+    "Plamo2ForCausalLM": _HfExamplesInfo("pfnet/plamo-2-1b",
+                                        trust_remote_code=True),
     "QWenLMHeadModel": _HfExamplesInfo("Qwen/Qwen-7B-Chat",
                                        trust_remote_code=True),
     "Qwen2ForCausalLM": _HfExamplesInfo("Qwen/Qwen2-7B-Instruct",

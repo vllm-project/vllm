@@ -400,8 +400,9 @@ steps:
     - pytest -v -s models/test_transformers.py
     - pytest -v -s models/test_registry.py
     # V1 Test: https://github.com/vllm-project/vllm/issues/14531
-    - VLLM_USE_V1=0 pytest -v -s models/test_initialization.py -k 'not llama4'
+    - VLLM_USE_V1=0 pytest -v -s models/test_initialization.py -k 'not llama4 and not plamo2'
     - VLLM_USE_V1=0 pytest -v -s models/test_initialization.py -k 'llama4'
+    - VLLM_USE_V1=0 pytest -v -s models/test_initialization.py -k 'plamo2'
 
 - label: Language Models Test (Standard) # 32min
   #mirror_hardwares: [amd]
@@ -411,6 +412,8 @@ steps:
   - tests/models/embedding/language
   - tests/models/encoder_decoder/language
   commands:
+    # Install causal-conv1d for plamo2 models here, as it is not compatible with pip-compile.
+    - pip install causal-conv1d
     - pytest -v -s models/decoder_only/language -m 'core_model or quant_model'
     - pytest -v -s models/embedding/language -m core_model
 
@@ -422,6 +425,8 @@ steps:
   - tests/models/embedding/language
   - tests/models/encoder_decoder/language
   commands:
+    # Install causal-conv1d for plamo2 models here, as it is not compatible with pip-compile.
+    - pip install causal-conv1d
     - pytest -v -s models/decoder_only/language -m 'not core_model and not quant_model'
     - pytest -v -s models/embedding/language -m 'not core_model'
 
