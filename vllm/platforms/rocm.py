@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import os
+import subprocess
 from datetime import timedelta
 from functools import cache, lru_cache, wraps
 from typing import TYPE_CHECKING, Optional
@@ -102,20 +103,31 @@ def with_amdsmi_context(fn):
 
 @cache
 def on_gfx1x() -> bool:
-    GPU_ARCH = torch.cuda.get_device_properties("cuda").gcnArchName
+    GPU_ARCH = get_gcn_arch()
     return any(arch in GPU_ARCH for arch in ["gfx11", "gfx12"])
 
 
 @cache
 def on_mi3xx() -> bool:
-    GPU_ARCH = torch.cuda.get_device_properties("cuda").gcnArchName
+    GPU_ARCH = get_gcn_arch()
     return any(arch in GPU_ARCH for arch in ["gfx942", "gfx950"])
 
 
 @cache
 def on_gfx9() -> bool:
-    GPU_ARCH = torch.cuda.get_device_properties("cuda").gcnArchName
+    GPU_ARCH = get_gcn_arch()
     return any(arch in GPU_ARCH for arch in ["gfx90a", "gfx942", "gfx950"])
+
+
+def get_gcn_arch():
+    # Try to avoid torch cuda calls to avoid initializing CUDA
+    output = subprocess.check_output(['rocminfo']).decode()
+    for line in output.split('\n'):
+        if "Name:" in line and "gfx" in line:
+            print("init line", line.strip().split()[-1])
+            return line.strip().split()[-1]
+    # Fallback
+    return torch.cuda.get_device_properties("cuda").gcnArchName
 
 
 @cache
@@ -129,7 +141,7 @@ def use_rocm_custom_paged_attention(
         kv_cache_dtype: str,
         alibi_slopes: Optional[torch.Tensor] = None) -> bool:
 
-    GPU_ARCH = torch.cuda.get_device_properties("cuda").gcnArchName
+    GPU_ARCH = get_gcn_arch()
     ON_GFX9 = any(arch in GPU_ARCH for arch in ["gfx90a", "gfx942", "gfx950"])
     ON_GFX11_GFX12 = any(arch in GPU_ARCH for arch in ["gfx11", "gfx12"])
 
@@ -381,18 +393,17 @@ class RocmPlatform(Platform):
 
     @classmethod
     def supports_mx(cls) -> bool:
-        gcn_arch = torch.cuda.get_device_properties(0).gcnArchName
-        return any(gfx in gcn_arch for gfx in ["gfx95"])
+        return any(gfx in get_gcn_arch() for gfx in ["gfx95"])
 
     @classmethod
     def supports_fp8(cls) -> bool:
-        gcn_arch = torch.cuda.get_device_properties(0).gcnArchName
-        return any(gfx in gcn_arch for gfx in ['gfx94', 'gfx95', 'gfx12'])
+        return any(gfx in get_gcn_arch()
+                   for gfx in ['gfx94', 'gfx95', 'gfx12'])
 
     @classmethod
     def is_fp8_fnuz(cls) -> bool:
         # only device 0 is checked, this assumes MI300 platforms are homogeneous
-        return 'gfx94' in torch.cuda.get_device_properties(0).gcnArchName
+        return 'gfx94' in get_gcn_arch()
 
     @classmethod
     def fp8_dtype(cls) -> torch.dtype:
@@ -409,9 +420,8 @@ class RocmPlatform(Platform):
     @classmethod
     def use_custom_allreduce(cls) -> bool:
         # We only enable custom allreduce for MI300 series
-        gcn_arch = torch.cuda.get_device_properties(0).gcnArchName
         supported_archs = ['gfx94', 'gfx95']
-        return any(gfx in gcn_arch for gfx in supported_archs)
+        return any(gfx in get_gcn_arch() for gfx in supported_archs)
 
     @classmethod
     def get_cu_count(cls, device_id: int = 0) -> int:
@@ -420,7 +430,7 @@ class RocmPlatform(Platform):
 
     @classmethod
     def is_navi(cls) -> bool:
-        return 'gfx1' in torch.cuda.get_device_properties(0).gcnArchName
+        return 'gfx1' in get_gcn_arch()
 
     @classmethod
     def get_piecewise_backend_cls(cls) -> str:

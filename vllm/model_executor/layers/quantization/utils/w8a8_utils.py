@@ -285,7 +285,8 @@ def dispatch_w8a8_scaled_mm(
         return torch_per_tensor_w8a8_scaled_mm
     global USE_ROWWISE_TORCH_SCALED_MM
     if USE_ROWWISE_TORCH_SCALED_MM is None:
-        USE_ROWWISE_TORCH_SCALED_MM = (current_platform.is_rocm()
+        USE_ROWWISE_TORCH_SCALED_MM = (
+            current_platform.is_rocm()
             and torch.__version__[0:3] >= "2.7"
             and current_platform.has_device_capability(94))
     # If torch.scaled_mm supports per-channel (weights) per-token (inputs)
