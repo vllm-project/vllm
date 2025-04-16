@@ -41,7 +41,7 @@ def _compare_objs(obj1, obj2):
         if isinstance(a, torch.Tensor):
             if (a.numel() == 0 or b.numel() == 0):
                 is_same = (a.numel() == 0 and b.numel() == 0)
-            elif torch.allclose(a, b):
+            elif torch.allclose(a.cpu(), b.cpu()):
                 is_same = True
         elif isinstance(a, np.ndarray):
             if np.allclose(a, b):
@@ -298,6 +298,8 @@ def test_sampling_metadata_in_input_batch(device: str, batch_size: int):
         sampling_metadata.bad_words_token_ids
 
 
+@pytest.mark.skipif(current_platform.is_hpu(),
+                    reason="Flaky test on HPU SynapseAI 1.20.x")
 @pytest.mark.parametrize("device", CUDA_DEVICES)
 @pytest.mark.parametrize("batch_size", [32])
 @pytest.mark.parametrize("swap_list", [((0, 1), )])
