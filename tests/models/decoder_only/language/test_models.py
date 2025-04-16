@@ -3,6 +3,7 @@
 
 Run `pytest tests/models/test_models.py`.
 """
+import os
 
 import pytest
 import torch
@@ -126,8 +127,9 @@ def test_models(hf_runner, vllm_runner, example_prompts, model: str,
     with vllm_runner(model, dtype=dtype) as vllm_model:
         vllm_outputs = vllm_model.generate_greedy_logprobs(
             example_prompts, max_tokens, num_logprobs)
-        vllm_outputs_from_embeds = vllm_model.generate_greedy_logprobs(
-            prompt_embeds, max_tokens, num_logprobs)
+        if os.getenv("VLLM_USE_V1") == "0":
+            vllm_outputs_from_embeds = vllm_model.generate_greedy_logprobs(
+                prompt_embeds, max_tokens, num_logprobs)
 
     check_logprobs_close(
         outputs_0_lst=hf_outputs,
@@ -135,12 +137,13 @@ def test_models(hf_runner, vllm_runner, example_prompts, model: str,
         name_0="hf",
         name_1="vllm",
     )
-    check_logprobs_close(
-        outputs_0_lst=vllm_outputs,
-        outputs_1_lst=vllm_outputs_from_embeds,
-        name_0="vllm",
-        name_1="vllm_from_embeds",
-    )
+    if os.getenv("VLLM_USE_V1") == "0":
+        check_logprobs_close(
+            outputs_0_lst=vllm_outputs,
+            outputs_1_lst=vllm_outputs_from_embeds,
+            name_0="vllm",
+            name_1="vllm_from_embeds",
+        )
 
     if use_rocm_aiter:
         # this is to ensure that vllm engine
