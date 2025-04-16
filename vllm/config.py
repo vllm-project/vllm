@@ -1382,9 +1382,11 @@ class TokenizerPoolConfig:
     pool_size: int = 0
     """Number of tokenizer workers in the pool to use for asynchronous
     tokenization. If 0, will use synchronous tokenization."""
+
     pool_type: Union[PoolType, type["BaseTokenizerGroup"]] = "ray"
     """Type of tokenizer pool to use for asynchronous tokenization. Ignored if
     tokenizer_pool_size is 0."""
+
     extra_config: dict = field(default_factory=dict)
     """Additional config for the pool. The way the config will be used depends
     on the pool type. This should be a JSON string that will be parsed into a
