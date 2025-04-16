@@ -39,7 +39,7 @@ from .pixtral import PixtralHFVisionModel
 from .siglip import SiglipVisionModel
 from .utils import (AutoWeightsLoader, init_vllm_registered_model,
                     maybe_prefix, merge_multimodal_embeddings)
-from .vision import get_vision_encoder_info, select_patch_features
+from .vision import get_vision_encoder_info
 
 
 class MiniMaxVL01ImagePixelInputs(TypedDict):
@@ -508,7 +508,7 @@ class MiniMaxVL01ForConditionalGeneration(nn.Module, SupportsMultiModal,
             inputs_embeds = merge_multimodal_embeddings(
                 input_ids,
                 inputs_embeds,
-                select_patch_features(multimodal_embeddings),
+                multimodal_embeddings,
                 self.config.image_token_index,
             )
         return inputs_embeds
