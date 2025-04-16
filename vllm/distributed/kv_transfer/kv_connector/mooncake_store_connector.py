@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 """
 MooncakeStore Connector for Distributed Machine Learning Inference
-
 The MooncakeStoreConnector transfers KV caches between prefill vLLM workers
 (KV cache producer) and decode vLLM workers (KV cache consumer) using a
 database-style KVStore.
@@ -11,9 +10,10 @@ from typing import TYPE_CHECKING, List, Tuple, Union
 
 import torch
 
-from vllm import _custom_ops as ops
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.base import KVConnectorBase
+from vllm.distributed.kv_transfer.kv_connector.utils import (
+    model_aware_kv_ops_helper as kv_helper)
 from vllm.logger import init_logger
 from vllm.sequence import IntermediateTensors
 
@@ -32,8 +32,7 @@ class MooncakeStoreConnector(KVConnectorBase):
         config: VllmConfig,
     ):
         self.config = config.kv_transfer_config
-        self.tp_size = config.parallel_config.tensor_parallel_size
-
+        self.kv_helper = kv_helper(config)
         self.local_tp_rank = local_rank
 
         # Init kv_store
@@ -80,12 +79,7 @@ class MooncakeStoreConnector(KVConnectorBase):
         slot_mapping_flat = model_input.attn_metadata.slot_mapping.flatten()
         start_layer = model_executable.model.start_layer
         end_layer = model_executable.model.end_layer
-
-        model_config = model_executable.model.config
-        num_heads = int(model_config.num_key_value_heads / self.tp_size)
-        hidden_size = model_config.hidden_size
-        num_attention_heads = model_config.num_attention_heads
-        head_size = int(hidden_size / num_attention_heads)
+        num_heads, head_size = self.kv_helper.get_model_args(model_executable)
 
         for idx, slen in enumerate(seq_lens):
             start_pos = sum(seq_lens[:idx])
@@ -97,10 +91,8 @@ class MooncakeStoreConnector(KVConnectorBase):
 
             for layer_id in range(start_layer, end_layer):
                 kv_cache = kv_caches[layer_id - start_layer]
-
-                key_cache = kv_cache[0].reshape(-1, num_heads, head_size)
-                value_cache = kv_cache[1].reshape(-1, num_heads, head_size)
-
+                key_cache, value_cache = self.kv_helper.get_kv_from_cache(
+                    kv_cache, num_heads, head_size)
                 current_slot_mapping = slot_mapping_flat[start_pos:end_pos]
 
                 keys.append(key_cache[current_slot_mapping].unsqueeze(0))
@@ -173,22 +165,15 @@ class MooncakeStoreConnector(KVConnectorBase):
                 layer = model_executable.model.layers[layer_id]
                 # get kvcache object
                 kv_cache = kv_caches[layer_id - start_layer]
-                key_cache, value_cache = kv_cache[0], kv_cache[1]
-                # get remote kvcache
 
+                # get remote kvcache
                 remote_k, remote_v = remote_kv[0][layer_id], remote_kv[1][
                     layer_id]
-                # use ops.reshape_and_cache_flash to put kv into kvcache
-                ops.reshape_and_cache_flash(
-                    remote_k.to(key_cache.device),
-                    remote_v.to(value_cache.device),
-                    key_cache,
-                    value_cache,
-                    slot_mapping[start_pos:end_pos],
-                    layer.self_attn.attn.kv_cache_dtype,
-                    layer.self_attn.attn._k_scale,
-                    layer.self_attn.attn._v_scale,
-                )
+
+                self.kv_helper.put_kv_to_cache(model_executable, remote_k,
+                                               remote_v, layer, kv_cache,
+                                               slot_mapping, start_pos,
+                                               end_pos)
 
             hidden_or_intermediate_states_for_one_req.append(hidden)
 
