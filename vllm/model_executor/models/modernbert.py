@@ -6,6 +6,7 @@ from torch import nn
 from transformers import ModernBertConfig
 
 from vllm.attention import Attention, AttentionType
+from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.linear import (QKVParallelLinear,
@@ -192,6 +193,7 @@ class ModernBertEncoderLayer(nn.Module):
         return hidden_states
 
 
+@support_torch_compile
 class ModernBertModel(nn.Module):
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={"layers.": "encoder_layer.layers."})
@@ -269,8 +271,8 @@ class ModernBertForSequenceClassification(nn.Module, SupportsCrossEncoding):
         super().__init__()
         config = vllm_config.model_config.hf_config
         self.config = config
-        self.model = ModernBertModel(vllm_config,
-                                     maybe_prefix(prefix, "modernbert"))
+        self.model = ModernBertModel(vllm_config=vllm_config,
+                                     prefix=maybe_prefix(prefix, "modernbert"))
         self.classifier = nn.Linear(config.hidden_size, config.num_labels)
         self._pooler = CrossEncodingPooler(config, self.classifier,
                                            ModernBertPooler(config))
@@ -311,13 +313,13 @@ class ModernBertForSequenceClassification(nn.Module, SupportsCrossEncoding):
 
     def forward(
         self,
-        input_ids: Optional[torch.LongTensor] = None,
-        positions: torch.Tensor = None,
+        input_ids: Optional[torch.LongTensor],
+        positions: torch.Tensor,
         intermediate_tensors: Optional[IntermediateTensors] = None,
         inputs_embeds: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         return self.model(
             input_ids=input_ids,
-            position_ids=positions,
             inputs_embeds=inputs_embeds,
+            position_ids=positions,
         )
