@@ -36,8 +36,6 @@ class GPTQBitBLASConfig(QuantizationConfig):
     TYPE_MAP = {
         (4, True): scalar_types.uint4b8,
         (8, True): scalar_types.uint8b128,
-        (4, False): scalar_types.uint4b8,
-        (8, False): scalar_types.uint8b128,
     }
 
     TORCH_DTYPE = torch.float16
@@ -157,7 +155,8 @@ class GPTQBitBLASConfig(QuantizationConfig):
                                      user_quant) -> Optional[str]:
         can_convert = cls.is_gptq_bitblas_compatible(hf_quant_cfg)
 
-        is_valid_user_quant = user_quant is None or user_quant == "bitblas"
+        is_valid_user_quant = (user_quant is None or user_quant == "bitblas"
+                               or user_quant == "gptq_bitblas")
 
         if can_convert and is_valid_user_quant:
             msg = ("The model is convertible to {} during runtime."
@@ -194,6 +193,9 @@ class GPTQBitBLASConfig(QuantizationConfig):
         # If we cannot find the info needed in the config, cannot convert.
         if (num_bits is None or group_size is None or sym is None
                 or desc_act is None):
+            return False
+        
+        if (num_bits, sym) not in cls.TYPE_MAP:
             return False
 
         # If the capability of the device is too low, cannot convert.
