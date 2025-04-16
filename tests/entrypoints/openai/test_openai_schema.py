@@ -7,7 +7,7 @@ from ...utils import RemoteOpenAIServer
 
 schemathesis.experimental.OPEN_API_3_1.enable()
 
-MODEL_NAME = "ibm-granite/granite-vision-3.2-2b"
+MODEL_NAME = "HuggingFaceTB/SmolVLM-256M-Instruct"
 MAXIMUM_IMAGES = 2
 
 
