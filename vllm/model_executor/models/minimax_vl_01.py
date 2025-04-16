@@ -1,25 +1,19 @@
 # SPDX-License-Identifier: Apache-2.0
 
-import math
 from abc import abstractmethod
 from collections.abc import Iterable, Mapping, Sequence
 from functools import cached_property
 from typing import (Final, Literal, Optional, Protocol, Set, Tuple, TypedDict,
-                    TypeVar, Union, cast)
+                    TypeVar, Union)
 
+import numpy as np
 import torch
 import torch.nn as nn
-from packaging.version import Version
-from transformers import (BatchFeature, CLIPVisionConfig,
-                          PixtralVisionConfig, PretrainedConfig,
-                          SiglipVisionConfig)
-from transformers import __version__ as TRANSFORMERS_VERSION
-from .minimax_vl_01_processing import MiniMaxVL01Processor
+from transformers import (BatchFeature, CLIPVisionConfig, PixtralVisionConfig,
+                          PretrainedConfig, SiglipVisionConfig)
+from transformers.image_processing_utils import select_best_resolution
 
 from vllm.config import VllmConfig
-from vllm.inputs import InputProcessingContext
-from vllm.jsontree import json_map_leaves
-from transformers.image_processing_utils import select_best_resolution
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                RowParallelLinear)
@@ -27,25 +21,25 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig,
-                                    MultiModalInputs, MultiModalKwargs)
+from vllm.multimodal.inputs import MultiModalFieldConfig, MultiModalKwargs
 from vllm.multimodal.parse import (ImageEmbeddingItems, ImageProcessorItems,
                                    ImageSize, MultiModalDataItems)
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
-                                        BaseProcessingInfo, ProcessingCache,
-                                        PromptReplacement, PromptUpdate)
+                                        BaseProcessingInfo, PromptReplacement,
+                                        PromptUpdate)
 from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
 from vllm.sequence import IntermediateTensors
+from vllm.transformers_utils.configs.configuration_minimax_vl_01 import (
+    MiniMaxVL01Config)
 
 from .clip import CLIPVisionModel
 from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsPP
-from .pixtral import PixtralHFEncoderInfo, PixtralHFVisionModel
+from .minimax_vl_01_processing import MiniMaxVL01Processor
+from .pixtral import PixtralHFVisionModel
 from .siglip import SiglipVisionModel
-from .utils import (AutoWeightsLoader, flatten_bn, init_vllm_registered_model,
+from .utils import (AutoWeightsLoader, init_vllm_registered_model,
                     maybe_prefix, merge_multimodal_embeddings)
-from .vision import (get_vision_encoder_info, scatter_patch_features,
-                     select_patch_features)
-from vllm.transformers_utils.configs.configuration_minimax_vl_01 import MiniMaxVL01Config
+from .vision import get_vision_encoder_info, select_patch_features
 
 
 class MiniMaxVL01ImagePixelInputs(TypedDict):
@@ -86,29 +80,17 @@ class MiniMaxVL01ImageEmbeddingInputs(TypedDict):
     `hidden_size` must match the hidden size of language model backbone.
     """
 
+
 def image_size_to_num_patches(image_size, grid_pinpoints, patch_size: int):
-    """
-    Calculate the number of patches after the preprocessing for images of any resolution.
-
-    Args:
-        image_size (`torch.LongTensor` or `np.ndarray` or `Tuple[int, int]`):
-            The size of the input image in the format (height, width). ?
-        grid_pinpoints (`List`):
-            A list containing possible resolutions. Each item in the list should be a tuple or list
-            of the form `(height, width)`.
-        patch_size (`int`):
-            The size of each image patch.
-
-    Returns:
-        int: the number of patches
-    """
     if not isinstance(grid_pinpoints, list):
         raise TypeError("grid_pinpoints should be a list of tuples or lists")
 
-    # ! VERY IMPORTANT if image_size is tensor, must convert to into tuple, otherwise it will cause wrong calculate
+    # ! VERY IMPORTANT if image_size is tensor, must convert to into tuple,
+    # otherwise it will cause wrong calculate
     if not isinstance(image_size, (list, tuple)):
         if not isinstance(image_size, (torch.Tensor, np.ndarray)):
-            raise TypeError(f"image_size invalid type {type(image_size)} with value {image_size}")
+            raise TypeError("image_size invalid type " +
+                            f"{type(image_size)} with value {image_size}")
         image_size = image_size.tolist()
 
     best_resolution = select_best_resolution(image_size, grid_pinpoints)
@@ -122,49 +104,27 @@ def image_size_to_num_patches(image_size, grid_pinpoints, patch_size: int):
     num_patches += 1
     return num_patches
 
+
 def get_anyres_image_grid_shape(image_size, grid_pinpoints, patch_size):
-    """
-    Calculate the shape of the image patch grid after the preprocessing for images of any resolution.
-
-    Args:
-        image_size (`tuple`):
-            The size of the input image in the format (width, height).
-        grid_pinpoints (`List`):
-            A list containing possible resolutions. Each item in the list should be a tuple or list
-            of the form `(height, width)`.
-        patch_size (`int`):
-            The size of each image patch.
-
-    Returns:
-        tuple: The shape of the image patch grid in the format (width, height).
-    """
     if not isinstance(grid_pinpoints, list):
         raise TypeError("grid_pinpoints should be a list of tuples or lists")
 
-    # ! VERY IMPORTANT if image_size is tensor, must convert to into tuple, otherwise it will cause wrong calculate
+    # ! VERY IMPORTANT if image_size is tensor,
+    # must convert to into tuple,
+    # otherwise it will cause wrong calculate
     if not isinstance(image_size, (list, tuple)):
         if not isinstance(image_size, (torch.Tensor, np.ndarray)):
             raise TypeError(
-                f"image_size invalid type: {type(image_size)} not valid, should be either list, tuple, np.ndarray or tensor"
-            )
+                "image_size invalid type " +
+                f"{type(image_size)} not valid, " +
+                "should be either list, tuple, np.ndarray or tensor")
         image_size = image_size.tolist()
 
     height, width = select_best_resolution(image_size, grid_pinpoints)
     return height // patch_size, width // patch_size
 
+
 def unpad_image(tensor, original_size):
-    """
-    Unpads a PyTorch tensor of a padded and resized image.
-
-    Args:
-        tensor (`torch.Tensor`):
-            The image tensor, assumed to be of shape (num_channels, height, width).
-        original_size (`tuple`):
-            The original size of the image (height, width).
-
-    Returns:
-        `torch.Tensor`: The unpadded image tensor.
-    """
     original_height, original_width = original_size
     current_height, current_width = tensor.shape[1:]
 
@@ -172,20 +132,20 @@ def unpad_image(tensor, original_size):
     current_aspect_ratio = current_width / current_height
 
     if original_aspect_ratio > current_aspect_ratio:
-        scale_factor = current_width / original_width
         new_height = int(original_height * current_width) // original_width
         padding = (current_height - new_height) // 2
-        unpadded_tensor = tensor[:, padding : current_height - padding, :]
+        unpadded_tensor = tensor[:, padding:current_height - padding, :]
     else:
-        scale_factor = current_height / original_height
         new_width = int(original_width * current_height) // original_height
         padding = (current_width - new_width) // 2
-        unpadded_tensor = tensor[:, :, padding : current_width - padding]
+        unpadded_tensor = tensor[:, :, padding:current_width - padding]
 
     return unpadded_tensor
 
-MiniMaxVL01ImageInputs = Union[MiniMaxVL01ImagePixelInputs, MiniMaxVL01HFImagePixelInputs,
-                         MiniMaxVL01ImageEmbeddingInputs]
+
+MiniMaxVL01ImageInputs = Union[MiniMaxVL01ImagePixelInputs,
+                               MiniMaxVL01HFImagePixelInputs,
+                               MiniMaxVL01ImageEmbeddingInputs]
 
 
 class MiniMaxVL01MultiModalProjector(nn.Module):
@@ -327,7 +287,8 @@ class MiniMaxVL01DummyInputsBuilder(BaseDummyInputsBuilder[_I]):
 class MiniMaxVL01ProcessingInfo(BaseMiniMaxVL01ProcessingInfo):
 
     def get_hf_processor(self, **kwargs: object):
-        hf_processor = self.ctx.get_hf_processor(MiniMaxVL01Processor, **kwargs)
+        hf_processor = self.ctx.get_hf_processor(MiniMaxVL01Processor,
+                                                 **kwargs)
         # In case patch_size is omitted from `processor_config.json`
         # e.g. for E5-V: https://huggingface.co/royokong/e5-v
         if hf_processor.patch_size is None:
@@ -392,6 +353,7 @@ class MiniMaxVL01MultiModalProcessor(
             pixel_values=MultiModalFieldConfig.batched("image"),
             image_embeds=MultiModalFieldConfig.batched("image"),
         )
+
 
 def _get_num_hidden_layers(hf_config: MiniMaxVL01LikeConfig) -> int:
     """Determine the number of hidden layers to initialize up to in the
@@ -468,10 +430,12 @@ def init_vision_tower_for_MiniMaxVL01(
     raise NotImplementedError(msg)
 
 
-@MULTIMODAL_REGISTRY.register_processor(MiniMaxVL01MultiModalProcessor,
-                                        info=MiniMaxVL01ProcessingInfo,
-                                        dummy_inputs=MiniMaxVL01DummyInputsBuilder)
-class MiniMaxVL01ForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
+@MULTIMODAL_REGISTRY.register_processor(
+    MiniMaxVL01MultiModalProcessor,
+    info=MiniMaxVL01ProcessingInfo,
+    dummy_inputs=MiniMaxVL01DummyInputsBuilder)
+class MiniMaxVL01ForConditionalGeneration(nn.Module, SupportsMultiModal,
+                                          SupportsPP):
 
     packed_modules_mapping = {
         "qkv_proj": ["q_proj", "k_proj", "v_proj"],
@@ -519,7 +483,9 @@ class MiniMaxVL01ForConditionalGeneration(nn.Module, SupportsMultiModal, Support
         )
         self.vision_feature_layer = config.vision_feature_layer
         self.vocab_size = config.text_config.vocab_size
-        self.pad_token_id = self.config.pad_token_id if self.config.pad_token_id is not None else -1
+        self.pad_token_id = -1
+        if self.config.pad_token_id is not None:
+            self.pad_token_id = self.config.pad_token_id
         self._padding_side = "left"
 
         self.make_empty_intermediate_tensors = (
@@ -546,7 +512,7 @@ class MiniMaxVL01ForConditionalGeneration(nn.Module, SupportsMultiModal, Support
                 self.config.image_token_index,
             )
         return inputs_embeds
-    
+
     @property
     def padding_side(self):
         return self._padding_side
@@ -575,8 +541,11 @@ class MiniMaxVL01ForConditionalGeneration(nn.Module, SupportsMultiModal, Support
     def tie_weights(self):
         return self.language_model.tie_weights()
 
-    def resize_token_embeddings(self, new_num_tokens: Optional[int] = None, pad_to_multiple_of=None) -> nn.Embedding:
-        model_embeds = self.language_model.resize_token_embeddings(new_num_tokens, pad_to_multiple_of)
+    def resize_token_embeddings(self,
+                                new_num_tokens: Optional[int] = None,
+                                pad_to_multiple_of=None) -> nn.Embedding:
+        model_embeds = self.language_model.resize_token_embeddings(
+            new_num_tokens, pad_to_multiple_of)
         # update vocab size
         self.config.text_config.vocab_size = model_embeds.num_embeddings
         self.vocab_size = model_embeds.num_embeddings
@@ -594,108 +563,23 @@ class MiniMaxVL01ForConditionalGeneration(nn.Module, SupportsMultiModal, Support
         image_token_index=None,
         ignore_index=-100,
     ):
-        """
-        Merge input_ids with with image features into final embeddings
-
-        Args:
-            image_features (`torch.Tensor` of shape `(all_feature_lens, embed_dim)`):
-                All vision vectors of all images in the batch
-            feature_lens (`torch.LongTensor` of shape `(num_images)`):
-                The length of visual embeddings of each image as stacked in `image_features`
-            inputs_embeds (`torch.Tensor` of shape `(batch_size, sequence_length, embed_dim)`):
-                Token embeddings before merging with visual embeddings
-            input_ids (`torch.LongTensor` of shape `(batch_size, sequence_length)`):
-                Input_ids of tokens, possibly filled with image token
-            attention_mask (`torch.LongTensor` of shape `(batch_size, sequence_length)`):
-                Mask to avoid performing attention on padding token indices.
-            position_ids (`torch.LongTensor` of shape `(batch_size, sequence_length)`):
-                Indices of positions of each input sequence tokens in the position embeddings. Selected in the range `[0,
-                config.n_positions - 1]`.
-            labels (`torch.Tensor` of shape `(batch_size, sequence_length)`, *optional*)
-                :abels need to be recalculated to support training (if provided)
-            image_token_index (`int`, *optional*)
-                Token id used to indicate the special "image" token. Defaults to `config.image_token_index`
-            ignore_index (`int`, *optional*)
-                Value that is used to pad `labels` and will be ignored when calculated loss. Default: -100.
-        Returns:
-            final_embedding, final_attention_mask, position_ids, final_labels
-
-        Explanation:
-            each image has variable length embeddings, with length specified by feature_lens
-            image_features is concatenation of all visual embed vectors
-            task: fill each <image> with the correct number of visual embeddings
-            Example:
-                X (5 patches), Y (3 patches), Z (8)
-                X, Y are in the same sequence (in-context learning)
-            if right padding
-                input_ids: [
-                    a b c d e f X g h i j k Y l m
-                    o p q r Z s t u v _ _ _ _ _ _
-                ]
-                input_ids should be: [
-                    a b c d e f X X X X X g h i j k Y Y Y l m
-                    o p q r Z Z Z Z Z Z Z Z s t u v _ _ _ _ _
-                ]
-                labels should be: [
-                    a b c d e f _ _ _ _ _ g h i j k _ _ _ l m
-                    o p q r _ _ _ _ _ _ _ _ s t u v _ _ _ _ _
-                ]
-            elif left padding
-                input_ids: [
-                    a b c d e f X g h i j k Y l m
-                    _ _ _ _ _ _ o p q r Z s t u v
-                ]
-                input_ids should be: [
-                    a b c d e f X X X X X g h i j k Y Y Y l m
-                    _ _ _ _ _ o p q r Z Z Z Z Z Z Z Z s t u v
-                ]
-                labels should be: [
-                    a b c d e f _ _ _ _ _ g h i j k _ _ _ l m
-                    _ _ _ _ _ o p q r _ _ _ _ _ _ _ _ s t u v
-                ]
-            Edge cases:
-                * If tokens are same but image token sizes are different, then cannot infer left or right padding
-                ```python
-                cat_img = Image.open(requests.get("http://images.cocodataset.org/val2017/000000039769.jpg", stream=True).raw)
-                chart_img = Image.open(requests.get("https://github.com/haotian-liu/LLaVA/blob/1a91fc274d7c35a9b50b3cb29c4247ae5837ce39/images/llava_v1_5_radar.jpg?raw=true", stream=True).raw)
-                prompts = [
-                    "[INST] <image>\nWhat is shown in this image? [/INST]",
-                    "[INST] <image>\nWhat is shown in this image? [/INST]",
-                ]
-                inputs = processor(prompts, [chart_img, cat_img], return_tensors='pt', padding=True).to("cuda")
-                    chart_img has 2634 tokens, while cat_img has 2340 tokens
-                ```
-
-                input_ids: [
-                    a b c d X g h
-                    i j Y k l m n
-                ]
-                where X is 3 tokens while Y is 5, this mean after merge
-                if left-padding (batched generation)
-                    input_ids should be: [
-                        _ _ a b c d X X X g h
-                        i j Y Y Y Y Y k l m n
-                    ]
-                elif (right padding) (training)
-                    input_ids should be: [
-                        a b c d X X X g h _ _
-                        i j Y Y Y Y Y k l m n
-                    ]
-        """
-        image_token_index = image_token_index if image_token_index is not None else self.config.image_token_index
-        ignore_index = ignore_index if ignore_index is not None else self.config.ignore_index
+        if image_token_index is None:
+            image_token_index = self.config.image_token_index
+        if ignore_index is None:
+            ignore_index = self.config.ignore_index
 
         with torch.no_grad():
             # ! in minimax 1.6, number of patches is variable
             num_images = feature_lens.size(0)
             num_image_features, embed_dim = image_features.shape
             if feature_lens.sum() != num_image_features:
-                raise ValueError(f"{feature_lens=} / {feature_lens.sum()} != {image_features.shape=}")
+                raise ValueError(
+                    f"{feature_lens=} / " +
+                    f"{feature_lens.sum()} != {image_features.shape=}")
             batch_size = input_ids.shape[0]
             _left_padding = torch.any(attention_mask[:, 0] == 0)
             _right_padding = torch.any(attention_mask[:, -1] == 0)
-
-            left_padding = True if not self.training else False
+            left_padding = bool(not self.training)
             if batch_size > 1 and not self.training:
                 if _left_padding and not _right_padding:
                     left_padding = True
@@ -706,60 +590,65 @@ class MiniMaxVL01ForConditionalGeneration(nn.Module, SupportsMultiModal, Support
                     left_padding = self.padding_side == "left"
                 else:
                     # invalid attention_mask
-                    raise ValueError(f"both side of attention_mask has zero, invalid. {attention_mask}")
+                    raise ValueError("both side of attention_mask " +
+                                     "has zero, invalid. " +
+                                     f"{attention_mask}")
 
             # Whether to turn off right padding
             # 1. Create a mask to know where special image tokens are
             special_image_token_mask = input_ids == image_token_index
             # special_image_token_mask: [bsz, seqlen]
-            num_special_image_tokens = torch.sum(special_image_token_mask, dim=-1)
+            num_special_image_tokens = torch.sum(special_image_token_mask,
+                                                 dim=-1)
             # num_special_image_tokens: [bsz]
             # Reserve for padding of num_images
-            total_num_special_image_tokens = torch.sum(special_image_token_mask)
+            total_num_special_image_tokens = torch.sum(
+                special_image_token_mask)
             if total_num_special_image_tokens != num_images:
-                raise ValueError(
-                    f"Number of image tokens in input_ids ({total_num_special_image_tokens}) different from num_images ({num_images})."
-                )
+                raise ValueError("Number of image tokens in input_ids " +
+                                 f"({total_num_special_image_tokens}) " +
+                                 "different from num_images " +
+                                 f"({num_images}).")
             # Compute the maximum embed dimension
             # max_image_feature_lens is max_feature_lens per batch
             feature_lens = feature_lens.to(input_ids.device)
-            feature_lens_batch = feature_lens.split(num_special_image_tokens.tolist(), dim=0)
-            feature_lens_batch_sum = torch.tensor([x.sum() for x in feature_lens_batch], device=input_ids.device)
-            embed_sequence_lengths = (
-                (attention_mask == 1).long().sum(-1) - num_special_image_tokens + feature_lens_batch_sum
-            )
+            feature_lens_batch = feature_lens.split(
+                num_special_image_tokens.tolist(), dim=0)
+            feature_lens_batch_sum = torch.tensor(
+                [x.sum() for x in feature_lens_batch], device=input_ids.device)
+            embed_sequence_lengths = ((attention_mask == 1).long().sum(-1) -
+                                      num_special_image_tokens +
+                                      feature_lens_batch_sum)
             max_embed_dim = embed_sequence_lengths.max()
 
-            batch_indices, non_image_indices = torch.where((input_ids != image_token_index) & (attention_mask == 1))
-            # 2. Compute the positions where text should be written
-            # Calculate new positions for text tokens in merged image-text sequence.
-            # `special_image_token_mask` identifies image tokens. Each image token will be replaced by `nb_text_tokens_per_images` text tokens.
-            # `torch.cumsum` computes how each image token shifts subsequent text token positions.
-            # - 1 to adjust for zero-based indexing, as `cumsum` inherently increases indices by one.
-            # ! instead of special_image_token_mask * (num_image_patches - 1)
-            #   special_image_token_mask * (num_feature_len - 1)
+            batch_indices, non_image_indices = torch.where(
+                (input_ids != image_token_index) & (attention_mask == 1))
+
             special_image_token_mask = special_image_token_mask.long()
-            special_image_token_mask[special_image_token_mask == 1] = feature_lens - 1
-            new_token_positions = torch.cumsum((special_image_token_mask + 1), -1) - 1
+            special_image_token_mask[special_image_token_mask ==
+                                     1] = feature_lens - 1
+            new_token_positions = torch.cumsum(
+                (special_image_token_mask + 1), -1) - 1
             if left_padding:
-                # shift right token positions so that they are ending at the same number
-                # the below here was incorrect? new_token_positions += new_token_positions[:, -1].max() - new_token_positions[:, -1:]
-                new_token_positions += max_embed_dim - 1 - new_token_positions[:, -1:]
+                new_token_positions += (max_embed_dim - 1 -
+                                        new_token_positions[:, -1:])
 
-            text_to_overwrite = new_token_positions[batch_indices, non_image_indices]
+            text_to_overwrite = new_token_positions[batch_indices,
+                                                    non_image_indices]
 
-        # 3. Create the full embedding, already padded to the maximum position
-        final_embedding = torch.zeros(
-            batch_size, max_embed_dim, embed_dim, dtype=inputs_embeds.dtype, device=inputs_embeds.device
-        )
-        final_attention_mask = torch.zeros(
-            batch_size, max_embed_dim, dtype=attention_mask.dtype, device=inputs_embeds.device
-        )
-        final_input_ids = torch.full(
-            (batch_size, max_embed_dim), self.pad_token_id, dtype=input_ids.dtype, device=inputs_embeds.device
-        )
-        # In case the Vision model or the Language model has been offloaded to CPU, we need to manually
-        # set the corresponding tensors into their correct target device.
+        final_embedding = torch.zeros(batch_size,
+                                      max_embed_dim,
+                                      embed_dim,
+                                      dtype=inputs_embeds.dtype,
+                                      device=inputs_embeds.device)
+        final_attention_mask = torch.zeros(batch_size,
+                                           max_embed_dim,
+                                           dtype=attention_mask.dtype,
+                                           device=inputs_embeds.device)
+        final_input_ids = torch.full((batch_size, max_embed_dim),
+                                     self.pad_token_id,
+                                     dtype=input_ids.dtype,
+                                     device=inputs_embeds.device)
         target_device = inputs_embeds.device
         batch_indices, non_image_indices, text_to_overwrite = (
             batch_indices.to(target_device),
@@ -769,24 +658,32 @@ class MiniMaxVL01ForConditionalGeneration(nn.Module, SupportsMultiModal, Support
         attention_mask = attention_mask.to(target_device)
         input_ids = input_ids.to(target_device)
 
-        # 4. Fill the embeddings based on the mask. If we have ["hey" "<image>", "how", "are"]
-        # we need to index copy on [0, 577, 578, 579] for the text and [1:576] for the image features
-        final_embedding[batch_indices, text_to_overwrite] = inputs_embeds[batch_indices, non_image_indices]
-        final_attention_mask[batch_indices, text_to_overwrite] = attention_mask[batch_indices, non_image_indices]
-        final_input_ids[batch_indices, text_to_overwrite] = input_ids[batch_indices, non_image_indices]
+        final_embedding[batch_indices,
+                        text_to_overwrite] = inputs_embeds[batch_indices,
+                                                           non_image_indices]
+        final_attention_mask[batch_indices,
+                             text_to_overwrite] = attention_mask[
+                                 batch_indices, non_image_indices]
+        final_input_ids[batch_indices,
+                        text_to_overwrite] = input_ids[batch_indices,
+                                                       non_image_indices]
         final_labels = None
         if labels is not None:
             labels = labels.to(target_device)
-            final_labels = torch.full_like(final_attention_mask, ignore_index).to(torch.long)
-            final_labels[batch_indices, text_to_overwrite] = labels[batch_indices, non_image_indices]
+            final_labels = torch.full_like(final_attention_mask,
+                                           ignore_index).to(torch.long)
+            final_labels[batch_indices,
+                         text_to_overwrite] = labels[batch_indices,
+                                                     non_image_indices]
 
-        # 5. Fill the embeddings corresponding to the images. Anything that is not `text_positions` needs filling (#29835)
         with torch.no_grad():
-            image_to_overwrite = torch.full(
-                (batch_size, max_embed_dim), True, dtype=torch.bool, device=inputs_embeds.device
-            )
+            image_to_overwrite = torch.full((batch_size, max_embed_dim),
+                                            True,
+                                            dtype=torch.bool,
+                                            device=inputs_embeds.device)
             image_to_overwrite[batch_indices, text_to_overwrite] = False
-            embed_indices = torch.arange(max_embed_dim).unsqueeze(0).to(target_device)
+            embed_indices = torch.arange(max_embed_dim).unsqueeze(0).to(
+                target_device)
             embed_indices = embed_indices.expand(batch_size, max_embed_dim)
             embed_seq_lens = embed_sequence_lengths[:, None].to(target_device)
 
@@ -801,73 +698,77 @@ class MiniMaxVL01ForConditionalGeneration(nn.Module, SupportsMultiModal, Support
 
             if image_to_overwrite.sum() != num_image_features:
                 raise ValueError(
-                    f"{image_to_overwrite.sum()=} != {num_image_features=} The input provided to the model are wrong. "
-                    f"The number of image tokens is {torch.sum(special_image_token_mask)} while"
-                    f" the number of image given to the model is {num_images}. "
-                    f"This prevents correct indexing and breaks batch generation."
-                )
-        final_embedding[image_to_overwrite] = image_features.contiguous().reshape(-1, embed_dim).to(target_device)
+                    f"{image_to_overwrite.sum()=} != {num_image_features=} " +
+                    "The input provided to the model are wrong. " +
+                    "The number of image tokens is " +
+                    f"{torch.sum(special_image_token_mask)} " +
+                    "while the number of image " + "given to the model is " +
+                    f"{num_images}. " + "This prevents correct indexing " +
+                    "and breaks batch generation.")
+        final_embedding[image_to_overwrite] = image_features.contiguous(
+        ).reshape(-1, embed_dim).to(target_device)
         final_attention_mask |= image_to_overwrite
-        position_ids = (final_attention_mask.cumsum(-1) - 1).masked_fill_((final_attention_mask == 0), 1)
+        position_ids = (final_attention_mask.cumsum(-1) - 1).masked_fill_(
+            (final_attention_mask == 0), 1)
 
-        return final_embedding, final_attention_mask, position_ids, final_labels, final_input_ids
+        return (final_embedding, final_attention_mask, position_ids,
+                final_labels, final_input_ids)
 
-    def pack_image_features(self, image_features, image_sizes, image_newline=None):
-        """
-        Reshape, unpad and then pack each image_feature into a single image_features tensor containing all visual vectors.
-
-        Args:
-            image_features (`List[torch.Tensor]` of length num_images, each of shape `(num_patches, image_length, embed_dim)`)
-                List of image feature tensor, each contains all the visual feature of all patches.
-            image_sizes (`torch.Tensor` of shape `(num_images, 2)`)
-                Actual image size of each images (H, W).
-            image_newline (`torch.Tensor` of shape `(embed_dim)`)
-                New line embedding vector.
-        Returns:
-            image_features (`torch.Tensor` of shape `(all_feat_len, embed_dim)`)
-            feature_lens (`List[int]`)
-                token length of each image in image_features
-        """
+    def pack_image_features(self,
+                            image_features,
+                            image_sizes,
+                            image_newline=None):
         new_image_features = []
         feature_lens = []
         for image_idx, image_feature in enumerate(image_features):
             if image_feature.shape[0] > 1:
                 base_image_feature = image_feature[0]
                 image_feature = image_feature[1:]
-                height = width = self.config.vision_config.image_size // self.config.vision_config.patch_size
+                height = width = (self.config.vision_config.image_size //
+                                  self.config.vision_config.patch_size)
                 if height * width != base_image_feature.shape[0]:
-                    raise ValueError("The number of patches is not consistent with the image size.")
+                    raise ValueError("The number of patches is not " +
+                                     "consistent with the image size.")
                 num_patch_height, num_patch_width = get_anyres_image_grid_shape(
                     image_sizes[image_idx],
                     self.config.image_grid_pinpoints,
                     self.config.vision_config.image_size,
                 )
-                #print('num_patch_height, num_patch_width',num_patch_height,num_patch_width)
-                image_feature = image_feature.view(num_patch_height, num_patch_width, height, width, -1)
-                image_feature = image_feature.permute(4, 0, 2, 1, 3).contiguous()
+                image_feature = image_feature.view(num_patch_height,
+                                                   num_patch_width, height,
+                                                   width, -1)
+                image_feature = image_feature.permute(4, 0, 2, 1,
+                                                      3).contiguous()
                 image_feature = image_feature.flatten(1, 2).flatten(2, 3)
-                image_feature = unpad_image(image_feature, image_sizes[image_idx])
-                #print('unpad', image_feature.shape)
+                image_feature = unpad_image(image_feature,
+                                            image_sizes[image_idx])
                 if image_newline is not None:
                     image_feature = torch.cat(
                         (
                             image_feature,
-                            image_newline[:, None, None].expand(*image_feature.shape[:-1], 1).to(image_feature.dtype),
+                            image_newline[:, None, None].expand(
+                                *image_feature.shape[:-1], 1).to(
+                                    image_feature.dtype),
                         ),
                         dim=-1,
                     )
                 image_feature = image_feature.flatten(1, 2).transpose(0, 1)
-                image_feature = torch.cat((base_image_feature, image_feature), dim=0)
+                image_feature = torch.cat((base_image_feature, image_feature),
+                                          dim=0)
             else:
                 image_feature = image_feature[0]
                 if image_newline is not None:
-                    image_feature = torch.cat((image_feature, image_newline[None].to(image_feature)), dim=0)
+                    image_feature = torch.cat(
+                        (image_feature, image_newline[None].to(image_feature)),
+                        dim=0)
             new_image_features.append(image_feature)
             feature_lens.append(image_feature.size(0))
         image_features = torch.cat(new_image_features, dim=0)
-        feature_lens = torch.tensor(feature_lens, dtype=torch.long, device=image_features.device)
+        feature_lens = torch.tensor(feature_lens,
+                                    dtype=torch.long,
+                                    device=image_features.device)
         return image_features, feature_lens
-    
+
     def forward(
         self,
         input_ids: torch.Tensor,
@@ -881,19 +782,21 @@ class MiniMaxVL01ForConditionalGeneration(nn.Module, SupportsMultiModal, Support
         past_key_values = kwargs.pop("past_key_values", None)
         use_cache = kwargs.pop("use_cache", False)
         output_hidden_states = kwargs.pop("output_hidden_states", True)
-        vision_feature_select_strategy = self.config.vision_feature_select_strategy
+        vision_feature_select_strategy = (
+            self.config.vision_feature_select_strategy)
         attention_mask = kwargs.pop("attention_mask", None)
         position_ids = kwargs.pop("position_ids", None)
         kv_caches = kwargs.pop("kv_caches", None)
         if inputs_embeds is None:
             # 1. Extract the input embeddings
-            # In case image_token_index is not in the embeddings (extra token but embedding don't have it)
             for_inputs_embeds_ids = input_ids.clone()
-            for_inputs_embeds_ids[(input_ids == self.config.image_token_index)] = 0
+            for_inputs_embeds_ids[(
+                input_ids == self.config.image_token_index)] = 0
             inputs_embeds = self.get_input_embeddings(for_inputs_embeds_ids)
 
             # 2. Merge text and images
-            if pixel_values is not None and input_ids.shape[1] != 1 and pixel_values.size(0) > 0:
+            if pixel_values is not None and input_ids.shape[
+                    1] != 1 and pixel_values.size(0) > 0:
                 # ! infer image_num_patches from image_sizes
                 if image_sizes is not None:
                     image_num_patches = [
@@ -901,25 +804,31 @@ class MiniMaxVL01ForConditionalGeneration(nn.Module, SupportsMultiModal, Support
                             image_size=imsize,
                             grid_pinpoints=self.config.image_grid_pinpoints,
                             patch_size=self.config.vision_config.image_size,
-                        )
-                        for imsize in image_sizes
+                        ) for imsize in image_sizes
                     ]
 
-                image_features = self.vision_tower(pixel_values, output_hidden_states=True)
-                selected_image_feature = image_features.hidden_states[self.vision_feature_layer]
+                image_features = self.vision_tower(pixel_values,
+                                                   output_hidden_states=True)
+                selected_image_feature = image_features.hidden_states[
+                    self.vision_feature_layer]
 
-
-                selected_image_feature = torch.chunk(selected_image_feature, len(pixel_values), dim=1)
-                selected_image_feature = torch.cat(selected_image_feature, dim=0)
+                selected_image_feature = torch.chunk(selected_image_feature,
+                                                     len(pixel_values),
+                                                     dim=1)
+                selected_image_feature = torch.cat(selected_image_feature,
+                                                   dim=0)
 
                 if vision_feature_select_strategy == "default":
                     selected_image_feature = selected_image_feature[:, 1:]
                 elif vision_feature_select_strategy == "full":
                     selected_image_feature = selected_image_feature
 
-                image_features = self.multi_modal_projector(selected_image_feature)
+                image_features = self.multi_modal_projector(
+                    selected_image_feature)
                 if image_sizes is not None:
-                    image_features = torch.split(image_features, image_num_patches, dim=0)
+                    image_features = torch.split(image_features,
+                                                 image_num_patches,
+                                                 dim=0)
 
                     image_features, feature_lens = self.pack_image_features(
                         image_features,
@@ -929,28 +838,26 @@ class MiniMaxVL01ForConditionalGeneration(nn.Module, SupportsMultiModal, Support
 
                 inputs_embeds = inputs_embeds.to(image_features.dtype)
                 special_image_mask = (
-                    (input_ids == self.config.image_token_index)
-                    .unsqueeze(-1)
-                    .expand_as(inputs_embeds)
-                    .to(inputs_embeds.device)
-                )
-                image_features = image_features.to(inputs_embeds.device, inputs_embeds.dtype)
-                inputs_embeds = inputs_embeds.masked_scatter(special_image_mask, image_features)
+                    (input_ids == self.config.image_token_index
+                     ).unsqueeze(-1).expand_as(inputs_embeds).to(
+                         inputs_embeds.device))
+                image_features = image_features.to(inputs_embeds.device,
+                                                   inputs_embeds.dtype)
+                inputs_embeds = inputs_embeds.masked_scatter(
+                    special_image_mask, image_features)
 
             # pixel_values is not None but is empty ---> text only cases
-            elif pixel_values is not None and input_ids.shape[1] != 1 and pixel_values.size(0) == 0:
+            elif pixel_values is not None and input_ids.shape[
+                    1] != 1 and pixel_values.size(0) == 0:
                 # there are no images
                 pass
 
-            # In case input_ids.shape[1] == 1 & pixel_values==None & past_key_values != None, we are in the case of
-            # generation with cache
-            elif past_key_values is not None and pixel_values is not None and input_ids.shape[1] == 1:
-                # Retrieve the first layer to inspect the logits and mask out the hidden states
-                # that are set to 0
+            elif (past_key_values is not None and pixel_values is not None
+                  and input_ids.shape[1] == 1):
                 first_layer_past_key_value = past_key_values[0][0][:, :, :, 0]
 
-                # Sum all dimensions of head_dim (-2) to avoid random errors such as: https://github.com/huggingface/transformers/pull/28032#issuecomment-1863691941
-                batch_index, non_attended_tokens = torch.where(first_layer_past_key_value.float().sum(-2) == 0)
+                batch_index, non_attended_tokens = torch.where(
+                    first_layer_past_key_value.float().sum(-2) == 0)
 
                 # Get the target length
                 target_length = input_ids.shape[1]
@@ -962,17 +869,22 @@ class MiniMaxVL01ForConditionalGeneration(nn.Module, SupportsMultiModal, Support
                     device=attention_mask.device,
                 )
 
-
-                valid_indices = non_attended_tokens < extended_attention_mask.size(-1)
+                valid_indices = non_attended_tokens < (
+                    extended_attention_mask.size(-1))
                 new_batch_index = batch_index[valid_indices]
                 new_non_attended_tokens = non_attended_tokens[valid_indices]
 
                 # Zero-out the places where we don't need to attend
-                extended_attention_mask[new_batch_index, new_non_attended_tokens] = 0
+                extended_attention_mask[new_batch_index,
+                                        new_non_attended_tokens] = 0
 
-                attention_mask = torch.cat((extended_attention_mask, attention_mask[:, -target_length:]), dim=1)
+                attention_mask = torch.cat(
+                    (extended_attention_mask, attention_mask[:,
+                                                             -target_length:]),
+                    dim=1)
 
-                position_ids = torch.sum(attention_mask, dim=1).unsqueeze(-1) - 1
+                position_ids = torch.sum(attention_mask,
+                                         dim=1).unsqueeze(-1) - 1
 
         hidden_states = self.language_model.model(
             input_ids=input_ids,
@@ -1008,4 +920,3 @@ class MiniMaxVL01ForConditionalGeneration(nn.Module, SupportsMultiModal, Support
                                                    torch.Tensor]]) -> Set[str]:
         loader = AutoWeightsLoader(self)
         return loader.load_weights(weights)
-

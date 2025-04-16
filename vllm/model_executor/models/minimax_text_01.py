@@ -3,7 +3,7 @@
 import copy
 import math
 import re
-from typing import Dict, Iterable, List, Optional, Tuple, Union, Set
+from typing import Dict, Iterable, List, Optional, Set, Tuple, Union
 
 import torch
 import torch.distributed
@@ -14,7 +14,6 @@ from transformers.configuration_utils import PretrainedConfig
 
 from vllm.attention import Attention, AttentionMetadata
 from vllm.config import CacheConfig, VllmConfig
-from vllm.distributed.communication_op import tensor_model_parallel_all_reduce
 from vllm.distributed.parallel_state import (
     get_pp_group, get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size)
@@ -94,7 +93,7 @@ class MiniMaxText01RMSNormTP(CustomOp):
     ) -> None:
         tp_world = get_tensor_model_parallel_world_size()
         tp_rank = get_tensor_model_parallel_rank()
-            
+
         shard_size = loaded_weight.shape[0] // tp_world
         shard = slice(tp_rank * shard_size, (tp_rank + 1) * shard_size)
         param.data.copy_(loaded_weight[shard])
@@ -110,27 +109,29 @@ class MiniMaxText01RMSNormTP(CustomOp):
         x = x.to(torch.float32)
         if x.dim() == 0:
             return x.to(orig_dtype)
-        
+
         last_dim = x.size(-1)
         weight_dim = self.weight.size(0)
-        
+
         if last_dim != weight_dim:
             if last_dim < weight_dim:
                 weight = self.weight[:last_dim]
             else:
-                weight = torch.ones(last_dim, dtype=self.weight.dtype, device=self.weight.device)
+                weight = torch.ones(last_dim,
+                                    dtype=self.weight.dtype,
+                                    device=self.weight.device)
                 weight[:weight_dim] = self.weight
         else:
             weight = self.weight
-        
+
         if x.dim() > 1:
             weight_shape = [1] * (x.dim() - 1) + [weight.size(0)]
             weight = weight.view(weight_shape)
-        
+
         var = torch.mean(x * x, dim=-1, keepdim=True)
         x_norm = x * torch.rsqrt(var + self.variance_epsilon)
         result = weight * x_norm
-        
+
         return result.to(orig_dtype)
 
 
@@ -459,10 +460,10 @@ class MiniMaxText01LinearAttention(nn.Module):
             hidden.append(
                 self._decode_infer(q, k, v, kv_cache, state_indices_tensor,
                                    attn_metadata))
-        
+
         if not hidden:
             return torch.empty((0, q.size(-1)), device=q.device, dtype=q.dtype)
-            
+
         hidden = torch.concat(hidden, dim=0).contiguous()
         return hidden
 
@@ -684,7 +685,8 @@ class MiniMaxText01DecoderLayer(nn.Module):
 
         shared_intermediate = getattr(config, 'shared_intermediate_size', 0)
         if isinstance(shared_intermediate, list):
-            shared_intermediate = shared_intermediate[layer_id] if layer_id < len(shared_intermediate) else 0
+            shared_intermediate = shared_intermediate[
+                layer_id] if layer_id < len(shared_intermediate) else 0
         if shared_intermediate > 0:
             self.shared_moe = True
             self.shared_mlp = MiniMaxText01MLP(
@@ -730,7 +732,7 @@ class MiniMaxText01DecoderLayer(nn.Module):
         residual = residual * self.layernorm_attention_alpha
         self_attention_output = (self_attention_output *
                                  self.layernorm_attention_beta)
-        
+
         layernorm_input = residual + self_attention_output
         layernorm_output = self.post_attention_layernorm(layernorm_input)
         residual = layernorm_output if self.postnorm else layernorm_input
@@ -915,7 +917,7 @@ class MiniMaxText01Model(nn.Module):
         input_ids: torch.Tensor,
     ) -> torch.Tensor:
         return self.embed_tokens(input_ids)
-    
+
     # def get_input_embeddings(self):
     #     return self.embed_tokens
 
@@ -934,10 +936,10 @@ class MiniMaxText01Model(nn.Module):
             kwargs["request_ids_to_seq_ids"] = {}
         if "finished_requests_ids" not in kwargs:
             kwargs["finished_requests_ids"] = []
-            
+
         if kv_caches is None:
             kv_caches = []
-            
+
         (
             minimax_cache_tensors,
             state_indices_tensor,
@@ -965,7 +967,8 @@ class MiniMaxText01Model(nn.Module):
         for i in range(self.start_layer, self.end_layer):
             layer = self.layers[i]
             _caches = None
-            if isinstance(layer.self_attn, MiniMaxText01Attention) and kv_caches and kv_cache_index < len(kv_caches):
+            if isinstance(layer.self_attn, MiniMaxText01Attention
+                          ) and kv_caches and kv_cache_index < len(kv_caches):
                 _caches = kv_caches[kv_cache_index]
                 kv_cache_index += 1
             if isinstance(layer.self_attn, MiniMaxText01LinearAttention):
@@ -1052,7 +1055,7 @@ class MiniMaxText01ForCausalLM(nn.Module, HasInnerState, IsHybrid,
         input_ids: torch.Tensor,
     ) -> torch.Tensor:
         return self.model.embed_tokens(input_ids)
-    
+
     # def get_input_embeddings(self):
     #     return self.model.embed_tokens
 
