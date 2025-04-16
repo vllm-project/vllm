@@ -24,7 +24,7 @@ from vllm.config import (CacheConfig, CompilationConfig, Config, ConfigFormat,
                          ParallelConfig, PoolerConfig, PoolType,
                          PromptAdapterConfig, SchedulerConfig, SchedulerPolicy,
                          SpeculativeConfig, TaskOption, TokenizerPoolConfig,
-                         VllmConfig, get_attr_docs, get_default_factory_field)
+                         VllmConfig, get_attr_docs, get_field)
 from vllm.executor.executor_base import ExecutorBase
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS
@@ -189,7 +189,7 @@ class EngineArgs:
     tokenizer_pool_type: Union[PoolType, Type["BaseTokenizerGroup"]] = \
         TokenizerPoolConfig.pool_type
     tokenizer_pool_extra_config: dict[str, Any] = \
-        get_default_factory_field(TokenizerPoolConfig, "extra_config")
+        get_field(TokenizerPoolConfig, "extra_config")
     limit_mm_per_prompt: Optional[Mapping[str, int]] = None
     mm_processor_kwargs: Optional[Dict[str, Any]] = None
     disable_mm_preprocessor_cache: bool = False
@@ -212,7 +212,7 @@ class EngineArgs:
     num_gpu_blocks_override: Optional[int] = None
     num_lookahead_slots: int = SchedulerConfig.num_lookahead_slots
     model_loader_extra_config: dict = \
-        get_default_factory_field(LoadConfig, "model_loader_extra_config")
+        get_field(LoadConfig, "model_loader_extra_config")
     ignore_patterns: Optional[Union[str,
                                     List[str]]] = LoadConfig.ignore_patterns
     preemption_mode: Optional[str] = SchedulerConfig.preemption_mode
