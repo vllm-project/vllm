@@ -131,16 +131,19 @@ class FullAttentionAllocator(SpecializedAllocator):
         block_hashes: list[BlockHashType],
         group_ids: Sequence[int],
     ) -> dict[int, list[KVCacheBlock]]:
-        computed_blocks: dict[int, list[KVCacheBlock]] = {}
+        computed_blocks: dict[int, list[KVCacheBlock]] = {
+            group_id: []
+            for group_id in group_ids
+        }
         for block_hash in block_hashes:
             # block_hashes is a chain of block hashes. If a block hash is not
             # in the cached_block_hash_to_id, the following block hashes are
             # not computed yet for sure.
             cached_blocks = self.block_pool.get_cached_block(block_hash)
-            if cached_blocks is None:
-                break
-            if all(group_id in cached_blocks for group_id in group_ids):
-                computed_blocks.append(cached_blocks)
+            if (cached_blocks and all(group_id in cached_blocks
+                                      for group_id in group_ids)):
+                for group_id in group_ids:
+                    computed_blocks[group_id].append(cached_blocks[group_id])
             else:
                 break
         return computed_blocks
@@ -193,7 +196,7 @@ class SlidingWindowAllocator(SpecializedAllocator):
         self,
         block_hashes: list[BlockHashType],
         group_ids: Sequence[int],
-    ) -> list[dict[int, KVCacheBlock]]:
+    ) -> dict[int, list[KVCacheBlock]]:
         # TODO: reduce i by sliding_window_contiguous_blocks when cache miss, to
         # optimize the time complexity from O(len(block_hashes)) to
         # O(len(block_hashes) / sliding_window_contiguous_blocks +

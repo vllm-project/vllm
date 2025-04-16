@@ -39,7 +39,7 @@ class BlockPool:
         # enabled).
         self.free_block_queue = FreeKVCacheBlockQueue(self.blocks)
 
-        # {block_hash: {block ID: {group ID: block}}}. A cached block is
+        # {block_hash: {group ID: {block ID: block}}}. A cached block is
         # a full block with a block hash that can be used for prefix caching.
         # The cached block may be used by running requests or in the
         # free_block_queue that could potentially be evicted.
@@ -73,8 +73,10 @@ class BlockPool:
         cached_blocks = self.cached_block_hash_to_block.get(block_hash)
         if not cached_blocks:
             return None
-        first_block_id = next(iter(cached_blocks))
-        return cached_blocks[first_block_id]
+        return {
+            group_id: next(iter(blocks))
+            for group_id, blocks in cached_blocks.items() if blocks
+        }
 
     def cache_full_blocks(
         self,
