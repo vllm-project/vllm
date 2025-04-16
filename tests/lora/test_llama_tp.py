@@ -88,7 +88,6 @@ def test_llama_lora(sql_lora_files):
         # also test odd max_num_seqs
         max_num_seqs=13,
         max_loras=4,
-        tensor_parallel_size=1,
         enable_chunked_prefill=True)
     generate_and_test(llm, sql_lora_files)
 
