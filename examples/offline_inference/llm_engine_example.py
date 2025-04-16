@@ -50,6 +50,13 @@ def initialize_engine(args: argparse.Namespace) -> LLMEngine:
     return LLMEngine.from_engine_args(engine_args)
 
 
+def parse_args():
+    parser = FlexibleArgumentParser(
+        description='Demo on using the LLMEngine class directly')
+    parser = EngineArgs.add_cli_args(parser)
+    return parser.parse_args()
+
+
 def main(args: argparse.Namespace):
     """Main function that sets up and runs the prompt processing."""
     engine = initialize_engine(args)
@@ -58,8 +65,5 @@ def main(args: argparse.Namespace):
 
 
 if __name__ == '__main__':
-    parser = FlexibleArgumentParser(
-        description='Demo on using the LLMEngine class directly')
-    parser = EngineArgs.add_cli_args(parser)
-    args = parser.parse_args()
+    args = parse_args()
     main(args)

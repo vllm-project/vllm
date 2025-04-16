@@ -6,22 +6,29 @@ from openai import OpenAI
 openai_api_key = "EMPTY"
 openai_api_base = "http://localhost:8000/v1"
 
-client = OpenAI(
-    # defaults to os.environ.get("OPENAI_API_KEY")
-    api_key=openai_api_key,
-    base_url=openai_api_base,
-)
 
-models = client.models.list()
-model = models.data[0].id
+def main():
+    client = OpenAI(
+        # defaults to os.environ.get("OPENAI_API_KEY")
+        api_key=openai_api_key,
+        base_url=openai_api_base,
+    )
 
-responses = client.embeddings.create(
-    input=[
-        "Hello my name is",
-        "The best thing about vLLM is that it supports many different models"
-    ],
-    model=model,
-)
+    models = client.models.list()
+    model = models.data[0].id
 
-for data in responses.data:
-    print(data.embedding)  # List of float of len 4096
+    responses = client.embeddings.create(
+        # ruff: noqa: E501
+        input=[
+            "Hello my name is",
+            "The best thing about vLLM is that it supports many different models"
+        ],
+        model=model,
+    )
+
+    for data in responses.data:
+        print(data.embedding)  # List of float of len 4096
+
+
+if __name__ == "__main__":
+    main()
