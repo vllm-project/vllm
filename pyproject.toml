@@ -41,6 +41,9 @@ Slack="http://slack.vllm.ai/"
 [project.scripts]
 vllm = "vllm.entrypoints.cli.main:main"
 
+[project.entry-points."vllm.general_plugins"]
+filesystem_resolver = "vllm.plugins.filesystem_resolver:register"
+
 [tool.setuptools_scm]
 # no extra settings needed, presence enables setuptools-scm
 
