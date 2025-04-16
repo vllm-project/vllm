@@ -212,31 +212,42 @@ class AsyncLLM(EngineClient):
                                                 priority)
 
         if params.n == 1:
-            await self._add_request(request, None, 0, queue)
+            await self._enqueue_requests([request], None, queue)
             return queue
 
         # Fan out child requests (for n>1).
         parent_request = ParentRequest(request_id, params)
+        child_reqs = []
         for idx in range(params.n):
-            request_id, params = parent_request.get_child_info(idx)
-            child_request = request if idx == params.n - 1 else copy(request)
-            child_request.request_id = request_id
-            child_request.sampling_params = params
-            await self._add_request(child_request, parent_request, idx, queue)
+            cid, cparams = parent_request.get_child_info(idx)
+            child = request if idx == params.n - 1 else copy(request)
+            child.request_id, child.sampling_params = cid, cparams
+            child_reqs.append(child)
+
+        await self._enqueue_requests(child_reqs, parent_request, queue)
         return queue
 
-    async def _add_request(self, request: EngineCoreRequest,
-                           parent_req: Optional[ParentRequest], index: int,
-                           queue: RequestOutputCollector):
+    async def _enqueue_requests(
+        self,
+        requests: list[EngineCoreRequest],
+        parent_request: Optional[ParentRequest],
+        queue: RequestOutputCollector,
+    ) -> None:
+        """
+        Registers each request with the local OutputProcessor and then forwards
+        the bundle to Engine‑Core, using the optimal path (single vs batched).
+        """
+        for idx, req in enumerate(requests):
+            self.output_processor.add_request(req, parent_request, idx, queue)
 
-        # Add the request to OutputProcessor (this process).
-        self.output_processor.add_request(request, parent_req, index, queue)
-
-        # Add the EngineCoreRequest to EngineCore (separate process).
-        await self.engine_core.add_request_async(request)
+        if len(requests) == 1:
+            await self.engine_core.add_request_async(requests[0])
+        else:
+            await self.engine_core.add_request_batched_async(requests)
 
         if self.log_requests:
-            logger.info("Added request %s.", request.request_id)
+            for req in requests:
+                logger.info("Added request %s.", req.request_id)
 
     # TODO: we should support multiple prompts in one call, as you
     # can do with LLM.generate. So that for multi-prompt completion

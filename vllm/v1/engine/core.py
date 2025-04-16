@@ -444,6 +444,9 @@ class EngineCoreProc(EngineCore):
 
         if request_type == EngineCoreRequestType.ADD:
             self.add_request(request)
+        elif request_type == EngineCoreRequestType.ADD_BATCHED:
+            for req in request:
+                self.add_request(req)
         elif request_type == EngineCoreRequestType.ABORT:
             self.abort_requests(request)
         elif request_type == EngineCoreRequestType.START_DP:
@@ -500,6 +503,7 @@ class EngineCoreProc(EngineCore):
 
         # Msgpack serialization decoding.
         add_request_decoder = MsgpackDecoder(EngineCoreRequest)
+        add_batched_request_decoder = MsgpackDecoder(list[EngineCoreRequest])
         generic_decoder = MsgpackDecoder()
         identity = engine_index.to_bytes(length=2, byteorder="little")
 
@@ -516,11 +520,13 @@ class EngineCoreProc(EngineCore):
                 type_frame, *data_frames = socket.recv_multipart(copy=False)
                 request_type = EngineCoreRequestType(bytes(type_frame.buffer))
 
-                # Deserialize the request data.
-                decoder = add_request_decoder if (
-                    request_type
-                    == EngineCoreRequestType.ADD) else generic_decoder
-                request = decoder.decode(data_frames)
+                # Deserialize payload based on request type
+                if request_type == EngineCoreRequestType.ADD:
+                    request = add_request_decoder.decode(data_frames)
+                elif request_type == EngineCoreRequestType.ADD_BATCHED:
+                    request = add_batched_request_decoder.decode(data_frames)
+                else:
+                    request = generic_decoder.decode(data_frames)
 
                 # Push to input queue for core busy loop.
                 self.input_queue.put_nowait((request_type, request))

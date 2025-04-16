@@ -200,16 +200,19 @@ class LLMEngine:
 
         # Fan out child requests (for n>1).
         parent_req = ParentRequest(request_id, params)
+        child_reqs = []
         for idx in range(n):
             request_id, params = parent_req.get_child_info(idx)
-            child_request = request if idx == n - 1 else copy(request)
-            child_request.request_id = request_id
-            child_request.sampling_params = params
+            child_req = request if idx == n - 1 else copy(request)
+            child_req.request_id = request_id
+            child_req.sampling_params = params
 
             # Make a new RequestState and queue.
-            self.output_processor.add_request(child_request, parent_req, idx)
-            # Add the request to EngineCore.
-            self.engine_core.add_request(child_request)
+            self.output_processor.add_request(child_req, parent_req, idx)
+            child_reqs.append(child_req)
+
+        # Add the batch of child requests to EngineCore.
+        self.engine_core.add_request_batched(child_reqs)
 
     def step(self) -> list[RequestOutput]:
 
