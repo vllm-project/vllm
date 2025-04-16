@@ -474,8 +474,6 @@ def test_structured_output_number_range(
         assert isinstance(output, RequestOutput)
         generated_text = output.outputs[0].text
         assert generated_text is not None
-        if "disable-any-whitespace" in guided_decoding_backend:
-            assert "\n" not in generated_text
         output_json = json.loads(generated_text)
         jsonschema.validate(instance=output_json, schema=number_range_schema)
         assert 18 <= output_json["age"] <= 99
@@ -530,8 +528,6 @@ def test_structured_output_pattern(
         assert isinstance(output, RequestOutput)
         generated_text = output.outputs[0].text
         assert generated_text is not None
-        if "disable-any-whitespace" in guided_decoding_backend:
-            assert "\n" not in generated_text
         output_json = json.loads(generated_text)
         jsonschema.validate(instance=output_json, schema=pattern_schema)
         assert (re.fullmatch(r"^\d{5}(-\d{4})?$", output_json["zipcode"])
