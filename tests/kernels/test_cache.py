@@ -281,12 +281,14 @@ def test_reshape_and_cache_flash(
 
     # Clone the KV caches.
     if kv_cache_dtype == "fp8":
-        cloned_key_cache = torch.empty_like(key_cache_compact, dtype=torch.float16)
+        cloned_key_cache = torch.empty_like(key_cache_compact,
+                                            dtype=torch.float16)
         ops.convert_fp8(cloned_key_cache, key_cache_compact, k_scale.item(),
                         kv_cache_dtype)
-        cloned_value_cache = torch.empty_like(value_cache_compact, dtype=torch.float16)
-        ops.convert_fp8(cloned_value_cache, value_cache_compact, v_scale.item(),
-                        kv_cache_dtype)
+        cloned_value_cache = torch.empty_like(value_cache_compact,
+                                              dtype=torch.float16)
+        ops.convert_fp8(cloned_value_cache, value_cache_compact,
+                        v_scale.item(), kv_cache_dtype)
     else:
         cloned_key_cache = key_cache_compact.clone()
         cloned_value_cache = value_cache_compact.clone()
@@ -296,18 +298,19 @@ def test_reshape_and_cache_flash(
              k_scale, v_scale),
             cond=(head_size == HEAD_SIZES[0]))
     ops.reshape_and_cache_flash(key, value, key_cache, value_cache,
-                                slot_mapping, kv_cache_dtype,
-                                k_scale, v_scale)
+                                slot_mapping, kv_cache_dtype, k_scale, v_scale)
     key_cache_compact = permute_and_compact(key_cache)
     value_cache_compact = permute_and_compact(value_cache)
 
     if kv_cache_dtype == "fp8":
-        result_key_cache = torch.empty_like(key_cache_compact, dtype=torch.float16)
+        result_key_cache = torch.empty_like(key_cache_compact,
+                                            dtype=torch.float16)
         ops.convert_fp8(result_key_cache,
                         key_cache_compact,
                         k_scale.item(),
                         kv_dtype=kv_cache_dtype)
-        result_value_cache = torch.empty_like(value_cache_compact, dtype=torch.float16)
+        result_value_cache = torch.empty_like(value_cache_compact,
+                                              dtype=torch.float16)
         ops.convert_fp8(result_value_cache,
                         value_cache_compact,
                         v_scale.item(),
@@ -328,7 +331,6 @@ def test_reshape_and_cache_flash(
             cloned_key_cache[block_idx, :, block_offset, :] = key[i]
             cloned_value_cache[block_idx, :, block_offset, :] = value[i]
 
-        
     if kv_cache_dtype == "fp8":
         torch.testing.assert_close(result_key_cache,
                                    cloned_key_cache,

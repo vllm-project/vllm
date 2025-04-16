@@ -715,9 +715,11 @@ def create_kv_caches_with_random_flash(
     torch_dtype = get_kv_cache_torch_dtype(cache_dtype, model_dtype)
     generic_kv_cache_shape = (num_blocks, 2, block_size, num_heads, head_size)
     assert cache_layout in ("NHD", "HND")
-    stride_order = (0, 1, 2, 3, 4) if cache_layout == "NHD" else (0, 1, 3, 2, 4)
+    stride_order = (0, 1, 2, 3, 4) if cache_layout == "NHD" else (0, 1, 3, 2,
+                                                                  4)
 
-    key_value_cache_shape = tuple(generic_kv_cache_shape[i] for i in stride_order)
+    key_value_cache_shape = tuple(generic_kv_cache_shape[i]
+                                  for i in stride_order)
     scale = head_size**-0.5
 
     key_caches: list[torch.Tensor] = []
