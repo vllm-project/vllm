@@ -84,7 +84,7 @@ def rocm_aiter_fused_experts(
 
     from vllm.model_executor.layers.quantization.utils.fp8_utils import (
         per_token_group_quant_fp8)
-    
+
     if apply_router_weight_on_input:
         _, topk = topk_weights.shape
         assert (
@@ -148,7 +148,7 @@ def rocm_aiter_fused_experts(
             None,
         )
         return out_asm
-    
+
     elif is_rocm_aiter_channel_scaled_moe_enabled() and use_fp8_w8a8:
         topk_weights = topk_weights.to(torch.float32)
         topk_ids = topk_ids.to(torch.int32)
@@ -171,30 +171,29 @@ def rocm_aiter_fused_experts(
                                                model_dim,
                                                dtype,
                                                expert_mask=expert_mask)
-        
-        asm_moe_tkw1_impl(
-            sorted_ids=sorted_token_ids,
-            sorted_weights=sorted_weight_buf,
-            sorted_expert_ids=sorted_expert_ids,
-            num_valid_ids=num_valid_ids,
-            moe_buf=out_asm,
-            hidden_states=hidden_states,
-            w1=w1,
-            w2=w2,
-            topk_weight=topk_weights,
-            topk_ids=topk_ids,
-            fc1_scale=w1_scale,
-            fc2_scale=w2_scale,
-            fc1_smooth_scale=None,
-            fc2_smooth_scale=None,
-            activation_str=activation)
+
+        asm_moe_tkw1_impl(sorted_ids=sorted_token_ids,
+                          sorted_weights=sorted_weight_buf,
+                          sorted_expert_ids=sorted_expert_ids,
+                          num_valid_ids=num_valid_ids,
+                          moe_buf=out_asm,
+                          hidden_states=hidden_states,
+                          w1=w1,
+                          w2=w2,
+                          topk_weight=topk_weights,
+                          topk_ids=topk_ids,
+                          fc1_scale=w1_scale,
+                          fc2_scale=w2_scale,
+                          fc1_smooth_scale=None,
+                          fc2_smooth_scale=None,
+                          activation_str=activation)
 
         return out_asm
 
     elif use_fp8_w8a8:
         assert not apply_router_weight_on_input, (
             "apply_router_weight_on_input is not supported for fp8_w8a8")
-        
+
         return rocm_aiter_asm_fmoe.asm_moe(hidden_states=hidden_states,
                                            w1=w1,
                                            w2=w2,

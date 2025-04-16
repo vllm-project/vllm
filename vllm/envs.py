@@ -557,9 +557,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Whether to use aiter channel scaled moe kernel.
     # By default this is disabled.
     "VLLM_ROCM_USE_AITER_FP8_CHANNEL_SCALED_MOE":
-    lambda:
-    (os.getenv("VLLM_ROCM_USE_AITER_FP8_CHANNEL_SCALED_MOE", "false").lower() in
-     ("true", "1")),
+    lambda: (os.getenv("VLLM_ROCM_USE_AITER_FP8_CHANNEL_SCALED_MOE", "false").
+             lower() in ("true", "1")),
 
     # use aiter rms norm op if aiter ops are enabled.
     "VLLM_ROCM_USE_AITER_RMSNORM":
