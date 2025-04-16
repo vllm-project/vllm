@@ -178,7 +178,7 @@ class KVCacheManager:
                 prefix caching.
             num_lookahead_tokens: The number of speculative tokens to allocate.
                 This is used by spec decode proposers with kv-cache such 
-                as eagle. 
+                as eagle.
 
         Blocks layout:
         -----------------------------------------------------------------------
@@ -216,7 +216,6 @@ class KVCacheManager:
         # the new prefix caching hits
         num_computed_tokens = (request.num_computed_tokens +
                                len(new_computed_blocks) * self.block_size)
-
         num_required_blocks = cdiv(
             num_computed_tokens + num_tokens + num_lookahead_tokens,
             self.block_size)
@@ -264,7 +263,7 @@ class KVCacheManager:
                 # [..., max_num_blocks_per_req].
                 self.max_num_blocks_per_req - len(req_blocks),
             )
-            assert num_new_blocks is not None and num_new_blocks > 0
+            assert num_new_blocks > 0
 
             # Concatenate the computed block IDs and the new block IDs.
             new_blocks = self.block_pool.get_new_blocks(num_new_blocks)
