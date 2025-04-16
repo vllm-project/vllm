@@ -50,6 +50,7 @@ from .interfaces import (
 )
 from .utils import (
     is_pp_missing_parameter,
+    PPMissingLayer,
     make_empty_intermediate_tensors_factory,
     make_layers,
     maybe_prefix,
@@ -378,7 +379,6 @@ class FalconH1ParallelHybrid(nn.Module):
         self,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
-        residual: Optional[torch.Tensor],
         mamba_cache_params: MambaCacheParams,
         sequence_idx: Optional[torch.Tensor] = None,
         **kwargs,
@@ -405,7 +405,6 @@ class FalconH1ParallelHybrid(nn.Module):
             sequence_idx=sequence_idx,
             **kwargs,
         )
-
         # Sum the outputs from both branches.
         # We assume both branches produce outputs of the same
         # dimensionality (config.hidden_size).
@@ -420,8 +419,7 @@ class FalconH1ParallelHybrid(nn.Module):
         hidden_states = self.feed_forward(hidden_states)
         hidden_states = residual + hidden_states
 
-        return hidden_states, residual
-
+        return hidden_states
 
 class FalconH1Model(nn.Module):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
@@ -439,14 +437,17 @@ class FalconH1Model(nn.Module):
         )
         self.vocab_size = config.vocab_size + lora_vocab
         self.org_vocab_size = config.vocab_size
-
-        self.embed_tokens = VocabParallelEmbedding(
-            self.vocab_size,
-            config.hidden_size,
-            org_num_embeddings=config.vocab_size,
-        )
-        self.embedding_multiplier = config.embedding_multiplier
-
+        if get_pp_group().is_first_rank:
+                
+            self.embed_tokens = VocabParallelEmbedding(
+                self.vocab_size,
+                config.hidden_size,
+                org_num_embeddings=config.vocab_size,
+            )
+            self.embedding_multiplier = config.embedding_multiplier
+        else:
+            self.embed_tokens = PPMissingLayer()
+            self.embedding_multiplier = 1.0
         def get_layer(prefix: str):
             layer_idx = int(prefix.rsplit(".", 1)[1])
             layer_class = FalconH1ParallelHybrid
@@ -466,10 +467,12 @@ class FalconH1Model(nn.Module):
                 ["hidden_states", "residual"], config.hidden_size
             )
         )
-
-        self.final_layernorm = RMSNorm(
-            config.hidden_size, eps=config.rms_norm_eps
-        )
+        if get_pp_group().is_last_rank:
+            self.final_layernorm = RMSNorm(
+                config.hidden_size, eps=config.rms_norm_eps
+            )
+        else:
+            self.final_layernorm = PPMissingLayer()
 
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
@@ -507,30 +510,26 @@ class FalconH1Model(nn.Module):
                     self.get_input_embeddings(input_ids)
                     * self.embedding_multiplier
                 )
-            residual = None
         else:
             assert intermediate_tensors is not None
             hidden_states = intermediate_tensors["hidden_states"]
-            residual = intermediate_tensors["residual"]
 
-        residual = None
-        for i in range(len(self.layers)):
+        for i in range(self.start_layer, self.end_layer):
             layer = self.layers[i]
             layer_mamba_cache_params = mamba_cache_params.at_layer_idx(i)
-
-            hidden_states, residual = layer(
+            hidden_states = layer(
                 positions=positions,
                 hidden_states=hidden_states,
-                residual=residual,
                 mamba_cache_params=layer_mamba_cache_params,
+                layer_idx = i,
                 sequence_idx=seq_idx,
             )
-
         if not get_pp_group().is_last_rank:
             return IntermediateTensors(
-                {"hidden_states": hidden_states, "residual": residual}
+                {"hidden_states": hidden_states,
+                 }
             )
-        hidden_states, _ = self.final_layernorm(hidden_states, residual)
+        hidden_states = self.final_layernorm(hidden_states)
         return hidden_states
 
 
@@ -566,7 +565,7 @@ class FalconH1ForCausalLM(
         scheduler_config = vllm_config.scheduler_config
         assert (
             not cache_config.enable_prefix_caching
-        ), "Bamba currently does not support prefix caching"
+        ), "FalconH1 currently does not support prefix caching"
 
         self.quant_config = vllm_config.quant_config
 
@@ -576,34 +575,36 @@ class FalconH1ForCausalLM(
         self.model = FalconH1Model(
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
         )
+        self.tie_word_embeddings = config.tie_word_embeddings
         self.unpadded_vocab_size = config.vocab_size
+        self.mamba_cache: Optional[MambaCacheManager] = None
         if lora_config:
             self.unpadded_vocab_size += lora_config.lora_extra_vocab_size
+        if get_pp_group().is_last_rank:
+            self.lm_head = ParallelLMHead(
+                self.unpadded_vocab_size,
+                config.hidden_size,
+                org_num_embeddings=config.vocab_size,
+                padding_size=(
+                    DEFAULT_VOCAB_PADDING_SIZE
+                    # We need bigger padding if using lora for kernel
+                    # compatibility
+                    if not lora_config
+                    else lora_config.lora_vocab_padding_size
+                ),
+            )
+            self.lm_head_multiplier = config.lm_head_multiplier
+            if self.tie_word_embeddings:
+                self.lm_head = self.lm_head.tie_weights(self.model.embed_tokens)
+            # Used to track and store by the Mamba cache between steps.
 
-        self.lm_head = ParallelLMHead(
-            self.unpadded_vocab_size,
-            config.hidden_size,
-            org_num_embeddings=config.vocab_size,
-            padding_size=(
-                DEFAULT_VOCAB_PADDING_SIZE
-                # We need bigger padding if using lora for kernel
-                # compatibility
-                if not lora_config
-                else lora_config.lora_vocab_padding_size
-            ),
-        )
-        self.tie_word_embeddings = config.tie_word_embeddings
-        self.lm_head_multiplier = config.lm_head_multiplier
-        if self.tie_word_embeddings:
-            self.lm_head = self.lm_head.tie_weights(self.model.embed_tokens)
-        # Used to track and store by the Mamba cache between steps.
-        self.mamba_cache: Optional[MambaCacheManager] = None
-
-        self.logits_processor = LogitsProcessor(
-            self.unpadded_vocab_size,
-            config.vocab_size,
-            scale=config.lm_head_multiplier,
-        )
+            self.logits_processor = LogitsProcessor(
+                self.unpadded_vocab_size,
+                config.vocab_size,
+                scale=config.lm_head_multiplier,
+            )
+        else:
+            self.lm_head = PPMissingLayer()
         self.sampler = get_sampler()
 
         self.make_empty_intermediate_tensors = (
@@ -624,7 +625,7 @@ class FalconH1ForCausalLM(
         if self.mamba_cache is None:
             self.mamba_cache = MambaCacheManager(
                 self.vllm_config,
-                self.lm_head.weight.dtype,
+                self.lm_head.weight.dtype if hasattr(self.lm_head, 'weight') else torch.bfloat16,
                 self.config.num_hidden_layers,
                 *self._get_mamba_cache_shape(),
             )
