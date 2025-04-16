@@ -170,10 +170,6 @@ def has_xgrammar_unsupported_json_features(schema: dict[str, Any]) -> bool:
         if not isinstance(obj, dict):
             return False
 
-        # Check for pattern restrictions
-        if "pattern" in obj:
-            return True
-
         # Check for numeric ranges
         if obj.get("type") in ("integer", "number") and ("multipleOf" in obj):
             return True
