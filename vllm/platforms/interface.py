@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING, NamedTuple, Optional, Tuple, Union
 import numpy as np
 import torch
 
-from vllm.inputs import PromptType
+from vllm.inputs import ProcessorInputs, PromptType
 from vllm.logger import init_logger
 
 if TYPE_CHECKING:
@@ -400,6 +400,7 @@ class Platform:
         cls,
         prompt: PromptType,
         params: Union[SamplingParams, PoolingParams],
+        processed_inputs: ProcessorInputs,
     ) -> None:
         """Raises if this request is unsupported on this platform"""
 
