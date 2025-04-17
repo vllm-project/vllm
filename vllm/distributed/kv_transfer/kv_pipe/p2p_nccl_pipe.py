@@ -152,7 +152,8 @@ class P2pNcclPipe:
                     tensor_size = tensor.element_size() * tensor.numel()
                     while (self.buffer_size + tensor_size
                            > self.buffer_size_threshold):
-                        _, oldest_tenser = self.send_store.popitem(last=False)
+                        oldest_tenser_id = next(iter(self.send_store))
+                        oldest_tenser = self.send_store.pop(oldest_tenser_id)
                         oldest_tenser_size = oldest_tenser.element_size(
                         ) * oldest_tenser.numel()
                         self.buffer_size -= oldest_tenser_size
@@ -186,7 +187,7 @@ class P2pNcclPipe:
                 tensor = self.recv_store[tensor_id]
                 self.recv_store[tensor_id] = None
                 while len(self.recv_store) > 10000:
-                    self.recv_store.popitem(last=False)
+                    self.recv_store.pop(next(iter(self.recv_store)))
 
             duration = time.time() - start_time
             if tensor is not None:
