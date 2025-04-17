@@ -4,7 +4,7 @@ from typing import List
 
 from torch import fx as fx
 
-from vllm.config import CompilationConfig
+from vllm.config import VllmConfig
 from vllm.logger import init_logger
 
 from .fix_functionalization import FixFunctionalizationPass
@@ -44,18 +44,18 @@ class PostGradPassManager(CustomGraphPass):
         # always run fix_functionalization last
         self.fix_functionalization(graph)
 
-    def configure(self, pass_config: CompilationConfig.PassConfig):
-        self.pass_config = pass_config
-        if pass_config.enable_noop:
-            self.passes += [NoOpEliminationPass(pass_config)]
+    def configure(self, config: VllmConfig):
+        self.pass_config = config.compilation_config.pass_config
+        if self.pass_config.enable_noop:
+            self.passes += [NoOpEliminationPass(config)]
 
-        if pass_config.enable_fusion:
-            self.passes += [FusionPass.instance(pass_config)]
+        if self.pass_config.enable_fusion:
+            self.passes += [FusionPass.instance(config)]
 
-        if pass_config.enable_sequence_parallelism:
-            self.passes += [SequenceParallelismPass.instance(pass_config)]
+        if self.pass_config.enable_sequence_parallelism:
+            self.passes += [SequenceParallelismPass.instance(config)]
 
-        self.fix_functionalization = FixFunctionalizationPass(pass_config)
+        self.fix_functionalization = FixFunctionalizationPass(config)
 
     def add(self, pass_: InductorPass):
         assert isinstance(pass_, InductorPass)

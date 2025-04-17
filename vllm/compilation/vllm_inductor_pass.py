@@ -5,7 +5,7 @@ from typing import Optional
 
 import torch
 
-from vllm.config import CompilationConfig
+from vllm.config import CompilationConfig, VllmConfig
 # yapf: disable
 from vllm.distributed import get_tensor_model_parallel_rank as get_tp_rank
 from vllm.distributed import (
@@ -25,8 +25,10 @@ class VllmInductorPass(InductorPass):
     It provides timing, logging, and dumping utilities.
     """
 
-    def __init__(self, config: CompilationConfig.PassConfig):
-        self.config = config
+    def __init__(self, config: VllmConfig):
+        self.config = config.compilation_config.pass_config
+        self.dtype = config.model_config.dtype
+        self.device = config.device_config.device
         self.pass_name = self.__class__.__name__
 
     def dump_graph(self, graph: torch.fx.Graph, stage: str, always=False):
