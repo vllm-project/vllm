@@ -102,7 +102,8 @@ class MetaData:
         self.eight_bit_kv = ((q_descale is None) and (k_descale is not None)
                              and (v_descale is not None))
 
-    def need_bias(self, bias, batch, nheads, seqlen_q, seqlen_k):
+    def need_bias(self, bias, seqlen_q, seqlen_k):
+        assert bias is not None
         assert bias.is_cuda
         assert bias.dim() == 4
         assert bias.shape[0] == 1
