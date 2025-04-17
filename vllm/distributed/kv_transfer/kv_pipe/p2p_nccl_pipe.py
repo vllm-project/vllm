@@ -283,9 +283,10 @@ class P2pNcclPipe:
                             comm, rank = self.comms[remote_address.decode()]
                             self._recv(comm, tensor, rank ^ 1)
                             logger.debug(
-                                "🔵[PUT]Recv Tensor, %s👈%s, MyRank:%s, data:%s, "
-                                "shape:%s", self.zmq_address,
-                                remote_address.decode(), rank, data, tensor.shape)
+                                "🔵[PUT]Recv Tensor, %s👈%s, MyRank:%s, "
+                                "data:%s, shape:%s", self.zmq_address,
+                                remote_address.decode(), rank, data,
+                                tensor.shape)
 
                     except torch.cuda.OutOfMemoryError:
                         self.router_socket.send_multipart(

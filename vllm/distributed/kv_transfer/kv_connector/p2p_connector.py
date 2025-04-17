@@ -7,9 +7,9 @@ import torch
 
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.base import KVConnectorBase
-from vllm.distributed.kv_transfer.kv_pipe.p2p_nccl_pipe import P2pNcclPipe
 from vllm.distributed.kv_transfer.kv_connector.utils import (
     model_aware_kv_ops_helper as kv_helper)
+from vllm.distributed.kv_transfer.kv_pipe.p2p_nccl_pipe import P2pNcclPipe
 from vllm.logger import init_logger
 from vllm.sequence import IntermediateTensors
 
@@ -130,7 +130,7 @@ class P2pConnector(KVConnectorBase):
             remote_address = ip + ":" + str(port + self.rank)
 
             kvcache = self.p2p_nccl_pipe.recv_tensor(request_id + "kv",
-                                                  remote_address)
+                                                     remote_address)
             hidden = self.p2p_nccl_pipe.recv_tensor(request_id + "hidden",
                                                     remote_address)
 
@@ -151,8 +151,7 @@ class P2pConnector(KVConnectorBase):
                 kv_cache = kv_caches[layer_id - start_layer]
 
                 # get remote kvcache
-                remote_k, remote_v = kvcache[0][layer_id], kvcache[1][
-                    layer_id]
+                remote_k, remote_v = kvcache[0][layer_id], kvcache[1][layer_id]
 
                 self.kv_helper.put_kv_to_cache(model_executable, remote_k,
                                                remote_v, layer, kv_cache,
