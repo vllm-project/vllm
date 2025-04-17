@@ -66,7 +66,6 @@ from vllm.worker.model_runner_base import InputProcessingError
 logger = init_logger(__name__)
 _LOCAL_LOGGING_INTERVAL_SEC = 5
 
-_G = TypeVar("_G", bound=TokenizerGroup, default=TokenizerGroup)
 _O = TypeVar("_O", RequestOutput, PoolingRequestOutput)
 _R = TypeVar("_R", default=Any)
 
@@ -537,21 +536,12 @@ class LLMEngine:
         if model_executor := getattr(self, "model_executor", None):
             model_executor.shutdown()
 
-    def get_tokenizer_group(
-        self,
-        group_type: Type[_G] = TokenizerGroup,
-    ) -> _G:
-        tokenizer_group = self.tokenizer
-
-        if tokenizer_group is None:
+    def get_tokenizer_group(self) -> TokenizerGroup:
+        if self.tokenizer is None:
             raise ValueError("Unable to get tokenizer because "
                              "skip_tokenizer_init is True")
-        if not isinstance(tokenizer_group, group_type):
-            raise TypeError("Invalid type of tokenizer group. "
-                            f"Expected type: {group_type}, but "
-                            f"found type: {type(tokenizer_group)}")
 
-        return tokenizer_group
+        return self.tokenizer
 
     def get_tokenizer(
         self,

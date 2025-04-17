@@ -31,7 +31,6 @@ from vllm.v1.executor.abstract import Executor
 
 logger = init_logger(__name__)
 
-_G = TypeVar("_G", bound=TokenizerGroup, default=TokenizerGroup)
 _R = TypeVar("_R", default=Any)
 
 
@@ -253,21 +252,12 @@ class LLMEngine:
     def is_sleeping(self) -> bool:
         return self.engine_core.is_sleeping()
 
-    def get_tokenizer_group(
-        self,
-        group_type: type[_G] = TokenizerGroup,
-    ) -> _G:
-        tokenizer_group = self.tokenizer
-
-        if tokenizer_group is None:
+    def get_tokenizer_group(self) -> TokenizerGroup:
+        if self.tokenizer is None:
             raise ValueError("Unable to get tokenizer because "
                              "skip_tokenizer_init is True")
-        if not isinstance(tokenizer_group, group_type):
-            raise TypeError("Invalid type of tokenizer group. "
-                            f"Expected type: {group_type}, but "
-                            f"found type: {type(tokenizer_group)}")
 
-        return tokenizer_group
+        return self.tokenizer
 
     def add_lora(self, lora_request: LoRARequest) -> bool:
         """Load a new LoRA adapter into the engine for future requests."""
