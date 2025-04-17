@@ -147,7 +147,7 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
                                          min_transformers_version="4.50"),
     "GlmForCausalLM": _HfExamplesInfo("THUDM/glm-4-9b-chat-hf"),
     "Glm4ForCausalLM": _HfExamplesInfo(
-        "THUDM/GLM-4-32B-Chat-0414",
+        "THUDM/GLM-4-32B-0414",
         is_available_online=False,
         min_transformers_version="4.52.dev0"
     ),
@@ -204,6 +204,8 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
                                             trust_remote_code=True),
     "PhiMoEForCausalLM": _HfExamplesInfo("microsoft/Phi-3.5-MoE-instruct",
                                          trust_remote_code=True),
+    "Plamo2ForCausalLM": _HfExamplesInfo("pfnet/plamo-2-1b",
+                                        trust_remote_code=True),
     "QWenLMHeadModel": _HfExamplesInfo("Qwen/Qwen-7B-Chat",
                                        trust_remote_code=True),
     "Qwen2ForCausalLM": _HfExamplesInfo("Qwen/Qwen2-7B-Instruct",
@@ -273,6 +275,9 @@ _CROSS_ENCODER_EXAMPLE_MODELS = {
     "BertForSequenceClassification": _HfExamplesInfo("cross-encoder/ms-marco-MiniLM-L-6-v2"),  # noqa: E501
     "RobertaForSequenceClassification": _HfExamplesInfo("cross-encoder/quora-roberta-base"),  # noqa: E501
     "XLMRobertaForSequenceClassification": _HfExamplesInfo("BAAI/bge-reranker-v2-m3"),  # noqa: E501
+    "ModernBertForSequenceClassification":
+        _HfExamplesInfo("Alibaba-NLP/gte-reranker-modernbert-base",
+                        min_transformers_version="4.49"),
 }
 
 _MULTIMODAL_EXAMPLE_MODELS = {
@@ -361,7 +366,7 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     # Florence-2 uses BartFastTokenizer which can't be loaded from AutoTokenizer
     # Therefore, we borrow the BartTokenizer from the original Bart model
     "Florence2ForConditionalGeneration": _HfExamplesInfo("microsoft/Florence-2-base",  # noqa: E501
-                                                         tokenizer="facebook/bart-base",
+                                                         tokenizer="Isotr0py/Florence-2-tokenizer",
                                                          trust_remote_code=True),  # noqa: E501
     "MllamaForConditionalGeneration": _HfExamplesInfo("meta-llama/Llama-3.2-11B-Vision-Instruct"),  # noqa: E501
     "WhisperForConditionalGeneration": _HfExamplesInfo("openai/whisper-large-v3"),  # noqa: E501
