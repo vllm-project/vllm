@@ -22,7 +22,7 @@ class ModelRequestData(NamedTuple):
 def run_florence2():
     engine_args = EngineArgs(
         model="microsoft/Florence-2-large",
-        tokenizer="facebook/bart-large",
+        tokenizer="Isotr0py/Florence-2-tokenizer",
         max_num_seqs=8,
         trust_remote_code=True,
         limit_mm_per_prompt={"image": 1},
@@ -165,6 +165,7 @@ def main(args):
         temperature=0,
         top_p=1.0,
         max_tokens=64,
+        skip_special_tokens=False,
     )
 
     start = time.time()

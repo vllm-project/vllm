@@ -150,7 +150,7 @@ def run_florence2(questions: list[str], modality: str) -> ModelRequestData:
 
     engine_args = EngineArgs(
         model="microsoft/Florence-2-large",
-        tokenizer="facebook/bart-large",
+        tokenizer="Isotr0py/Florence-2-tokenizer",
         max_model_len=4096,
         max_num_seqs=2,
         trust_remote_code=True,
