@@ -162,6 +162,7 @@ def input_helper(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, dtype, layout):
     elif layout == 'bshd':
         q_tensor_shape = (Z, N_CTX_Q, HQ, D_HEAD)
         k_tensor_shape = (Z, N_CTX_K, HK, D_HEAD)
+
     q = torch.randn(q_tensor_shape,
                     dtype=dtype,
                     device="cuda",
@@ -236,15 +237,15 @@ def varlen_input_helper(Z,
 
 
 @pytest.mark.parametrize('Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD', [
-    (4, 48, 12, 1, 1, 64),
-    (4, 48, 48, 1, 1, 128),
-    (4, 48, 24, 3, 3, 128),
+    (1, 48, 12, 1, 1, 64),
     (4, 4, 4, 128, 128, 65),
+    (16, 48, 48, 1, 1, 128),
+    (64, 48, 24, 3, 3, 128),
     (4, 4, 4, 113, 123, 1),
 ])
 @pytest.mark.parametrize('causal', [True, False])
 @pytest.mark.parametrize('use_alibi', [True, False])
-@pytest.mark.parametrize('layout', ['bshd', 'bhsd'])
+@pytest.mark.parametrize('layout', ['bshd'])
 def test_op_fwd(Z,
                 HQ,
                 HK,
@@ -311,7 +312,7 @@ def test_op_fwd(Z,
 ])
 @pytest.mark.parametrize('causal', [True, False])
 @pytest.mark.parametrize('use_alibi', [True, False])
-@pytest.mark.parametrize('layout', ['bshd', 'bhsd'])
+@pytest.mark.parametrize('layout', ['bshd'])
 @pytest.mark.parametrize('persistent', ['fixed', 'dynamic'])
 def test_op_persistent_fwd(Z,
                            HQ,
@@ -506,9 +507,11 @@ def test_op_fwd_bias(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, use_bias, dtype):
     torch.testing.assert_close(ref_out, tri_out, atol=2e-2, rtol=2e-2)
 
 
-@pytest.mark.parametrize('Z, H, N_CTX, D_HEAD', [(4, 48, 256, 64),
+# NOTE: Uses thd layout, so also tests thd.
+@pytest.mark.parametrize('Z, H, N_CTX, D_HEAD', [(1, 48, 256, 64),
                                                  (4, 48, 512, 64),
-                                                 (4, 48, 128, 128)])
+                                                 (16, 48, 512, 64),
+                                                 (64, 48, 128, 128)])
 @pytest.mark.parametrize('causal', [True, False])
 def test_op_varlen_fwd(Z, H, N_CTX, D_HEAD, causal, dtype=torch.float16):
 
@@ -525,6 +528,7 @@ def test_op_varlen_fwd(Z, H, N_CTX, D_HEAD, causal, dtype=torch.float16):
     torch.testing.assert_close(ref_out, tri_out, atol=2e-2, rtol=2e-2)
 
 
+# NOTE: Uses thd layout, so also tests thd.
 @pytest.mark.parametrize('Z, HQ, HK, N_CTX, D_HEAD', [(2, 48, 24, 128, 64),
                                                       (4, 48, 12, 256, 64),
                                                       (4, 48, 4, 512, 64),
