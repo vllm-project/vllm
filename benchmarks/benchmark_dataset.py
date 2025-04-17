@@ -868,7 +868,6 @@ class ASRDataset(HuggingFaceDataset):
         for item in self.data:
             if len(sampled_requests) >= num_requests:
                 break
-            # output_len = len(tokenizer._normalize(item['text']))
             audio = item["audio"]
             y, sr = audio["array"], audio["sampling_rate"]
             duration_s = librosa.get_duration(y=y, sr=sr)
@@ -884,7 +883,6 @@ class ASRDataset(HuggingFaceDataset):
                     prompt_len=prompt_len,
                     expected_output_len=output_len,
                     multi_modal_data=mm_content,
-                    # language="en" will default to en on endpoint
                 ))
         if skipped:
             logger.warning("%d samples discarded from dataset due to" \
