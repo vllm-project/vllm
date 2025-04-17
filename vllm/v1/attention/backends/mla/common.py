@@ -186,6 +186,7 @@ return curr_o @ W_O
 
 import functools
 from abc import abstractmethod
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Generic, Optional, TypeVar
 
@@ -377,8 +378,11 @@ class MLACommonMetadataBuilder(Generic[M]):
             )
             self.page_size = self.runner.block_size
 
-    def reorder_batch(self, input_batch: "InputBatch",
-                      scheduler_output: "SchedulerOutput") -> bool:
+    def reorder_batch(
+        self,
+        input_batch: "InputBatch",
+        scheduler_output: "SchedulerOutput",
+    ) -> Sequence[tuple[int, int]]:
         # We now want to reorder the batch so that the "decode" requests are and
         # the front and the "prefill" requests are at the using the least amount
         # swaps possible. (NOTE for now we loosely use "decode" to mean requests
@@ -415,19 +419,24 @@ class MLACommonMetadataBuilder(Generic[M]):
         # the above loop
         num_decodes = len(decodes)
         num_prefills = len(prefills)
-        first_prefill = 0
-        modified_batch = False
 
+        swaps = []
         for i in range(1, min(num_decodes, num_prefills) + 1):
             # If the decode is at the "back" of the batch, i, we can swap it
             # with the prefill closest to the front of the batch
-            if decodes[num_decodes - i] >= num_decodes:
-                input_batch.swap_states(prefills[first_prefill],
-                                        decodes[num_decodes - i])
-                first_prefill += 1
-                modified_batch = True
-            else:
+            if decodes[num_decodes - i] < num_decodes:
                 break
+
+            i1 = prefills[i - 1]
+            i2 = decodes[num_decodes - i]
+            input_batch.swap_states(i1, i2)
+
+            # Using "move" operation of LogitsProcessors via temporary slot
+            # currently.
+            # TODO possibly add more direct swap operation to LPs
+            swaps.append((i1, input_batch.max_num_reqs))
+            swaps.append((i2, i1))
+            swaps.append((input_batch.max_num_reqs, i2))
 
         # Save for next `build` call
         # TODO(lucas): this is a bit of a hack, we should probably have a
@@ -437,7 +446,7 @@ class MLACommonMetadataBuilder(Generic[M]):
         self._num_decode_tokens = num_decode_tokens
         self._num_prefill_tokens = num_prefill_tokens
 
-        return modified_batch
+        return swaps
 
     def _build_decode(self, input_positions: torch.Tensor,
                       block_table: torch.Tensor, seq_lens: torch.Tensor):
