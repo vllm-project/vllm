@@ -20,6 +20,12 @@ NGRAM_SPEC_CONFIG = {
     "num_speculative_tokens": 5,
     "prompt_lookup_max": 5,
     "prompt_lookup_min": 1,
+},
+
+EAGLE_SPEC_CONFIG = {
+    "method": "eagle",
+    "model": "abhigoyal/EAGLE-LLaMA3-Instruct-8B-vllm",
+    "num_speculative_tokens": 5,
 }
 
 PARAMS_MODELS_BACKENDS_TOKENIZER_MODE = [
@@ -36,7 +42,9 @@ PARAMS_MODELS_BACKENDS_TOKENIZER_MODE = [
     ("mistralai/Ministral-8B-Instruct-2410", "guidance:disable-any-whitespace",
      "auto", NGRAM_SPEC_CONFIG),
     ("Qwen/Qwen2.5-1.5B-Instruct", "xgrammar:disable-any-whitespace", "auto",
-     NGRAM_SPEC_CONFIG)
+     NGRAM_SPEC_CONFIG),
+    ("meta-llama/Meta-Llama-3-8B-Instruct", "xgrammar:disable-any-whitespace",
+     "auto", EAGLE_SPEC_CONFIG)
 ]
 
 PARAMS_MODELS_TOKENIZER_MODE = [
