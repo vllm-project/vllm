@@ -13,11 +13,10 @@
 template <typename scalar_t, int bit, int GROUPS>
 __global__ void moe_wna16_gemm_kernel(
     const scalar_t* __restrict__ input, scalar_t* __restrict__ output,
-
     const uint32_t* __restrict__ qweight, const scalar_t* __restrict__ scales,
     const uint32_t* __restrict__ qzeros,
 
-    const float* __restrict__ topk_weights,
+    const scalar_t* __restrict__ topk_weights,
     const int32_t* __restrict__ sorted_token_ids,
     const int32_t* __restrict__ expert_ids,
     const int32_t* __restrict__ num_tokens_post_pad,
@@ -54,8 +53,6 @@ __global__ void moe_wna16_gemm_kernel(
       if (token_index / top_k >= size_m) break;
 
       num_valid_tokens = m + 1;
-      if (blockIdx.z == 0 && offset_n < size_n)
-        output[token_index * size_n + offset_n] = Dtype::int2num(0);
 
       if (expert_id != -1) {
         int k_per_thread = DIVIDE(BLOCK_SIZE_K, BLOCK_SIZE_N);
@@ -214,7 +211,7 @@ __global__ void moe_wna16_gemm_kernel(
       const int32_t token_index =
           sorted_token_ids[blockIdx.x * BLOCK_SIZE_M + m];
       if (mul_topk_weight) {
-        res[m] *= topk_weights[token_index];
+        res[m] *= Dtype::num2float(topk_weights[token_index]);
       }
       atomicAdd(&output[token_index * size_n + offset_n],
                 Dtype::float2num(res[m]));
@@ -228,7 +225,7 @@ __global__ void moe_wna16_gemm_kernel(
 template <typename scalar_t>
 void run_moe_wna16_gemm(const scalar_t* input, scalar_t* output,
                         const uint32_t* b_qweight, const scalar_t* b_scales,
-                        const uint32_t* b_qzeros, const float* topk_weights,
+                        const uint32_t* b_qzeros, const scalar_t* topk_weights,
                         const int32_t* sorted_token_ids,
                         const int32_t* expert_ids,
                         const int32_t* num_tokens_post_pad, int num_experts,
@@ -284,8 +281,7 @@ torch::Tensor moe_wna16_gemm(torch::Tensor input, torch::Tensor output,
                              int64_t BLOCK_SIZE_M, int64_t BLOCK_SIZE_N,
                              int64_t BLOCK_SIZE_K, int64_t bit) {
   const at::cuda::OptionalCUDAGuard device_guard(device_of(input));
-  auto options =
-      torch::TensorOptions().dtype(input.dtype()).device(input.device());
+  output.zero_();
 
   const int num_experts = b_qweight.size(0);
   const int size_m = input.size(0);
@@ -318,27 +314,36 @@ torch::Tensor moe_wna16_gemm(torch::Tensor input, torch::Tensor output,
               "BLOCK_SIZE_K // group_size must be one of [1, 2, 4, 8]");
 
   if (input.scalar_type() == at::ScalarType::Half) {
+    const at::Half* topk_weights_ptr = nullptr;
+    if (topk_weights.has_value())
+      topk_weights_ptr = topk_weights.value().data_ptr<at::Half>();
+
     run_moe_wna16_gemm<half>(
         (const half*)input.data_ptr<at::Half>(),
         (half*)output.data_ptr<at::Half>(),
         (const uint32_t*)b_qweight.data_ptr<uint8_t>(),
         (const half*)b_scales.data_ptr<at::Half>(), b_qzeros_ptr,
-        topk_weights_ptr, sorted_token_ids.data_ptr<int32_t>(),
+        (const half*)topk_weights_ptr, sorted_token_ids.data_ptr<int32_t>(),
         expert_ids.data_ptr<int32_t>(), num_tokens_post_pad.data_ptr<int32_t>(),
         num_experts, group_size, num_token_blocks, top_k, size_m, size_n,
         size_k, BLOCK_SIZE_M, BLOCK_SIZE_N, BLOCK_SIZE_K, bit,
         b_qzeros.has_value(), topk_weights.has_value());
   } else if (input.scalar_type() == at::ScalarType::BFloat16) {
+    const at::BFloat16* topk_weights_ptr = nullptr;
+    if (topk_weights.has_value())
+      topk_weights_ptr = topk_weights.value().data_ptr<at::BFloat16>();
+
     run_moe_wna16_gemm<nv_bfloat16>(
         (const nv_bfloat16*)input.data_ptr<at::BFloat16>(),
         (nv_bfloat16*)output.data_ptr<at::BFloat16>(),
         (const uint32_t*)b_qweight.data_ptr<uint8_t>(),
         (const nv_bfloat16*)b_scales.data_ptr<at::BFloat16>(), b_qzeros_ptr,
-        topk_weights_ptr, sorted_token_ids.data_ptr<int32_t>(),
-        expert_ids.data_ptr<int32_t>(), num_tokens_post_pad.data_ptr<int32_t>(),
-        num_experts, group_size, num_token_blocks, top_k, size_m, size_n,
-        size_k, BLOCK_SIZE_M, BLOCK_SIZE_N, BLOCK_SIZE_K, bit,
-        b_qzeros.has_value(), topk_weights.has_value());
+        (const nv_bfloat16*)topk_weights_ptr,
+        sorted_token_ids.data_ptr<int32_t>(), expert_ids.data_ptr<int32_t>(),
+        num_tokens_post_pad.data_ptr<int32_t>(), num_experts, group_size,
+        num_token_blocks, top_k, size_m, size_n, size_k, BLOCK_SIZE_M,
+        BLOCK_SIZE_N, BLOCK_SIZE_K, bit, b_qzeros.has_value(),
+        topk_weights.has_value());
   } else {
     TORCH_CHECK(false, "moe_wna16_gemm only supports bfloat16 and float16");
   }
