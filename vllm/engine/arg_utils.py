@@ -1527,12 +1527,6 @@ class EngineArgs:
                                    recommend_to_remove=False)
                 return False
 
-        # No Disaggregated Prefill so far.
-        if self.kv_transfer_config != EngineArgs.kv_transfer_config:
-            _raise_or_fallback(feature_name="--kv-transfer-config",
-                               recommend_to_remove=False)
-            return False
-
         # No FlashInfer or XFormers so far.
         V1_BACKENDS = [
             "FLASH_ATTN_VLLM_V1", "FLASH_ATTN", "PALLAS", "PALLAS_VLLM_V1",
