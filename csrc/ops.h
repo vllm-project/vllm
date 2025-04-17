@@ -214,7 +214,8 @@ void cutlass_blockscaled_fp4_group_mm(
     const torch::Tensor &alphas, const torch::Tensor &stride_a, 
     const torch::Tensor &stride_b, const torch::Tensor &stride_c,
     const torch::Tensor &layout_sfa, const torch::Tensor &layout_sfb,
-    const torch::Tensor &problem_sizes, const torch::Tensor &expert_offsets);
+    const torch::Tensor &problem_sizes, const torch::Tensor &expert_offsets,
+    const torch::Tensor &sf_offsets);
 
 void get_cutlass_moe_mm_data(
     const torch::Tensor& topk_ids, torch::Tensor& expert_offsets,

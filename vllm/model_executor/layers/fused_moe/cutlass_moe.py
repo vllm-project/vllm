@@ -182,6 +182,16 @@ from vllm.scalar_type import scalar_types
 FLOAT4_E2M1_MAX = scalar_types.float4_e2m1fn.max()
 FLOAT8_E4M3_MAX = torch.finfo(torch.float8_e4m3fn).max
 
+def quantize_x_per_expert(a, expert_size):
+    return
+    
+
+def quantize_replicated_a(a, tokens_per_expert):
+#    ops.scaled_fp4_quant(a, mat_a_gs)
+   
+   return  
+    
+
 def cutlass_moe_fp4(
     a: torch.Tensor,
     a1_gscale: torch.Tensor,
@@ -250,10 +260,10 @@ def cutlass_moe_fp4(
     device = a.device
     out_dtype = a.dtype
 
-    # Step 1: Quantize a to fp4
-    a_amax = torch.abs(a).amax().to(torch.float32)
-    mat_a_gs = FLOAT8_E4M3_MAX * FLOAT4_E2M1_MAX / a_amax
-    a_fp4, a_blockscale = ops.scaled_fp4_quant(a, mat_a_gs)
+    # # Step 1: Quantize a to fp4
+    # a_amax = torch.abs(a).amax().to(torch.float32)
+    # mat_a_gs = FLOAT8_E4M3_MAX * FLOAT4_E2M1_MAX / a_amax
+    # a_fp4, a_blockscale = ops.scaled_fp4_quant(a, mat_a_gs)
 
     expert_offsets = torch.empty((e+ 1),
                                  dtype=torch.int32,
@@ -279,11 +289,44 @@ def cutlass_moe_fp4(
                                 num_experts=w1_fp4.shape[0],
                                 n=n, k=k)
 
-    # Replicated scales 
-    rep_a_fp4 = a_fp4[a_map]
-    rep_a_blockscale = a_blockscale.view(dtype=torch.uint8)[a_map].view(
-                                                     dtype=a_blockscale.dtype)
-    assert rep_a_fp4.shape[0] == m * num_topk, "map was expanded incorrectly"
+    # Replicated a
+    rep_a =  a[a_map]
+    tokens_per_expert = problem_sizes1[:,0]
+    round_up = lambda x, y: (x + y - 1) // y * y
+    sf_sizes = round_up(tokens_per_expert, 128)
+    sf_k = round_up(k // 16, 4)
+    # sf_sizes = ((tokens_per_expert + 128 - 1) // 128) * 128
+
+    # max_tokens_per_expert = max(tokens_per_expert)
+    # round_up = lambda x, y: (x + y - 1) // y * y
+    # rounded_max_m = round_up(max_tokens_per_expert, 128)
+    # rep_a_fp4 = torch.empty(e, rounded_max_m, k // 2, dtype=torch.uint8, device=a.device)
+    rep_a_fp4 = torch.empty(m*num_topk, half_k_w1, dtype=torch.uint8, device=a.device)
+    
+    rep_a_blockscale = torch.empty(sum(sf_sizes), sf_k, dtype=torch.float8_e4m3fn, device=a.device)
+    
+    # rep_a_blockscale = torch.empty(e, rounded_max_m, k // 16, dtype=torch.float8_e4m3fn, device=a.device)
+    rep_a_gs = torch.empty(e,  dtype=torch.float32, device=a.device)
+    sf_offsets = torch.zeros(e+1, dtype=problem_sizes1.dtype, device=problem_sizes1.device)
+    sf_offsets[1:] = torch.cumsum(sf_sizes, dim=0) 
+    for expert_id in range(e):
+        if tokens_per_expert[expert_id] == 0:
+            print(f"expert: {expert_id} has zero psize")
+            continue
+        sf_slice = slice(sf_offsets[expert_id],sf_offsets[expert_id+1])
+        a_slice = slice(expert_offsets[expert_id], expert_offsets[expert_id+1]) 
+        a_expert = rep_a[a_slice]
+        a_expert_max = torch.abs(a_expert).max().to(torch.float32)
+        rep_a_gs[expert_id] = FLOAT8_E4M3_MAX * FLOAT4_E2M1_MAX / a_expert_max
+        rep_a_fp4[a_slice], rep_a_blockscale[sf_slice] = ops.scaled_fp4_quant(
+                                                a_expert, rep_a_gs[expert_id])
+
+
+    # a_fp4, a_blockscale = ops.scaled_fp4_quant(a, mat_a_gs)
+    # rep_a_fp4 = a_fp4[a_map]
+    # rep_a_blockscale = a_blockscale.view(dtype=torch.uint8)[a_map].view(
+    #                                                  dtype=a_blockscale.dtype)
+    # assert rep_a_fp4.shape[0] == m * num_topk, "map was expanded incorrectly"
     
     
     # First gemm is up projection. We the contracting dimension is 
@@ -314,19 +357,30 @@ def cutlass_moe_fp4(
     if a1_gscale is not None:
         alphas = 1 / (a1_gscale * w1_tensorscale)
     else:
-        alphas = 1 / (mat_a_gs * w1_tensorscale)
-    print(f"{problem_sizes1=}, {rep_a_fp4.stride()=}"
-          f"{rep_a_blockscale.shape=}, {w1_fp4.shape=}"
-          f"{rep_a_blockscale.stride()=}, {w1_fp4.stride()=}"
-          f"{w1_fp4.stride()=}{w1_blockscale.stride()=}"
-          f"{alphas=}{alphas.stride()=}"
+        alphas = 1 / (rep_a_gs * w1_tensorscale)
+    print(f"{problem_sizes1=},\n{rep_a_fp4.stride()=}\n"
+          f"{rep_a_blockscale.shape=},\n{w1_fp4.shape=}\n"
+          f"{rep_a_blockscale.stride()=},\n{w1_fp4.stride()=}\n"
+          f"{w1_fp4.stride()=}\n{w1_blockscale.stride()=}\n"
+          f"{alphas=}\n{alphas.stride()=}\n"
           f"{expert_offsets=}")
-          
+    print(f"=========================================================") 
+    print(f"{rep_a_fp4[expert_offsets[0]]=}") 
+    print(f"{rep_a_fp4[expert_offsets[1]]=}")
+    print(f"{rep_a_blockscale[sf_offsets[0]].view(dtype=torch.uint8)=}") 
+    print(f"{rep_a_blockscale[sf_offsets[1]].view(dtype=torch.uint8)=}")
+
+    # To fix the alignment issue, reshape rep_a_blockscale to start
+    # at offsets of `alignment` required for fp4 data
+    # int const tma_alignment_bits = 128;
+    # int const alignment = tma_alignment_bits / cutlass::sizeof_bits<ElementInput>::value;
+    # alignment evaluates to 32
+    
     ops.cutlass_fp4_moe_mm(c1, rep_a_fp4, w1_fp4, rep_a_blockscale,
                         w1_blockscale, alphas, a_strides1, b_strides1,
                         c_strides1,a1_sf_layout, w1_sf_layout, problem_sizes1,
-                        expert_offsets[:-1])
-    print(f"{c1.to(dtype=a.dtype)=}")
+                        expert_offsets[:-1], sf_offsets[:-1])
+    print(f"{c1}")
     return
     # hidden size dimension is split to one half sized tensor. 
     intermediate = torch.empty((m * num_topk, w1_fp4.shape[1] // 2),
@@ -334,8 +388,9 @@ def cutlass_moe_fp4(
     
     torch.ops._C.silu_and_mul(intermediate, c1)
 
-    print(f"{intermediate}")
-
+    print(f"{intermediate=}")
+    
+    # return intermediate
     intermediate_amax = torch.abs(intermediate).amax().to(torch.float32)
     mat_int_gs = FLOAT8_E4M3_MAX * FLOAT4_E2M1_MAX / intermediate_amax 
     int_fp4, int_blockscale = ops.scaled_fp4_quant(intermediate, mat_int_gs)
@@ -344,9 +399,9 @@ def cutlass_moe_fp4(
                          device=device)
 
     if a2_gscale is not None:
-        alphas_2 = 1/ (a2_gscale * w2_tensorscale)
+        alphas_2 = (a2_gscale * w2_tensorscale)
     else:
-        alphas_2 = 1/ (mat_int_gs * w2_tensorscale)
+        alphas_2 = (mat_int_gs * w2_tensorscale)
 
     c2_shape = (m * num_topk, w2_fp4.shape[1])
     c2 = torch.empty(c2_shape, device=device, dtype=out_dtype)

@@ -43,47 +43,54 @@ static int getSMVersion()
 
 template <typename ElementAB, typename ElementC, typename ElementSF, typename ElementAccumulator, typename LayoutSFA, typename LayoutSFB, typename ScaleConfig>
 __global__ void get_group_gemm_starts(
-    int32_t *expert_offsets, ElementAB **a_offsets, ElementAB **b_offsets,
+    int32_t *expert_offsets, int32_t *sf_offsets, ElementAB **a_offsets, ElementAB **b_offsets,
     ElementC **out_offsets, ElementSF **a_scales_offsets,
     ElementSF **b_scales_offsets, ElementAccumulator **alpha_offsets,
     ElementAB *a_base_as_int, ElementAB *b_base_as_int, ElementC *out_base_as_int,
     ElementSF *a_scales_base_as_int, ElementSF *b_scales_base_as_int,
     ElementAccumulator *alphas_base_as_int, LayoutSFA *layout_sfa_base_as_int,
-    LayoutSFB *layout_sfb_base_as_int, int *problem_sizes_as_shapes,
+    LayoutSFB *layout_sfb_base_as_int, int32_t *problem_sizes_as_shapes,
     int K, int N)
 {
   int expert_id = threadIdx.x;
-
   if (expert_id >= gridDim.x * blockDim.x)
   {
     return;
   }
-
   int32_t expert_offset = expert_offsets[expert_id];
-  auto safe_inc_ptr = [](auto * base_ptr, int offset) { 
-    int adjustment = (sizeof_bits<decltype(base_ptr)>::value < 8) ? (8 / sizeof_bits<decltype(base_ptr)>::value) : 1;
-    assert(offset % adjustment == 0 && "Attempt to offset index to sub-byte");
-    return base_ptr + offset / adjustment;
-  };
+  int32_t sf_offset = sf_offsets[expert_id];
+  // auto safe_inc_ptr = [](auto * base_ptr, int offset) { 
+  //   int adjustment = (sizeof_bits<decltype(base_ptr)>::value < 8) ? (8 / sizeof_bits<decltype(base_ptr)>::value) : 1;
+  //   assert(offset % adjustment == 0 && "Attempt to offset index to sub-byte");
+  //   return base_ptr + offset / adjustment;
+  // };
   // size for block in block scale.
   int32_t group_size = 16;
-  int m = problem_sizes_as_shapes[expert_id * 3];
-  int n =  problem_sizes_as_shapes[expert_id * 3 + 1];
-  int k =  problem_sizes_as_shapes[expert_id * 3 + 2];
-  assert((n == N && k == K && k % 2 == 0) &&  "unexpected problem sizes");
+  int32_t m = problem_sizes_as_shapes[expert_id * 3];
+  int32_t n =  problem_sizes_as_shapes[expert_id * 3 + 1];
+  int32_t k =  problem_sizes_as_shapes[expert_id * 3 + 2];
+  assert((m >= 0 && n == N && k == K && k % 2 == 0) &&  "unexpected problem sizes");
   #if defined DEBUG 
+  printf("for m: %d, n: %d, k %d\n", m, n, k);
   printf("for expert %d, we see expert offset: %d, n = %d k =%d \n", expert_id, expert_offset, n, k);
   #endif 
-  int half_k = static_cast<int>(k / 2);
-  int group_k = static_cast<int>(k / group_size);
+  int32_t half_k = static_cast<int>(k / 2);
+  int32_t group_k = static_cast<int>(k / group_size);
   // Shape of A as uint8/byte = [M, K // 2] 
   // Shape of B as uint8/byte = [E, N, K // 2]
   a_offsets[expert_id] = a_base_as_int +  expert_offset * half_k;
+  #if defined DEBUG 
+  printf("at a_offsets[%d], a[] = %d\n", expert_id, *a_offsets[expert_id]);
+  #endif 
+
   b_offsets[expert_id] = b_base_as_int +  expert_id * n * half_k;
   // Shape of C = [M, N]
   out_offsets[expert_id] = out_base_as_int +  expert_offset * n;
-  // Shape of a_scale = [M, K // group_size]
-  a_scales_offsets[expert_id] = a_scales_base_as_int +  expert_offset * group_k;
+  // Shape of a_scale = [sum(sf_sizes), K // group_size]
+  a_scales_offsets[expert_id] = a_scales_base_as_int +  sf_offset * group_k;
+  #if defined DEBUG 
+  printf("at group_k = %d, a_scale_offsets[%d], a_scales[] = %d\n", group_k, expert_id, *a_scales_offsets[expert_id]);
+  #endif  
   // Shape of B scale = [E, N, K // group_size]
   b_scales_offsets[expert_id] = b_scales_base_as_int + expert_id * n * group_k;
   // Shape of alpha = [E]
@@ -102,6 +109,7 @@ __global__ void get_group_gemm_starts(
     get_group_gemm_starts<ELEMENT_AB_TYPE, C_TYPE, SF_TYPE, float, LayoutSFA, LayoutSFB, ScaleConfig> \
         <<<1, num_experts, 0, stream>>>(                                                              \
             static_cast<int32_t *>(expert_offsets.data_ptr()),                                        \
+            static_cast<int32_t *>(sf_offsets.data_ptr()),                                            \
             static_cast<ELEMENT_AB_TYPE **>(a_starts.data_ptr()),                                     \
             static_cast<ELEMENT_AB_TYPE **>(b_starts.data_ptr()),                                     \
             static_cast<C_TYPE **>(out_starts.data_ptr()),                                            \
@@ -116,21 +124,25 @@ __global__ void get_group_gemm_starts(
             static_cast<float *>(alphas.data_ptr()),                                                  \
             reinterpret_cast<LayoutSFA *>(layout_sfa.data_ptr()),                                     \
             reinterpret_cast<LayoutSFB *>(layout_sfb.data_ptr()),                                     \
-            static_cast<int *>(problem_sizes.data_ptr()),                                             \
-            K, N);                                                                                    \
+            static_cast<int32_t *>(problem_sizes.data_ptr()),                                         \
+            K, N);                                                                              \
   }
+
+
+            // static_cast<int32_t *>(problem_sizes.data_ptr()),
+
 
 template <typename LayoutSFA, typename LayoutSFB, typename ScaleConfig>
 void run_get_group_gemm_starts(
-      torch::Tensor const &expert_offsets, torch::Tensor &a_starts,
-      torch::Tensor &b_starts, torch::Tensor &out_starts,
-      torch::Tensor &a_scales_starts, torch::Tensor &b_scales_starts,
-      torch::Tensor &alpha_starts, torch::Tensor const &a_tensors,
-      torch::Tensor const &b_tensors, torch::Tensor &out_tensors,
-      torch::Tensor const &a_scales, torch::Tensor const &b_scales, 
-      torch::Tensor const &alphas, torch::Tensor const &layout_sfa,
-      torch::Tensor const &layout_sfb, torch::Tensor const &problem_sizes,
-      int M, int N, int K)
+      torch::Tensor const &expert_offsets, torch::Tensor const &sf_offsets,
+      torch::Tensor &a_starts, torch::Tensor &b_starts, 
+      torch::Tensor &out_starts, torch::Tensor &a_scales_starts,
+      torch::Tensor &b_scales_starts, torch::Tensor &alpha_starts,
+      torch::Tensor const &a_tensors, torch::Tensor const &b_tensors,
+      torch::Tensor &out_tensors, torch::Tensor const &a_scales,
+      torch::Tensor const &b_scales, torch::Tensor const &alphas,
+      torch::Tensor const &layout_sfa, torch::Tensor const &layout_sfb,
+      torch::Tensor const &problem_sizes, int M, int N, int K)
 {
   TORCH_CHECK(a_tensors.dtype() == at::ScalarType::Byte);
   TORCH_CHECK(b_tensors.dtype() == at::ScalarType::Byte);
@@ -192,9 +204,10 @@ void run_fp4_blockwise_scaled_group_mm(
     const torch::Tensor &layout_sfb,
     const torch::Tensor &problem_sizes,
     const torch::Tensor &expert_offsets,
+    const torch::Tensor &sf_offsets,
     int M, int N, int K)
 { 
-  using ProblemShape = cutlass::gemm::GroupProblemShape<Shape<int, int, int>>;
+  using ProblemShape = cutlass::gemm::GroupProblemShape<Shape<int32_t, int32_t, int32_t>>;
   using ElementType = cutlass::float_e2m1_t;
   using ElementSFType =cutlass::float_ue4m3_t;
   using ElementA = cutlass::nv_float4_t<cutlass::float_e2m1_t>;
@@ -227,19 +240,17 @@ void run_fp4_blockwise_scaled_group_mm(
     using MmaTileShape     = Shape<_128,_256,_256>;
     using KernelSchedule   = cutlass::gemm::KernelPtrArrayTmaWarpSpecialized1SmNvf4Sm100;   // Kernel to launch
     using EpilogueSchedule = cutlass::epilogue::PtrArrayTmaWarpSpecialized1Sm;              // Epilogue to launch
-    using OutputTileShape  = decltype(shape_div(MmaTileShape{}, Shape<_1,_1,_1>{}));
   };
   
   using CollectiveEpilogue = typename cutlass::epilogue::collective::CollectiveBuilder<
     ArchTag, EpilogueOperatorClass,
-    typename MMA1SMConfig::OutputTileShape, ClusterShape,
+    typename MMA1SMConfig::MmaTileShape, ClusterShape,
     Shape<_128,_64>,
     ElementAccumulator, ElementAccumulator,
     ElementC, LayoutC *, AlignmentC,
     ElementD, LayoutC *, AlignmentD,
-    typename MMA1SMConfig::EpilogueSchedule
-    // , FusionOperation  // Enable for SF Output
-  >::CollectiveOp;
+    typename MMA1SMConfig::EpilogueSchedule>::CollectiveOp;
+
   using CollectiveMainloop = typename cutlass::gemm::collective::CollectiveBuilder<
   ArchTag, MainloopOperatorClass,
   ElementA, LayoutA *, AlignmentA,
@@ -276,12 +287,10 @@ void run_fp4_blockwise_scaled_group_mm(
   torch::Tensor alpha_ptrs = torch::empty(num_experts, options_int);
 
   run_get_group_gemm_starts<LayoutSFA, LayoutSFB, ScaleConfig>(
-          expert_offsets, a_ptrs, b_ptrs, out_ptrs, a_scales_ptrs,
+          expert_offsets, sf_offsets, a_ptrs, b_ptrs, out_ptrs, a_scales_ptrs,
           b_scales_ptrs, alpha_ptrs, a, b, output, a_blockscale, b_blockscales,
           alphas, layout_sfa, layout_sfb, problem_sizes, M, N, K);
  
-  auto problem_sizes_ptr = static_cast<const int32_t *>(problem_sizes.data_ptr());
-
   // Use the expert offsets tensor directly
   auto expert_offsets_ptr = static_cast<const int32_t *>(expert_offsets.data_ptr());
         
@@ -321,7 +330,8 @@ void run_fp4_blockwise_scaled_group_mm(
   // hw_info.cluster_shape.y = 1;
   hw_info.cluster_shape_fallback = 2; 
   // hw_info.cluster_shape_fallback.y = 1; 
-  hw_info.sm_count = cutlass::KernelHardwareInfo::query_device_multiprocessor_count(hw_info.device_id);
+  static auto mp_sm_count = cutlass::KernelHardwareInfo::query_device_multiprocessor_count(hw_info.device_id);
+  hw_info.sm_count = mp_sm_count;
   // Currently, we are only able to do broadcast on either all or none a_scales
   // and on either all or none b_scales
   typename GemmKernel::EpilogueArguments epilogue_args{
@@ -353,55 +363,78 @@ void run_fp4_blockwise_scaled_group_mm(
   TORCH_CHECK(status == cutlass::Status::kSuccess, "Failed to run GEMM");
 }
 
+
+constexpr auto FLOAT4_E2M1X2 = at::ScalarType::Byte;
+constexpr auto SF_DTYPE = at::ScalarType::Float8_e4m3fn;
+
+#define CHECK_TYPE(x, st, m) \
+  TORCH_CHECK(x.scalar_type() == st, ": Inconsistency of Tensor type:", m)
+#define CHECK_TH_CUDA(x, m) \
+  TORCH_CHECK(x.is_cuda(), m, ": must be a CUDA tensor.")
+#define CHECK_CONTIGUOUS(x, m) \
+  TORCH_CHECK(x.is_contiguous(), m, ": must be contiguous.")
+#define CHECK_INPUT(x, st, m) \
+  CHECK_TH_CUDA(x, m);        \
+  CHECK_CONTIGUOUS(x, m);     \
+  CHECK_TYPE(x, st, m)
+
 void cutlass_blockscaled_fp4_group_mm(
     torch::Tensor &output,
     const torch::Tensor &a,
     const torch::Tensor &b,
     const torch::Tensor &a_blockscale,
     const torch::Tensor &b_blockscales,
-    const torch::Tensor &alpha,
+    const torch::Tensor &alphas,
     const torch::Tensor &stride_a,
     const torch::Tensor &stride_b,
     const torch::Tensor &stride_c,
     const torch::Tensor &layout_sfa,
     const torch::Tensor &layout_sfb,
     const torch::Tensor &problem_sizes,
-    const torch::Tensor &expert_offsets)
+    const torch::Tensor &expert_offsets,
+    const torch::Tensor &sf_offsets)
 {
-  // Differentiate M, N, K for full sized dimensions and m, n , k for actual tensor shapes.
-  // Shape of B: [E, N, K // 2]
-  // shape of A: [M, K // 2]
-  int M = static_cast<int>(a.size(0));
-  int N = static_cast<int>(b.size(1));
-  int E = static_cast<int>(b.size(0));
-  int K = static_cast<int>(2 * b.size(2));
-  // Input validation
-  TORCH_CHECK(problem_sizes.dim() == 2, "problem_sizes must be 2D tensor");
-  TORCH_CHECK(problem_sizes.size(1) == 3, "problem_sizes must have shape (num_experts, 3)");
-  TORCH_CHECK(problem_sizes.size(0) == expert_offsets.size(0),
-              "Number of experts in problem_sizes must match expert_offsets");
-  TORCH_CHECK(problem_sizes.dtype() == torch::kInt32, "problem_sizes must be int32");
-
-  // Get output shapes and create output tensors
-  auto sm_version = getSMVersion();
-  std::cout << "Entered cultass_blockscaled_fp4_group_mm";
-
-// #if defined ENABLE_NVFP4 && ENABLE_NVFP4
-
+#if defined ENABLE_NVFP4 && ENABLE_NVFP4
+  static auto sm_version = getSMVersion();
   if (sm_version == 100)
   {
+    // Input validation
+    CHECK_INPUT(a, FLOAT4_E2M1X2, "a");
+    CHECK_INPUT(b, FLOAT4_E2M1X2, "b"); 
+    CHECK_INPUT(a_blockscale, SF_DTYPE, "a_blockscale");
+    CHECK_INPUT(b_blockscales, SF_DTYPE, "b_blockscales");
+    CHECK_INPUT(alphas, at::ScalarType::Float, "alphas");
+
+    TORCH_CHECK(a_blockscale.dim() == 2, 
+            "expected a_blockscale to be of shape [num_experts, rounded_m," \
+            " k // group_size], observed rank: ",
+            a_blockscale.dim())
+    TORCH_CHECK(b_blockscales.dim() == 3, "expected b_blockscale to be of shape: " \
+      " [num_experts, n, k // group_size], observed rank: ", b_blockscales.dim())
+    TORCH_CHECK(problem_sizes.dim() == 2, "problem_sizes must be 2D tensor");
+    TORCH_CHECK(problem_sizes.size(1) == 3, "problem_sizes must have shape (num_experts, 3)");
+    TORCH_CHECK(problem_sizes.size(0) == expert_offsets.size(0),
+                "Number of experts in problem_sizes must match expert_offsets");
+    TORCH_CHECK(problem_sizes.dtype() == torch::kInt32, "problem_sizes must be int32.");
+
+    int M = static_cast<int>(a.size(0));
+    int N = static_cast<int>(b.size(1));
+    int E = static_cast<int>(b.size(0));
+    int K = static_cast<int>(2 * b.size(2));
+
     if (output.scalar_type() == torch::kBFloat16)
     {
       run_fp4_blockwise_scaled_group_mm<cutlass::bfloat16_t>(
-          output, a, b, a_blockscale, b_blockscales, alpha, stride_a, stride_b, stride_c, layout_sfa, layout_sfb, problem_sizes, expert_offsets, M, N, K);
+          output, a, b, a_blockscale, b_blockscales, alphas, stride_a, stride_b, stride_c, layout_sfa, layout_sfb, problem_sizes, expert_offsets, sf_offsets, M, N, K);
     }
     else
     {
       run_fp4_blockwise_scaled_group_mm<cutlass::half_t>(
-          output, a, b, a_blockscale, b_blockscales, alpha, stride_a, stride_b, stride_c, layout_sfa, layout_sfb, problem_sizes, expert_offsets, M, N, K);
+          output, a, b, a_blockscale, b_blockscales, alphas, stride_a, stride_b, stride_c, layout_sfa, layout_sfb, problem_sizes, expert_offsets, sf_offsets, M, N, K);
     }
   }
-//#endif
-  // TORCH_CHECK_NOT_IMPLEMENTED(false,
-  //                             "No implemented cutlass_blockwise_scaled_mm_fp4 for current compute capability: ", sm_version);
+#else
+  TORCH_CHECK_NOT_IMPLEMENTED(false,
+                              "No implemented cutlass_blockwise_scaled_mm_fp4 for current compute capability: ", sm_version);
+#endif
 }
