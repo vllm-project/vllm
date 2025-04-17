@@ -4,7 +4,7 @@
 
 1. Install the (Docker)[https://docs.docker.com/engine/install/]
 
-2. Start the vLLM server with supported chat completion, e.g.
+2. Start the vLLM server with supported chat completion model, e.g.
 
 ```console
 vllm serve qwen/Qwen1.5-0.5B-Chat
