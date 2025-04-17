@@ -940,8 +940,7 @@ class TPUModelRunner:
         self._update_num_xla_graphs("select_hidden_states")
 
     def _precompile_compute_logits(self) -> None:
-        logger.info(
-            "Compiling compute_logits with different input shapes.")
+        logger.info("Compiling compute_logits with different input shapes.")
         start = time.perf_counter()
         hsize = self.model_config.get_hidden_size()
         for num_reqs in self.num_reqs_paddings:
@@ -1147,6 +1146,7 @@ class TPUModelRunner:
                 continue
             batch_index = self.input_batch.req_id_to_index[req_id]
             struct_out_indices.append(batch_index)
+            mask_indices.append(mask_index)
         grammar_bitmask_padded[struct_out_indices] = torch.from_numpy(
             grammar_bitmask[mask_indices])
         # It's not guaranteed that all requests in this batch require
