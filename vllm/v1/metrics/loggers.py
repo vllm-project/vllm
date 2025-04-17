@@ -52,6 +52,8 @@ class LoggingStatLogger(StatLoggerBase):
         self.prefix_caching_metrics = CachingMetrics()
 
         self.spec_decoding_metrics = SpecDecodingMetrics()
+        self.last_prompt_throughput: float = 0.0
+        self.last_generation_throughput: float = 0.0
 
     def _reset(self, now):
         self.last_log_time = now
@@ -105,8 +107,17 @@ class LoggingStatLogger(StatLoggerBase):
 
         scheduler_stats = self.last_scheduler_stats
 
+        log_fn = logger.info
+        if not any(
+            (prompt_throughput, generation_throughput,
+             self.last_prompt_throughput, self.last_generation_throughput)):
+            # Avoid log noise on an idle production system
+            log_fn = logger.debug
+        self.last_generation_throughput = generation_throughput
+        self.last_prompt_throughput = prompt_throughput
+
         # Format and print output.
-        logger.info(
+        log_fn(
             "Engine %03d: "
             "Avg prompt throughput: %.1f tokens/s, "
             "Avg generation throughput: %.1f tokens/s, "
@@ -145,7 +156,7 @@ class LoggingStatLogger(StatLoggerBase):
             )
 
         if scheduler_stats.spec_decoding_stats is not None:
-            self.spec_decoding_metrics.log()
+            self.spec_decoding_metrics.log(log_fn=log_fn)
 
 
 class PrometheusStatLogger(StatLoggerBase):
