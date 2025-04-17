@@ -1961,7 +1961,6 @@ class SchedulerConfig:
                 self.max_num_batched_tokens,
                 _POOLING_MODEL_MAX_NUM_BATCHED_TOKENS,
             )
-
         if self.is_multimodal_model:
             # The value needs to be at least the number of multimodal tokens
             self.max_num_batched_tokens = max(
