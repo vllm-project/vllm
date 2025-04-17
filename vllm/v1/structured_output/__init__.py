@@ -122,18 +122,17 @@ class StructuredOutputManager:
 
         for req_id, batch_index in structured_output_request_ids.items():
             full_request = requests[req_id]
-            so_request = full_request.structured_output_request
-            assert so_request is not None and so_request.grammar is not None
+            request = full_request.structured_output_request
+            assert request is not None and request.grammar is not None
 
-            apply_bitmask = (self.reasoner is None
-                             or so_request.reasoning_ended
+            apply_bitmask = (self.reasoner is None or request.reasoning_ended
                              or self.reasoner.is_reasoning_end(
                                  full_request.all_token_ids))
 
-            if apply_bitmask and not so_request.grammar.is_terminated():
-                so_request.grammar.fill_bitmask(bitmask_tensor, batch_index)
+            if apply_bitmask and not request.grammar.is_terminated():
+                request.grammar.fill_bitmask(bitmask_tensor, batch_index)
 
-        if batch_len < bitmask_tensor.shape[0]:
+        if batch_len < self._grammar_bitmask.shape[0]:
             bitmask_tensor = self._grammar_bitmask[:batch_len]
 
         # After finishing with the xgrammar operations, we convert to
