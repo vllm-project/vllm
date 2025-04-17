@@ -5,7 +5,7 @@ from typing import TYPE_CHECKING, Optional, Union
 import torch
 
 import vllm.envs as envs
-from vllm.inputs import PromptType
+from vllm.inputs import ProcessorInputs, PromptType
 from vllm.logger import init_logger
 from vllm.sampling_params import SamplingParams, SamplingType
 
@@ -120,6 +120,13 @@ class TpuPlatform(Platform):
         assert not vllm_config.speculative_config, (
             "Speculative decoding is not yet supported for TPU backend")
 
+        if scheduler_config.is_multimodal_model and not \
+            scheduler_config.disable_chunked_mm_input:
+            logger.warning("TPU does not support running Multimodal models"\
+            " without setting `--disable_chunked_mm_input`. " \
+            "Forcing --disable_chunked_mm_input.")
+            scheduler_config.disable_chunked_mm_input = True
+
     @classmethod
     def is_pin_memory_available(cls):
         logger.warning("Pin memory is not supported on TPU.")
@@ -143,6 +150,7 @@ class TpuPlatform(Platform):
         cls,
         prompt: PromptType,
         params: Union[SamplingParams, PoolingParams],
+        processed_inputs: ProcessorInputs,
     ) -> None:
         """Raises if this request is unsupported on this platform"""
         if isinstance(params, SamplingParams):

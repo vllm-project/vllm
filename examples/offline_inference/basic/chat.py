@@ -4,6 +4,24 @@ from vllm import LLM, EngineArgs
 from vllm.utils import FlexibleArgumentParser
 
 
+def create_parser():
+    parser = FlexibleArgumentParser()
+    # Add engine args
+    engine_group = parser.add_argument_group("Engine arguments")
+    EngineArgs.add_cli_args(engine_group)
+    engine_group.set_defaults(model="meta-llama/Llama-3.2-1B-Instruct")
+    # Add sampling params
+    sampling_group = parser.add_argument_group("Sampling parameters")
+    sampling_group.add_argument("--max-tokens", type=int)
+    sampling_group.add_argument("--temperature", type=float)
+    sampling_group.add_argument("--top-p", type=float)
+    sampling_group.add_argument("--top-k", type=int)
+    # Add example params
+    parser.add_argument("--chat-template-path", type=str)
+
+    return parser
+
+
 def main(args: dict):
     # Pop arguments not used by LLM
     max_tokens = args.pop("max_tokens")
@@ -82,18 +100,6 @@ def main(args: dict):
 
 
 if __name__ == "__main__":
-    parser = FlexibleArgumentParser()
-    # Add engine args
-    engine_group = parser.add_argument_group("Engine arguments")
-    EngineArgs.add_cli_args(engine_group)
-    engine_group.set_defaults(model="meta-llama/Llama-3.2-1B-Instruct")
-    # Add sampling params
-    sampling_group = parser.add_argument_group("Sampling parameters")
-    sampling_group.add_argument("--max-tokens", type=int)
-    sampling_group.add_argument("--temperature", type=float)
-    sampling_group.add_argument("--top-p", type=float)
-    sampling_group.add_argument("--top-k", type=int)
-    # Add example params
-    parser.add_argument("--chat-template-path", type=str)
+    parser = create_parser()
     args: dict = vars(parser.parse_args())
     main(args)
