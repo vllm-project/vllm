@@ -84,12 +84,12 @@ class EagleProposer:
         )
 
         with set_forward_context(attn_metadata, self.vllm_config):
-            hidden_states = self.model(
+            hidden_states_logits, hidden_states_fwd = self.model(
                 input_ids=input_ids,
                 hidden_states=target_hidden_states,
                 positions=target_positions,
             )
-        sample_hidden_states = hidden_states[last_token_indices]
+        sample_hidden_states = hidden_states_logits[last_token_indices]
         logits = self.model.compute_logits(sample_hidden_states, None)
         draft_token_ids, draft_probs = compute_probs_and_sample_next_token(
             logits, sampling_metadata)
@@ -104,7 +104,7 @@ class EagleProposer:
         draft_probs_list = [draft_probs]
 
         positions = target_positions[last_token_indices]
-        hidden_states = sample_hidden_states
+        hidden_states = hidden_states_fwd[last_token_indices]
         attn_metadata.num_actual_tokens = batch_size
         attn_metadata.max_query_len = 1
         attn_metadata.query_start_loc = self.arange[:batch_size + 1]
@@ -124,12 +124,12 @@ class EagleProposer:
 
             # Run the model.
             with set_forward_context(attn_metadata, self.vllm_config):
-                hidden_states = self.model(
+                hidden_states_logits, hidden_states = self.model(
                     input_ids=input_ids,
                     hidden_states=hidden_states,
                     positions=positions,
                 )
-            logits = self.model.compute_logits(hidden_states, None)
+            logits = self.model.compute_logits(hidden_states_logits, None)
             draft_token_ids, probs = compute_probs_and_sample_next_token(
                 logits, sampling_metadata)
             draft_token_ids_list.append(draft_token_ids)

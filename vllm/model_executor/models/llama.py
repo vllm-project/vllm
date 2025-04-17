@@ -367,10 +367,10 @@ class LlamaModel(nn.Module):
         extra_hidden_states = []
         for idx, layer in enumerate(
                 self.layers[self.start_layer:self.end_layer]):
-            hidden_states, residual = layer(positions, hidden_states, residual)
             if idx == 2 or idx == len(self.layers) // 2 or idx == len(
                     self.layers) - 3:
                 extra_hidden_states.append(hidden_states + residual)
+            hidden_states, residual = layer(positions, hidden_states, residual)
 
         if not get_pp_group().is_last_rank:
             return IntermediateTensors({

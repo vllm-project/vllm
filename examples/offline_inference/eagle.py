@@ -45,6 +45,7 @@ def parse_args():
     parser.add_argument("--enable_chunked_prefill", action='store_true')
     parser.add_argument("--max_num_batched_tokens", type=int, default=2048)
     parser.add_argument("--temp", type=float, default=0)
+    parser.add_argument("--use_v1", type=str, default="1")
     return parser.parse_args()
 
 
@@ -52,7 +53,7 @@ def main():
 
     args = parse_args()
 
-    os.environ["VLLM_USE_V1"] = "1"
+    os.environ["VLLM_USE_V1"] = args.use_v1
 
     model_dir = "meta-llama/Llama-3.1-8B-Instruct"
     eagle_dir = "yuhuili/EAGLE3-LLaMA3.1-Instruct-8B"

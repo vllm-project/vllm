@@ -9,7 +9,9 @@ from transformers import LlamaConfig
 from vllm.config import ModelConfig
 from vllm.logger import init_logger
 from vllm.model_executor.layers.layernorm import RMSNorm
+from vllm.model_executor.layers.linear import QKVParallelLinear
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
+from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     DEFAULT_VOCAB_PADDING_SIZE, ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
@@ -23,20 +25,52 @@ logger = init_logger(__name__)
 
 
 class LlamaDecoderLayer(LlamaDecoderLayer):
-
     def __init__(
         self,
         config: LlamaConfig,
-        disable_input_layernorm: bool,
+        quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
     ) -> None:
-        super().__init__(config, prefix=prefix)
+        super().__init__(config, quant_config=quant_config, prefix=prefix)
 
-        # Skip the input_layernorm
-        # https://github.com/SafeAILab/EAGLE/blob/35c78f6cdc19a73e05cf5c330b4c358dad970c6a/eagle/model/cnets.py#L427
-        if disable_input_layernorm:
-            del self.input_layernorm
-            self.input_layernorm = nn.Identity()
+        # override qkv
+        self.self_attn.qkv_proj = QKVParallelLinear(
+            2 * self.hidden_size,
+            self.self_attn.head_dim,
+            self.self_attn.total_num_heads,
+            self.self_attn.total_num_kv_heads,
+            bias=False,
+            quant_config=quant_config,
+            prefix=maybe_prefix(prefix, "qkv_proj"),
+        )
+
+        self.hidden_norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+
+    def forward(
+        self,
+        positions: torch.Tensor,
+        embeds: torch.Tensor,
+        hidden_states: torch.Tensor,
+        residual: Optional[torch.Tensor],
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+
+        residual = hidden_states
+        embeds = self.input_layernorm(embeds)
+        hidden_states = self.hidden_norm(hidden_states)
+
+        hidden_states = torch.cat([embeds, hidden_states], dim=-1)
+        # Self Attention
+        hidden_states = self.self_attn(
+            positions=positions,
+            hidden_states=hidden_states,
+        )
+
+        hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
+
+        # Fully Connected
+        hidden_states = self.mlp(hidden_states)
+
+        return hidden_states, residual
 
 
 class LlamaModel(nn.Module):
@@ -60,7 +94,6 @@ class LlamaModel(nn.Module):
         self.layers = nn.ModuleList([
             LlamaDecoderLayer(
                 self.config,
-                disable_input_layernorm=True,
                 prefix=maybe_prefix(prefix, f"layers.{start_layer_id}"),
             )
         ])
@@ -72,25 +105,6 @@ class LlamaModel(nn.Module):
             eps=self.config.rms_norm_eps,
         )
 
-        # d2t=torch.zeros((self.config.draft_vocab_size),dtype=torch.long)
-        # t2d=torch.zeros((self.config.vocab_size),dtype=torch.bool)
-        # self.register_buffer("d2t", d2t)
-        # self.register_buffer("t2d", t2d)
-
-        # self.t2d = nn.Parameter(
-        #     torch.zeros((self.config.vocab_size), dtype=torch.bool),
-        #     requires_grad=False,
-        # )
-
-        self.input_layernorm = RMSNorm(
-            self.config.hidden_size,
-            eps=self.config.rms_norm_eps,
-        )
-        self.hidden_norm = RMSNorm(
-            self.config.hidden_size,
-            eps=self.config.rms_norm_eps,
-        )
-
     def forward(
         self,
         input_ids: torch.Tensor,
@@ -98,19 +112,19 @@ class LlamaModel(nn.Module):
         hidden_states: torch.Tensor,
     ) -> torch.Tensor:
         input_embeds = self.embed_tokens(input_ids)
-        input_embeds = self.input_layernorm(input_embeds)
-        hidden_states = self.hidden_norm(hidden_states)
-        if (hidden_states.shape != input_embeds.shape):
+        if (hidden_states.shape[-1] != input_embeds.shape[-1]):
             hidden_states = self.fc(hidden_states)
-        hidden_states = torch.cat((input_embeds, hidden_states), dim=-1)
 
+        residual = None
         hidden_states, residual = self.layers[0](
             positions,
+            input_embeds,
             hidden_states,
-            None,
+            residual,
         )
-        hidden_states, _ = self.norm(hidden_states, residual)
-        return hidden_states
+
+        hidden_states, hidden_prenorm = self.norm(hidden_states, residual)
+        return hidden_states, hidden_prenorm
 
     def load_weights(self, weights: Iterable[Tuple[str,
                                                    torch.Tensor]]) -> Set[str]:
@@ -125,10 +139,6 @@ class LlamaModel(nn.Module):
         params_dict = dict(self.named_parameters())
         loaded_params: Set[str] = set()
         for name, loaded_weight in weights:
-            if 'midlayer.input_layernorm' in name:
-                name = name.replace('midlayer.', '')
-            if 'midlayer.hidden_norm' in name:
-                name = name.replace('midlayer.', '')
             if 'midlayer.' in name:
                 name = name.replace('midlayer.', 'layers.0.')
             for param_name, weight_name, shard_id in stacked_params_mapping:
