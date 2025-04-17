@@ -78,8 +78,7 @@ if TYPE_CHECKING:
     VLLM_ROCM_USE_AITER_LINEAR: bool = True
     VLLM_ROCM_USE_AITER_MOE: bool = True
     VLLM_ROCM_USE_AITER_FP8_BLOCK_SCALED_MOE: bool = False
-    # VLLM_ROCM_USE_AITER_FP8_CHANNEL_SCALED_MOE to be set to false
-    VLLM_ROCM_USE_AITER_FP8_CHANNEL_SCALED_MOE: bool = True
+    VLLM_ROCM_USE_AITER_FP8_TKW1_MOE: bool = False
     VLLM_ROCM_USE_AITER_RMSNORM: bool = True
     VLLM_ROCM_FP8_PADDING: bool = True
     VLLM_ROCM_MOE_PADDING: bool = True
@@ -556,12 +555,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
      ("true", "1")),
 
     # TODO: change this back to False
-    # Whether to use aiter channel scaled moe kernel.
+    # Whether to use aiter custom topk weight multiplication first
+    # channel scaled moe kernel. (This is for Llama-4)
     # By default this is disabled.
-    "VLLM_ROCM_USE_AITER_FP8_CHANNEL_SCALED_MOE":
-    lambda:
-    (os.getenv("VLLM_ROCM_USE_AITER_FP8_CHANNEL_SCALED_MOE", "true").lower() in
-     ("true", "1")),
+    "VLLM_ROCM_USE_AITER_FP8_TKW1_MOE":
+    lambda: (os.getenv("VLLM_ROCM_USE_AITER_FP8_TKW1_MOE", "false").lower() in
+             ("true", "1")),
 
     # use aiter rms norm op if aiter ops are enabled.
     "VLLM_ROCM_USE_AITER_RMSNORM":
