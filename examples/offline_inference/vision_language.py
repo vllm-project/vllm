@@ -1097,6 +1097,59 @@ def time_counter(enable: bool):
         yield
 
 
+def parse_args():
+    parser = FlexibleArgumentParser(
+        description='Demo on using vLLM for offline inference with '
+        'vision language models for text generation')
+    parser.add_argument('--model-type',
+                        '-m',
+                        type=str,
+                        default="llava",
+                        choices=model_example_map.keys(),
+                        help='Huggingface "model_type".')
+    parser.add_argument('--num-prompts',
+                        type=int,
+                        default=4,
+                        help='Number of prompts to run.')
+    parser.add_argument('--modality',
+                        type=str,
+                        default="image",
+                        choices=['image', 'video'],
+                        help='Modality of the input.')
+    parser.add_argument('--num-frames',
+                        type=int,
+                        default=16,
+                        help='Number of frames to extract from the video.')
+    parser.add_argument("--seed",
+                        type=int,
+                        default=None,
+                        help="Set the seed when initializing `vllm.LLM`.")
+
+    parser.add_argument(
+        '--image-repeat-prob',
+        type=float,
+        default=None,
+        help='Simulates the hit-ratio for multi-modal preprocessor cache'
+        ' (if enabled)')
+
+    parser.add_argument(
+        '--disable-mm-preprocessor-cache',
+        action='store_true',
+        help='If True, disables caching of multi-modal preprocessor/mapper.')
+
+    parser.add_argument(
+        '--time-generate',
+        action='store_true',
+        help='If True, then print the total generate() call time')
+
+    parser.add_argument(
+        '--use-different-prompt-per-request',
+        action='store_true',
+        help='If True, then use different prompt (with the same multi-modal '
+        'data) for each request.')
+    return parser.parse_args()
+
+
 def main(args):
     model = args.model_type
     if model not in model_example_map:
@@ -1175,55 +1228,5 @@ def main(args):
 
 
 if __name__ == "__main__":
-    parser = FlexibleArgumentParser(
-        description='Demo on using vLLM for offline inference with '
-        'vision language models for text generation')
-    parser.add_argument('--model-type',
-                        '-m',
-                        type=str,
-                        default="llava",
-                        choices=model_example_map.keys(),
-                        help='Huggingface "model_type".')
-    parser.add_argument('--num-prompts',
-                        type=int,
-                        default=4,
-                        help='Number of prompts to run.')
-    parser.add_argument('--modality',
-                        type=str,
-                        default="image",
-                        choices=['image', 'video'],
-                        help='Modality of the input.')
-    parser.add_argument('--num-frames',
-                        type=int,
-                        default=16,
-                        help='Number of frames to extract from the video.')
-    parser.add_argument("--seed",
-                        type=int,
-                        default=None,
-                        help="Set the seed when initializing `vllm.LLM`.")
-
-    parser.add_argument(
-        '--image-repeat-prob',
-        type=float,
-        default=None,
-        help='Simulates the hit-ratio for multi-modal preprocessor cache'
-        ' (if enabled)')
-
-    parser.add_argument(
-        '--disable-mm-preprocessor-cache',
-        action='store_true',
-        help='If True, disables caching of multi-modal preprocessor/mapper.')
-
-    parser.add_argument(
-        '--time-generate',
-        action='store_true',
-        help='If True, then print the total generate() call time')
-
-    parser.add_argument(
-        '--use-different-prompt-per-request',
-        action='store_true',
-        help='If True, then use different prompt (with the same multi-modal '
-        'data) for each request.')
-
-    args = parser.parse_args()
+    args = parse_args()
     main(args)

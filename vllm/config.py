@@ -298,12 +298,18 @@ class ModelConfig:
         factors.append(self.quantization)
         factors.append(self.revision)
         factors.append(self.code_revision)
+        factors.append(self.max_model_len)
+        factors.append(self.max_logprobs)
+        factors.append(self.disable_sliding_window)
         factors.append(self.trust_remote_code)
+        factors.append(self.mm_processor_kwargs)
+        factors.append(self.generation_config)
+        factors.append(self.model_impl)
+        factors.append(self.override_generation_config)
         factors.append(self.rope_scaling)
         factors.append(self.rope_theta)
-        # rope cos/sin cache depends on the max_position_embeddings
-        factors.append(
-            getattr(self.hf_config, "max_position_embeddings", "None"))
+        # hf_config can control how the model looks!
+        factors.append(self.hf_config.to_json_string())
         return hashlib.sha256(str(factors).encode()).hexdigest()
 
     def __init__(
@@ -2832,6 +2838,13 @@ def _get_and_verify_dtype(
             else:
                 torch_dtype = config_dtype
 
+            if config.model_type == "plamo2":
+                logger.info(
+                    "For PLaMo2, we cast models to bfloat16 instead of using "
+                    "float16 by default. This is because float16 does not work."
+                )
+                torch_dtype = torch.bfloat16
+
             from vllm.platforms import current_platform
             if (current_platform.is_cpu()
                     and current_platform.get_cpu_architecture()
@@ -2861,6 +2874,11 @@ def _get_and_verify_dtype(
                     "using float16 by default. Please specify `dtype` if you "
                     "want to use float16.")
                 torch_dtype = torch.bfloat16
+        elif dtype == "float16" and config.model_type == "plamo2":
+            logger.warning(
+                "For PLaMo2, using float16 is unstable and might cause "
+                "unexpected behavior. Please use bfloat16 or float32 instead.")
+            torch_dtype = torch.float16
         else:
             if dtype not in _STR_DTYPE_TO_TORCH_DTYPE:
                 raise ValueError(f"Unknown dtype: {dtype}")
