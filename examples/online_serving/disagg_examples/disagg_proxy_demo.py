@@ -407,7 +407,7 @@ class ProxyServer:
     def run_server(self):
         app = FastAPI()
         app.include_router(self.proxy_instance.router)
-        config = uvicorn.Config(app, port=self.port, loop="uvloop")
+        config = uvicorn.Config(app, host="0.0.0.0", port=self.port, loop="uvloop")
         server = uvicorn.Server(config)
         server.run()
 
