@@ -136,14 +136,12 @@ class Metrics:
 
         self.gauge_mm_cache_size_G = prometheus_client.Gauge(
             name="vllm:mm_cache_size_G",
-            documentation="Multi-modal cache size "
-            "(in GiB).",
+            documentation="Multi-modal cache size (in GiB).",
             labelnames=labelnames)
 
         self.gauge_mm_cache_size_items = prometheus_client.Gauge(
             name="vllm:mm_cache_size_items",
-            documentation="Multi-modal cache size "
-            "(in number of items).",
+            documentation="Multi-modal cache size (in number of items).",
             labelnames=labelnames)
 
         self.counter_mm_cache_queries = prometheus_client.Counter(
