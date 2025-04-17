@@ -624,8 +624,10 @@ tiktoken==0.7.0
     #   mistral-common
 timm==1.0.11
     # via -r requirements/test.in
-tokenizers==0.21.0
-    # via transformers
+tokenizers==0.21.1
+    # via
+    #   -r requirements/test.in
+    #   transformers
 torch==2.6.0
     # via
     #   -r requirements/test.in
