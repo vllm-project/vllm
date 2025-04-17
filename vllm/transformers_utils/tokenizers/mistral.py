@@ -20,6 +20,16 @@ if TYPE_CHECKING:
     from mistral_common.protocol.instruct.request import ChatCompletionRequest
     from mistral_common.tokens.tokenizers.mistral import (
         MistralTokenizer as PublicMistralTokenizer)
+    from mistral_common.exceptions import (
+        InvalidAssistantMessageException,
+        InvalidFunctionCallException,
+        InvalidMessageStructureException,
+        InvalidRequestException,
+        InvalidSystemPromptException,
+        InvalidToolException,
+        InvalidToolMessageException,
+        InvalidToolSchemaException,
+    )
 
     from vllm.entrypoints.chat_utils import ChatCompletionMessageParam
 
@@ -375,8 +385,17 @@ class MistralTokenizer(TokenizerBase):
                             tools: Optional[List[Dict[str, Any]]] = None,
                             **kwargs) -> List[int]:
 
-        request = make_mistral_chat_completion_request(messages, tools)
-        encoded = self.mistral.encode_chat_completion(request)
+        try:
+
+            request = make_mistral_chat_completion_request(messages, tools)
+            encoded = self.mistral.encode_chat_completion(request)
+
+        # Mistral requests are only validated within the scope of `encode_chat_completion`.
+        except (InvalidAssistantMessageException, InvalidFunctionCallException,
+                InvalidMessageStructureException, InvalidRequestException,
+                InvalidSystemPromptException, InvalidToolException,
+                InvalidToolMessageException, InvalidToolSchemaException) as e:
+            raise AssertionError from e
 
         # encode-decode to get clean prompt
         return encoded.tokens
