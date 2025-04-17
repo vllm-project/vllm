@@ -1334,6 +1334,11 @@ def triton_attention(
     attn_metadata.output_dtype = q.dtype
     attn_metadata.set_varlen_params(cu_seqlens_q, cu_seqlens_k)
 
+    # currently output scale only supported when fp8_scales are set
+    if input_scale is not None:
+        assert o is not None and o.dtype == current_platform.fp8_dtype()
+        assert fp8_scales is not None
+
     if fp8_scales is not None:
         q, k, v = check_and_maybe_quantize_qkv(q, k, v, fp8_scales)
 
