@@ -75,15 +75,18 @@ class PplxDispatchCombine(mk.FusedMoEQuantizeDispatchCombine):
             dtype=torch.int32,
             device=device,
         )
-        #expert_num_tokens.fill_(-1)  # debugging remove
+        #expert_num_tokens.fill_(-1)  # debugging, remove later
 
         num_dp = self.world_size // self.dp_size
+        print(f"GOT HERE A {self.rank}: {self.max_num_tokens} {num_dp} {hidden_dim}")
         expert_x = torch.empty(
             (num_local_experts, self.max_num_tokens * num_dp, a1q.shape[-1]),
             dtype=a1q.dtype,
             device=device,
         )
-        expert_x.fill_(torch.nan)   # debugging remove
+        expert_x.fill_(torch.nan)   # debugging, remove later
+
+        print(f"GOT HERE B {self.rank}")
 
         expert_x_scale: Optional[torch.Tensor] = None
         if a1q.dtype.itemsize == 1:
@@ -100,6 +103,8 @@ class PplxDispatchCombine(mk.FusedMoEQuantizeDispatchCombine):
                 device=device,
             )
 
+        print(f"GOT HERE C {self.rank}")
+
         # This argument is optional, defaults to indices.shape[0]
         # This causes a deadlock????
         #bound_m = get_forward_context().dp_metadata.dp_rank_num_tokens
@@ -107,7 +112,9 @@ class PplxDispatchCombine(mk.FusedMoEQuantizeDispatchCombine):
         bound_m = None
 
         # TODO: optimize this?
-        indices = rank_topk_ids.to(dtype=torch.uint32).to(device)
+        indices = rank_topk_ids.to(dtype=torch.uint32)
+
+        print(f"GOT HERE D {self.rank}")
 
         self.a2a.dispatch(
             out_expert_num_tokens=expert_num_tokens,
@@ -133,7 +140,7 @@ class PplxDispatchCombine(mk.FusedMoEQuantizeDispatchCombine):
         #device = get_dp_group().device
         #assert fused_expert_output.device == device
 
-        #print(f"COMBINE START {self.rank}")
+        print(f"COMBINE START {self.rank}")
 
         # This argument is optional
         #bound_m = get_forward_context().dp_metadata.dp_rank_num_tokens
@@ -154,4 +161,4 @@ class PplxDispatchCombine(mk.FusedMoEQuantizeDispatchCombine):
                          expert_y=fused_expert_output,
                          bound_m=bound_m)
 
-        #print(f"COMBINE END {self.rank}")
+        print(f"COMBINE END {self.rank}")
