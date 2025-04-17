@@ -64,7 +64,7 @@ class KVConnectorFactory:
         logger.info("Creating v1 connector with name: %s", connector_name)
         # NOTE(Kuntai): v1 connector is explicitly separated into two roles.
         # Scheduler connector:
-        # - Co-colate with scheduler process
+        # - Co-locate with scheduler process
         # - Should only be used inside the Scheduler class
         # Worker connector:
         # - Co-locate with worker process
