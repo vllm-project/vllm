@@ -979,14 +979,16 @@ def grouped_topk(hidden_states: torch.Tensor,
     assert hidden_states.shape[0] == gating_output.shape[0], (
         "Number of tokens mismatch")
 
+    gating_output = gating_output.float()
+    if e_score_correction_bias is not None:
+        e_score_correction_bias = e_score_correction_bias.float()
+
     if scoring_func == "softmax":
         scores = torch.softmax(gating_output, dim=-1)
     elif scoring_func == "sigmoid":
         scores = gating_output.sigmoid()
     else:
         raise ValueError(f"Unsupported scoring function: {scoring_func}")
-    if current_platform.is_hpu():
-        htorch.core.mark_step()
 
     num_token = scores.shape[0]
     if e_score_correction_bias is not None:
@@ -999,6 +1001,7 @@ def grouped_topk(hidden_states: torch.Tensor,
     else:
         group_scores = scores.view(num_token, num_expert_group,
                                    -1).max(dim=-1).values  # [n, n_group]
+
     group_idx = torch.topk(group_scores, k=topk_group, dim=-1,
                            sorted=False)[1]  # [n, top_k_group]
     group_mask = torch.zeros_like(group_scores)  # [n, n_group]
