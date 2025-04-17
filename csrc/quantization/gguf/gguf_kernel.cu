@@ -443,7 +443,6 @@ torch::Tensor ggml_moe_a8_vec(torch::Tensor X,  // input
             (scalar_t*)Y.data_ptr(), (int*)topk_ids.data_ptr(), top_k, tokens,
             col, row, quant_X.stride(0), stream);
         break;
-
       case 13:
         moe_vec_q5_K_q8_1_cuda<scalar_t>(
             (void*)W.data_ptr(), (void*)quant_X.data_ptr(),
