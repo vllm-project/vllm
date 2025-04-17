@@ -142,13 +142,13 @@ Our [OpenAI-Compatible Server](#openai-compatible-server) provides endpoints tha
 - [Embeddings API](#embeddings-api) is similar to `LLM.embed`, accepting both text and [multi-modal inputs](#multimodal-inputs) for embedding models.
 - [Score API](#score-api) is similar to `LLM.score` for cross-encoder models.
 
-## Matryoshka Representation Learning (MRL)
+## Matryoshka Embeddings
 
 [Matryoshka Embeddings](https://sbert.net/examples/sentence_transformer/training/matryoshka/README.html#matryoshka-embeddings) or [Matryoshka Representation Learning (MRL)](https://arxiv.org/abs/2205.13147) is a technique used in training embedding models. It allows user to trade off between performance and cost.
 
 ### Offline Inference
 
-You can change the output of embedding models that support MRL by using the dimensions parameter in PoolingParams.
+You can change the output dimensions of embedding models that support Matryoshka Embeddings by using the dimensions parameter in {class}`~vllm.PoolingParams`.
 
 ```python
 from vllm import LLM, PoolingParams
@@ -171,7 +171,7 @@ Use the following command to start vllm server.
 vllm serve jinaai/jina-embeddings-v3 --trust-remote-code
 ```
 
-You can change the output of embedding models that support MRL by using the dimensions parameter.
+You can change the output dimensions of embedding models that support Matryoshka Embeddings by using the dimensions parameter.
 
 ```text
 curl http://127.0.0.1:8000/v1/embeddings \
@@ -185,7 +185,7 @@ curl http://127.0.0.1:8000/v1/embeddings \
   }'
 ```
 
-expected output
+Expected output:
 
 ```json
 {"id":"embd-0aab28c384d348c3b8f0eb783109dc5f","object":"list","created":1744195454,"model":"jinaai/jina-embeddings-v3","data":[{"index":0,"object":"embedding","embedding":[-1.0]}],"usage":{"prompt_tokens":10,"total_tokens":10,"completion_tokens":0,"prompt_tokens_details":null}}
@@ -195,7 +195,7 @@ A openai client example can be found here: <gh-file:examples/online_serving/open
 
 ### Warning
 
-**Not all embeddings models support MRL. Changing the output dimension for models that do not support MRL will lead to poor results. vllm returns an error for requests that attempt to change the output dimension (dimensions is not None) of an unsupported MRL model.**
+**Not all embeddings models support Matryoshka Embeddings. Changing the output dimensions for models that do not support Matryoshka Embeddings will lead to poor results. vllm returns an error for requests that attempt to change the output dimension (dimensions is not None) of an unsupported Matryoshka Embeddings model.**
 
 For example, trying to change the output dimension of the BAAI/bge-m3 model will result in the following error.
 
@@ -203,13 +203,13 @@ For example, trying to change the output dimension of the BAAI/bge-m3 model will
 {"object":"error","message":"Model \"BAAI/bge-m3\" does not support matryoshka representation, changing output dimensions will lead to poor results.","type":"BadRequestError","param":null,"code":400}
 ```
 
-We hope that the open source community will adopt the terms “is_matryoshka ” or “matryoshka_dimensions ” to denote whether a model is compatible with Matryoshka Representation Learning (MRL).
+We hope that the open source community will adopt the terms “is_matryoshka ” or “matryoshka_dimensions ” to denote whether a model is compatible with Matryoshka Embeddings.
 
-### Manually support MRL
+### Manually support Matryoshka Embeddings
 
-For models supported by MRL but not recognized by vllm, please manually enable MRL support using hf_overrides={"is_matryoshka": True} (Offline) or --hf_overrides '{"is_matryoshka":true}' (online) with caution.
+For models supported by Matryoshka Embeddings but not recognized by vllm, please manually enable Matryoshka Embeddings support using hf_overrides={"is_matryoshka": True} (Offline) or --hf_overrides '{"is_matryoshka":true}' (online) with caution.
 
-For example, using the following command to start vllm server can manually support MRL.
+For example, using the following command to start vllm server can manually support Matryoshka Embeddings.
 
 ```text
 vllm serve Snowflake/snowflake-arctic-embed-m-v1.5 --hf_overrides '{"is_matryoshka":true}'
