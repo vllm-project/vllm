@@ -19,7 +19,7 @@ from vllm.config import ParallelConfig, VllmConfig
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.utils import (get_open_port, get_open_zmq_inproc_path,
-                        get_open_zmq_ipc_path, make_zmq_socket)
+                        get_open_zmq_ipc_path, get_tcp_uri, make_zmq_socket)
 from vllm.v1.engine import (EngineCoreOutputs, EngineCoreRequest,
                             EngineCoreRequestType, UtilityOutput)
 from vllm.v1.engine.core import EngineCore, EngineCoreProc
@@ -423,8 +423,8 @@ class MPClient(EngineCoreClient):
             host = parallel_config.data_parallel_master_ip
             input_port = parallel_config.data_parallel_rpc_port
             output_port = get_open_port()
-            input_address = f"tcp://{host}:{input_port}"
-            output_address = f"tcp://{host}:{output_port}"
+            input_address = get_tcp_uri(host, input_port)
+            output_address = get_tcp_uri(host, output_port)
 
         return input_address, output_address
 
@@ -496,7 +496,7 @@ class MPClient(EngineCoreClient):
                         parallel_config.data_parallel_size,
                     },
                 })
-                sync_input_socket.send_multipart((eng_identity, init_message),
+                sync_input_socket.send_multipart((eng_identity, *init_message),
                                                  copy=False)
                 conn_pending[0 if local else 1] -= 1
                 start_pending[0 if local else 1] += 1
