@@ -17,14 +17,7 @@ if TYPE_CHECKING:
     # make sure `mistral_common` is lazy imported,
     # so that users who only use non-mistral models
     # will not be bothered by the dependency.
-    from mistral_common.exceptions import (InvalidAssistantMessageException,
-                                           InvalidFunctionCallException,
-                                           InvalidMessageStructureException,
-                                           InvalidRequestException,
-                                           InvalidSystemPromptException,
-                                           InvalidToolException,
-                                           InvalidToolMessageException,
-                                           InvalidToolSchemaException)
+    from mistral_common.exceptions import MistralCommonException
     from mistral_common.protocol.instruct.request import ChatCompletionRequest
     from mistral_common.tokens.tokenizers.mistral import (
         MistralTokenizer as PublicMistralTokenizer)
@@ -390,11 +383,7 @@ class MistralTokenizer(TokenizerBase):
 
         # Mistral requests are only validated within the scope of
         # `encode_chat_completion`.
-        except (InvalidAssistantMessageException, InvalidFunctionCallException,
-                InvalidMessageStructureException, InvalidRequestException,
-                InvalidSystemPromptException, InvalidToolException,
-                InvalidToolMessageException, InvalidToolSchemaException) as e:
-
+        except MistralCommonException as e:
             raise AssertionError from e
 
         # encode-decode to get clean prompt
