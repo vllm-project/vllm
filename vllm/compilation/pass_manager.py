@@ -53,8 +53,9 @@ class PostGradPassManager(CustomGraphPass):
         if pass_config.enable_fusion:
             self.passes += [FusionPass.instance(pass_config)]
 
-        # TODO enable flag
-        self.passes += [AttnFusionPass(pass_config, context)]
+        if pass_config.enable_attn_fusion:
+            self.passes += [AttnFusionPass(pass_config, context)]
+
         self.fix_functionalization = FixFunctionalizationPass(pass_config)
 
     def add(self, pass_: InductorPass):
