@@ -1,4 +1,4 @@
-(deployment-open_webui)=
+(deployment-open-webui)=
 
 # Open WebUI
 
