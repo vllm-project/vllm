@@ -305,7 +305,6 @@ def test_get_paddings():
     expected_paddings = [16, 32, 64, 128, 192, 256, 320]
     actual_paddings = _get_token_paddings(min_token_size, max_token_size,
                                           padding_gap)
-    print(actual_paddings, expected_paddings)
     assert actual_paddings == expected_paddings
 
     # Exponential padding.
