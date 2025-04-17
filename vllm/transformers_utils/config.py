@@ -670,10 +670,8 @@ def load_params_config(model: Union[str, Path], revision: Optional[str],
         if quantization.get("qformat_weight") == "fp8_e4m3":
             # This maps to the FP8 static per-tensor quantization scheme
             quantization_config = {
-                "quant_method":
-                "fp8",
-                "activation_scheme":
-                quantization.get("activation_scheme", "static")
+                "quant_method": "fp8",
+                "activation_scheme": "static"
             }
         elif quantization.get("quant_method") == "compressed-tensors":
             # Pass through the quantization config to compressed-tensors
