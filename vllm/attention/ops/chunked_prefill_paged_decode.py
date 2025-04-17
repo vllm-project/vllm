@@ -612,9 +612,8 @@ def chunked_prefill_paged_decode(
             k_scale=k_scale,
             v_scale=v_scale,
         )
-    elif (
-        max_seq_len < 256
-    ):  # use 2d kernel to avoid reduction overhead for short sequences
+    elif max_seq_len < 256:
+        # use 2d kernel to avoid reduction overhead for short sequences
         kernel_paged_attention_2d[
             (
                 num_seqs,
