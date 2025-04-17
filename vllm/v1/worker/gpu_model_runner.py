@@ -241,18 +241,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             device=self.device)
 
         # OPTIMIZATION: Cache the tensors rather than creating them every step.
-        # For long context, may need to store int64 so max idx doesn't overflow
-        # token_indices are calculated by adding (req_idx * max_model_len)
-        # to per-request indices e.g. [0, 1, 0, 1, 2, 3, 4, 0, 1, 2]
-        # -> [0, 1, M, M + 1, M + 2, M + 3, M + 4, 2 * M, 2 * M + 1, 2 * M + 2]
-        # where M is the max_model_len.
-        max_token_idx = self.max_num_tokens + self.max_num_reqs * \
-                        self.max_model_len
         self.arange_np = np.arange(max(self.max_num_reqs + 1,
                                        self.max_model_len,
                                        self.max_num_tokens),
-                                   dtype=np.int32 if max_token_idx <= np.iinfo(
-                                       np.int32).max else np.int64)
+                                   dtype=np.int32)
 
         # NOTE(woosuk): These tensors are "stateless", i.e., they are literally
         # a faster version of creating a new tensor every time. Thus, we should
@@ -282,6 +274,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                                         device="cpu",
                                         pin_memory=self.pin_memory)
         self.seq_lens_np = self.seq_lens_cpu.numpy()
+
+        max_token_idx = self.max_num_reqs * self.max_model_len - 1
+        # if max token idx exceeds int32 max, use int64 to avoid overflow
+        self.token_indices_dtype = np.int32 \
+            if max_token_idx <= np.iinfo(np.int32).max else np.int64
 
     def _update_states(self, scheduler_output: "SchedulerOutput") -> None:
         """Update the cached states and the persistent batch with the scheduler
@@ -530,8 +527,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # E.g., [0, 1, 0, 1, 2, 3, 4, 0, 1, 2]
         # -> [0, 1, M, M + 1, M + 2, M + 3, M + 4, 2 * M, 2 * M + 1, 2 * M + 2]
         # where M is the max_model_len.
+        # For long context, may need to cast to int64 to avoid overflow
         token_indices = (positions_np +
-                         req_indices * self.input_batch.token_ids_cpu.shape[1])
+                         req_indices.astype(self.token_indices_dtype) *
+                         self.input_batch.token_ids_cpu.shape[1])
 
         # NOTE(woosuk): We use torch.index_select instead of np.take here
         # because torch.index_select is much faster than np.take for large
