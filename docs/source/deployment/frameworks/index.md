@@ -11,4 +11,5 @@ lws
 modal
 skypilot
 triton
+open_webui
 :::
