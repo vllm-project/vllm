@@ -7,7 +7,8 @@ from collections import deque
 from collections.abc import Iterable
 from typing import Optional, Union
 
-from vllm.config import CacheConfig, LoRAConfig, ModelConfig, SchedulerConfig
+from vllm.config import (CacheConfig, LoRAConfig, ModelConfig, SchedulerConfig,
+                         SpeculativeConfig)
 from vllm.logger import init_logger
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.v1.core.encoder_cache_manager import (EncoderCacheManager,
@@ -39,6 +40,7 @@ class Scheduler(SchedulerInterface):
         lora_config: Optional[LoRAConfig],
         kv_cache_config: KVCacheConfig,
         structured_output_manager: StructuredOutputManager,
+        speculative_config: SpeculativeConfig = None,
         mm_registry: MultiModalRegistry = MULTIMODAL_REGISTRY,
         include_finished_set: bool = False,
         log_stats: bool = False,
@@ -111,6 +113,11 @@ class Scheduler(SchedulerInterface):
         # for these models.
         self.encoder_cache_manager = EncoderCacheManager(
             cache_size=encoder_cache_size)
+
+        self.num_lookahead_tokens = 0
+        if speculative_config and speculative_config.method == "eagle":
+            self.num_lookahead_tokens = \
+                speculative_config.num_speculative_tokens
 
     def schedule(self) -> SchedulerOutput:
         # NOTE(woosuk) on the scheduling algorithm:
@@ -188,7 +195,9 @@ class Scheduler(SchedulerInterface):
 
             while True:
                 new_blocks = self.kv_cache_manager.allocate_slots(
-                    request, num_new_tokens)
+                    request,
+                    num_new_tokens,
+                    num_lookahead_tokens=self.num_lookahead_tokens)
                 if new_blocks is None:
                     # The request cannot be scheduled.
                     # Preempt the lowest-priority request.
