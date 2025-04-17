@@ -279,11 +279,9 @@ class PunicaWrapperGPU(PunicaWrapperBase):
             buffer = torch.zeros((x.size(0), r),
                                  dtype=torch.float32,
                                  device=x.device)
-        
         if not self.is_prompt_logprobs:
             lora_shrink(x, [lora_a_stacked], buffer.unsqueeze(dim=0),
                         *self.prompt_mapping_meta.meta_args(x.size(0)), scale)
-            
             lora_expand(buffer.unsqueeze(dim=0), [lora_b_stacked],
                         y,
                         *self.prompt_mapping_meta.meta_args(buffer.size(0)),
@@ -292,7 +290,6 @@ class PunicaWrapperGPU(PunicaWrapperBase):
             # Use token_mapping_meta when compute prompt logprobs
             lora_shrink(x, [lora_a_stacked], buffer.unsqueeze(dim=0),
                         *self.token_mapping_meta.meta_args(x.size(0)), scale)
-            
             lora_expand(buffer.unsqueeze(dim=0), [lora_b_stacked],
                         y,
                         *self.token_mapping_meta.meta_args(buffer.size(0)),
