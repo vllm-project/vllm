@@ -2725,6 +2725,7 @@ class PromptAdapterConfig:
                                                 self.prompt_adapter_dtype)
 
 
+@config
 @dataclass
 class MultiModalConfig:
     """Controls the behavior of multimodal models."""
@@ -2732,6 +2733,8 @@ class MultiModalConfig:
     limit_per_prompt: Mapping[str, int] = field(default_factory=dict)
     """
     The maximum number of input items allowed per prompt for each modality.
+    This should be a JSON string that will be parsed into a dictionary.
+    Defaults to  1 (V0) or 999 (V1) for each modality.
     """
 
     def compute_hash(self) -> str:
@@ -2753,20 +2756,15 @@ class MultiModalConfig:
                                usedforsecurity=False).hexdigest()
         return hash_str
 
-    def get_default_limit_per_prompt(self) -> int:
-        """
-        Return the default number of input items allowed per prompt
-        for any modality if not specified by the user.
-        """
-        return 999 if envs.VLLM_USE_V1 else 1
-
     def get_limit_per_prompt(self, modality: str) -> int:
         """
         Get the maximum number of input items allowed per prompt
         for the given modality.
         """
-        default = self.get_default_limit_per_prompt()
-        return self.limit_per_prompt.get(modality, default)
+        return self.limit_per_prompt.get(
+            modality,
+            999 if envs.VLLM_USE_V1 else 1,
+        )
 
     # TODO: Add configs to init vision tower or not.
 

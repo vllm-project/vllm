@@ -49,7 +49,7 @@ def audio(request):
 def server(request, audio_assets):
     args = [
         "--dtype=bfloat16", "--max-model-len=4096", "--enforce-eager",
-        f"--limit-mm-per-prompt=audio={len(audio_assets)}",
+        f'--limit-mm-per-prompt={{"audio":{len(audio_assets)}}}',
         "--trust-remote-code"
     ] + [
         f"--{key.replace('_','-')}={value}"

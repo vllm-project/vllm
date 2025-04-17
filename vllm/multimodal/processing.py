@@ -1117,8 +1117,9 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
 
             if num_items > allowed_limit:
                 raise ValueError(
-                    f"You set or defaulted to {modality}={allowed_limit} "
-                    f"in --limit-mm-per-prompt`, but passed {num_items} "
+                    "You set or defaulted to "
+                    f'{{"{modality}":{allowed_limit}}} in '
+                    f"`--limit-mm-per-prompt`, but passed {num_items} "
                     f"{modality} items in the same prompt.")
 
         return mm_items

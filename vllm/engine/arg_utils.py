@@ -20,11 +20,12 @@ from vllm.config import (CacheConfig, CompilationConfig, Config, ConfigFormat,
                          DecodingConfig, Device, DeviceConfig,
                          DistributedExecutorBackend, HfOverrides,
                          KVTransferConfig, LoadConfig, LoadFormat, LoRAConfig,
-                         ModelConfig, ModelImpl, ObservabilityConfig,
-                         ParallelConfig, PoolerConfig, PoolType,
-                         PromptAdapterConfig, SchedulerConfig, SchedulerPolicy,
-                         SpeculativeConfig, TaskOption, TokenizerPoolConfig,
-                         VllmConfig, get_attr_docs, get_field)
+                         ModelConfig, ModelImpl, MultiModalConfig,
+                         ObservabilityConfig, ParallelConfig, PoolerConfig,
+                         PoolType, PromptAdapterConfig, SchedulerConfig,
+                         SchedulerPolicy, SpeculativeConfig, TaskOption,
+                         TokenizerPoolConfig, VllmConfig, get_attr_docs,
+                         get_field)
 from vllm.executor.executor_base import ExecutorBase
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS
@@ -190,7 +191,8 @@ class EngineArgs:
         TokenizerPoolConfig.pool_type
     tokenizer_pool_extra_config: dict[str, Any] = \
         get_field(TokenizerPoolConfig, "extra_config")
-    limit_mm_per_prompt: Optional[Mapping[str, int]] = None
+    limit_mm_per_prompt: Mapping[str, int] = \
+        get_field(MultiModalConfig, "limit_per_prompt")
     mm_processor_kwargs: Optional[Dict[str, Any]] = None
     disable_mm_preprocessor_cache: bool = False
     enable_lora: bool = False
@@ -701,18 +703,14 @@ class EngineArgs:
                                      **tokenizer_kwargs["extra_config"])
 
         # Multimodal related configs
-        parser.add_argument(
-            '--limit-mm-per-prompt',
-            type=nullable_kvs,
-            default=EngineArgs.limit_mm_per_prompt,
-            # The default value is given in
-            # MultiModalConfig.get_default_limit_per_prompt
-            help=('For each multimodal plugin, limit how many '
-                  'input instances to allow for each prompt. '
-                  'Expects a comma-separated list of items, '
-                  'e.g.: `image=16,video=2` allows a maximum of 16 '
-                  'images and 2 videos per prompt. Defaults to '
-                  '1 (V0) or 999 (V1) for each modality.'))
+        multimodal_kwargs = get_kwargs(MultiModalConfig)
+        multimodal_group = parser.add_argument_group(
+            title="MultiModalConfig",
+            description=MultiModalConfig.__doc__,
+        )
+        multimodal_group.add_argument('--limit-mm-per-prompt',
+                                      **multimodal_kwargs["limit_per_prompt"])
+
         parser.add_argument(
             '--mm-processor-kwargs',
             default=None,

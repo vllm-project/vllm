@@ -194,9 +194,9 @@ class MultiModalRegistry:
             max_items = self._limits_by_model[model_config][data_key]
             if num_items > max_items:
                 raise ValueError(
-                    f"You set {data_key}={max_items} (or defaulted to 1) in "
-                    f"`--limit-mm-per-prompt`, but found {num_items} items "
-                    "in the same prompt.")
+                    f'You set {{"{data_key}":{max_items}}} (or defaulted to '
+                    f"1) in `--limit-mm-per-prompt`, but found {num_items} "
+                    "items in the same prompt.")
 
             input_dict = plugin.map_input(model_config, data_value,
                                           mm_processor_kwargs)
