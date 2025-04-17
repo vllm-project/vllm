@@ -1,4 +1,6 @@
-# Setup Open WebUI with vLLM
+(deployment-open_webui)=
+
+# Open WebUI
 
 1. Install the (Docker)[https://docs.docker.com/engine/install/]
 
