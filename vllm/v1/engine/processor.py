@@ -182,7 +182,9 @@ class Processor:
                 # The request includes some jsonschema feature(s) that
                 # are not supported in xgrammar. Fall back to guidance.
                 params.guided_decoding.backend = "guidance"
-
+            # Set the backend to the engine level backend
+            self.decoding_config.guided_decoding_backend =\
+                  params.guided_decoding.backend
         if engine_level_backend.startswith("guidance"):
             # TODO ideally we would have the LLTokenizer here as Lark syntax
             # allows <|special_token|> and similar, see
