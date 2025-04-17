@@ -134,7 +134,7 @@ class LoggingStatLogger(StatLoggerBase):
         )
 
         if self.last_mm_cache_stats:
-            logger.info(
+            log_fn(
                 "P0 Processor MM cache usage: %.2f%% (%d items = %.2f GiB), "
                 "hit rate: %.2f%%; "
                 "P0 Mirrored MM cache usage: %.2f%% (%d items = %.2f GiB), "
