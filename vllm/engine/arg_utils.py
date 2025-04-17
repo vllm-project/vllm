@@ -156,6 +156,7 @@ class EngineArgs:
     block_size: Optional[int] = None
     enable_prefix_caching: Optional[bool] = None
     prefix_caching_hash_algo: str = "builtin"
+    enable_kv_cache_events: bool = False
     disable_sliding_window: bool = False
     disable_cascade_attn: bool = False
     use_v2_block_manager: bool = True
@@ -565,6 +566,12 @@ class EngineArgs:
             "Options are 'builtin' (Python's built-in hash) or 'sha256' "
             "(collision resistant but with certain overheads).",
         )
+        parser.add_argument(
+            "--enable-kv-cache-events",
+            action='store_true',
+            default=EngineArgs.enable_kv_cache_events,
+            help=
+            "Enable KV cache events for tracking block storage and removal.")
         parser.add_argument('--disable-sliding-window',
                             action='store_true',
                             help='Disables sliding window, '
@@ -1293,6 +1300,7 @@ class EngineArgs:
             max_num_partial_prefills=self.max_num_partial_prefills,
             max_long_partial_prefills=self.max_long_partial_prefills,
             long_prefill_token_threshold=self.long_prefill_token_threshold,
+            enable_kv_cache_events=self.enable_kv_cache_events,
         )
 
         lora_config = LoRAConfig(
