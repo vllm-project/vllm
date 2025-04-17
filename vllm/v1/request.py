@@ -37,7 +37,6 @@ class Request:
         self.eos_token_id = eos_token_id
         self.lora_request = lora_request
         self.structured_output_request = structured_output_request
-        self.reasoning_ended: bool = False
 
         self.status = (RequestStatus.WAITING_FOR_FSM
                        if sampling_params.guided_decoding is not None else

@@ -129,7 +129,7 @@ class StructuredOutputManager:
             assert so_request is not None and so_request.grammar is not None
 
             apply_bitmask = (self.reasoner is None
-                             or full_request.reasoning_ended
+                             or so_request.reasoning_ended
                              or self.reasoner.is_reasoning_end(
                                  full_request.all_token_ids))
 
