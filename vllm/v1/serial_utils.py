@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
+import dataclasses
 import pickle
 from collections.abc import Sequence
 from inspect import isclass
@@ -12,12 +13,26 @@ import torch
 import zmq
 from msgspec import msgpack
 
+from vllm import envs
+from vllm.multimodal.inputs import (BaseMultiModalField,
+                                    MultiModalBatchedField,
+                                    MultiModalFieldConfig, MultiModalFieldElem,
+                                    MultiModalFlatField, MultiModalKwargs,
+                                    MultiModalKwargsItem,
+                                    MultiModalSharedField, NestedTensors)
+
 CUSTOM_TYPE_PICKLE = 1
 CUSTOM_TYPE_CLOUDPICKLE = 2
 CUSTOM_TYPE_RAW_VIEW = 3
 
-# TODO calibrate this size
-MIN_NOCOPY_BUF_SIZE = 512
+# MultiModalField class serialization type map.
+# These need to list all possible field types and match them
+# to factory methods in `MultiModalFieldConfig`.
+MMF_CLASS_TO_FACTORY: dict[type[BaseMultiModalField], str] = {
+    MultiModalFlatField: "flat",
+    MultiModalSharedField: "shared",
+    MultiModalBatchedField: "batched",
+}
 
 bytestr = Union[bytes, bytearray, memoryview, zmq.Frame]
 
@@ -27,14 +42,20 @@ class MsgpackEncoder:
 
     Note that unlike vanilla `msgspec` Encoders, this interface is generally
     not thread-safe when encoding tensors / numpy arrays.
+
+    By default, arrays below 256B are serialized inline Larger will get sent 
+    via dedicated messages. Note that this is a per-tensor limit.
     """
 
-    def __init__(self):
+    def __init__(self, size_threshold: Optional[int] = None):
+        if size_threshold is None:
+            size_threshold = envs.VLLM_MSGPACK_ZERO_COPY_THRESHOLD
         self.encoder = msgpack.Encoder(enc_hook=self.enc_hook)
         # This is used as a local stash of buffers that we can then access from
         # our custom `msgspec` hook, `enc_hook`. We don't have a way to
         # pass custom data to the hook otherwise.
         self.aux_buffers: Optional[list[bytestr]] = None
+        self.size_threshold = size_threshold
 
     def encode(self, obj: Any) -> Sequence[bytestr]:
         try:
@@ -65,6 +86,25 @@ class MsgpackEncoder:
         if isinstance(obj, np.ndarray) and obj.dtype.kind not in ('O', 'V'):
             return self._encode_ndarray(obj)
 
+        if isinstance(obj, MultiModalKwargs):
+            mm: MultiModalKwargs = obj
+            if not mm.modalities:
+                # just return the main dict if there are no modalities.
+                return dict(mm)
+
+            # ignore the main dict, it will be re-indexed.
+            # Encode a list of MultiModalKwargsItems as plain dicts
+            # + special handling for .field.
+            # Any tensors *not* indexed by modality will be ignored.
+            return [[{
+                "modality": elem.modality,
+                "key": elem.key,
+                "data": self._encode_nested_tensors(elem.data),
+                "field": self._encode_mm_field(elem.field),
+            } for elem in item.values()]
+                    for itemlist in mm._items_by_modality.values()
+                    for item in itemlist]
+
         if isinstance(obj, FunctionType):
             # `pickle` is generally faster than cloudpickle, but can have
             # problems serializing methods.
@@ -77,8 +117,9 @@ class MsgpackEncoder:
         self, obj: np.ndarray
     ) -> tuple[str, tuple[int, ...], Union[int, memoryview]]:
         assert self.aux_buffers is not None
+        # If the array is non-contiguous, we need to copy it first
         arr_data = obj.data if obj.data.c_contiguous else obj.tobytes()
-        if not obj.shape or obj.nbytes < MIN_NOCOPY_BUF_SIZE:
+        if not obj.shape or obj.nbytes < self.size_threshold:
             # Encode small arrays and scalars inline. Using this extension type
             # ensures we can avoid copying when decoding.
             data = msgpack.Ext(CUSTOM_TYPE_RAW_VIEW, arr_data)
@@ -91,6 +132,26 @@ class MsgpackEncoder:
         # The data is either inlined if small, or an index into a list of
         # backing buffers that we've stashed in `aux_buffers`.
         return obj.dtype.str, obj.shape, data
+
+    def _encode_nested_tensors(self, nt: NestedTensors) -> Any:
+        if isinstance(nt, torch.Tensor):
+            return self._encode_ndarray(nt.numpy())
+        if isinstance(nt, (int, float)):
+            # Although it violates NestedTensors type, MultiModalKwargs
+            # values are sometimes floats.
+            return nt
+        return [self._encode_nested_tensors(x) for x in nt]
+
+    def _encode_mm_field(self, field: BaseMultiModalField):
+        # Figure out the factory name for the field type.
+        name = MMF_CLASS_TO_FACTORY.get(field.__class__)
+        if not name:
+            raise TypeError(f"Unsupported field type: {field.__class__}")
+        # We just need to copy all of the field values in order
+        # which will be then used to reconstruct the field.
+        field_values = (getattr(field, f.name)
+                        for f in dataclasses.fields(field))
+        return name, *field_values
 
 
 class MsgpackDecoder:
@@ -126,12 +187,49 @@ class MsgpackDecoder:
                 return self._decode_ndarray(obj)
             if issubclass(t, torch.Tensor):
                 return torch.from_numpy(self._decode_ndarray(obj))
+            if issubclass(t, MultiModalKwargs):
+                if isinstance(obj, list):
+                    return MultiModalKwargs.from_items(
+                        self._decode_mm_items(obj))
+                return MultiModalKwargs({
+                    k: self._decode_nested_tensors(v)
+                    for k, v in obj.items()
+                })
         return obj
 
     def _decode_ndarray(self, arr: Any) -> np.ndarray:
         dtype, shape, data = arr
-        buffer = self.aux_buffers[data] if isinstance(data, int) else data
+        # Copy from inline representation, otherwise Torch is unhappy since
+        # the returned memory is non-writeable.
+        buffer = self.aux_buffers[data] if isinstance(data, int) \
+            else bytearray(data)
         return np.ndarray(buffer=buffer, dtype=np.dtype(dtype), shape=shape)
+
+    def _decode_mm_items(self, obj: list) -> list[MultiModalKwargsItem]:
+        decoded_items = []
+        for item in obj:
+            elems = []
+            for v in item:
+                v["data"] = self._decode_nested_tensors(v["data"])
+                # Reconstruct the field processor using MultiModalFieldConfig
+                factory_meth_name, *field_args = v["field"]
+                factory_meth = getattr(MultiModalFieldConfig,
+                                       factory_meth_name)
+                v["field"] = factory_meth(None, *field_args).field
+                elems.append(MultiModalFieldElem(**v))
+            decoded_items.append(MultiModalKwargsItem.from_elems(elems))
+        return decoded_items
+
+    def _decode_nested_tensors(self, obj: Any) -> NestedTensors:
+        if isinstance(obj, (int, float)):
+            # Although it violates NestedTensors type, MultiModalKwargs
+            # values are sometimes floats.
+            return obj
+        if not isinstance(obj, list):
+            raise TypeError(f"Unexpected NestedTensors contents: {type(obj)}")
+        if obj and isinstance(obj[0], str):
+            return torch.from_numpy(self._decode_ndarray(obj))
+        return [self._decode_nested_tensors(x) for x in obj]
 
     def ext_hook(self, code: int, data: memoryview) -> Any:
         if code == CUSTOM_TYPE_RAW_VIEW:
