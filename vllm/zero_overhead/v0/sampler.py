@@ -1,39 +1,53 @@
+# SPDX-License-Identifier: Apache-2.0
+
 from importlib.util import find_spec
-from typing import Dict, List, Optional
+from typing import Optional
+
 import torch
 
 from vllm import envs
-from vllm.model_executor.layers.sampler import MultinomialSamplesType, SampleMetadataType, \
-    SampleResultArgsType, SampleResultType, SampleResultsDictType, SampleReturnType, Sampler, \
-        SamplerOutput, _apply_min_p, _apply_min_tokens_penalty, _apply_top_k_top_p, _build_sampler_output, \
-        _modify_greedy_probs_inplace, _top_k_top_p_multinomial_with_flashinfer, get_logprobs, _multinomial
+from vllm.model_executor.layers.sampler import (
+    MultinomialSamplesType, SampleMetadataType, Sampler, SampleResultArgsType,
+    SampleResultsDictType, SampleResultType, SampleReturnType, SamplerOutput,
+    _apply_min_p, _apply_min_tokens_penalty, _apply_top_k_top_p,
+    _build_sampler_output, _modify_greedy_probs_inplace, _multinomial,
+    _top_k_top_p_multinomial_with_flashinfer, get_logprobs)
 from vllm.model_executor.layers.utils import apply_penalties
-from vllm.model_executor.sampling_metadata import SamplingMetadata, SamplingTensors, SequenceGroupToSample
+from vllm.model_executor.sampling_metadata import (SamplingMetadata,
+                                                   SamplingTensors,
+                                                   SequenceGroupToSample)
 from vllm.sampling_params import SamplingType
 from vllm.sequence import VLLM_INVALID_TOKEN_ID
+
 if envs.VLLM_USE_FLASHINFER_SAMPLER and find_spec("flashinfer"):
-    import flashinfer.sampling
     # yapf: disable
     from flashinfer.sampling import (
         top_k_top_p_sampling_from_probs as flashinfer_top_k_top_p_sampling)
+
     # yapf: enable
 else:
     flashinfer_top_k_top_p_sampling = None
 
+
 class SampleRecorder:
+
     def __init__(self):
-        self.seq_id:torch.Tensor = None
-        self.sampled_token_ids_tensor:torch.Tensor = None
+        self.seq_id: torch.Tensor = None
+        self.sampled_token_ids_tensor: torch.Tensor = None
+
 
 last_sampler = None
+
 
 def get_last_sampler():
     return last_sampler
 
+
 class ZeroOverheadSampler(Sampler):
+
     def __init__(self):
         super().__init__()
-        
+
     def forward(
         self,
         logits: torch.Tensor,
@@ -58,7 +72,7 @@ class ZeroOverheadSampler(Sampler):
             sampling_metadata: Metadata for sampling.
         """
         global last_sampler
-        last_sampler = SampleRecorder() 
+        last_sampler = SampleRecorder()
         assert logits is not None
         _, vocab_size = logits.shape
 
@@ -145,8 +159,9 @@ class ZeroOverheadSampler(Sampler):
             on_device_tensors=on_device_tensors,
             skip_sampler_cpu_output=sampling_metadata.skip_sampler_cpu_output)
 
+
 def _greedy_sample(
-    selected_seq_groups: List[SequenceGroupToSample],
+    selected_seq_groups: list[SequenceGroupToSample],
     samples: torch.Tensor,
 ) -> SampleResultType:
     """Run greedy sampling on a given samples.
@@ -173,14 +188,16 @@ def _greedy_sample(
         assert num_parent_seqs == 1, (
             "Greedy sampling should have only one seq.")
         parent_ids = list(range(num_parent_seqs))
-        assert num_parent_seqs == 1 # not support muti seqences in seqence group
-        next_token_ids = [0] #place holder token id
+        # not support multi sequences in sequence group
+        assert num_parent_seqs == 1
+        next_token_ids = [0]  #place holder token id
         results.append((next_token_ids, parent_ids))
         sample_idx += num_parent_seqs
     return results
 
+
 def _random_sample(
-    selected_seq_groups: List[SequenceGroupToSample],
+    selected_seq_groups: list[SequenceGroupToSample],
     random_samples: torch.Tensor,
 ) -> SampleResultType:
     """Run random sampling on a given samples.
@@ -210,16 +227,21 @@ def _random_sample(
         if is_prompt:
             # Prompt phase.
             parent_ids = [0] * sampling_params.n
-            assert num_parent_seqs == 1 # not support muti seqences in seqence group
-            next_token_ids = [0] * sampling_params.n  #place holder token id
+            # not support multi sequences in sequence group
+            assert num_parent_seqs == 1
+            #place holder token id
+            next_token_ids = [0] * sampling_params.n
         else:
             # Generation phase.
             parent_ids = list(range(num_parent_seqs))
-            assert num_parent_seqs == 1 # not support muti seqences in seqence group
-            next_token_ids = [0] * num_parent_seqs  #place holder token id
+            # not support multi sequences in sequence group
+            assert num_parent_seqs == 1
+            #place holder token id
+            next_token_ids = [0] * num_parent_seqs
         results.append((next_token_ids, parent_ids))
         sample_idx += num_parent_seqs
     return results
+
 
 def _sample(
     probs: torch.Tensor,
@@ -250,6 +272,7 @@ def _sample(
         modify_greedy_probs=modify_greedy_probs,
     )
 
+
 def _sample_with_torch(
     probs: torch.Tensor,
     logprobs: torch.Tensor,
@@ -270,11 +293,12 @@ def _sample_with_torch(
       tensors required for Pythonization
     '''
 
-    categorized_seq_group_ids: Dict[SamplingType, List[int]] = {
+    categorized_seq_group_ids: dict[SamplingType, list[int]] = {
         t: []
         for t in SamplingType
     }
-    last_sampler.seq_id = torch.zeros(len(sampling_metadata.seq_groups), dtype=torch.int32)
+    last_sampler.seq_id = torch.zeros(len(sampling_metadata.seq_groups),
+                                      dtype=torch.int32)
     categorized_sample_indices = sampling_metadata.categorized_sample_indices
     for i, seq_group in enumerate(sampling_metadata.seq_groups):
         last_sampler.seq_id[i] = seq_group.seq_ids[0]
@@ -310,8 +334,9 @@ def _sample_with_torch(
         if sampling_type == SamplingType.GREEDY:
             greedy_samples = torch.argmax(logprobs[long_sample_indices],
                                           dim=-1)
-            
-            last_sampler.sampled_token_ids_tensor = greedy_samples.unsqueeze(-1)
+
+            last_sampler.sampled_token_ids_tensor = greedy_samples.unsqueeze(
+                -1)
 
             if sampled_token_ids_tensor is not None:
                 # Store sampled tokens in output tensor.
@@ -349,7 +374,7 @@ def _sample_with_torch(
                     probs[long_sample_indices],
                     max_n_in_batch,
                     seq_groups=seq_groups_arg)
-                
+
             last_sampler.sampled_token_ids_tensor = \
                 multinomial_samples[sampling_type].to(torch.long)
 

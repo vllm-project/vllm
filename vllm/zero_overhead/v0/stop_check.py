@@ -1,6 +1,7 @@
-
+# SPDX-License-Identifier: Apache-2.0
 
 from typing import Optional
+
 from vllm.engine.output_processor.stop_checker import StopChecker
 from vllm.lora.request import LoRARequest
 from vllm.sampling_params import SamplingParams
@@ -9,10 +10,10 @@ from vllm.zero_overhead.v0.sequence import ZeroOverheadSequence
 
 
 class ZeroOverheadStopChecker(StopChecker):
+
     def __init__(self, max_model_len, get_tokenizer_for_seq):
         super().__init__(max_model_len, get_tokenizer_for_seq)
-    
-    
+
     def maybe_stop_sequence(
         self,
         seq: ZeroOverheadSequence,

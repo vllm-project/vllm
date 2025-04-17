@@ -1450,7 +1450,8 @@ class LLM:
 
         if use_tqdm:
             pbar.close()
-        if is_zero_auto_thread():
+        if is_zero_auto_thread() and isinstance(self.llm_engine,
+                                                ZeroOverheadEngine):
             self.llm_engine.finish_thread()
         # Sort the outputs by request ID.
         # This is necessary because some requests may be finished earlier than

@@ -1,16 +1,18 @@
-
+# SPDX-License-Identifier: Apache-2.0
 
 from vllm.sampling_params import SamplingParams
 from vllm.sequence import VLLM_INVALID_TOKEN_ID
 from vllm.transformers_utils.detokenizer import Detokenizer
-from vllm.transformers_utils.detokenizer_utils import convert_prompt_ids_to_tokens, detokenize_incrementally
+from vllm.transformers_utils.detokenizer_utils import (
+    convert_prompt_ids_to_tokens, detokenize_incrementally)
 from vllm.zero_overhead.v0.sequence import ZeroOverheadSequence
 
 
 class ZeroOverheadDetokenizer(Detokenizer):
+
     def __init__(self, tokenizer_group):
         super().__init__(tokenizer_group)
-    
+
     def decode_sequence_inplace(self, seq: ZeroOverheadSequence,
                                 prms: SamplingParams) -> int:
         """Decodes the new token for a sequence. In-place operation.
@@ -21,9 +23,9 @@ class ZeroOverheadDetokenizer(Detokenizer):
 
         Returns:
             The number of characters added to the output text.
-        """   
+        """
         eff_length = seq.get_prompt_len() + seq.effective_output_len
-        all_input_ids = seq.get_token_ids()[ : eff_length]
+        all_input_ids = seq.get_token_ids()[:eff_length]
 
         token_id_generated_this_iteration = all_input_ids[-1]
         tokenizer = self.get_tokenizer_for_seq(seq)

@@ -1632,7 +1632,8 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
         ModelInputForGPUWithSamplingMetadata)
     _builder_cls: Type[ModelInputForGPUBuilder] = ModelInputForGPUBuilder
     if is_zero_overhead():
-        from vllm.zero_overhead.v0.model_runner import ZeroOverheadModelInputForGpuBuilder
+        from vllm.zero_overhead.v0.model_runner import (
+            ZeroOverheadModelInputForGpuBuilder)
         _builder_cls = ZeroOverheadModelInputForGpuBuilder
 
     def make_model_input_from_broadcasted_tensor_dict(

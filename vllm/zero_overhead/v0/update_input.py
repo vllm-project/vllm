@@ -1,6 +1,8 @@
-import torch
+# SPDX-License-Identifier: Apache-2.0
+
 import triton
 import triton.language as tl
+
 
 @triton.jit
 def _update_input_tokens(
@@ -23,12 +25,18 @@ def _update_input_tokens(
             output_token = tl.load(sample_output + i)
     tl.store(input_tokens + pid, output_token)
 
+
 _update_input_tokens_ptr = None
+
 
 def UpdateInputTokens(input_tokens, input_seq_ids, last_sample, last_ids):
     global _update_input_tokens_ptr
     grid = [input_seq_ids.shape[0], 1, 1]
     if _update_input_tokens_ptr is None:
-        _update_input_tokens_ptr = _update_input_tokens[grid](last_sample, last_ids, input_tokens, input_seq_ids, last_ids.shape[0], input_seq_ids.shape[0])
+        _update_input_tokens_ptr = _update_input_tokens[grid](
+            last_sample, last_ids, input_tokens, input_seq_ids,
+            last_ids.shape[0], input_seq_ids.shape[0])
     else:
-        _update_input_tokens_ptr[grid](last_sample, last_ids, input_tokens, input_seq_ids, last_ids.shape[0], input_seq_ids.shape[0])
+        _update_input_tokens_ptr[grid](last_sample, last_ids, input_tokens,
+                                       input_seq_ids, last_ids.shape[0],
+                                       input_seq_ids.shape[0])

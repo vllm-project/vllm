@@ -1,24 +1,30 @@
-from functools import partial
+# SPDX-License-Identifier: Apache-2.0
+
 import os
 import queue
 import threading
 import traceback
-from typing import Callable, Dict, List, Mapping, Optional, Type, Union
-from zlib import ZLIB_VERSION
+from collections.abc import Mapping
+from functools import partial
+from typing import Callable, Optional, Union
+
 import torch
+
 from vllm import envs
 from vllm.config import DecodingConfig, ObservabilityConfig, VllmConfig
 from vllm.core.scheduler import ScheduledSequenceGroup
-from vllm.engine.llm_engine import _LOCAL_LOGGING_INTERVAL_SEC, LLMEngine, SchedulerContext, SchedulerOutputState
+from vllm.engine.llm_engine import (_LOCAL_LOGGING_INTERVAL_SEC, LLMEngine,
+                                    SchedulerContext, SchedulerOutputState)
 from vllm.engine.metrics_types import StatLoggerBase
-from vllm.engine.output_processor.interfaces import SequenceGroupOutputProcessor
-from vllm.logger import init_logger
+from vllm.engine.output_processor.interfaces import (
+    SequenceGroupOutputProcessor)
 from vllm.executor.executor_base import ExecutorBase
 from vllm.inputs import INPUT_REGISTRY
-from vllm.inputs.parse import is_token_prompt, split_enc_dec_inputs
 from vllm.inputs.data import ProcessorInputs
+from vllm.inputs.parse import split_enc_dec_inputs
 from vllm.inputs.preprocess import InputPreprocessor
 from vllm.inputs.registry import InputRegistry
+from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.multimodal import MULTIMODAL_REGISTRY
@@ -27,30 +33,33 @@ from vllm.outputs import PoolingRequestOutput, RequestOutput
 from vllm.pooling_params import PoolingParams
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import SamplingParams
-from vllm.sequence import ExecuteModelRequest, ParallelSampleSequenceGroup, SequenceGroup, SequenceGroupBase, SequenceGroupMetadata
+from vllm.sequence import (ExecuteModelRequest, ParallelSampleSequenceGroup,
+                           SequenceGroup, SequenceGroupBase,
+                           SequenceGroupMetadata)
 from vllm.tracing import init_tracer
 from vllm.transformers_utils.tokenizer import AnyTokenizer
+from vllm.usage.usage_lib import (UsageContext, is_usage_stats_enabled,
+                                  usage_message)
+from vllm.utils import Counter, resolve_obj_by_qualname, weak_bind
 from vllm.version import __version__ as VLLM_VERSION
-from vllm.usage.usage_lib import UsageContext, is_usage_stats_enabled
-from vllm.utils import resolve_obj_by_qualname, weak_bind, Counter
 from vllm.zero_overhead.v0.sampler import SampleRecorder, get_last_sampler
 from vllm.zero_overhead.v0.sequence import ZeroOverheadSequence
 from vllm.zero_overhead.v0.stop_check import ZeroOverheadStopChecker
 from vllm.zero_overhead.v0.tokenizer import ZeroOverheadDetokenizer
-from vllm.usage.usage_lib import (UsageContext, is_usage_stats_enabled,
-                                  usage_message)
 from vllm.zero_overhead.v0.utils import is_zero_no_thread
 
 logger = init_logger(__name__)
 
+
 class ZeroOverheadEngine(LLMEngine):
+
     def __init__(
         self,
         vllm_config: VllmConfig,
-        executor_class: Type[ExecutorBase],
+        executor_class: type[ExecutorBase],
         log_stats: bool,
         usage_context: UsageContext = UsageContext.ENGINE_CONTEXT,
-        stat_loggers: Optional[Dict[str, StatLoggerBase]] = None,
+        stat_loggers: Optional[dict[str, StatLoggerBase]] = None,
         input_registry: InputRegistry = INPUT_REGISTRY,
         mm_registry: MultiModalRegistry = MULTIMODAL_REGISTRY,
         use_cached_outputs: bool = False,
@@ -99,7 +108,8 @@ class ZeroOverheadEngine(LLMEngine):
 
         # Ensure that the function doesn't contain a reference to self,
         # to avoid engine GC issues
-        def get_tokenizer_for_seq(sequence: ZeroOverheadSequence) -> AnyTokenizer:
+        def get_tokenizer_for_seq(
+                sequence: ZeroOverheadSequence) -> AnyTokenizer:
             assert tokenizer_group, ("tokenizer_group cannot be None, "
                                      "make sure skip_tokenizer_init is False")
             return tokenizer_group.get_lora_tokenizer(sequence.lora_request)
@@ -255,7 +265,7 @@ class ZeroOverheadEngine(LLMEngine):
             ))
         self.tree_decoding = os.environ.get('VLLM_TREE_DECODING') == '1'
 
-        self.seq_id_to_seq_group: Dict[str, SequenceGroupBase] = {}
+        self.seq_id_to_seq_group: dict[str, SequenceGroupBase] = {}
 
         # Flag to set when an input fails to process and the engine should run
         # the next step without re-scheduling.
@@ -266,11 +276,12 @@ class ZeroOverheadEngine(LLMEngine):
         self.thread_running = False
         self.q_recorder = queue.Queue()
         if not is_zero_no_thread():
-            self.zero_thread = threading.Thread(target=self.thread_zero_overhead)
+            self.zero_thread = threading.Thread(
+                target=self.thread_zero_overhead)
             self.thread_running = True
-            self.sem_m2s = threading.Semaphore(0) # main to scheduler thread
+            self.sem_m2s = threading.Semaphore(0)
             self.zero_thread.start()
-    
+
     def __del__(self):
         self.finish_thread()
         return super().__del__()
@@ -279,7 +290,7 @@ class ZeroOverheadEngine(LLMEngine):
         if self.thread_running:
             self.thread_running = False
             self.sem_m2s.release()
-    
+
     def thread_zero_overhead(self):
         logger.info('zero overhead thread start!')
         try:
@@ -290,14 +301,14 @@ class ZeroOverheadEngine(LLMEngine):
 
                 virtual_engine = 0
                 # Clear outputs for each new scheduler iteration
-                
                 # Schedule iteration
                 (seq_group_metadata_list, scheduler_outputs,
-                    allow_async_output_proc
-                    ) = self.scheduler[virtual_engine].schedule()
+                 allow_async_output_proc
+                 ) = self.scheduler[virtual_engine].schedule()
                 if self.last_record is not None:
                     last_sampler = self.last_record[1]
-                    self.async_d2h = last_sampler.sampled_token_ids_tensor.to('cpu', non_blocking=True)
+                    self.async_d2h = last_sampler.sampled_token_ids_tensor.to(
+                        'cpu', non_blocking=True)
                     self.async_event.record()
                     self.q_recorder.put(self.last_record)
                 else:
@@ -322,8 +333,10 @@ class ZeroOverheadEngine(LLMEngine):
                     num_lookahead_slots=scheduler_outputs.num_lookahead_slots,
                     running_queue_size=scheduler_outputs.running_queue_size,
                     finished_requests_ids=finished_requests_ids,
-                    # We use ExecuteModelRequest to pass the last sampled_token_ids
-                    # to each of the non-last PP stages for in-place prepare_input.
+                    # We use ExecuteModelRequest to
+                    # pass the last sampled_token_ids
+                    # to each of the non-last PP stages
+                    # for in-place prepare_input.
                     last_sampled_token_ids=last_sampled_token_ids)
                 outputs = self.model_executor.execute_model(
                     execute_model_req=execute_model_req)
@@ -332,34 +345,42 @@ class ZeroOverheadEngine(LLMEngine):
                     self._advance_to_next_step(
                         outputs[0], seq_group_metadata_list,
                         scheduler_outputs.scheduled_seq_groups)
-                scheduler_outputs.scheduled_seq_groups = [item for item in scheduler_outputs.scheduled_seq_groups] #deep copy
-                last_sampler = get_last_sampler()    
-                self.last_record = [outputs, last_sampler, seq_group_metadata_list, scheduler_outputs]
+                scheduler_outputs.scheduled_seq_groups = [
+                    item for item in scheduler_outputs.scheduled_seq_groups
+                ]  #deep copy
+                last_sampler = get_last_sampler()
+                self.last_record = [
+                    outputs, last_sampler, seq_group_metadata_list,
+                    scheduler_outputs
+                ]
 
         except Exception as e:
             print(f"thread_zero_overhead error : {e}")
             traceback.print_exc()
 
-    def zero_overhead_step(self) -> List[Union[RequestOutput, PoolingRequestOutput]]:
+    def zero_overhead_step(
+            self) -> list[Union[RequestOutput, PoolingRequestOutput]]:
         if not self.thread_running:
             self.zero_thread.join()
             self.thread_running = True
-            self.zero_thread = threading.Thread(target=self.thread_zero_overhead)
+            self.zero_thread = threading.Thread(
+                target=self.thread_zero_overhead)
             self.zero_thread.start()
         self.sem_m2s.release()
         recode_output = self.q_recorder.get()
-        if recode_output is None: # None is for the first step
+        if recode_output is None:
+            # None is for the first step
             return None
         virtual_engine = 0
         ctx = self.scheduler_contexts[virtual_engine]
         ctx.request_outputs.clear()
-        outputs, last_sampler, seq_group_metadata_list, scheduler_outputs = recode_output
+        (outputs, last_sampler, seq_group_metadata_list,
+         scheduler_outputs) = recode_output
         ctx.seq_group_metadata_list = seq_group_metadata_list
         ctx.scheduler_outputs = scheduler_outputs
         self.async_event.synchronize()
-        self._fix_last_step(
-            outputs, last_sampler, seq_group_metadata_list,
-            scheduler_outputs.scheduled_seq_groups)
+        self._fix_last_step(outputs, last_sampler, seq_group_metadata_list,
+                            scheduler_outputs.scheduled_seq_groups)
 
         # is_first_step_output is True only when the num_steps of all
         # the sequences are 1. When the num_steps > 1,
@@ -369,11 +390,11 @@ class ZeroOverheadEngine(LLMEngine):
 
         # Add results to the output_queue
         ctx.append_output(outputs=outputs,
-                            seq_group_metadata_list=seq_group_metadata_list,
-                            scheduler_outputs=scheduler_outputs,
-                            is_async=True,
-                            is_last_step=True,
-                            is_first_step_output=is_first_step_output)
+                          seq_group_metadata_list=seq_group_metadata_list,
+                          scheduler_outputs=scheduler_outputs,
+                          is_async=True,
+                          is_last_step=True,
+                          is_first_step_output=is_first_step_output)
 
         # Check if need to run the usual non-async path
         #if not allow_async_output_proc:
@@ -394,14 +415,12 @@ class ZeroOverheadEngine(LLMEngine):
             logger.debug("Stopping remote worker execution loop.")
             self.model_executor.stop_remote_worker_execution_loop()
         return ctx.request_outputs
-    
-    
+
     def _fix_last_step(
-            self, output: List[SamplerOutput],
-            last_sampler: SampleRecorder,
-            seq_group_metadata_list: List[SequenceGroupMetadata],
-            scheduled_seq_groups: List[ScheduledSequenceGroup]) -> None:
-        
+            self, output: list[SamplerOutput], last_sampler: SampleRecorder,
+            seq_group_metadata_list: list[SequenceGroupMetadata],
+            scheduled_seq_groups: list[ScheduledSequenceGroup]) -> None:
+
         #sample_out_list = output[0].sampler_out_tenosr.cpu().tolist()
         sample_out_list = self.async_d2h.tolist()
         sample_out_ids = last_sampler.seq_id.tolist()
@@ -416,7 +435,7 @@ class ZeroOverheadEngine(LLMEngine):
                 sample = sequence_group_outputs.samples[0]
 
                 assert len(seq_group.seqs) == 1
-                seq : ZeroOverheadSequence = seq_group.seqs[0]
+                seq: ZeroOverheadSequence = seq_group.seqs[0]
                 for token_id, seq_id in zip(sample_out_list, sample_out_ids):
                     if seq.seq_id == seq_id:
                         if type(token_id) is list:
@@ -429,14 +448,14 @@ class ZeroOverheadEngine(LLMEngine):
     def no_thread_step(self):
         virtual_engine = 0
         # Clear outputs for each new scheduler iteration
-        
+
         # Schedule iteration
         (seq_group_metadata_list, scheduler_outputs,
-            allow_async_output_proc
-            ) = self.scheduler[virtual_engine].schedule()
+         allow_async_output_proc) = self.scheduler[virtual_engine].schedule()
         if self.last_record is not None:
             last_sampler = self.last_record[1]
-            self.async_d2h = last_sampler.sampled_token_ids_tensor.to('cpu', non_blocking=True)
+            self.async_d2h = last_sampler.sampled_token_ids_tensor.to(
+                'cpu', non_blocking=True)
             self.async_event.record()
             self.q_recorder.put(self.last_record)
         else:
@@ -470,23 +489,29 @@ class ZeroOverheadEngine(LLMEngine):
                 self._advance_to_next_step(
                     outputs[0], seq_group_metadata_list,
                     scheduler_outputs.scheduled_seq_groups)
-            scheduler_outputs.scheduled_seq_groups = [item for item in scheduler_outputs.scheduled_seq_groups] #deep copy
-            last_sampler = get_last_sampler()    
-            self.last_record = [outputs, last_sampler, seq_group_metadata_list, scheduler_outputs]
+            scheduler_outputs.scheduled_seq_groups = [
+                item for item in scheduler_outputs.scheduled_seq_groups
+            ]  #deep copy
+            last_sampler = get_last_sampler()
+            self.last_record = [
+                outputs, last_sampler, seq_group_metadata_list,
+                scheduler_outputs
+            ]
 
         recode_output = self.q_recorder.get()
-        if recode_output is None: # None is for the first step
+        if recode_output is None:
+            # None is for the first step
             return None
         virtual_engine = 0
         ctx = self.scheduler_contexts[virtual_engine]
         ctx.request_outputs.clear()
-        outputs, last_sampler, seq_group_metadata_list, scheduler_outputs = recode_output
+        (outputs, last_sampler, seq_group_metadata_list,
+         scheduler_outputs) = recode_output
         ctx.seq_group_metadata_list = seq_group_metadata_list
         ctx.scheduler_outputs = scheduler_outputs
         self.async_event.synchronize()
-        self._fix_last_step(
-            outputs, last_sampler, seq_group_metadata_list,
-            scheduler_outputs.scheduled_seq_groups)
+        self._fix_last_step(outputs, last_sampler, seq_group_metadata_list,
+                            scheduler_outputs.scheduled_seq_groups)
 
         # is_first_step_output is True only when the num_steps of all
         # the sequences are 1. When the num_steps > 1,
@@ -496,11 +521,11 @@ class ZeroOverheadEngine(LLMEngine):
 
         # Add results to the output_queue
         ctx.append_output(outputs=outputs,
-                            seq_group_metadata_list=seq_group_metadata_list,
-                            scheduler_outputs=scheduler_outputs,
-                            is_async=True,
-                            is_last_step=True,
-                            is_first_step_output=is_first_step_output)
+                          seq_group_metadata_list=seq_group_metadata_list,
+                          scheduler_outputs=scheduler_outputs,
+                          is_async=True,
+                          is_last_step=True,
+                          is_first_step_output=is_first_step_output)
 
         # Check if need to run the usual non-async path
         #if not allow_async_output_proc:
@@ -521,18 +546,18 @@ class ZeroOverheadEngine(LLMEngine):
             logger.debug("Stopping remote worker execution loop.")
             self.model_executor.stop_remote_worker_execution_loop()
         return ctx.request_outputs
-                    
-    def step(self) -> List[Union[RequestOutput, PoolingRequestOutput]]:
+
+    def step(self) -> list[Union[RequestOutput, PoolingRequestOutput]]:
         if is_zero_no_thread():
             out = self.no_thread_step()
-            if out is None: #the first step need launch twice
+            if out is None:  #the first step need launch twice
                 out = self.no_thread_step()
         else:
             out = self.zero_overhead_step()
-            if out is None: #the first step need launch twice
+            if out is None:  #the first step need launch twice
                 out = self.zero_overhead_step()
         return out
-    
+
     def _add_processed_request(
         self,
         request_id: str,
@@ -569,12 +594,14 @@ class ZeroOverheadEngine(LLMEngine):
 
         encoder_inputs, decoder_inputs = split_enc_dec_inputs(processed_inputs)
 
-        seq = ZeroOverheadSequence(seq_id, decoder_inputs, block_size, eos_token_id,
-                       lora_request, prompt_adapter_request)
+        seq = ZeroOverheadSequence(seq_id, decoder_inputs, block_size,
+                                   eos_token_id, lora_request,
+                                   prompt_adapter_request)
 
-        encoder_seq = (None if encoder_inputs is None else ZeroOverheadSequence(
-            seq_id, encoder_inputs, block_size, eos_token_id, lora_request,
-            prompt_adapter_request))
+        encoder_seq = (None
+                       if encoder_inputs is None else ZeroOverheadSequence(
+                           seq_id, encoder_inputs, block_size, eos_token_id,
+                           lora_request, prompt_adapter_request))
 
         # Create a SequenceGroup based on SamplingParams or PoolingParams
         if isinstance(params, SamplingParams):
