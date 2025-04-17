@@ -217,14 +217,14 @@ class AsyncLLM(EngineClient):
 
         # Fan out child requests (for n>1).
         parent_request = ParentRequest(request_id, params)
-        child_reqs = []
+        child_requests = []
         for idx in range(params.n):
             cid, cparams = parent_request.get_child_info(idx)
             child = request if idx == params.n - 1 else copy(request)
             child.request_id, child.sampling_params = cid, cparams
-            child_reqs.append(child)
+            child_requests.append(child)
 
-        await self._enqueue_requests(child_reqs, parent_request, queue)
+        await self._enqueue_requests(child_requests, parent_request, queue)
         return queue
 
     async def _enqueue_requests(
