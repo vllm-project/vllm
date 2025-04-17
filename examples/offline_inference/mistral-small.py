@@ -90,8 +90,9 @@ def run_simple_demo(args: argparse.Namespace):
         },
     ]
     outputs = llm.chat(messages, sampling_params=sampling_params)
-
+    print("-" * 50)
     print(outputs[0].outputs[0].text)
+    print("-" * 50)
 
 
 def run_advanced_demo(args: argparse.Namespace):
@@ -162,10 +163,12 @@ def run_advanced_demo(args: argparse.Namespace):
     ]
 
     outputs = llm.chat(messages=messages, sampling_params=sampling_params)
+    print("-" * 50)
     print(outputs[0].outputs[0].text)
+    print("-" * 50)
 
 
-def main():
+def parse_args():
     parser = argparse.ArgumentParser(
         description="Run a demo in simple or advanced mode.")
 
@@ -184,8 +187,11 @@ def main():
         '--disable-mm-preprocessor-cache',
         action='store_true',
         help='If True, disables caching of multi-modal preprocessor/mapper.')
+    return parser.parse_args()
 
-    args = parser.parse_args()
+
+def main():
+    args = parse_args()
 
     if args.mode == "simple":
         print("Running simple demo...")
