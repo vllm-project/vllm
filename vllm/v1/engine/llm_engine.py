@@ -20,7 +20,7 @@ from vllm.pooling_params import PoolingParams
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import SamplingParams
 from vllm.transformers_utils.tokenizer_group import (
-    BaseTokenizerGroup, init_tokenizer_from_configs)
+    TokenizerGroup, init_tokenizer_from_configs)
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils import Device
 from vllm.v1.engine.core_client import EngineCoreClient
@@ -31,7 +31,7 @@ from vllm.v1.executor.abstract import Executor
 
 logger = init_logger(__name__)
 
-_G = TypeVar("_G", bound=BaseTokenizerGroup, default=BaseTokenizerGroup)
+_G = TypeVar("_G", bound=TokenizerGroup, default=TokenizerGroup)
 _R = TypeVar("_R", default=Any)
 
 
@@ -255,7 +255,7 @@ class LLMEngine:
 
     def get_tokenizer_group(
         self,
-        group_type: type[_G] = BaseTokenizerGroup,
+        group_type: type[_G] = TokenizerGroup,
     ) -> _G:
         tokenizer_group = self.tokenizer
 
