@@ -35,15 +35,15 @@ class ReqMeta:
     def make_meta(token_ids: list[int], block_ids: list[int], block_size: int,
                   is_store: bool) -> "ReqMeta":
         valid_num_tokens = align_to_block_size(len(token_ids), block_size)
-        token_ids = torch.tensor(token_ids)[:valid_num_tokens]
-        block_ids = torch.tensor(block_ids)
-        num_blocks = block_ids.shape[0]
+        token_ids_tensor = torch.tensor(token_ids)[:valid_num_tokens]
+        block_ids_tensor = torch.tensor(block_ids)
+        num_blocks = block_ids_tensor.shape[0]
         block_offsets = torch.arange(0, block_size)
         slot_mapping = block_offsets.reshape((1, block_size)) + \
-                block_ids.reshape((num_blocks, 1)) * block_size
+                block_ids_tensor.reshape((num_blocks, 1)) * block_size
         slot_mapping = slot_mapping.flatten()[:valid_num_tokens]
         return ReqMeta(
-            token_ids=token_ids,
+            token_ids=token_ids_tensor,
             slot_mapping=slot_mapping,
             is_store=is_store,
         )
