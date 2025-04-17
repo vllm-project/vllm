@@ -10,17 +10,7 @@ from vllm.platforms import current_platform
 def is_rocm_aiter_moe_enabled() -> bool:
     return current_platform.is_rocm() \
         and envs.VLLM_ROCM_USE_AITER_MOE \
-        and envs.VLLM_ROCM_USE_AITER \
-
-
-def is_rocm_aiter_block_scaled_moe_enabled() -> bool:
-    return is_rocm_aiter_moe_enabled() and \
-        envs.VLLM_ROCM_USE_AITER_FP8_BLOCK_SCALED_MOE
-
-
-def is_rocm_aiter_tkw1_moe_enabled() -> bool:
-    return is_rocm_aiter_moe_enabled() and \
-        envs.VLLM_ROCM_USE_AITER_FP8_TKW1_MOE
+        and envs.VLLM_ROCM_USE_AITER
 
 
 def rocm_aiter_asm_moe_tkw1(hidden_states,
@@ -59,13 +49,13 @@ def rocm_aiter_asm_moe_tkw1(hidden_states,
 
 
 def rocm_aiter_fused_experts(
-        *,
         hidden_states: torch.Tensor,
         w1: torch.Tensor,
         w2: torch.Tensor,
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
         use_fp8_w8a8: bool = False,
+        per_channel_quant: bool = False,
         apply_router_weight_on_input: bool = False,
         w1_scale: Optional[torch.Tensor] = None,
         w2_scale: Optional[torch.Tensor] = None,
@@ -85,11 +75,12 @@ def rocm_aiter_fused_experts(
     topk_weights = topk_weights.to(torch.float32)
     topk_ids = topk_ids.to(torch.int32)
 
-    if is_rocm_aiter_block_scaled_moe_enabled() and use_fp8_w8a8:
+    if (block_shape is not None) and use_fp8_w8a8:
         assert not apply_router_weight_on_input, (
             "apply_router_weight_on_input is not supported for block scaled moe"
         )
 
+        # TODO: verify this code path for DeepSeekV3
         assert w1_scale is not None
         assert w2_scale is not None
 
@@ -139,7 +130,7 @@ def rocm_aiter_fused_experts(
         )
         return out_asm
 
-    elif is_rocm_aiter_tkw1_moe_enabled() and use_fp8_w8a8:
+    elif per_channel_quant and apply_router_weight_on_input and use_fp8_w8a8:
         assert apply_router_weight_on_input, (
             "aiter's tkw1 MoE only supports models with"
             " apply_router_weight_on_input. Please set the"
@@ -160,7 +151,7 @@ def rocm_aiter_fused_experts(
                                        fc2_smooth_scale=None,
                                        a16=False,
                                        per_tensor_quant_scale=None,
-                                       expert_mask=None,
+                                       expert_mask=expert_mask,
                                        activation_str=activation)
 
     elif use_fp8_w8a8:
