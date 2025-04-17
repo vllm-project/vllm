@@ -147,3 +147,8 @@ class XgrammarGrammar(StructuredOutputGrammar):
     def reset(self):
         self.num_processed_tokens = 0
         self.matcher.reset()
+
+    def find_jump_forward_tokens(self) -> list[int]:
+        jf_string = self.matcher.find_jump_forward_string()
+        return self.tokenizer.decode(
+            jf_string, skip_special_tokens=True) if jf_string else []

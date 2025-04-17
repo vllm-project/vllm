@@ -100,3 +100,9 @@ class StructuredOutputBackend(ABC):
             max_num_seqs (int): The maximum number of sequences for which
               to allocate the bitmask.
         """
+
+    @abstractmethod
+    def find_jump_forward_tokens(self) -> list[int]:
+        """
+        Finds the tokens that can be used to jump forward in the grammar.
+        """

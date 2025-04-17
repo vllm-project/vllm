@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Optional
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.transformers_utils.tokenizer_group import init_tokenizer_from_configs
+from vllm.utils import LazyLoader
 from vllm.v1.structured_output.backend_guidance import GuidanceBackend
 from vllm.v1.structured_output.backend_types import (StructuredOutputBackend,
                                                      StructuredOutputGrammar)
@@ -17,8 +18,11 @@ if TYPE_CHECKING:
     import numpy as np
     import numpy.typing as npt
     import torch
+    import xgrammar.testing as xgr_testing
 
     from vllm.v1.request import Request
+else:
+    xgr_testing = LazyLoader('xgr_testing', globals(), 'xgrammar.testing')
 
 logger = init_logger(__name__)
 
@@ -122,3 +126,28 @@ class StructuredOutputManager:
         # np.ndarray, because that is much more efficient for serialization
         # and deserialization when sending this to the GPU workers.
         return bitmask_tensor.numpy()
+
+    def jump_forward_tokens(self, request, batch_index) -> list[int]:
+        """
+        For xgrammar-based structured output requests, repeatedly check if the grammar bitmask
+        is a single-token bitmask, and if so, advance the FSM and collect all jump-forward tokens.
+        Returns the list of jump-forward token IDs.
+        """
+        so_request = request.structured_output_request
+        if so_request is None or so_request.grammar is None:
+            return []
+
+        jump_tokens = []
+        bitmask = torch.zeros(so_request.grammar.vocab_size, dtype=torch.int32)
+        so_request.grammar.allocate_token_bitmask(1)
+        so_request.grammar.fill_bitmask(bitmask, 0)
+        is_single, unique_token_id = xgr_testing._is_single_token_bitmask(
+            bitmask, so_request.grammar.vocab_size, 0)
+        while is_single and unique_token_id != -1:
+            jump_tokens.append(unique_token_id)
+            so_request.grammar.accept_tokens(request.request_id,
+                                             [unique_token_id])
+            so_request.grammar.fill_bitmask(bitmask, batch_index)
+            is_single, unique_token_id = xgr_testing._is_single_token_bitmask(
+                bitmask, so_request.grammar.vocab_size, 0)
+        return jump_tokens
