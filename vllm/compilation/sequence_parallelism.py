@@ -17,16 +17,6 @@ from .vllm_inductor_pass import VllmInductorPass
 logger = init_logger(__name__)
 
 
-def get_world_name() -> str:
-    return torch.distributed.group.WORLD.group_name
-
-
-def residual_slice_shape(residual: torch.Tensor) -> int:
-    n_slices = get_tensor_model_parallel_world_size()
-    assert residual.size(0) % n_slices == 0
-    return residual.size(0) // n_slices
-
-
 def search_embedding_all_reduce_rmsnorm(
     arg2_1: torch.Tensor,
     mul_6: torch.Tensor,
@@ -267,14 +257,14 @@ class SequenceParallelismPass(VllmInductorPass):
             extra_check=lambda m: self.record_match(m),
         )
 
-    def record_match(self, match: Match) -> bool:
-        self.matches.append(match)
-        return bool(match)
-
-    def specialized_for_shape(self, shape: Optional[int]) -> bool:
+    def is_applicable_for_shape(self, shape: Optional[int]) -> bool:
         # only do replace for specific shapes
         tp_size = get_tensor_model_parallel_world_size()
         return shape is not None and shape % tp_size == 0
+
+    def record_match(self, match: Match) -> bool:
+        self.matches.append(match)
+        return bool(match)
 
     def __call__(self, graph: fx.Graph):
         self.dump_graph(graph, "before_sequence_parallelism_pass")
@@ -300,5 +290,6 @@ class SequenceParallelismPass(VllmInductorPass):
                 embedding_match_cnt,
                 gemm_ar_rmsnorm_match_cnt,
             )
+        logger.debug("after graph = %s", graph)
         self.dump_graph(graph, "after_sequence_parallelism_pass")
         self.matches.clear()

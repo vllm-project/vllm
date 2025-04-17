@@ -3182,7 +3182,8 @@ class CompilationConfig(BaseModel):
             Do not include dump_graph_* in the hash - they don't affect
             compilation.
             """
-            dict_ = self.model_dump(include={"enable_fusion", "enable_noop"})
+            dict_ = self.model_dump(include={"enable_fusion", "enable_noop", \
+                "enable_sequence_parallelism"})
             return InductorPass.hash_dict(dict_)
 
         def model_post_init(self, __context: Any) -> None:
