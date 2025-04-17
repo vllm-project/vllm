@@ -335,7 +335,8 @@ class VllmBackend:
 
     def configure_post_pass(self):
         config = self.compilation_config
-        self.post_grad_pass_manager.configure(config.pass_config)
+        self.post_grad_pass_manager.configure(config.pass_config,
+                                              config.static_forward_context)
 
         # Post-grad custom passes are run using the post_grad_custom_post_pass
         # hook. If a pass for that hook exists, add it to the pass manager.

@@ -136,6 +136,13 @@ class RocmPlatform(Platform):
     ]
 
     @classmethod
+    def has_cdna_target(cls):
+        import triton
+        ROCM_CDNA_TARGETS = ["gfx940", "gfx941", "gfx942", "gfx90a", "gfx908"]
+        return triton.runtime.driver.active.get_current_target(
+        ).arch in ROCM_CDNA_TARGETS
+
+    @classmethod
     def get_attn_backend_cls(cls, selected_backend, head_size, dtype,
                              kv_cache_dtype, block_size, use_v1,
                              use_mla) -> str:

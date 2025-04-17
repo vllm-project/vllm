@@ -7,8 +7,10 @@ from torch import fx as fx
 from vllm.config import CompilationConfig
 from vllm.logger import init_logger
 
+from ..attention import Attention
 from .fix_functionalization import FixFunctionalizationPass
 from .fusion import FusionPass
+from .fusion_attn import AttnFusionPass
 from .inductor_pass import CustomGraphPass, InductorPass
 from .noop_elimination import NoOpEliminationPass
 
@@ -40,13 +42,19 @@ class PostGradPassManager(CustomGraphPass):
         # always run fix_functionalization last
         self.fix_functionalization(graph)
 
-    def configure(self, pass_config: CompilationConfig.PassConfig):
+    # TODO(luka): need to improve config passing
+    def configure(self, pass_config: CompilationConfig.PassConfig,
+                  context: dict[str, Attention]):
+
         self.pass_config = pass_config
         if pass_config.enable_noop:
             self.passes += [NoOpEliminationPass(pass_config)]
 
         if pass_config.enable_fusion:
             self.passes += [FusionPass.instance(pass_config)]
+
+        if pass_config.enable_attn_fusion:
+            self.passes += [AttnFusionPass(pass_config, context)]
 
         self.fix_functionalization = FixFunctionalizationPass(pass_config)
 
