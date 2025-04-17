@@ -422,7 +422,6 @@ def kernel_paged_attention_3d(
     tl.store(segm_max_ptr + segm_offset, M, mask=head_mask)
     tl.store(segm_expsum_ptr + segm_offset, L, mask=head_mask)
 
-
 @triton.jit
 def reduce_segments(
     output_ptr,  # [num_seqs, num_query_heads, head_size]
