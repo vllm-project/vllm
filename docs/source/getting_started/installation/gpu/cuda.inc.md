@@ -46,7 +46,7 @@ LLM inference is a fast-evolving field, and the latest code may contain bug fixe
 ##### Install the latest code using `pip`
 
 ```console
-pip install vllm --pre --extra-index-url https://wheels.vllm.ai/nightly
+pip install -U vllm --pre --extra-index-url https://wheels.vllm.ai/nightly
 ```
 
 `--pre` is required for `pip` to consider pre-released versions.
@@ -65,8 +65,10 @@ Note that the wheels are built with Python 3.8 ABI (see [PEP 425](https://peps.p
 Another way to install the latest code is to use `uv`:
 
 ```console
-uv pip install vllm --extra-index-url https://wheels.vllm.ai/nightly
+uv pip install -U vllm --extra-index-url https://wheels.vllm.ai/nightly
 ```
+
+##### Install specific revisions using `uv`
 
 If you want to access the wheels for previous commits (e.g. to bisect the behavior change, performance regression), you can specify the commit hash in the URL:
 
