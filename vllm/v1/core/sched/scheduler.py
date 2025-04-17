@@ -707,21 +707,19 @@ class Scheduler(SchedulerInterface):
             if new_token_ids and request.use_structured_output:
                 advance_fsm = False
                 reasoner = self.structured_output_manager.reasoner
-                is_reasoning_end_this_step = False  # Flag the transition
+                so_request = request.structured_output_request
+                is_reasoning_end_this_step = False
 
-                if reasoner is None or request.reasoning_ended:
-                    # Reasoning was already off or never active
+                if reasoner is None or so_request.reasoning_ended:  # type: ignore[union-attr]
                     advance_fsm = True
-                else:
-                    # Reasoning is active, check if it ends now
+                else:  # type: ignore[union-attr]
                     if reasoner.is_reasoning_end(request.all_token_ids):
-                        request.reasoning_ended = True
+                        so_request.reasoning_ended = True  # type: ignore[union-attr]
                         is_reasoning_end_this_step = True
                         # Don't advance FSM in the step the transition occurs,
                         # as new_token_ids might contain the end marker.
                         advance_fsm = False
                     else:
-                        # Reasoning continues, don't advance FSM
                         advance_fsm = False
 
                 # Only advance FSM if reasoning was already off OR
