@@ -920,14 +920,19 @@ class TPUModelRunner:
                                       device=self.device)
                 torch._dynamo.mark_dynamic(indices, 0)
                 self.select_hidden_states(dummy_hidden, indices)
-            logger.info("  -- num_tokens: %d", num_tokens)
+                logger.info("  -- num_tokens: %d, num_seqs: %d", num_tokens,
+                            num_reqs)
+                # Requests can't be more than tokens. But do compile for the
+                # next bigger value in case num_tokens uses bucketed padding.
+                if num_reqs >= min(num_tokens, self.max_num_reqs):
+                    break
         xm.wait_device_ops()
         end = time.perf_counter()
         logger.info("Compilation finished in in %.2f [secs].", end - start)
         self._update_num_xla_graphs("select_hidden_states")
 
     def _precompile_sample_from_hidden(self) -> None:
-        logger.info("Compiling sampling with different input shapes.")
+        logger.info("Compiling sampling with different num_reqs.")
         start = time.perf_counter()
         hsize = self.model_config.get_hidden_size()
         for num_reqs in self.num_reqs_paddings:
