@@ -881,7 +881,8 @@ def build_app(args: Namespace) -> FastAPI:
                 section async for section in response.body_iterator
             ]
             response.body_iterator = iterate_in_threadpool(iter(response_body))
-            logger.info("response_body={%s}", response_body[0].decode())
+            logger.info("response_body={%s}",
+                        response_body[0].decode() if response_body else None)
             return response
 
     for middleware in args.middleware:
