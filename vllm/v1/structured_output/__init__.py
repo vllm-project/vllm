@@ -119,9 +119,6 @@ class StructuredOutputManager:
         # position in the batch. Resize the bitmask down to the size of
         # the batch.
         bitmask_tensor = self._grammar_bitmask
-        # Reset the relevant part of the bitmask before filling
-        if batch_len > 0:
-            bitmask_tensor[:batch_len].fill_(-1)
 
         for req_id, batch_index in structured_output_request_ids.items():
             full_request = requests[req_id]
@@ -137,14 +134,12 @@ class StructuredOutputManager:
                 so_request.grammar.fill_bitmask(bitmask_tensor, batch_index)
 
         if batch_len < bitmask_tensor.shape[0]:
-            final_bitmask_tensor = bitmask_tensor[:batch_len]
-        else:
-            final_bitmask_tensor = bitmask_tensor
+            bitmask_tensor = self._grammar_bitmask[:batch_len]
 
         # After finishing with the xgrammar operations, we convert to
         # np.ndarray, because that is much more efficient for serialization
         # and deserialization when sending this to the GPU workers.
-        return final_bitmask_tensor.numpy()
+        return bitmask_tensor.numpy()
 
     def clear_backend(self) -> None:
         if self.backend is not None:
