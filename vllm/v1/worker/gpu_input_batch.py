@@ -30,7 +30,7 @@ class CachedRequestState:
     sampling_params: SamplingParams
     generator: Optional[torch.Generator]
 
-    block_ids: list[int]
+    block_ids: list[list[int]]
     num_computed_tokens: int
     output_token_ids: list[int]
 
