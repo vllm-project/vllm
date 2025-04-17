@@ -127,6 +127,35 @@ class Metrics:
                 labelnames=labelnames,
                 multiprocess_mode="sum")
 
+        # Multi-modal cache stats
+        self.gauge_mm_cache_usage = prometheus_client.Gauge(
+            name="vllm:mm_cache_usage",
+            documentation="Multi-modal cache usage. "
+            "1 means 100 percent usage.",
+            labelnames=labelnames)
+
+        self.gauge_mm_cache_size_G = prometheus_client.Gauge(
+            name="vllm:mm_cache_size_G",
+            documentation="Multi-modal cache size "
+            "(in GiB).",
+            labelnames=labelnames)
+
+        self.gauge_mm_cache_size_items = prometheus_client.Gauge(
+            name="vllm:mm_cache_size_items",
+            documentation="Multi-modal cache size "
+            "(in number of items).",
+            labelnames=labelnames)
+
+        self.counter_mm_cache_queries = prometheus_client.Counter(
+            name="vllm:mm_cache_queries",
+            documentation="Multi-modal cache queries.",
+            labelnames=labelnames)
+
+        self.counter_mm_cache_hits = prometheus_client.Counter(
+            name="vllm:mm_cache_hits",
+            documentation="Multi-modal cache hits.",
+            labelnames=labelnames)
+
         # Iteration stats
         self.counter_num_preemption = self._counter_cls(
             name="vllm:num_preemptions_total",
@@ -500,6 +529,13 @@ class LoggingStatLogger(StatLoggerBase):
                 stats.gpu_cache_usage_sys * 100,
                 stats.cpu_cache_usage_sys * 100,
             )
+            if (stats.mm_cache_usage >= 0):
+                log_fn(
+                    "MM cache usage: %.2f%% (%d items = %.2f GiB)",
+                    stats.mm_cache_usage * 100,
+                    stats.mm_cache_size_items,
+                    stats.mm_cache_size_G,
+                )
             if (stats.cpu_prefix_cache_hit_rate >= 0
                     or stats.gpu_prefix_cache_hit_rate >= 0):
                 log_fn(
@@ -507,6 +543,7 @@ class LoggingStatLogger(StatLoggerBase):
                     stats.gpu_prefix_cache_hit_rate * 100,
                     stats.cpu_prefix_cache_hit_rate * 100,
                 )
+
             if self.spec_decode_metrics is not None:
                 log_fn(
                     self._format_spec_decode_metrics_str(
@@ -597,6 +634,18 @@ class PrometheusStatLogger(StatLoggerBase):
                             stats.cpu_prefix_cache_hit_rate)
             self._log_gauge(self.metrics.gauge_gpu_prefix_cache_hit_rate,
                             stats.gpu_prefix_cache_hit_rate)
+
+        self._log_gauge(self.metrics.gauge_mm_cache_usage,
+                        stats.mm_cache_usage)
+        self._log_gauge(self.metrics.gauge_mm_cache_size_G,
+                        stats.mm_cache_size_G)
+        self._log_gauge(self.metrics.gauge_mm_cache_size_items,
+                        stats.mm_cache_size_items)
+        self._log_counter(self.metrics.counter_mm_cache_queries,
+                          stats.mm_cache_queries)
+        self._log_counter(self.metrics.counter_mm_cache_hits,
+                          stats.mm_cache_hits)
+
         # Including max-lora in metric, in future this property of lora
         # config maybe extended to be dynamic.
         lora_info = {

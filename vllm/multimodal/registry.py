@@ -14,6 +14,7 @@ from vllm.logger import init_logger
 from vllm.transformers_utils.tokenizer import (AnyTokenizer,
                                                cached_tokenizer_from_config)
 from vllm.utils import ClassRegistry
+from vllm.v1.metrics.stats import MultiModalCacheStats
 
 from .audio import AudioPlugin
 from .base import MultiModalInputMapper, MultiModalPlugin, MultiModalTokensCalc
@@ -121,6 +122,20 @@ class MultiModalRegistry:
         self._limits_by_model = _MultiModalLimits()
 
         self._processing_cache = ProcessingCache(VLLM_MM_INPUT_CACHE_GIB)
+
+    def make_processor_cache_stats(self) -> MultiModalCacheStats:
+        """Get (and reset) the multi-modal cache stats.
+
+        Returns:
+            The current multi-modal caching stats.
+        """
+        return self._processing_cache.make_stats()
+
+    def reset_processor_cache(self) -> bool:
+        """Reset the multi-modal processing cache."""
+        self._processing_cache.reset()
+
+        return True  # Success
 
     def register_plugin(self, plugin: MultiModalPlugin) -> None:
         """

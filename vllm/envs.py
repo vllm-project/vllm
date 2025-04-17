@@ -592,7 +592,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
 
     # If set, vllm will run in development mode, which will enable
     # some additional endpoints for developing and debugging,
-    # e.g. `/reset_prefix_cache`
+    # e.g. `/reset_mm_cache`, `/reset_prefix_cache`
     "VLLM_SERVER_DEV_MODE":
     lambda: bool(int(os.getenv("VLLM_SERVER_DEV_MODE", "0"))),
 
