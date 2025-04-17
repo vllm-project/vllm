@@ -5,7 +5,7 @@ from __future__ import annotations
 import time
 from collections import defaultdict, deque
 from collections.abc import Iterable
-from typing import Optional, Union
+from typing import TYPE_CHECKING, Optional, Union
 
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.factory import (
@@ -707,20 +707,22 @@ class Scheduler(SchedulerInterface):
             if new_token_ids and request.use_structured_output:
                 advance_fsm = False
                 reasoner = self.structured_output_manager.reasoner
-                so_request = request.structured_output_request
                 is_reasoning_end_this_step = False
 
-                if reasoner is None or so_request.reasoning_ended:  # type: ignore[union-attr]
+                # NOTE: use_structured_output implies
+                # structured_output_request is not None,
+                # but type checker isn't smart enough to know this.
+                # This only affect type runtime, not actual runtime.
+                # assert is also not recommended on perf-sensitive runtime path.
+                if TYPE_CHECKING:
+                    assert request.structured_output_request is not None
+                    assert request.structured_output_request.grammar is not None
+
+                if reasoner is None or request.structured_output_request.reasoning_ended:  # noqa: E501
                     advance_fsm = True
-                else:  # type: ignore[union-attr]
-                    if reasoner.is_reasoning_end(request.all_token_ids):
-                        so_request.reasoning_ended = True  # type: ignore[union-attr]
-                        is_reasoning_end_this_step = True
-                        # Don't advance FSM in the step the transition occurs,
-                        # as new_token_ids might contain the end marker.
-                        advance_fsm = False
-                    else:
-                        advance_fsm = False
+                elif reasoner.is_reasoning_end(request.all_token_ids):
+                    request.structured_output_request.reasoning_ended = True
+                    is_reasoning_end_this_step = True
 
                 # Only advance FSM if reasoning was already off OR
                 # if we are not in the specific step where reasoning just ended.
@@ -728,7 +730,7 @@ class Scheduler(SchedulerInterface):
                     # NOTE: structured_output_request
                     # should not be None if use_structured_output, we have
                     # check above, so safe to ignore type warning
-                    request.structured_output_request.grammar.accept_tokens(  # type: ignore[union-attr]
+                    request.structured_output_request.grammar.accept_tokens(
                         req_id, new_token_ids)
 
             # Get prompt logprobs for this request.
