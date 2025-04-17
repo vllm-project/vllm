@@ -1,8 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
-
-# ruff: noqa: E501
 """Example Python client for embedding API dimensions using vLLM API server
-NOTE: start a supported Matryoshka Embeddings model server with `vllm serve`, e.g.
+NOTE:
+    start a supported Matryoshka Embeddings model server with `vllm serve`, e.g.
     vllm serve jinaai/jina-embeddings-v3 --trust-remote-code
 """
 
