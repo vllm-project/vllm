@@ -52,7 +52,6 @@ class AsyncLLM(EngineClient):
         use_cached_outputs: bool = False,
         log_requests: bool = True,
         start_engine_loop: bool = True,
-        external_stat_loggers: Optional[list[list[StatLoggerBase]]] = None,
     ) -> None:
         if not envs.VLLM_USE_V1:
             raise ValueError(
@@ -75,14 +74,6 @@ class AsyncLLM(EngineClient):
                     loggers.append(LoggingStatLogger(engine_index=i))
                 loggers.append(
                     PrometheusStatLogger(vllm_config, engine_index=i))
-
-                if external_stat_loggers is not None:
-                    # External stat loggers handle own dp splitting
-                    # Should be in format
-                    # [[stat_logger1-dp1, stat_logger1-dp2],
-                    # [stat_logger2-dp1, stat_logger2-dp2]]
-                    for stat_logger in external_stat_loggers:
-                        loggers.append(stat_logger[i])
 
                 self.stat_loggers.append(loggers)
 
@@ -165,7 +156,6 @@ class AsyncLLM(EngineClient):
         engine_args: AsyncEngineArgs,
         start_engine_loop: bool = True,
         usage_context: UsageContext = UsageContext.ENGINE_CONTEXT,
-        external_stat_loggers: Optional[list[list[StatLoggerBase]]] = None,
     ) -> "AsyncLLM":
         """Create an AsyncLLM from the EngineArgs."""
 
@@ -181,7 +171,6 @@ class AsyncLLM(EngineClient):
             log_stats=not engine_args.disable_log_stats,
             start_engine_loop=start_engine_loop,
             usage_context=usage_context,
-            external_stat_loggers=external_stat_loggers,
         )
 
     def __del__(self):
