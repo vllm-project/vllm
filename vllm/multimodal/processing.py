@@ -21,6 +21,7 @@ from vllm.logger import init_logger
 from vllm.transformers_utils.tokenizer import (AnyTokenizer, decode_tokens,
                                                encode_tokens)
 from vllm.utils import GiB_bytes, LRUCache, flatten_2d_lists, full_groupby
+from vllm.v1.metrics.stats import MultiModalCacheStats
 
 from .hasher import MultiModalHasher
 from .inputs import (MultiModalDataDict, MultiModalEncDecInputs,
@@ -922,32 +923,35 @@ class ProcessingCache:
         self,
         capacity_gb: float,
         *,
-        debug_cache_hit_ratio_steps: Optional[int] = None,
+        debug: bool = False,
     ) -> None:
         super().__init__()
-
-        self.debug_cache_hit_ratio_steps = debug_cache_hit_ratio_steps
-        self.debug_cache_hits = 0
-        self.debug_cache_total = 0
 
         self._cache = self.get_lru_cache(
             capacity_gb,
             MultiModalKwargsItem,
-            debug=bool(debug_cache_hit_ratio_steps),
+            debug=debug,
         )
+        self._stats = MultiModalCacheStats()
 
-    def _maybe_log_cache_stats(self) -> None:
-        steps = self.debug_cache_hit_ratio_steps
-        if not steps:
-            return
+    def make_stats(self) -> MultiModalCacheStats:
+        """Get (and reset) the multi-modal cache stats.
 
-        total = self.debug_cache_total
-        if total > 0 and total % steps == 0:
-            logger.debug("ProcessingCache: hit_ratio = %.2f",
-                         self.debug_cache_hits / total)
-            logger.debug("ProcessingCache: size = %.2f / %.2f GiB",
-                         self._cache.currsize / GiB_bytes,
-                         self._cache.maxsize / GiB_bytes)
+        Returns:
+            The current multi-modal caching stats.
+        """
+        mm_cache = self._cache
+
+        info_delta = mm_cache.stat(delta=True)
+        self._stats.hits = info_delta.hits
+        self._stats.queries = info_delta.total
+        self._stats.usage = mm_cache.usage
+        self._stats.size_G = mm_cache.currsize / GiB_bytes
+        self._stats.size_items = len(mm_cache)
+
+        stats = self._stats
+        self._stats = MultiModalCacheStats()
+        return stats
 
     def get(
         self,
@@ -965,17 +969,9 @@ class ProcessingCache:
         - The original data item passed to the HF processor
         - The configuration options of the HF processor
         """
-        self._maybe_log_cache_stats()
-
         cache_key = MultiModalHasher.hash_kwargs(model_id=model_id,
                                                  **{modality: input_item},
                                                  **input_kwargs)
-
-        if self.debug_cache_hit_ratio_steps:
-            if cache_key in self._cache:
-                self.debug_cache_hits += 1
-
-            self.debug_cache_total += 1
 
         return self._cache.get(cache_key)
 
@@ -995,6 +991,12 @@ class ProcessingCache:
                                                  **{modality: input_item},
                                                  **input_kwargs)
         self._cache[cache_key] = output_kwargs
+
+    def reset(self) -> bool:
+        self._cache.clear()
+        self._stats.reset = True
+
+        return True
 
 
 class BaseProcessingInfo:

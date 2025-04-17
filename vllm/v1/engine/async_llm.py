@@ -35,7 +35,9 @@ from vllm.v1.engine.processor import Processor
 from vllm.v1.executor.abstract import Executor
 from vllm.v1.metrics.loggers import (LoggingStatLogger, PrometheusStatLogger,
                                      StatLoggerBase)
-from vllm.v1.metrics.stats import IterationStats, SchedulerStats
+from vllm.v1.metrics.stats import (IterationStats, MultiModalCacheStats,
+                                   MultiModalCacheStatsCollection,
+                                   SchedulerStats)
 
 logger = init_logger(__name__)
 
@@ -333,6 +335,7 @@ class AsyncLLM(EngineClient):
         # Ensure that the task doesn't have a circular ref back to the AsyncLLM
         # object, or else it won't be garbage collected and cleaned up properly.
         engine_core = self.engine_core
+        input_processor = self.processor
         output_processor = self.output_processor
         log_stats = self.log_stats
         stat_loggers = self.stat_loggers if log_stats else None
@@ -378,8 +381,10 @@ class AsyncLLM(EngineClient):
                     if stat_loggers:
                         assert outputs.scheduler_stats is not None
                         AsyncLLM._record_stats(
-                            stat_loggers[outputs.engine_index],
+                            input_processor=input_processor,
+                            stat_loggers=stat_loggers[outputs.engine_index],
                             scheduler_stats=outputs.scheduler_stats,
+                            p1_mm_cache_stats=outputs.mm_cache_stats,
                             iteration_stats=iteration_stats,
                         )
             except Exception as e:
@@ -399,14 +404,24 @@ class AsyncLLM(EngineClient):
 
     @staticmethod
     def _record_stats(
+        input_processor: Processor,
         stat_loggers: list[StatLoggerBase],
         scheduler_stats: SchedulerStats,
+        p1_mm_cache_stats: Optional[MultiModalCacheStats],
         iteration_stats: Optional[IterationStats],
     ):
         """static so that it can be used from the output_handler task
         without a circular ref to AsyncLLM."""
+        mm_cache_stats = MultiModalCacheStatsCollection(
+            p0_processor=input_processor.mm_registry.
+            make_processor_cache_stats(),
+            p0_mirror=input_processor.mm_input_cache_client.make_stats(),
+            p1_mirror=p1_mm_cache_stats,
+        ) if p1_mm_cache_stats else None
+
         for stat_logger in stat_loggers:
             stat_logger.record(scheduler_stats=scheduler_stats,
+                               mm_cache_stats=mm_cache_stats,
                                iteration_stats=iteration_stats)
 
     def encode(
@@ -458,6 +473,11 @@ class AsyncLLM(EngineClient):
 
     async def stop_profile(self) -> None:
         await self.engine_core.profile_async(False)
+
+    async def reset_mm_cache(self) -> None:
+        self.processor.mm_registry.reset_processor_cache()
+        self.processor.mm_input_cache_client.reset()
+        await self.engine_core.reset_mm_cache_async()
 
     async def reset_prefix_cache(self,
                                  device: Optional[Device] = None) -> None:

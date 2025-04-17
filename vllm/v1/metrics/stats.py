@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import time
+from collections import deque
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Optional
 
@@ -12,17 +13,91 @@ if TYPE_CHECKING:
 
 
 @dataclass
-class PrefixCacheStats:
-    """Stores prefix cache hit statistics."""
-    # Whether reset_prefix_cache was invoked.
+class CacheStats:
+    """Stores cache hit statistics."""
     reset: bool = False
-    # The number of requests in this update.
+    """Whether the cache was reset."""
+
     requests: int = 0
-    # The number of queries in these requests. Note that "queries" here
-    # means the number of blocks that were queried from the cache.
+    """The number of requests in this update."""
+
     queries: int = 0
-    # The number of hits in these requests.
+    """The number of queries in these requests."""
+
     hits: int = 0
+    """The number of hits in these requests."""
+
+
+class CachingMetrics:
+    """Metrics for caching with a hit rate of the most recent N requests.
+
+    Args:
+        interval: The number of the most recent requests to aggregate.
+            Defaults to 1000.
+    """
+
+    def __init__(self, interval: int = 1000):
+        self.interval = interval
+        # The current aggregated values.
+        self.aggregated_requests = 0
+        self.aggregated_query_total = 0
+        self.aggregated_query_hit = 0
+        # A deque of (requests, queries, hits) for the most recent requests.
+        self.query_queue: deque[tuple[int, int, int]] = deque()
+
+    def observe(self, stats: CacheStats):
+        """Observe the caching for a set of requests.
+
+        This function is called with information gathered when new requests
+        are being scheduled and are looking for computed blocks.
+
+        When there are more than `interval` requests, the oldest set of
+        requestsare removed from the metrics.
+
+        Args:
+            stats: The cache stats.
+        """
+        # The cache was reset before the current update.
+        # Reset the metrics before aggregating the current stats.
+        if stats.reset:
+            self.reset()
+
+        # Update the metrics.
+        self.query_queue.append((stats.requests, stats.queries, stats.hits))
+        self.aggregated_requests += stats.requests
+        self.aggregated_query_total += stats.queries
+        self.aggregated_query_hit += stats.hits
+
+        # Remove the oldest stats if the number of requests exceeds.
+        if self.aggregated_requests > self.interval:
+            old_requests, old_queries, old_hits = self.query_queue.popleft()
+            self.aggregated_requests -= old_requests
+            self.aggregated_query_total -= old_queries
+            self.aggregated_query_hit -= old_hits
+
+    def reset(self):
+        """Reset the metrics."""
+        self.aggregated_requests = 0
+        self.aggregated_query_total = 0
+        self.aggregated_query_hit = 0
+        self.query_queue.clear()
+
+    @property
+    def hit_rate(self) -> float:
+        """Calculate the hit rate for the past N requests."""
+        if self.aggregated_query_total == 0:
+            return 0.0
+        return self.aggregated_query_hit / self.aggregated_query_total
+
+
+@dataclass
+class PrefixCacheStats(CacheStats):
+    """
+    Stores prefix cache hit statistics.
+
+    - `reset`: Whether `reset_prefix_cache` was invoked.
+    - `queries`: Refers to the number of blocks that were queried.
+    """
 
 
 @dataclass
@@ -38,6 +113,43 @@ class SchedulerStats:
         default_factory=PrefixCacheStats)
 
     spec_decoding_stats: Optional[SpecDecodingStats] = None
+
+
+@dataclass
+class MultiModalCacheStats(CacheStats):
+    """
+    Stores multi-modal cache hit statistics.
+
+    - `reset`: Whether `reset_mm_cache` was invoked.
+    - `queries`: Refers to the number of multi-modal data items
+      that were queried.
+    """
+    usage: float = 0.0
+    """The current memory usage of the cache relative to its capacity."""
+
+    size_G: float = 0.0
+    """The current size of the cache (in GiB)."""
+
+    size_items: int = 0
+    """The current size of the cache (in number of items)."""
+
+
+@dataclass
+class MultiModalCacheStatsCollection:
+    p0_processor: MultiModalCacheStats
+    """Stats for Process 0 processor cache."""
+
+    p0_mirror: MultiModalCacheStats
+    """Stats for Process 0 mirrored cache."""
+
+    p1_mirror: MultiModalCacheStats
+    """Stats for Process 1 mirrored cache."""
+
+    def __getitem__(self, key: str) -> MultiModalCacheStats:
+        try:
+            return getattr(self, key)
+        except AttributeError as e:
+            raise KeyError(key) from e
 
 
 @dataclass

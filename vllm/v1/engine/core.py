@@ -105,6 +105,7 @@ class EngineCore:
         )
 
         # Setup MM Input Mapper.
+        self.is_multimodal_model = vllm_config.model_config.is_multimodal_model
         self.mm_input_cache_server = MirroredProcessingCache(
             vllm_config.model_config)
 
@@ -194,20 +195,28 @@ class EngineCore:
 
     def step(self) -> EngineCoreOutputs:
         """Schedule, execute, and make output."""
-
         # Check for any requests remaining in the scheduler - unfinished,
         # or finished and not yet removed from the batch.
-        if not self.scheduler.has_requests():
-            return EngineCoreOutputs(
+        if self.scheduler.has_requests():
+            scheduler_output = self.scheduler.schedule()
+            output = self.model_executor.execute_model(scheduler_output)
+            core_outputs = self.scheduler.update_from_output(
+                scheduler_output, output)  # type: ignore
+        else:
+            core_outputs = EngineCoreOutputs(
                 outputs=[],
                 scheduler_stats=self.scheduler.make_stats(),
             )
-        scheduler_output = self.scheduler.schedule()
-        output = self.model_executor.execute_model(scheduler_output)
-        engine_core_outputs = self.scheduler.update_from_output(
-            scheduler_output, output)  # type: ignore
 
-        return engine_core_outputs
+        if self.is_multimodal_model:
+            mm_cache_stats = self.mm_input_cache_server.make_stats()
+            if (scheduler_stats := core_outputs.scheduler_stats):
+                mm_cache_stats.requests = (
+                    scheduler_stats.prefix_cache_stats.requests)
+
+            core_outputs.mm_cache_stats = mm_cache_stats
+
+        return core_outputs
 
     def step_with_batch_queue(self) -> Optional[EngineCoreOutputs]:
         """Schedule and execute batches with the batch queue.
@@ -258,6 +267,15 @@ class EngineCore:
 
     def profile(self, is_start: bool = True):
         self.model_executor.profile(is_start)
+
+    def reset_mm_cache(self):
+        # NOTE: Since this is mainly for debugging, we don't attempt to
+        # re-sync the internal caches (P0 processor, P0 mirror, P1 mirror)
+        if self.scheduler.get_num_unfinished_requests():
+            logger.warning("Resetting the multi-modal cache when requests are "
+                           "in progress may lead to desynced internal caches.")
+
+        self.mm_input_cache_server.reset()
 
     def reset_prefix_cache(self):
         self.scheduler.reset_prefix_cache()

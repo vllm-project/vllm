@@ -11,7 +11,7 @@ from vllm.lora.request import LoRARequest
 from vllm.multimodal import MultiModalKwargs
 from vllm.multimodal.inputs import PlaceholderRange
 from vllm.sampling_params import SamplingParams
-from vllm.v1.metrics.stats import SchedulerStats
+from vllm.v1.metrics.stats import MultiModalCacheStats, SchedulerStats
 from vllm.v1.outputs import LogprobsLists, LogprobsTensors
 
 # These are possible values of RequestOutput.finish_reason,
@@ -134,6 +134,7 @@ class EngineCoreOutputs(
     # [num_reqs]
     outputs: list[EngineCoreOutput] = []
     scheduler_stats: Optional[SchedulerStats] = None
+    mm_cache_stats: Optional[MultiModalCacheStats] = None
     timestamp: float = 0.0
 
     utility_output: Optional[UtilityOutput] = None
