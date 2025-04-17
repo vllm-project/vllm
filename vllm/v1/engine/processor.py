@@ -155,10 +155,13 @@ class Processor:
                              "supported in V1.")
         if params.guided_decoding.backend:
             if params.guided_decoding.backend != engine_level_backend:
-                raise ValueError("Request-level structured output backend "
-                                 "must match engine-level backend. "
-                                 f"{params.guided_decoding.backend}"
-                                 f" != {engine_level_backend}")
+                raise ValueError(
+                    "Request-level structured output backend selection is no "
+                    "longer supported. The request specified "
+                    f"'{params.guided_decoding.backend}', but vLLM was "
+                    f"initialised with '{engine_level_backend}'. This error "
+                    "can be resolved by removing backend selection from the "
+                    "request.")
         else:
             params.guided_decoding.backend = engine_level_backend
 
@@ -353,7 +356,7 @@ class Processor:
             raise ValueError(f"Token id {max_input_id} is out of vocabulary")
 
         max_prompt_len = self.model_config.max_model_len
-        if len(prompt_ids) >= max_prompt_len:
+        if len(prompt_ids) > max_prompt_len:
             if prompt_type == "encoder" and model_config.is_multimodal_model:
                 mm_registry = self.input_preprocessor.mm_registry
                 mm_processor = mm_registry.create_processor(
