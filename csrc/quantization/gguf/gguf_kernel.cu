@@ -13,7 +13,6 @@
 #include "mmvq.cuh"
 #include "mmq.cuh"
 #include "moe.cuh"
-#include "moe_new.cuh"
 #include "moe_vec.cuh"
 
 // Q8 gemv
