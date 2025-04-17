@@ -112,6 +112,8 @@ class Scheduler(SchedulerInterface):
         self.encoder_cache_manager = EncoderCacheManager(
             cache_size=encoder_cache_size)
 
+
+    # Q: How many times do we update num_common_prefix_blocks?
     def schedule(self) -> SchedulerOutput:
         # NOTE(woosuk) on the scheduling algorithm:
         # There's no "decoding phase" nor "prefill phase" in the scheduler.
@@ -319,7 +321,7 @@ class Scheduler(SchedulerInterface):
                 else:
                     encoder_inputs_to_schedule = None
                     new_encoder_budget = encoder_budget
-
+                # allocate_slots deallocates blocks which no longer are in use
                 new_blocks = self.kv_cache_manager.allocate_slots(
                     request, num_new_tokens, computed_blocks)
                 if new_blocks is None:

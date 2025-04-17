@@ -17,6 +17,7 @@ from vllm.v1.request import Request
 
 logger = init_logger(__name__)
 
+from __future__ import annotations
 
 class BlockHashType(NamedTuple):
     """Hash value of a block (int), the token IDs in the block, and extra keys.
@@ -107,7 +108,6 @@ class PrefixCachingMetrics:
             return 0.0
         return self.aggregated_query_hit / self.aggregated_query_total
 
-
 @dataclass
 class KVCacheBlock:
     """KV-cache block metadata."""
@@ -123,6 +123,9 @@ class KVCacheBlock:
     # These two attributes should only be manipulated by FreeKVCacheBlockQueue.
     prev_free_block: Optional["KVCacheBlock"] = None
     next_free_block: Optional["KVCacheBlock"] = None
+
+    # Number of blocks encapsulated by this KVCacheBlock
+    block_depth: int = 0
 
     def incr_ref(self):
         self.ref_cnt += 1
@@ -144,6 +147,7 @@ class KVCacheBlock:
         """Reset the block hash when the block is evicted."""
         self._block_hash = None
 
+
     def __repr__(self) -> str:
         # Use block_id instead of KVCacheBlock object to avoid calling __repr__
         # on KVCacheBlock object recursively.
@@ -156,7 +160,132 @@ class KVCacheBlock:
                 f"_block_hash={self._block_hash}, "
                 f"prev_free_block={prev_block_id}, "
                 f"next_free_block={next_block_id})")
+@dataclass
+class LeafMetadata:
+    def __init__(self, leaf_id: int = 0, kv_node: KVCacheBlockPrefixTrieNode = None):
+        """
+        Args:
+            req_id: Request id which this leaf corresponds to.
+            leaf_id: The index of the leaf in leaves list of KVCacheBlockPrefixTrie
+            kv_node: The KVCacheBlockPrefixTrieNode this leaf corresponds to
+        """
+        # The id of the leaf (based on post-order traversal of KVCacheBlockPrefixTrie
+        self.leaf_id: int = leaf_id
+        # Node which this leaf corresponds to
+        self.kv_node: KVCacheBlockPrefixTrieNode = kv_node
 
+#TODO: Replace all PrefixTrie with KVCacheBlockPrefixTrie
+class KVCacheBlockPrefixTrie:
+    """Prefix Trie of KVCacheBlocks for Forested Cascade Attention"""
+
+    max_node_id = 0
+    min_ungrouped_node_id: int = 1
+    def __init__(self, depth: int):
+        """
+        Args:
+            depth: The depth of the trees level 1 KVCacheBlock nodes.
+        """
+        self.depth = depth
+        # node_id == 0 means node is a sentinel
+        self.sentinel = KVCacheBlockPrefixTrieNode()
+        self.req_to_leaf: dict[str, LeafMetadata] = {}
+        self.leaves: list[LeafMetadata] = []
+
+    def insert_leaf_at_idx(self, idx: int, leaf_metadata: LeafMetadata):
+        self.leaves.insert(idx, leaf_metadata)
+
+    # For each block in blocks, first check if it is in the trie
+    # If it is in the trie, and it is the final block, add the request id
+    # to the leaf's req_ids list.
+
+    #TODO(jayanth): Verify that blocks will always be non-empty
+    def insert(self, request: Request, blocks: list[KVCacheBlock]):
+        if not blocks:
+            return
+        parent_block_node = self.sentinel
+        for i in range(len(blocks)):
+            curr_block = blocks[i]
+            curr_depth = curr_block.block_depth
+
+            #TODO(jayanth): Remove in production code
+            assert curr_depth == self.depth + i
+
+            parent_man_id = parent_block_node.min_accessible_node_id
+            parent_prefix_cnt = parent_block_node.leaf_cnt
+            curr_leaf_insert_idx = parent_man_id + parent_prefix_cnt
+
+            curr_prefix_cnt = 0 if i < len(blocks) - 1 else 1
+            if curr_block.block_id in parent_block_node.children:
+                curr_block_node = parent_block_node.children[curr_block.block_id]
+            else:
+                curr_block_node = KVCacheBlockPrefixTrieNode(
+                    depth=curr_depth,
+                    parent=parent_block_node,
+                    block_id=curr_block.block_id,
+                    min_accessible_node_id=curr_leaf_insert_idx,
+                    leaf_cnt= curr_prefix_cnt)
+
+            if i == len(blocks) - 1:
+                leaf_metadata = LeafMetadata(
+                    leaf_id=curr_leaf_insert_idx)
+                self.req_to_leaf[request.request_id] = leaf_metadata
+                self.insert_leaf_at_idx(curr_leaf_insert_idx, leaf_metadata)
+            parent_block_node.add_child(curr_block_node)
+            parent_block_node = curr_block_node
+
+    #TODO(jayanth): Ensure leaf never corresponds to sentinel via insert
+    def remove(self, request: Request):
+        req_id = request.request_id
+        if req_id not in self.req_to_leaf:
+            return
+        leaf_metadata = self.req_to_leaf[req_id]
+        node = leaf_metadata.kv_node
+        while node.node_id:
+            parent_node = node.parent
+            parent_node.remove_child(node.node_id)
+            node = parent_node
+        self.leaves.remove(leaf_metadata.leaf_id)
+
+class KVCacheBlockPrefixTrieNode:
+    """Node that stores each KVCacheBlock still in use by
+       the GPUModelRunner. The root of the Trie is a sentinel node which
+       points to KVCacheBlocks with distinct prefixes. A node is the child of
+       another Trie node if it contains the parent node as a prefix."""
+
+    def __init__(self,
+                 depth: int = 0,
+                 parent: "KVCacheBlockPrefixTrieNode" = None,
+                 block_id: int = 0,
+                 min_accessible_node_id: int = 0,
+                 leaf_cnt: int = 0):
+        """
+        Args:
+            depth: The depth of the KVCacheBlock encompassed by this node.
+            parent: The parent of this node.
+            block_id: The id of the KVCacheBlock encompassed by this node.
+            min_accessible_node_id: The minimum node_id of a leaf node traversable from this node.
+        """
+        self.depth: int = depth
+        self.parent: KVCacheBlockPrefixTrieNode = parent
+        self.children: dict[int, KVCacheBlockPrefixTrieNode] = {}
+        self.block_id = block_id
+        self.min_accessible_node_id = min_accessible_node_id
+        self.leaf_cnt = leaf_cnt
+    def add_child(self, child_node: "KVCacheBlockPrefixTrieNode" = None):
+        self.children[child_node.block_id] = child_node
+        self.leaf_cnt += 1
+
+    def remove_child(self, child_node_block_id: int):
+        if child_node_block_id not in self.children:
+            return
+        del self.children[child_node_block_id]
+        self.leaf_cnt -= 1
+    @property
+    def weight(self):
+        return self.depth * self.leaf_cnt
+
+    def allocate_group(self):
+        pass
 
 class FreeKVCacheBlockQueue:
     """This class organizes a list of KVCacheBlock objects to a doubly linked
@@ -262,6 +391,64 @@ class FreeKVCacheBlockQueue:
             curr_block = curr_block.next_free_block
         return ret
 
+class KVCacheBlockPrefixTrie:
+    """Prefix Trie of KVCacheBlocks for Forested Cascade Attention"""
+
+    min_ungrouped_node_id: int = 1
+    def __init__(self, depth: int):
+        """
+        Args:
+            depth: The depth of the trees level 1 KVCacheBlock nodes.
+        """
+        self.depth = depth
+
+    def insert(self, request: Request, blocks: list[KVCacheBlock]):
+        pass
+
+
+class KVCacheBlockPrefixTrieNode:
+    """Node that stores each KVCacheBlock still in use by
+       the GPUModelRunner. The root of the Trie is a sentinel node which
+       points to KVCacheBlocks with distinct prefixes. A node is the child of
+       another Trie node if it contains the parent node as a prefix."""
+
+    def __init__(self, node_id: int = 0,
+                 depth: int = 0,
+                 parent: "KVCacheBlockPrefixTrieNode" = None,
+                 block_id: int = 0,
+                 min_accessible_node_id: int = 0,
+                 isLeaf: bool = False,
+                 req_id: str = ""):
+        """
+        Args:
+            node_id: The id of the node in the actual trie. Node ids increase from "left to right and bottom to top".
+            Nodes with lower depth have higher node_id.
+            depth: The depth of the KVCacheBlock encompassed by this node.
+            parent: The parent of this node.
+            block_id: The id of the KVCacheBlock encompassed by this node.
+            min_accessible_node_id: The minimum node_id of a leaf node traversable from this node.
+            isLeaf: Boolean returning true if the current node is a leaf.
+            req_id: The request corresponding to this block if it is a leaf.
+            isLeaf must be True, else req_id is garbage.
+        """
+        self.node_id = node_id
+        self.depth: int = depth
+        self.parent: KVCacheBlockPrefixTrieNode = parent
+        self.children: dict[int, KVCacheBlockPrefixTrieNode] = {}
+        self.block_id = block_id
+        self.min_accessible_node_id = min_accessible_node_id
+        self.isLeaf: bool = isLeaf
+        self.req_id: str = req_id
+
+    def add_child(self, child_node: "KVCacheBlockPrefixTrieNode" = None):
+        self.children[child_node.block_id] = child_node
+
+    @property
+    def weight(self):
+        return self.depth * self.prefix_cnt
+
+    def allocate_group(self):
+        pass
 
 def need_extra_keys(request: Request) -> bool:
     """Check whether the blocks allocated to this request need extra hash keys.

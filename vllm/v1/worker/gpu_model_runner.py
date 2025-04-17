@@ -461,6 +461,15 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         if batch_changed:
             self.input_batch.refresh_sampling_metadata()
 
+    #Q: When do we fill block table with pointers to appropriate KV Cache Blocks for each request?
+    # Algorithm:
+    # 1. Make a root node
+    # 2. On each commit to the block table, add a child KVCacheBlock to the appropriate parent
+    # 3. Ensure leaf nodes correspond to certain requests.
+    # 4. Iterate through the trie from left to right and bottom to top, and
+    #    number each request depending on its position in this traversal
+
+    #Q: Do we update the shared prefix in _update_states? If not, why?
     def _prepare_inputs(
         self,
         scheduler_output: "SchedulerOutput",

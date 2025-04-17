@@ -8,14 +8,13 @@ from vllm.logger import init_logger
 from vllm.utils import cdiv, sha256
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_utils import (BlockHashType, KVCacheBlock,
-                                         hash_request_tokens)
+                                         hash_request_tokens, KVCacheBlockPrefixTrie)
 from vllm.v1.core.specialized_manager import get_specialized_manager
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.metrics.stats import PrefixCacheStats
 from vllm.v1.request import Request, RequestStatus
 
 logger = init_logger(__name__)
-
 
 class KVCacheManager:
 
@@ -73,6 +72,10 @@ class KVCacheManager:
         # `get_computed_blocks` or `allocate_slots`.
         self.req_to_block_hashes: defaultdict[
             str, list[BlockHashType]] = defaultdict(list)
+
+        # Mapping from block depth to a KVCacheBlockPrefixTrie
+        # This is necessary when using forested CascadeAttention
+        self.depth_to_prefix_trie: dict[int, KVCacheBlockPrefixTrie] = {}
 
         # {req_id: The number of cached blocks for this given request}
         # This is used to track the number of cached blocks for each request.
@@ -160,11 +163,16 @@ class KVCacheManager:
         num_computed_tokens = len(computed_blocks) * self.block_size
         return computed_blocks, num_computed_tokens
 
+    # Edit allocate_slots such that each KVCacheBlock has a level and any KVCacheBlock
+    # which it points to has level++. If the cache block has already been allocated,
+    # verify that its previous level agrees with the current level (should be the case since
+    # block hash should be unique)
     def allocate_slots(
         self,
         request: Request,
         num_tokens: int,
-        new_computed_blocks: Optional[list[KVCacheBlock]] = None
+        new_computed_blocks: Optional[list[KVCacheBlock]] = None,
+        use_cascade_forest: bool = False
     ) -> Optional[list[KVCacheBlock]]:
         """Add slots for a request with new tokens to append.
 
@@ -174,6 +182,8 @@ class KVCacheManager:
                 not include the tokens that have already been computed.
             new_computed_blocks: A list of new computed blocks just hitting the
                 prefix caching.
+            use_cascade_forest: Returns true when forested cascade attention is
+                on.
 
         Blocks layout:
         -----------------------------------------------------------------------
@@ -203,8 +213,23 @@ class KVCacheManager:
         # insufficient free blocks.
         # Should call this function before allocating new blocks to reduce
         # the number of evicted blocks.
+
         removed_blocks = self.specialized_manager.remove_skipped_blocks(
             req_blocks, request.num_computed_tokens)
+
+        #TODO(jayanth): Figure out how to insert quick after removed_blocks
+        if removed_blocks:
+            old_req_depth = removed_blocks[-1].block_depth
+            old_forested_cascade_trie = self.depth_to_prefix_trie[old_req_depth]
+            old_forested_cascade_trie.remove(request)
+            new_req_depth = removed_blocks[0].block_depth
+            new_forested_cascade_trie = self.depth_to_prefix_trie[new_req_depth]
+
+
+            # for block in removed_blocks:
+            #     block_id = block.block_id
+            #     del prefix_tries[i].children[block_i_id]
+
         self.block_pool.free_blocks(removed_blocks)
 
         # The number of computed tokens is the number of computed tokens plus
