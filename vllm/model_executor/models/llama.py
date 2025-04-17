@@ -113,6 +113,10 @@ class LlamaAttention(nn.Module):
         super().__init__()
         layer_idx = extract_layer_index(prefix)
         self.hidden_size = hidden_size
+        self.input_hidden_size = hidden_size
+        if hasattr(config, "input_hidden_size") and \
+            config.input_hidden_size is not None:
+            self.input_hidden_size = config.input_hidden_size
         tp_size = get_tensor_model_parallel_world_size()
         self.total_num_heads = num_heads
         assert self.total_num_heads % tp_size == 0
@@ -140,7 +144,7 @@ class LlamaAttention(nn.Module):
         self.max_position_embeddings = max_position_embeddings
 
         self.qkv_proj = QKVParallelLinear(
-            hidden_size=hidden_size,
+            hidden_size=self.input_hidden_size,
             head_size=self.head_dim,
             total_num_heads=self.total_num_heads,
             total_num_kv_heads=self.total_num_kv_heads,
@@ -219,6 +223,10 @@ class LlamaDecoderLayer(nn.Module):
     ) -> None:
         super().__init__()
         self.hidden_size = config.hidden_size
+        # self.input_hidden_size = config.hidden_size
+        # if hasattr(config, "input_hidden_size") and \
+        #     config.input_hidden_size is not None:
+        #     self.input_hidden_size = config.input_hidden_size
         rope_theta = getattr(config, "rope_theta", 10000)
         rope_scaling = getattr(config, "rope_scaling", None)
         if rope_scaling is not None and getattr(
@@ -356,8 +364,13 @@ class LlamaModel(nn.Module):
             hidden_states = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
 
-        for layer in self.layers[self.start_layer:self.end_layer]:
+        extra_hidden_states = []
+        for idx, layer in enumerate(
+                self.layers[self.start_layer:self.end_layer]):
             hidden_states, residual = layer(positions, hidden_states, residual)
+            if idx == 2 or idx == len(self.layers) // 2 or idx == len(
+                    self.layers) - 3:
+                extra_hidden_states.append(hidden_states + residual)
 
         if not get_pp_group().is_last_rank:
             return IntermediateTensors({
@@ -366,7 +379,7 @@ class LlamaModel(nn.Module):
             })
 
         hidden_states, _ = self.norm(hidden_states, residual)
-        return hidden_states
+        return hidden_states, extra_hidden_states
 
     def load_weights(self, weights: Iterable[Tuple[str,
                                                    torch.Tensor]]) -> Set[str]:

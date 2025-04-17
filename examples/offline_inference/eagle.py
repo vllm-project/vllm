@@ -51,8 +51,8 @@ def main():
     # TODO: remove this option once EAGLE in v1 is ready.
     os.environ["VLLM_USE_V1"] = args.use_v1
 
-    model_dir = "meta-llama/Meta-Llama-3-8B-Instruct"
-    eagle_dir = "abhigoyal/EAGLE-LLaMA3-Instruct-8B-vllm"
+    model_dir = "meta-llama/Llama-3.1-8B-Instruct"
+    eagle_dir = "yuhuili/EAGLE3-LLaMA3.1-Instruct-8B"
 
     max_model_len = 2048
 
@@ -113,6 +113,12 @@ def main():
     print(f"mean acceptance length: \
         {sum(acceptance_counts) / acceptance_counts[0]:.2f}")
     print("-" * 50)
+
+    # print acceptance at each token position
+    for i in range(len(acceptance_counts)):
+        print(
+            f"acceptance at token {i}: {acceptance_counts[i] / (acceptance_counts[0]):.2f}"
+        )
 
 
 if __name__ == "__main__":

@@ -1061,7 +1061,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # Run the decoder.
         # Use persistent buffers for CUDA graphs.
         with set_forward_context(attn_metadata, self.vllm_config):
-            hidden_states = self.model(
+            hidden_states, extra_hidden_states = self.model(
                 input_ids=input_ids,
                 positions=positions,
                 intermediate_tensors=intermediate_tensors,
@@ -1192,7 +1192,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 # not include padding.
                 target_token_ids = self.input_ids[:num_scheduled_tokens]
                 target_positions = positions[:num_scheduled_tokens]
-                target_hidden_states = hidden_states[:num_scheduled_tokens]
+                target_hidden_states = [
+                    h[:num_scheduled_tokens] for h in extra_hidden_states
+                ]
                 target_slot_mapping = attn_metadata.slot_mapping
                 cu_num_tokens = attn_metadata.query_start_loc
             else:
@@ -1213,9 +1215,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 )
                 target_token_ids = self.input_ids[token_indices]
                 target_positions = positions[token_indices]
-                target_hidden_states = hidden_states[token_indices]
+                target_hidden_states = [
+                    h[token_indices] for h in extra_hidden_states
+                ]
                 target_slot_mapping = attn_metadata.slot_mapping[token_indices]
 
+            target_hidden_states = torch.cat(target_hidden_states, dim=-1)
             draft_token_ids, draft_probs = self.drafter.propose(
                 target_token_ids=target_token_ids,
                 target_positions=target_positions,
@@ -1286,6 +1291,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             if hasattr(self, "drafter"):
                 logger.info("Loading drafter model...")
                 self.drafter.load_model(self.model)
+                pass
             time_after_load = time.perf_counter()
         self.model_memory_usage = m.consumed_memory
         logger.info("Model loading took %.4f GiB and %.6f seconds",
@@ -1438,7 +1444,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             with set_forward_context(None,
                                      self.vllm_config,
                                      num_tokens=num_tokens):
-                hidden_states = model(
+                hidden_states, _ = model(
                     input_ids=input_ids,
                     positions=positions,
                     intermediate_tensors=intermediate_tensors,
