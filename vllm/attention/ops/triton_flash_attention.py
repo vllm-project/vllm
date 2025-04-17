@@ -635,10 +635,11 @@ def attn_fwd(
     p_descale_ptr,
     o_descale_ptr,
     v_descale_ptr,
-    q_descale_has_singleton,
-    k_descale_has_singleton,
-    p_descale_has_singleton,
-    v_descale_has_singleton,
+    # set these bools as constexpr to avoid bug in 3.2
+    q_descale_has_singleton: tl.constexpr,
+    k_descale_has_singleton: tl.constexpr,
+    p_descale_has_singleton: tl.constexpr,
+    v_descale_has_singleton: tl.constexpr,
     cu_seqlens_q,
     cu_seqlens_k,
     philox_seed,
@@ -707,6 +708,9 @@ def attn_fwd(
         offs_m = start_m * BLOCK_M + tl.arange(0, BLOCK_M)
         offs_n = tl.arange(0, BLOCK_N)
         offs_d = tl.arange(0, BLOCK_DMODEL)
+
+        # TODO
+        # off_h_k = off_h_q
 
         # as we can't have return statements inside while loop in Triton
         continue_condition = True
