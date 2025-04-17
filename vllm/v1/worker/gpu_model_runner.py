@@ -982,13 +982,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         seq = sorted(scheduler_output.structured_output_request_ids.items(),
                      key=lambda x: x[1])
         for req_id, _ in seq:
-            batch_index = struct_out_req_batch_indices[req_id]
+            logit_index = struct_out_req_batch_indices[req_id]
             num_spec_tokens = len(
                 scheduler_output.scheduled_spec_decode_tokens.get(req_id, []))
             for i in range(1 + num_spec_tokens):
-                sorted_bitmask[batch_index + i] = \
+                sorted_bitmask[logit_index + i] = \
                     grammar_bitmask[cumulative_index + i]
-                out_indices.append(batch_index + i)
+                out_indices.append(logit_index + i)
             cumulative_index += 1 + num_spec_tokens
         grammar_bitmask = sorted_bitmask
 

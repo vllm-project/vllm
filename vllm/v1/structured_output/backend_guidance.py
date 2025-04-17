@@ -86,7 +86,6 @@ class GuidanceGrammar(StructuredOutputGrammar):
         if not self.printed_error:
             err = self.ll_matcher.get_error()
             if err:
-                breakpoint()
                 self.printed_error = True
                 logger.warning("LLMatcher error: %s", err)
 
@@ -109,12 +108,6 @@ class GuidanceGrammar(StructuredOutputGrammar):
         #   "canonical" tokenizers
         # For conversion between the two, see
         # https://github.com/guidance-ai/llguidance/blob/main/docs/fast_forward.md
-
-        if self.ll_matcher.validate_tokens(tokens) != len(tokens):
-            breakpoint()
-            pass
-
-        self.check_error()
 
         r = self.ll_matcher.consume_tokens(tokens)
 
