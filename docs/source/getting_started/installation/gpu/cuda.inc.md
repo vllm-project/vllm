@@ -68,6 +68,8 @@ Another way to install the latest code is to use `uv`:
 uv pip install -U vllm --extra-index-url https://wheels.vllm.ai/nightly
 ```
 
+##### Install specific revisions using `uv`
+
 If you want to access the wheels for previous commits (e.g. to bisect the behavior change, performance regression), you can specify the commit hash in the URL:
 
 ```console
