@@ -1,7 +1,7 @@
 # install
 
 ```
-docker run -d -it --runtime=habana --name deepseek-vllm-1.20  -v `pwd`:/workspace/vllm/  -v /data:/data -e HABANA_VISIBLE_DEVICES=all -e OMPI_MCA_btl_vader_single_copy_mechanism=none --cap-add=sys_nice --ipc=host --net=host -e HF_HOME=/data/huggingface vault.habana.ai/gaudi-docker/1.20.0/ubuntu24.04/habanalabs/pytorch-installer-2.6.0:latest /bin/bash
+docker run -d -it --runtime=habana --name deepseek-vllm-1.20  -v `pwd`:/workspace/vllm/  -v /data:/data -e HABANA_VISIBLE_DEVICES=all -e OMPI_MCA_btl_vader_single_copy_mechanism=none --cap-add=sys_nice --ipc=host --net=host -e HF_HOME=/data/huggingface vault.habana.ai/gaudi-docker/1.20.0/ubuntu22.04/habanalabs/pytorch-installer-2.6.0:latest /bin/bash
 ```
 
 or use 1.21 engineering build => better performance
@@ -115,9 +115,34 @@ bash scripts/benchmark-inc-staticfp8-i1k-o1k-ep8-bestperf.sh
 bash scripts/benchmark-inc-staticfp8-i3200-o800-ep8-bestperf.sh
 ```
 
+# Option 4. run with Data Parallel
+
+## step 1. deploy
+> Use 1.20 docker is necessary, 1.21 will sometimes trigger kernel failing
+
+```
+docker run -d -it --runtime=habana --name deepseek-vllm-1.20  -v `pwd`:/workspace/vllm/  -v /data:/data -e HABANA_VISIBLE_DEVICES=all -e OMPI_MCA_btl_vader_single_copy_mechanism=none --cap-add=sys_nice --ipc=host --net=host -e HF_HOME=/data/huggingface vault.habana.ai/gaudi-docker/1.20.0/ubuntu22.04/habanalabs/pytorch-installer-2.6.0:latest /bin/bash
+
+docker exec -it deepseek-vllm-1.20 /bin/bash
+
+git clone https://github.com/HabanaAI/vllm-fork.git; git checkout deepseek_r1
+cd vllm;  pip install -r requirements-hpu.txt; VLLM_TARGET_DEVICE=hpu pip install -e .  --no-build-isolation;
+
+```
+
+## step 2. do benchmark
+
+```
+# need to skip test run in benchmark_serving.py to avoid server hang issue
+cp dp_only/benchmark_serving.py benchmarks/benchmark_serving.py
+
+bash dp_only/benchmark-inc-staticfp8-i1k-o1k-ep8-bestperf-nowarmup.sh
+``
+
 # Others. run with multi nodes
 
 ```
+
 # head node
 HABANA_VISIBLE_MODULES='0,1,2,3,4,5,6,7'  \
 PT_HPU_WEIGHT_SHARING=0 \
@@ -126,9 +151,11 @@ PT_HPU_ENABLE_LAZY_COLLECTIVES="true" \
 VLLM_RAY_DISABLE_LOG_TO_DRIVER="1" \
 RAY_IGNORE_UNHANDLED_ERRORS="1" \
 ray start --head --resources='{"HPU": 8, "TPU": 0}'
+
 ```
 
 ```
+
 # worker node
 HABANA_VISIBLE_MODULES='0,1,2,3,4,5,6,7'  \
 PT_HPU_WEIGHT_SHARING=0 \
@@ -137,8 +164,11 @@ PT_HPU_ENABLE_LAZY_COLLECTIVES="true" \
 VLLM_RAY_DISABLE_LOG_TO_DRIVER="1" \
 RAY_IGNORE_UNHANDLED_ERRORS="1" \
 ray start --address='${head_ip}:6379' --resources='{"HPU": 8, "TPU": 0}'
+
 ```
 
 ```
+
 python scripts/run_example_tp_2nodes.py --model ${YOUR_PATH}/DeepSeek-R1-static
+
 ```
