@@ -25,10 +25,6 @@ class TokenizerGroup:
         self.lora_tokenizers = LRUCache[int, AnyTokenizer](
             capacity=max(max_loras, max_num_seqs) if enable_lora else 0)
 
-    def ping(self) -> bool:
-        """Check if the tokenizer group is alive."""
-        return True
-
     def get_max_input_len(self,
                           lora_request: Optional[LoRARequest] = None
                           ) -> Optional[int]:

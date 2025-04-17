@@ -39,7 +39,6 @@ class XgrammarBackend(StructuredOutputBackend):
             model_config=vllm_config.model_config,
             scheduler_config=vllm_config.scheduler_config,
             lora_config=vllm_config.lora_config)  # type: ignore[arg-type]
-        tokenizer_group.ping()
 
         tokenizer = tokenizer_group.get_lora_tokenizer(None)
         self.vocab_size = vllm_config.model_config.get_vocab_size()

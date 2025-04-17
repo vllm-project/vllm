@@ -37,7 +37,6 @@ class GuidanceBackend(StructuredOutputBackend):
             model_config=vllm_config.model_config,
             scheduler_config=vllm_config.scheduler_config,
             lora_config=vllm_config.lora_config)  # type: ignore[arg-type]
-        tokenizer_group.ping()
         self.vllm_config = vllm_config
         self.vocab_size = vllm_config.model_config.get_vocab_size()
         self.disable_any_whitespace = (

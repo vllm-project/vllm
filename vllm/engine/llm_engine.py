@@ -320,11 +320,6 @@ class LLMEngine:
                     self.parallel_config.disable_custom_all_reduce,
                 })
 
-        if self.tokenizer:
-            # Ping the tokenizer to ensure liveness if it runs in a
-            # different process.
-            self.tokenizer.ping()
-
         self.cached_scheduler_outputs = [
             SchedulerOutputState()
             for _ in range(self.parallel_config.pipeline_parallel_size)
