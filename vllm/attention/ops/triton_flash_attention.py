@@ -95,7 +95,7 @@ class MetaData:
         max_seqlens_q=0,
         max_seqlens_k=0,
         # varlen params
-        cu_seqlens_q=None,  # only 'thd' layout supported for varlen 
+        cu_seqlens_q=None,  # only 'thd' layout supported for varlen
         cu_seqlens_k=None,
         # quant params
         q_descale=None,
@@ -712,6 +712,7 @@ def attn_fwd(
     p_descale_ptr,
     o_descale_ptr,
     v_descale_ptr,
+    # set these bools as constexpr to avoid bug in 3.2
     q_descale_has_singleton: tl.constexpr,
     k_descale_has_singleton: tl.constexpr,
     p_descale_has_singleton: tl.constexpr,
