@@ -1883,7 +1883,8 @@ class BatchedExperts(mk.FusedMoEPermuteExpertsUnpermute):
         assert expert_num_tokens is not None
         num_tokens, topk = topk_ids.shape
         _, max_num_tokens, K = hidden_states.shape
-        num_experts = w1.shape[0]
+        print(f"global_num_experts = {global_num_experts}")
+        num_experts = global_num_experts
         out = _resize_cache(workspace13, (num_experts, max_num_tokens, w2.shape[1]))
         for expert in range(num_experts):
             num = expert_num_tokens[expert]
