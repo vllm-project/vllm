@@ -133,9 +133,7 @@ def rocm_aiter_fused_experts(
     elif per_channel_quant and apply_router_weight_on_input and use_fp8_w8a8:
         assert apply_router_weight_on_input, (
             "aiter's tkw1 MoE only supports models with"
-            " apply_router_weight_on_input. Please set the"
-            " environment variable"
-            " VLLM_ROCM_USE_AITER_FP8_TKW1_MOE=0 for the current model.")
+            " apply_router_weight_on_input.")
         assert topk_weights.shape[-1] == 1, (
             "Only support topk=1 when"
             " `apply_router_weight_on_input` is True")
