@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from concurrent.futures import Future
-from typing import Union
+from typing import Callable, Union
 
 import torch
 import torch.distributed as dist
@@ -14,6 +14,8 @@ from vllm.executor.uniproc_executor import (  # noqa
     UniProcExecutor as UniProcExecutorV0)
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
 from vllm.v1.outputs import ModelRunnerOutput
+
+FailureCallback = Callable[[], None]
 
 
 class Executor(ExecutorBase):
@@ -61,6 +63,13 @@ class Executor(ExecutorBase):
         self.collective_rpc("initialize_from_config",
                             args=(kv_cache_configs, ))
         self.collective_rpc("compile_or_warm_up_model")
+
+    def register_failure_callback(self, callback: FailureCallback):
+        """
+        Register a function to be called if the executor enters a permanent
+        failed state.
+        """
+        pass
 
     def determine_available_memory(self) -> list[int]:  # in bytes
         output = self.collective_rpc("determine_available_memory")
