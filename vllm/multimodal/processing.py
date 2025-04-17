@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+import json
 import re
 import sys
 from abc import ABC, abstractmethod
@@ -1118,7 +1119,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
             if num_items > allowed_limit:
                 raise ValueError(
                     "You set or defaulted to "
-                    f'{{"{modality}":{allowed_limit}}} in '
+                    f"'{json.dumps({modality: allowed_limit})}' in "
                     f"`--limit-mm-per-prompt`, but passed {num_items} "
                     f"{modality} items in the same prompt.")
 

@@ -47,10 +47,10 @@ def audio(request):
     pytest.param(CHUNKED_PREFILL_KWARGS),
 ])
 def server(request, audio_assets):
-    limit_mm_per_prompt = {"audio": len(audio_assets)}
     args = [
-        "--dtype=bfloat16", "--max-model-len=4096", "--enforce-eager",
-        f"--limit-mm-per-prompt='{limit_mm_per_prompt}'", "--trust-remote-code"
+        "--dtype", "bfloat16", "--max-model-len", "4096", "--enforce-eager",
+        "--limit-mm-per-prompt",
+        str({"audio": len(audio_assets)}), "--trust-remote-code"
     ] + [
         f"--{key.replace('_','-')}={value}"
         for key, value in request.param.items()
