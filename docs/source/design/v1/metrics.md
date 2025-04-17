@@ -66,8 +66,8 @@ vLLM also provides [a reference example](https://docs.vllm.ai/en/latest/getting_
 The subset of metrics exposed in the Grafana dashboard gives us an indication of which metrics are especially important:
 
 - `vllm:e2e_request_latency_seconds_bucket` - End to end request latency measured in seconds
-- `vllm:prompt_tokens_total` - Prompt Tokens/Sec
-- `vllm:generation_tokens_total` - Generation Tokens/Sec
+- `vllm:prompt_tokens_total` - Prompt Tokens
+- `vllm:generation_tokens_total` - Generation Tokens
 - `vllm:time_per_output_token_seconds` - Inter token latency (Time Per Output Token, TPOT) in second.
 - `vllm:time_to_first_token_seconds` - Time to First Token (TTFT) latency in seconds.
 - `vllm:num_requests_running` (also, `_swapped` and `_waiting`) - Number of requests in RUNNING, WAITING, and SWAPPED state

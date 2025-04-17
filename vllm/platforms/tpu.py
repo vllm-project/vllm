@@ -5,7 +5,7 @@ from typing import TYPE_CHECKING, Optional, Union
 import torch
 
 import vllm.envs as envs
-from vllm.inputs import PromptType
+from vllm.inputs import ProcessorInputs, PromptType
 from vllm.logger import init_logger
 from vllm.sampling_params import SamplingParams, SamplingType
 
@@ -150,6 +150,7 @@ class TpuPlatform(Platform):
         cls,
         prompt: PromptType,
         params: Union[SamplingParams, PoolingParams],
+        processed_inputs: ProcessorInputs,
     ) -> None:
         """Raises if this request is unsupported on this platform"""
         if isinstance(params, SamplingParams):

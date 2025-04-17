@@ -2,7 +2,7 @@
 
 import pytest
 
-from vllm.v1.structured_output.utils import (
+from vllm.v1.structured_output.backend_xgrammar import (
     has_xgrammar_unsupported_json_features)
 
 

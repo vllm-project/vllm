@@ -914,6 +914,10 @@ class LLMEngine:
             scheduler.abort_seq_group(
                 request_id, seq_id_to_seq_group=self.seq_id_to_seq_group)
 
+    def get_vllm_config(self) -> VllmConfig:
+        """Gets the vllm configuration."""
+        return self.vllm_config
+
     def get_model_config(self) -> ModelConfig:
         """Gets the model configuration."""
         return self.model_config
@@ -2058,7 +2062,7 @@ class LLMEngine:
                 raise ValueError(f"The {prompt_type} prompt cannot be empty")
 
         max_prompt_len = self.model_config.max_model_len
-        if len(prompt_ids) >= max_prompt_len:
+        if len(prompt_ids) > max_prompt_len:
             if prompt_type == "encoder" and model_config.is_multimodal_model:
                 mm_registry = self.input_preprocessor.mm_registry
                 mm_processor = mm_registry.create_processor(

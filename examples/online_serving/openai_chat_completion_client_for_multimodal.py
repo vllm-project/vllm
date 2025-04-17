@@ -303,12 +303,7 @@ example_function_map = {
 }
 
 
-def main(args) -> None:
-    chat_type = args.chat_type
-    example_function_map[chat_type]()
-
-
-if __name__ == "__main__":
+def parse_args():
     parser = FlexibleArgumentParser(
         description='Demo on using OpenAI client for online serving with '
         'multimodal language models served with vLLM.')
@@ -318,5 +313,14 @@ if __name__ == "__main__":
                         default="single-image",
                         choices=list(example_function_map.keys()),
                         help='Conversation type with multimodal data.')
-    args = parser.parse_args()
+    return parser.parse_args()
+
+
+def main(args) -> None:
+    chat_type = args.chat_type
+    example_function_map[chat_type]()
+
+
+if __name__ == "__main__":
+    args = parse_args()
     main(args)

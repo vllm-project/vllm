@@ -126,13 +126,16 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 FROM base-builder AS cv-builder
 
 ARG MAX_JOBS
-ARG OPENCV_VERSION=84
+ARG OPENCV_VERSION=86
+# patch for version 4.11.0.86
+ARG OPENCV_PATCH=97f3f39
 ARG ENABLE_HEADLESS=1
 RUN --mount=type=cache,target=/root/.cache/uv \
     source /opt/rh/gcc-toolset-13/enable && \
     git clone --recursive https://github.com/opencv/opencv-python.git -b ${OPENCV_VERSION} && \
     cd opencv-python && \
-    sed -i 's/"setuptools==59.2.0",/"setuptools<70.0",/g' pyproject.toml && \
+    sed -i -E -e 's/"setuptools.+",/"setuptools",/g' pyproject.toml && \
+    cd opencv && git cherry-pick --no-commit $OPENCV_PATCH && cd .. && \
     python -m build --wheel --installer=uv --outdir /opencvwheels/
 
 ###############################################################
@@ -148,9 +151,15 @@ COPY --from=arrow-builder /tmp/control /dev/null
 COPY --from=cv-builder /tmp/control /dev/null
 
 ARG VLLM_TARGET_DEVICE=cpu
+ARG GRPC_PYTHON_BUILD_SYSTEM_OPENSSL=1
 
 # this step installs vllm and populates uv cache
 # with all the transitive dependencies
+RUN --mount=type=cache,target=/root/.cache/uv \
+    source /opt/rh/gcc-toolset-13/enable && \
+    git clone https://github.com/huggingface/xet-core.git && cd xet-core/hf_xet/ && \
+    uv pip install maturin && \
+    uv build --wheel --out-dir /hf_wheels/
 RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=bind,from=torch-builder,source=/torchwheels/,target=/torchwheels/,ro \
     --mount=type=bind,from=arrow-builder,source=/arrowwheels/,target=/arrowwheels/,ro \
@@ -159,7 +168,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     source /opt/rh/gcc-toolset-13/enable && \
     uv pip install /opencvwheels/*.whl /arrowwheels/*.whl /torchwheels/*.whl && \
     sed -i -e 's/.*torch.*//g' /src/pyproject.toml /src/requirements/*.txt && \
-    uv pip install pandas pythran pybind11 && \
+    uv pip install pandas pythran pybind11 /hf_wheels/*.whl && \
     # sentencepiece.pc is in some pkgconfig inside uv cache
     export PKG_CONFIG_PATH=$(find / -type d -name "pkgconfig" 2>/dev/null | tr '\n' ':') && \
     uv pip install -r /src/requirements/common.txt -r /src/requirements/cpu.txt -r /src/requirements/build.txt --no-build-isolation && \
@@ -247,8 +256,9 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=bind,from=torch-builder,source=/torchwheels/,target=/torchwheels/,ro \
     --mount=type=bind,from=arrow-builder,source=/arrowwheels/,target=/arrowwheels/,ro \
     --mount=type=bind,from=cv-builder,source=/opencvwheels/,target=/opencvwheels/,ro \
+    --mount=type=bind,from=vllmcache-builder,source=/hf_wheels/,target=/hf_wheels/,ro \
     --mount=type=bind,from=vllmcache-builder,source=/vllmwheel/,target=/vllmwheel/,ro \
-    HOME=/root uv pip install /opencvwheels/*.whl /arrowwheels/*.whl /torchwheels/*.whl /vllmwheel/*.whl
+    HOME=/root uv pip install /opencvwheels/*.whl /arrowwheels/*.whl /torchwheels/*.whl /hf_wheels/*.whl /vllmwheel/*.whl
 
 COPY ./ /workspace/vllm
 WORKDIR /workspace/vllm

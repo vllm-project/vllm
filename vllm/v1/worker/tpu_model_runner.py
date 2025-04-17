@@ -53,6 +53,41 @@ INVALID_TOKEN_ID = -1
 MIN_NUM_SEQS = 8
 
 
+#########################################################
+# Ways to avoid recompilation
+#########################################################
+#
+# The model executor has two primary components:
+# 1. preparing the model and sampler inputs
+# 2. executing the model and sampler.
+# The core idea is to avoid any TPU computation during input preparation. For
+# better compilation tracking and increased flexibility, the model execution and
+# sampler are divided into several distinct components.
+#
+# Below are the detailed steps:
+#
+# Step 1
+# It is recommended to avoid TPU operations when preparing the model and sampler
+# inputs. CPU tensors can be prepared and transferred to the XLA device using
+# cpu_tensor.to(xla_device), which only triggers CPU to TPU transfers and avoids
+# compilation.
+#
+# Step 2
+# The TPU execution should be decomposed into subgraphs (4 at the moment):
+# 1. the main model
+# 2. selecting hidden states for each request
+# 3. sampler
+# 4. encoder.
+# Each subgraph should be decorated in a torch.compile. This is used to make
+# sure that we have the same subgraph topology in both dummy_run and
+# xecute_model. The results from these subgraphs should either be passed to
+# other subgraphs, or transferred from TPU to CPU using xla_tensor.cpu() for
+# subsequent processing on the CPU.
+#
+# Step 3
+# The dummy_run should be comprehensive, ensuring all potential input shapes and
+# branch predictions are included as subgraph inputs to facilitate
+# pre-compilation.
 class TPUModelRunner:
 
     def __init__(
@@ -93,10 +128,16 @@ class TPUModelRunner:
         self.block_size = cache_config.block_size
         self.max_model_len = model_config.max_model_len
         self.max_num_blocks_per_req = cdiv(self.max_model_len, self.block_size)
-        self.max_num_tokens = scheduler_config.max_num_batched_tokens
         # InputBatch needs to work with sampling tensors greater than padding
         # to avoid dynamic shapes. Also, avoid suboptimal alignment.
         self.max_num_reqs = max(scheduler_config.max_num_seqs, MIN_NUM_SEQS)
+        self.num_tokens_paddings = _get_token_paddings(
+            min_token_size=16,
+            max_token_size=scheduler_config.max_num_batched_tokens,
+            padding_gap=envs.VLLM_TPU_BUCKET_PADDING_GAP)
+        # In case `max_num_tokens < max(num_tokens_paddings)` use the actual
+        # padded max value to pre-allocate data structures and pre-compile.
+        self.max_num_tokens = self.num_tokens_paddings[-1]
 
         # Model-related.
         self.num_attn_layers = model_config.get_num_layers_by_block_type(
@@ -176,10 +217,6 @@ class TPUModelRunner:
         # Range tensor with values [0 .. self.max_num_tokens - 1].
         # Used to initialize positions / context_lens / seq_lens
         self.arange_np = np.arange(self.max_num_tokens, dtype=np.int32)
-        self.num_tokens_paddings = _get_token_paddings(
-            min_token_size=16,
-            max_token_size=self.max_num_tokens,
-            padding_gap=envs.VLLM_TPU_BUCKET_PADDING_GAP)
         self.num_reqs_paddings = _get_req_paddings(
             min_req_size=MIN_NUM_SEQS, max_req_size=self.max_num_reqs)
 
@@ -883,14 +920,19 @@ class TPUModelRunner:
                                       device=self.device)
                 torch._dynamo.mark_dynamic(indices, 0)
                 self.select_hidden_states(dummy_hidden, indices)
-            logger.info("  -- num_tokens: %d", num_tokens)
+                logger.info("  -- num_tokens: %d, num_seqs: %d", num_tokens,
+                            num_reqs)
+                # Requests can't be more than tokens. But do compile for the
+                # next bigger value in case num_tokens uses bucketed padding.
+                if num_reqs >= min(num_tokens, self.max_num_reqs):
+                    break
         xm.wait_device_ops()
         end = time.perf_counter()
         logger.info("Compilation finished in in %.2f [secs].", end - start)
         self._update_num_xla_graphs("select_hidden_states")
 
     def _precompile_sample_from_hidden(self) -> None:
-        logger.info("Compiling sampling with different input shapes.")
+        logger.info("Compiling sampling with different num_reqs.")
         start = time.perf_counter()
         hsize = self.model_config.get_hidden_size()
         for num_reqs in self.num_reqs_paddings:
@@ -1040,9 +1082,11 @@ def _get_token_paddings(min_token_size: int, max_token_size: int,
 
     if padding_gap == 0:
         logger.info("Using exponential token paddings:")
-        while num <= max_token_size:
+        while True:
             logger.info("    %d", num)
             paddings.append(num)
+            if num >= max_token_size:
+                break
             num *= 2
 
     else:
