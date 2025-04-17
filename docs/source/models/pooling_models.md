@@ -141,3 +141,77 @@ Our [OpenAI-Compatible Server](#openai-compatible-server) provides endpoints tha
 - [Pooling API](#pooling-api) is similar to `LLM.encode`, being applicable to all types of pooling models.
 - [Embeddings API](#embeddings-api) is similar to `LLM.embed`, accepting both text and [multi-modal inputs](#multimodal-inputs) for embedding models.
 - [Score API](#score-api) is similar to `LLM.score` for cross-encoder models.
+
+## Matryoshka Embeddings
+
+[Matryoshka Embeddings](https://sbert.net/examples/sentence_transformer/training/matryoshka/README.html#matryoshka-embeddings) or [Matryoshka Representation Learning (MRL)](https://arxiv.org/abs/2205.13147) is a technique used in training embedding models. It allows user to trade off between performance and cost.
+
+:::{warning}
+Not all embedding models are trained using Matryoshka Representation Learning. To avoid misuse of the `dimensions` parameter, vLLM returns an error for requests that attempt to change the output dimension of models that do not support Matryoshka Embeddings.
+
+For example, setting `dimensions` parameter while using the `BAAI/bge-m3` model will result in the following error.
+
+```json
+{"object":"error","message":"Model \"BAAI/bge-m3\" does not support matryoshka representation, changing output dimensions will lead to poor results.","type":"BadRequestError","param":null,"code":400}
+```
+
+:::
+
+### Manually enable Matryoshka Embeddings
+
+There is currently no official interface for specifying support for Matryoshka Embeddings. In vLLM, we simply check the existence of the fields `is_matryoshka` or `matryoshka_dimensions` inside `config.json`.
+
+For models that support Matryoshka Embeddings but not recognized by vLLM, please manually override the config using `hf_overrides={"is_matryoshka": True}` (offline) or `--hf_overrides '{"is_matryoshka": true}'` (online).
+
+Here is an example to serve a model with Matryoshka Embeddings enabled.
+
+```text
+vllm serve Snowflake/snowflake-arctic-embed-m-v1.5 --hf_overrides '{"is_matryoshka":true}'
+```
+
+### Offline Inference
+
+You can change the output dimensions of embedding models that support Matryoshka Embeddings by using the dimensions parameter in {class}`~vllm.PoolingParams`.
+
+```python
+from vllm import LLM, PoolingParams
+
+model = LLM(model="jinaai/jina-embeddings-v3", 
+            task="embed", 
+            trust_remote_code=True)
+outputs = model.embed(["Follow the white rabbit."], 
+                      pooling_params=PoolingParams(dimensions=32))
+print(outputs[0].outputs)
+```
+
+A code example can be found here: <gh-file:examples/offline_inference/embed_matryoshka_fy.py>
+
+### Online Inference
+
+Use the following command to start vllm server.
+
+```text
+vllm serve jinaai/jina-embeddings-v3 --trust-remote-code
+```
+
+You can change the output dimensions of embedding models that support Matryoshka Embeddings by using the dimensions parameter.
+
+```text
+curl http://127.0.0.1:8000/v1/embeddings \
+  -H 'accept: application/json' \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "input": "Follow the white rabbit.",
+    "model": "jinaai/jina-embeddings-v3",
+    "encoding_format": "float",
+    "dimensions": 1
+  }'
+```
+
+Expected output:
+
+```json
+{"id":"embd-0aab28c384d348c3b8f0eb783109dc5f","object":"list","created":1744195454,"model":"jinaai/jina-embeddings-v3","data":[{"index":0,"object":"embedding","embedding":[-1.0]}],"usage":{"prompt_tokens":10,"total_tokens":10,"completion_tokens":0,"prompt_tokens_details":null}}
+```
+
+A openai client example can be found here: <gh-file:examples/online_serving/openai_embedding_matryoshka_fy.py>
