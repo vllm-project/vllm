@@ -99,16 +99,15 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         super().process_weights_after_loading(layer)
 
-        if current_platform.is_cpu():
-            if current_platform.get_cpu_architecture() == CpuArchEnum.X86:
-                import intel_extension_for_pytorch as ipex
-                layer.ipex_fusion = ipex.llm.modules.GatedMLPMOE(
-                    layer.w13_weight,
-                    layer.w2_weight,
-                    use_prepack=envs.VLLM_CPU_MOE_PREPACK,
-                )
-            else:
-                raise NotImplementedError("CPU MOE only supports x86 arch.")
+        if current_platform.is_xpu() or (current_platform.is_cpu() and current_platform.get_cpu_architecture() == CpuArchEnum.X86):
+            import intel_extension_for_pytorch as ipex
+            layer.ipex_fusion = ipex.llm.modules.GatedMLPMOE(
+                layer.w13_weight,
+                layer.w2_weight,
+                use_prepack=True,
+            )
+        else:
+            raise NotImplementedError("CPU MOE only supports x86 arch.")
 
     def apply(
         self,
@@ -211,6 +210,30 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             custom_routing_function,
             scoring_func,
             e_score_correction_bias,
+        )
+
+    def forward_xpu(
+            self,
+            layer: torch.nn.Module,
+            x: torch.Tensor,
+            use_grouped_topk: bool,
+            top_k: int,
+            router_logits: torch.Tensor,
+            renormalize: bool,
+            topk_group: Optional[int] = None,
+            num_expert_group: Optional[int] = None,
+            custom_routing_function: Optional[Callable] = None,
+            **kwargs,
+    ):
+        assert custom_routing_function is None
+        return layer.ipex_fusion(
+            x,
+            use_grouped_topk,
+            top_k,
+            router_logits,
+            renormalize,
+            topk_group,
+            num_expert_group,
         )
 
     def forward_tpu(

@@ -34,6 +34,7 @@ def run_vllm(
     n: int,
     engine_args: EngineArgs,
     disable_detokenize: bool = False,
+    do_profile: bool = False,
 ) -> tuple[float, Optional[list[RequestOutput]]]:
     from vllm import LLM, SamplingParams
     llm = LLM(**dataclasses.asdict(engine_args))
@@ -71,11 +72,15 @@ def run_vllm(
     outputs = None
     if not use_beam_search:
         start = time.perf_counter()
+        if do_profile:
+            llm.start_profile()
         outputs = llm.generate(prompts,
                                sampling_params,
                                lora_request=lora_requests,
                                use_tqdm=True)
         end = time.perf_counter()
+        if do_profile:
+            llm.stop_profile()
     else:
         assert lora_requests is None, "BeamSearch API does not support LoRA"
         prompts = [request.prompt for request in requests]
@@ -361,7 +366,7 @@ def main(args: argparse.Namespace):
         else:
             elapsed_time, request_outputs = run_vllm(
                 requests, args.n, EngineArgs.from_cli_args(args),
-                args.disable_detokenize)
+                args.disable_detokenize, args.profile)
     elif args.backend == "hf":
         assert args.tensor_parallel_size == 1
         elapsed_time = run_hf(requests, args.model, tokenizer, args.n,
@@ -547,6 +552,10 @@ if __name__ == "__main__":
                         type=int,
                         default=1000,
                         help="Number of prompts to process.")
+    parser.add_argument("--profile",
+                        action='store_true',
+                        default=False,
+                        help="whether run with profiler.")
     parser.add_argument("--hf-max-batch-size",
                         type=int,
                         default=None,

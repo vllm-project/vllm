@@ -1477,10 +1477,10 @@ class EngineArgs:
             return False
 
         # No Fp8 KV cache so far.
-        if self.kv_cache_dtype != "auto":
-            _raise_or_fallback(feature_name="--kv-cache-dtype",
-                               recommend_to_remove=False)
-            return False
+        # if self.kv_cache_dtype != "auto":
+        #     _raise_or_fallback(feature_name="--kv-cache-dtype",
+        #                        recommend_to_remove=False)
+        #     return False
 
         # No Prompt Adapter so far.
         if self.enable_prompt_adapter:
@@ -1566,7 +1566,7 @@ class EngineArgs:
         # No FlashInfer or XFormers so far.
         V1_BACKENDS = [
             "FLASH_ATTN_VLLM_V1", "FLASH_ATTN", "PALLAS", "PALLAS_VLLM_V1",
-            "TRITON_MLA", "FLASHMLA"
+            "TRITON_MLA", "FLASHMLA", "IPEX_V1"
         ]
         if (envs.is_set("VLLM_ATTENTION_BACKEND")
                 and envs.VLLM_ATTENTION_BACKEND not in V1_BACKENDS):

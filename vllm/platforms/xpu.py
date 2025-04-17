@@ -4,6 +4,7 @@ from typing import TYPE_CHECKING, Optional
 
 import torch
 
+import vllm.envs as envs
 from vllm.logger import init_logger
 
 from .interface import DeviceCapability, Platform, PlatformEnum, _Backend
@@ -31,10 +32,22 @@ class XPUPlatform(Platform):
                              dtype: torch.dtype, kv_cache_dtype: Optional[str],
                              block_size: int, use_v1: bool,
                              use_mla: bool) -> str:
-        if selected_backend != _Backend.IPEX:
-            logger.info("Cannot use %s backend on XPU.", selected_backend)
-        logger.info("Using IPEX attention backend.")
-        return "vllm.attention.backends.ipex_attn.IpexAttnBackend"
+        if selected_backend not in [_Backend.IPEX, _Backend.IPEX_V1]:
+            logger.warning_once(
+                f"Cannot use {selected_backend} backend on XPU.")
+        use_v1 = envs.VLLM_USE_V1
+        if use_v1:
+            if selected_backend == _Backend.IPEX:
+                logger.warning_once("For v1 on XPU, should use "
+                                    "IPEX_V1 attention backend.")
+            logger.info_once("Using IPEX_V1 attention backend.")
+            return "vllm.v1.attention.backends.ipex_attn.IPEXAttentionBackend"
+        else:
+            if selected_backend == _Backend.IPEX:
+                logger.warning_once("For v0 on XPU, should use "
+                                    "IPEX attention backend.")
+            logger.info_once("Using IPEX attention backend.")
+            return "vllm.attention.backends.ipex_attn.IpexAttnBackend"
 
     @staticmethod
     def get_device_capability(
@@ -64,7 +77,10 @@ class XPUPlatform(Platform):
     def check_and_update_config(cls, vllm_config: VllmConfig) -> None:
         cache_config = vllm_config.cache_config
         if cache_config and cache_config.block_size is None:
-            cache_config.block_size = 16
+            if envs.VLLM_USE_V1:
+                cache_config.block_size = 64
+            else:
+                cache_config.block_size = 16
 
         # check and update model config
         model_config = vllm_config.model_config
@@ -83,30 +99,37 @@ class XPUPlatform(Platform):
                 "mode.")
             model_config.enforce_eager = True
 
-        if vllm_config.speculative_config is not None:
-            raise NotImplementedError(
-                "XPU does not support speculative decoding")
-
         if vllm_config.device_config is not None:
             assert vllm_config.device_config.device_type == "xpu"
 
         # check and update parallel config
         parallel_config = vllm_config.parallel_config
-        if parallel_config.worker_cls == "auto":
+        if vllm_config.speculative_config:
+            if envs.VLLM_USE_V1:
+                parallel_config.worker_cls = \
+                    "vllm.v1.worker.gpu_worker.Worker"
+            else:
+                raise NotImplementedError(
+                    "XPU v0 does not support speculative decoding")
+        if envs.VLLM_USE_V1:
+            parallel_config.worker_cls =\
+                "vllm.v1.worker.xpu_worker.XPUWorker"
+        else:
             parallel_config.worker_cls = "vllm.worker.xpu_worker.XPUWorker"
 
         if parallel_config.distributed_executor_backend is None:
-            parallel_config.distributed_executor_backend = "ray"
+            if parallel_config.world_size > 1:
+                parallel_config.distributed_executor_backend = "ray"
+            else:
+                parallel_config.distributed_executor_backend = "uni"
         elif parallel_config.distributed_executor_backend == "mp":
             # FIXME(kunshang):
             # spawn needs calling `if __name__ == '__main__':``
             # fork is not supported for xpu start new process.
-            logger.error(
-                "Both start methods (spawn and fork) have issue "
-                "on XPU if you use mp backend, setting it to ray instead.")
-            parallel_config.distributed_executor_backend = "ray"
-
-        elif parallel_config.distributed_executor_backend != "ray":
+            logger.warning(
+                "Please use spawn as start method if you want to use mp.")
+        elif parallel_config.distributed_executor_backend != "ray" and \
+                parallel_config.distributed_executor_backend != "uni":
             logger.warning(
                 "%s is not supported on XPU, fallback to ray distributed"
                 " executor backend.",
@@ -115,8 +138,7 @@ class XPUPlatform(Platform):
 
     @classmethod
     def is_pin_memory_available(cls):
-        logger.warning("Pin memory is not supported on XPU.")
-        return False
+        return True
 
     @classmethod
     def get_current_memory_usage(cls,
@@ -128,14 +150,24 @@ class XPUPlatform(Platform):
     @classmethod
     def device_support_bf16(cls) -> bool:
         device_name = cls.get_device_name().lower()
-        if device_name.count("arc") > 0:
+        if cls.is_client_gpu():
             return False
-        elif device_name.count("data center gpu") > 0:
+        elif cls.is_data_center_gpu():
             return True
         else:
             logger.warning("Unknown device name %s, always use float16",
                            device_name)
             return False
+
+    @classmethod
+    def is_data_center_gpu(cls) -> bool:
+        device_name = cls.get_device_name().lower()
+        return device_name.count("data center gpu") > 0
+
+    @classmethod
+    def is_client_gpu(cls) -> bool:
+        device_name = cls.get_device_name().lower()
+        return device_name.count("arc") > 0
 
     @classmethod
     def get_device_communicator_cls(cls) -> str:
