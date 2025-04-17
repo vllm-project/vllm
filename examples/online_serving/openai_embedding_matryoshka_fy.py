@@ -1,5 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 
+"""Example Python client for embedding API dimensions using vLLM API server
+NOTE: start a supported Matryoshka Embeddings model server with `vllm serve`, e.g.
+    vllm serve jinaai/jina-embeddings-v3 --trust-remote-code
+"""
+
 from openai import OpenAI
 
 # Modify OpenAI's API key and API base to use vLLM's API server.
