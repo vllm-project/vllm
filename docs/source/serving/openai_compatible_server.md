@@ -177,7 +177,7 @@ The `vllm serve` command is used to launch the OpenAI-compatible server.
 :::{tips}
 The vast majority of command-line arguments are based on those for offline inference.
 
-See [here](#configuration-options) for some common options.
+See [here](configuration-options) for some common options.
 :::
 
 :::{argparse}
