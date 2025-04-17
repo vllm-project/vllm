@@ -37,11 +37,11 @@ def is_rocm_aiter_paged_attn_enabled() -> bool:
 @cache
 def _get_paged_attn_module() -> PagedAttention:
     """
-    Initializes the appropriate PagedAttention module from `attention/ops`, 
+    Initializes the appropriate PagedAttention module from `attention/ops`,
     which is used as helper function
     by `ROCmFlashAttentionImpl` and `ROCmFlashAttentionBackend`.
 
-    The choice of attention module depends on whether 
+    The choice of attention module depends on whether
     AITER paged attention is enabled:
     - If enabled, `ROCmFlashAttentionImpl` uses `AITERPagedAttention`.
     - Otherwise, it defaults to using the original `PagedAttention`.
@@ -889,6 +889,15 @@ class ROCmFlashAttentionImpl(AttentionImpl):
                 decode_query.dtype, head_size, block_size, gqa_ratio,
                 decode_meta.max_decode_seq_len, self.sliding_window,
                 self.kv_cache_dtype, self.alibi_slopes)
+
+            # PagedAttention does not support fused quant, manually quantize
+            if output_scale is None:
+                out_pa = output[num_prefill_tokens:]
+            else:
+                # TODO(luka) fix dtype
+                out_pa = torch.empty_like(output[num_prefill_tokens:],
+                                          dtype=torch.bfloat16)
+
             if use_custom:
                 max_seq_len = (decode_meta.max_decode_seq_len if self.attn_type
                                != AttentionType.ENCODER_DECODER else
@@ -912,7 +921,7 @@ class ROCmFlashAttentionImpl(AttentionImpl):
 
                 query_start_loc = None
                 ops.paged_attention_rocm(
-                    output[num_prefill_tokens:],
+                    out_pa,
                     exp_sums,
                     max_logits,
                     tmp_output,
@@ -936,7 +945,7 @@ class ROCmFlashAttentionImpl(AttentionImpl):
                     layer._v_scale,
                 )
             else:
-                output[num_prefill_tokens:] = paged_attn.forward_decode(
+                out_pa[:] = paged_attn.forward_decode(
                     decode_query,
                     key_cache,
                     value_cache,
@@ -956,6 +965,13 @@ class ROCmFlashAttentionImpl(AttentionImpl):
                     layer._k_scale,
                     layer._v_scale,
                 )
+
+            # Manually perform quantization
+            if output_scale is not None:
+                out_uq = out_pa.view(-1, self.num_heads * self.head_size)
+                out_q = output.view(-1, self.num_heads * self.head_size)
+                out_q[num_prefill_tokens:] = ops.scaled_fp8_quant(
+                    out_uq, output_scale)[0]
 
         # Reshape the output tensor.
         return output.view(-1, self.num_heads * self.head_size)
