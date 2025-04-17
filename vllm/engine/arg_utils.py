@@ -1684,7 +1684,6 @@ class EngineArgs:
             # This is only used to set default_max_num_batched_tokens
             device_name = "no-device"
 
-        default_max_num_batched_tokens: dict[UsageContext, Optional[int]]
         if "h100" in device_name or "h200" in device_name:
             # For H100 and H200, we use larger default values.
             default_max_num_batched_tokens = {
@@ -1696,7 +1695,7 @@ class EngineArgs:
             # TODO(woosuk): Tune the default values for other hardware.
             default_max_num_batched_tokens = {
                 UsageContext.LLM_CLASS: 8192,
-                UsageContext.OPENAI_API_SERVER: None,
+                UsageContext.OPENAI_API_SERVER: 2048,
             }
             default_max_num_seqs = 256
 
