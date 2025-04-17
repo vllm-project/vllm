@@ -25,7 +25,7 @@ from vllm.utils import direct_register_custom_op
 
 from .rocm_aiter_fused_moe import (is_rocm_aiter_moe_enabled,
                                    rocm_aiter_fused_experts,
-                                   rocm_aiter_topk_softmax)
+                                   rocm_aiter_topk_softmax_wrapper)
 
 logger = init_logger(__name__)
 
@@ -846,7 +846,7 @@ def vllm_topk_softmax(topk_weights: torch.Tensor, topk_indices: torch.Tensor,
 
 def dispatch_topk_func() -> Callable[..., tuple[torch.Tensor, ...]]:
     if is_rocm_aiter_moe_enabled():
-        return rocm_aiter_topk_softmax
+        return rocm_aiter_topk_softmax_wrapper
     return vllm_topk_softmax
 
 
