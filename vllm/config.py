@@ -2734,7 +2734,7 @@ class MultiModalConfig:
     """
     The maximum number of input items allowed per prompt for each modality.
     This should be a JSON string that will be parsed into a dictionary.
-    Defaults to  1 (V0) or 999 (V1) for each modality.
+    Defaults to 1 (V0) or 999 (V1) for each modality.
     """
 
     def compute_hash(self) -> str:
