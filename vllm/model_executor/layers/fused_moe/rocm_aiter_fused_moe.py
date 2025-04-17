@@ -18,9 +18,9 @@ def is_rocm_aiter_block_scaled_moe_enabled() -> bool:
         envs.VLLM_ROCM_USE_AITER_FP8_BLOCK_SCALED_MOE
 
 
-def is_rocm_aiter_channel_scaled_moe_enabled() -> bool:
+def is_rocm_aiter_tkw1_moe_enabled() -> bool:
     return is_rocm_aiter_moe_enabled() and \
-        envs.VLLM_ROCM_USE_AITER_FP8_CHANNEL_SCALED_MOE
+        envs.VLLM_ROCM_USE_AITER_FP8_TKW1_MOE
 
 
 def rocm_aiter_asm_moe_tkw1(hidden_states,
@@ -143,11 +143,15 @@ def rocm_aiter_fused_experts(
         )
         return out_asm
 
-    elif is_rocm_aiter_channel_scaled_moe_enabled() and use_fp8_w8a8:
-
-        # # All AITER Fused MoE kernels are expecting the following datatypes
-        # topk_weights = topk_weights.to(torch.float32)
-        # topk_ids = topk_ids.to(torch.int32)
+    elif is_rocm_aiter_tkw1_moe_enabled() and use_fp8_w8a8:
+        assert apply_router_weight_on_input, (
+            "aiter's tkw1 MoE only supports models with"
+            " apply_router_weight_on_input. Please set the"
+            " environment variable"
+            " VLLM_ROCM_USE_AITER_FP8_TKW1_MOE=0 for the current model.")
+        assert topk_weights.shape[-1] == 1, (
+            "Only support topk=1 when"
+            " `apply_router_weight_on_input` is True")
 
         return rocm_aiter_asm_moe_tkw1(hidden_states,
                                        w1,
