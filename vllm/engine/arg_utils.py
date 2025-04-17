@@ -7,9 +7,8 @@ import json
 import re
 import threading
 from dataclasses import MISSING, dataclass, fields
-from typing import (TYPE_CHECKING, Any, Callable, Dict, List, Literal, Mapping,
-                    Optional, Tuple, Type, TypeVar, Union, cast, get_args,
-                    get_origin)
+from typing import (Any, Callable, Dict, List, Literal, Mapping, Optional,
+                    Tuple, Type, TypeVar, Union, cast, get_args, get_origin)
 
 import torch
 from typing_extensions import TypeIs
@@ -21,10 +20,9 @@ from vllm.config import (CacheConfig, CompilationConfig, Config, ConfigFormat,
                          DistributedExecutorBackend, HfOverrides,
                          KVTransferConfig, LoadConfig, LoadFormat, LoRAConfig,
                          ModelConfig, ModelImpl, ObservabilityConfig,
-                         ParallelConfig, PoolerConfig, PoolType,
-                         PromptAdapterConfig, SchedulerConfig, SchedulerPolicy,
-                         SpeculativeConfig, TaskOption, TokenizerPoolConfig,
-                         VllmConfig, get_attr_docs, get_field)
+                         ParallelConfig, PoolerConfig, PromptAdapterConfig,
+                         SchedulerConfig, SchedulerPolicy, SpeculativeConfig,
+                         TaskOption, VllmConfig, get_attr_docs, get_field)
 from vllm.executor.executor_base import ExecutorBase
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS
@@ -36,9 +34,6 @@ from vllm.usage.usage_lib import UsageContext
 from vllm.utils import FlexibleArgumentParser, is_in_ray_actor
 
 # yapf: enable
-
-if TYPE_CHECKING:
-    from vllm.transformers_utils.tokenizer_group import BaseTokenizerGroup
 
 logger = init_logger(__name__)
 
@@ -182,14 +177,6 @@ class EngineArgs:
     enforce_eager: Optional[bool] = None
     max_seq_len_to_capture: int = 8192
     disable_custom_all_reduce: bool = ParallelConfig.disable_custom_all_reduce
-    tokenizer_pool_size: int = TokenizerPoolConfig.pool_size
-    # Note: Specifying a tokenizer pool by passing a class
-    # is intended for expert use only. The API may change without
-    # notice.
-    tokenizer_pool_type: Union[PoolType, Type["BaseTokenizerGroup"]] = \
-        TokenizerPoolConfig.pool_type
-    tokenizer_pool_extra_config: dict[str, Any] = \
-        get_field(TokenizerPoolConfig, "extra_config")
     limit_mm_per_prompt: Optional[Mapping[str, int]] = None
     mm_processor_kwargs: Optional[Dict[str, Any]] = None
     disable_mm_preprocessor_cache: bool = False
@@ -682,19 +669,6 @@ class EngineArgs:
                             'Additionally for encoder-decoder models, if the '
                             'sequence length of the encoder input is larger '
                             'than this, we fall back to the eager mode.')
-
-        # Tokenizer arguments
-        tokenizer_kwargs = get_kwargs(TokenizerPoolConfig)
-        tokenizer_group = parser.add_argument_group(
-            title="TokenizerPoolConfig",
-            description=TokenizerPoolConfig.__doc__,
-        )
-        tokenizer_group.add_argument('--tokenizer-pool-size',
-                                     **tokenizer_kwargs["pool_size"])
-        tokenizer_group.add_argument('--tokenizer-pool-type',
-                                     **tokenizer_kwargs["pool_type"])
-        tokenizer_group.add_argument('--tokenizer-pool-extra-config',
-                                     **tokenizer_kwargs["extra_config"])
 
         # Multimodal related configs
         parser.add_argument(
@@ -1230,11 +1204,6 @@ class EngineArgs:
             enable_expert_parallel=self.enable_expert_parallel,
             max_parallel_loading_workers=self.max_parallel_loading_workers,
             disable_custom_all_reduce=self.disable_custom_all_reduce,
-            tokenizer_pool_config=TokenizerPoolConfig.create_config(
-                self.tokenizer_pool_size,
-                self.tokenizer_pool_type,
-                self.tokenizer_pool_extra_config,
-            ),
             ray_workers_use_nsight=self.ray_workers_use_nsight,
             placement_group=placement_group,
             distributed_executor_backend=self.distributed_executor_backend,
