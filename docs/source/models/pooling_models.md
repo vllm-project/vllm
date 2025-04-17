@@ -159,7 +159,7 @@ For example, setting `dimensions` parameter while using the `BAAI/bge-m3` model 
 
 ### Manually enable Matryoshka Embeddings
 
-There is currently no official interface for specifying support for Matryoshka Embeddings. In vLLM, we simply check the existence of the fields `is_matryoshka` or matryoshka_dimensions inside `config.json`.
+There is currently no official interface for specifying support for Matryoshka Embeddings. In vLLM, we simply check the existence of the fields `is_matryoshka` or `matryoshka_dimensions` inside `config.json`.
 
 For models that support Matryoshka Embeddings but not recognized by vLLM, please manually override the config using `hf_overrides={"is_matryoshka": True}` (offline) or `--hf_overrides '{"is_matryoshka": true}'` (online).
 
