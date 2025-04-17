@@ -1341,6 +1341,13 @@ def fused_experts_impl(hidden_states: torch.Tensor,
         curr_topk_ids = topk_ids[begin_chunk_idx:end_chunk_idx]
         curr_topk_weights = topk_weights[begin_chunk_idx:end_chunk_idx]
 
+        # FIXME: We apply router weights before we do mm. To properly
+        # achieve this, we should move this into our moe kernels.
+        if apply_router_weight_on_input:
+            assert topk_ids.shape[1] == 1, "Can only apply router weight \
+                on input when topk is 1!"
+            curr_hidden_states = curr_hidden_states * curr_topk_weights
+
         qcurr_hidden_states, qa1_scale = moe_kernel_prepare_input(
             A=curr_hidden_states,
             B=w1,
@@ -1357,11 +1364,6 @@ def fused_experts_impl(hidden_states: torch.Tensor,
             moe_align_block_size(curr_topk_ids, config['BLOCK_SIZE_M'],
                                  global_num_experts, expert_map))
 
-        # FIXME: apply input within the FusedMoe kernel.
-        if apply_router_weight_on_input:
-            assert topk_ids.shape[1] == 1, "Can only apply router weight \
-                on input when topk is 1!"
-            qcurr_hidden_states = qcurr_hidden_states * curr_topk_weights
         invoke_fused_moe_kernel(qcurr_hidden_states,
                                 w1,
                                 intermediate_cache1,
