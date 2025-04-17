@@ -14,7 +14,7 @@ from vllm import SamplingParams
 from vllm.engine.arg_utils import EngineArgs
 from vllm.platforms import current_platform
 from vllm.usage.usage_lib import UsageContext
-from vllm.v1.engine import EngineCoreRequest
+from vllm.v1.engine import BlockStored, EngineCoreRequest
 from vllm.v1.engine.core import EngineCore
 from vllm.v1.engine.core_client import (AsyncMPClient, EngineCoreClient,
                                         SyncMPClient)
@@ -176,6 +176,70 @@ def test_engine_core_client(monkeypatch: pytest.MonkeyPatch,
                 core_client.call_utility("echo", None, "help!")
 
             assert str(e_info.value) == "Call to echo method failed: help!"
+
+
+@create_new_process_for_each_test()
+@pytest.mark.parametrize("multiprocessing_mode", [True, False])
+def test_kv_cache_events(monkeypatch: pytest.MonkeyPatch,
+                         multiprocessing_mode: bool):
+    with monkeypatch.context() as m:
+        m.setenv("VLLM_USE_V1", "1")
+        block_size = 16
+        num_blocks = 2
+
+        engine_args = EngineArgs(
+            model=MODEL_NAME,
+            enforce_eager=True,
+            enable_prefix_caching=True,
+            enable_kv_cache_events=True,  # Enable KV cache events
+            block_size=block_size)
+
+        vllm_config = engine_args.create_engine_config(
+            UsageContext.UNKNOWN_CONTEXT)
+
+        executor_class = Executor.get_class(vllm_config)
+        client = EngineCoreClient.make_client(
+            multiprocess_mode=multiprocessing_mode,
+            asyncio_mode=False,
+            vllm_config=vllm_config,
+            executor_class=executor_class,
+            log_stats=False,
+        )
+
+        custom_tokens = list(range(num_blocks * block_size))
+        request = EngineCoreRequest(
+            request_id=str(uuid.uuid4()),
+            prompt=None,
+            prompt_token_ids=custom_tokens,
+            mm_inputs=None,
+            mm_hashes=None,
+            mm_placeholders=None,
+            sampling_params=SamplingParams(
+                max_tokens=1),  # Short completion for speed
+            eos_token_id=None,
+            arrival_time=time.time(),
+            lora_request=None,
+        )
+
+        client.add_request(request)
+
+        while True:
+            engine_outputs = client.get_output()
+
+            for out in engine_outputs.outputs:
+                if out.finished:
+                    kv_events = engine_outputs.kv_cache_events
+                    print(f"KV events: {kv_events}")
+
+                    assert len(kv_events) == 1, (
+                        "We should have exactly one BlockStored event")
+                    assert isinstance(
+                        kv_events[0],
+                        BlockStored), ("We should have a BlockStored event")
+                    assert len(kv_events[0].block_hashes) == num_blocks, (
+                        "We should have a BlockStored event with 2 block_hashes"
+                    )
+                    return
 
 
 @pytest.mark.asyncio(loop_scope="function")

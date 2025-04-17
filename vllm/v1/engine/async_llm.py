@@ -25,7 +25,7 @@ from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.transformers_utils.tokenizer_group import init_tokenizer_from_configs
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils import Device, cdiv
-from vllm.v1.engine import EngineCoreRequest
+from vllm.v1.engine import EngineCoreRequest, KVCacheEvent
 from vllm.v1.engine.core_client import AsyncMPClient, DPAsyncMPClient
 from vllm.v1.engine.exceptions import EngineDeadError, EngineGenerateError
 from vllm.v1.engine.output_processor import (OutputProcessor,
@@ -52,6 +52,7 @@ class AsyncLLM(EngineClient):
         use_cached_outputs: bool = False,
         log_requests: bool = True,
         start_engine_loop: bool = True,
+        external_stat_loggers: Optional[list[list[StatLoggerBase]]] = None,
     ) -> None:
         if not envs.VLLM_USE_V1:
             raise ValueError(
@@ -74,6 +75,15 @@ class AsyncLLM(EngineClient):
                     loggers.append(LoggingStatLogger(engine_index=i))
                 loggers.append(
                     PrometheusStatLogger(vllm_config, engine_index=i))
+
+                if external_stat_loggers is not None:
+                    # External stat loggers handle own dp splitting
+                    # Should be in format
+                    # [[stat_logger1-dp1, stat_logger1-dp2],
+                    # [stat_logger2-dp1, stat_logger2-dp2]]
+                    for stat_logger in external_stat_loggers:
+                        loggers.append(stat_logger[i])
+
                 self.stat_loggers.append(loggers)
 
         # Tokenizer (+ ensure liveness if running in another process).
@@ -133,6 +143,8 @@ class AsyncLLM(EngineClient):
 
         # FIXME(rob): refactor VllmConfig to include the StatLoggers
         # include StatLogger in the Oracle decision.
+
+        # TODO (alec) ask rob about this
         if stat_loggers is not None:
             raise ValueError("Custom StatLoggers are not yet supported on V1. "
                              "Explicitly set VLLM_USE_V1=0 to disable V1.")
@@ -153,6 +165,7 @@ class AsyncLLM(EngineClient):
         engine_args: AsyncEngineArgs,
         start_engine_loop: bool = True,
         usage_context: UsageContext = UsageContext.ENGINE_CONTEXT,
+        external_stat_loggers: Optional[list[list[StatLoggerBase]]] = None,
     ) -> "AsyncLLM":
         """Create an AsyncLLM from the EngineArgs."""
 
@@ -168,6 +181,7 @@ class AsyncLLM(EngineClient):
             log_stats=not engine_args.disable_log_stats,
             start_engine_loop=start_engine_loop,
             usage_context=usage_context,
+            external_stat_loggers=external_stat_loggers,
         )
 
     def __del__(self):
@@ -381,7 +395,7 @@ class AsyncLLM(EngineClient):
                             stat_loggers[outputs.engine_index],
                             scheduler_stats=outputs.scheduler_stats,
                             iteration_stats=iteration_stats,
-                        )
+                            kv_cache_events=outputs.kv_cache_events)
             except Exception as e:
                 logger.exception("AsyncLLM output_handler failed.")
                 output_processor.propagate_error(e)
@@ -402,12 +416,14 @@ class AsyncLLM(EngineClient):
         stat_loggers: list[StatLoggerBase],
         scheduler_stats: SchedulerStats,
         iteration_stats: Optional[IterationStats],
+        kv_cache_events: Optional[list[KVCacheEvent]],
     ):
         """static so that it can be used from the output_handler task
         without a circular ref to AsyncLLM."""
         for stat_logger in stat_loggers:
             stat_logger.record(scheduler_stats=scheduler_stats,
-                               iteration_stats=iteration_stats)
+                               iteration_stats=iteration_stats,
+                               kv_cache_events=kv_cache_events)
 
     def encode(
         self,

@@ -80,7 +80,10 @@ class Scheduler(SchedulerInterface):
             max_model_len=self.max_model_len,
             enable_caching=self.cache_config.enable_prefix_caching,
             caching_hash_algo=self.cache_config.prefix_caching_hash_algo,
-            log_stats=self.log_stats)
+            log_stats=self.log_stats,
+            enable_kv_cache_events=self.scheduler_config.
+            enable_kv_cache_events,
+        )
         self.block_size = self.cache_config.block_size
 
         # req_id -> Request
@@ -723,7 +726,8 @@ class Scheduler(SchedulerInterface):
                         new_logprobs=new_logprobs,
                         new_prompt_logprobs_tensors=prompt_logprobs_tensors,
                         stop_reason=request.stop_reason,
-                        events=request.take_events()))
+                        events=request.take_events(),
+                    ))
             else:
                 # Invariant: EngineCore returns no partial prefill outputs.
                 assert not prompt_logprobs_tensors
@@ -736,6 +740,7 @@ class Scheduler(SchedulerInterface):
         engine_core_outputs = EngineCoreOutputs(
             outputs=outputs,
             scheduler_stats=self.make_stats(spec_decoding_stats),
+            kv_cache_events=self.kv_cache_manager.get_kv_events(),
         )
         if self.include_finished_set:
             #TODO currently sending duplicates here, improve this

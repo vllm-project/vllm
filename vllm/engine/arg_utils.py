@@ -159,6 +159,7 @@ class EngineArgs:
     enable_prefix_caching: Optional[bool] = CacheConfig.enable_prefix_caching
     prefix_caching_hash_algo: PrefixCachingHashAlgo = \
         CacheConfig.prefix_caching_hash_algo
+    enable_kv_cache_events: bool = False
     disable_sliding_window: bool = False
     disable_cascade_attn: bool = False
     use_v2_block_manager: bool = True
@@ -572,6 +573,12 @@ class EngineArgs:
         cache_group.add_argument('--calculate-kv-scales',
                                  **cache_kwargs["calculate_kv_scales"])
 
+        parser.add_argument(
+            "--enable-kv-cache-events",
+            action='store_true',
+            default=EngineArgs.enable_kv_cache_events,
+            help=
+            "Enable KV cache events for tracking block storage and removal.")
         parser.add_argument('--disable-sliding-window',
                             action='store_true',
                             help='Disables sliding window, '
@@ -1250,6 +1257,7 @@ class EngineArgs:
             max_num_partial_prefills=self.max_num_partial_prefills,
             max_long_partial_prefills=self.max_long_partial_prefills,
             long_prefill_token_threshold=self.long_prefill_token_threshold,
+            enable_kv_cache_events=self.enable_kv_cache_events,
         )
 
         lora_config = LoRAConfig(

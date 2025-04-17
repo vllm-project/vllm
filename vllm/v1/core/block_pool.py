@@ -8,6 +8,8 @@ from vllm.v1.core.kv_cache_utils import (BlockHashType, FreeKVCacheBlockQueue,
                                          KVCacheBlock,
                                          generate_block_hash_extra_keys,
                                          hash_block_tokens)
+from vllm.v1.engine import (AllBlocksCleared, BlockRemoved, BlockStored,
+                            KVCacheEvent)
 from vllm.v1.request import Request
 
 logger = init_logger(__name__)
@@ -26,7 +28,12 @@ class BlockPool:
         enable_caching: Whether to enable prefix caching.
     """
 
-    def __init__(self, num_gpu_blocks: int, enable_caching: bool):
+    def __init__(
+        self,
+        num_gpu_blocks: int,
+        enable_caching: bool,
+        enable_kv_cache_events: bool = False,
+    ):
         assert isinstance(num_gpu_blocks, int) and num_gpu_blocks > 0
         self.num_gpu_blocks = num_gpu_blocks
         self.enable_caching = enable_caching
@@ -55,6 +62,9 @@ class BlockPool:
         # The ref_cnt of null_block is not maintained, needs special care to
         # avoid freeing it.
         self.null_block = self.free_block_queue.popleft()
+
+        self.enable_kv_cache_events = enable_kv_cache_events
+        self.kv_event_queue: list[KVCacheEvent] = []
 
     def get_cached_block(self,
                          block_hash: BlockHashType) -> Optional[KVCacheBlock]:
@@ -116,6 +126,8 @@ class BlockPool:
             assert prev_block.block_hash is not None
             prev_block_hash_value = prev_block.block_hash.hash_value
 
+        parent_block_hash = prev_block_hash_value
+        new_hashes: list[int] = []
         for i, blk in enumerate(new_full_blocks):
             assert blk.block_hash is None
 
@@ -153,7 +165,21 @@ class BlockPool:
             # Update and added the full block to the cache.
             blk.block_hash = block_hash
             self.cached_block_hash_to_block[block_hash][blk.block_id] = blk
+            new_hashes.append(block_hash.hash_value)
             prev_block_hash_value = block_hash.hash_value
+
+        if self.enable_kv_cache_events:
+            self.kv_event_queue.append(
+                BlockStored(
+                    block_hashes=new_hashes,
+                    parent_block_hash=parent_block_hash,
+                    token_ids=request.
+                    all_token_ids[num_cached_blocks *
+                                  block_size:num_full_blocks * block_size],
+                    num_toks_per_block=[block_size] * len(new_hashes),
+                    lora_id=request.lora_request.id
+                    if request.lora_request else None,
+                ))
 
     def get_new_blocks(self, num_blocks: int) -> list[KVCacheBlock]:
         """Get new blocks from the free block pool.
@@ -206,6 +232,9 @@ class BlockPool:
             if len(self.cached_block_hash_to_block[block_hash]) == 0:
                 del self.cached_block_hash_to_block[block_hash]
 
+            if self.enable_kv_cache_events:
+                self.kv_event_queue.append(
+                    BlockRemoved(block_hashes=[block_hash.hash_value], ))
             return True
         return False
 
@@ -262,6 +291,10 @@ class BlockPool:
             block.reset_hash()
 
         logger.info("Successfully reset prefix cache")
+
+        if self.enable_kv_cache_events:
+            self.kv_event_queue.append(AllBlocksCleared())
+
         return True
 
     def get_num_free_blocks(self) -> int:
@@ -279,3 +312,15 @@ class BlockPool:
             The KV cache usage (between 0.0 and 1.0).
         """
         return 1.0 - (self.get_num_free_blocks() / self.num_gpu_blocks)
+
+    def extract_kv_events(self) -> list[KVCacheEvent]:
+        """Atomically extracts all events and clears the queue.
+        
+        Returns:
+            A list of KV cache events.
+        """
+        if not self.enable_kv_cache_events:
+            return []
+        events = self.kv_event_queue
+        self.kv_event_queue = []
+        return events
