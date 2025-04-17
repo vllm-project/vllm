@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+from __future__ import annotations
 
 import contextlib
 import os
@@ -9,8 +10,6 @@ from types import MethodType
 from typing import TYPE_CHECKING, Any, Optional, Union
 
 import huggingface_hub
-from transformers import (AutoTokenizer, PreTrainedTokenizer,
-                          PreTrainedTokenizerFast)
 
 from vllm.envs import VLLM_USE_MODELSCOPE
 from vllm.logger import init_logger
@@ -22,11 +21,13 @@ from vllm.transformers_utils.utils import check_gguf_file
 from vllm.utils import make_async
 
 if TYPE_CHECKING:
+    from transformers import PreTrainedTokenizer, PreTrainedTokenizerFast
+
     from vllm.config import ModelConfig
 
 logger = init_logger(__name__)
 
-AnyTokenizer = Union[PreTrainedTokenizer, PreTrainedTokenizerFast,
+AnyTokenizer = Union["PreTrainedTokenizer", "PreTrainedTokenizerFast",
                      TokenizerBase]
 
 
@@ -215,6 +216,7 @@ def get_tokenizer(
                                                     **kwargs)
     else:
         try:
+            from transformers import AutoTokenizer
             tokenizer = AutoTokenizer.from_pretrained(
                 tokenizer_name,
                 *args,
@@ -241,9 +243,9 @@ def get_tokenizer(
         # NOTE: We can remove this after https://github.com/THUDM/ChatGLM3/issues/1324
         if type(tokenizer).__name__ in ("ChatGLMTokenizer",
                                         "ChatGLM4Tokenizer"):
-            assert isinstance(tokenizer, PreTrainedTokenizer)
+            assert isinstance(tokenizer, "PreTrainedTokenizer")
             patch_padding_side(tokenizer)
-
+        from transformers import PreTrainedTokenizerFast
         if not isinstance(tokenizer, PreTrainedTokenizerFast):
             logger.warning(
                 "Using a slow tokenizer. This might cause a significant "
@@ -257,7 +259,7 @@ cached_get_tokenizer = lru_cache(get_tokenizer)
 
 
 def cached_tokenizer_from_config(
-    model_config: "ModelConfig",
+    model_config: ModelConfig,
     **kwargs: Any,
 ):
     return cached_get_tokenizer(

@@ -4,7 +4,8 @@ import itertools
 import warnings
 from collections.abc import Sequence
 from contextlib import contextmanager
-from typing import Any, Callable, ClassVar, Optional, Union, cast, overload
+from typing import (TYPE_CHECKING, Any, Callable, ClassVar, Optional, Union,
+                    cast, overload)
 
 import cloudpickle
 import torch.nn as nn
@@ -13,9 +14,6 @@ from typing_extensions import TypeVar, deprecated
 
 from vllm.beam_search import (BeamSearchInstance, BeamSearchOutput,
                               BeamSearchSequence, get_beam_search_score)
-from vllm.config import CompilationConfig
-from vllm.engine.arg_utils import (EngineArgs, HfOverrides, PoolerConfig,
-                                   TaskOption)
 from vllm.engine.llm_engine import LLMEngine
 from vllm.entrypoints.chat_utils import (ChatCompletionMessageParam,
                                          ChatTemplateContentFormatOption,
@@ -44,6 +42,12 @@ from vllm.transformers_utils.tokenizer_group import TokenizerGroup
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils import (Counter, Device, deprecate_args, deprecate_kwargs,
                         is_list_of)
+
+if TYPE_CHECKING:
+    from vllm.engine.arg_utils import HfOverrides, PoolerConfig, TaskOption
+
+if TYPE_CHECKING:
+    from vllm.engine.arg_utils import HfOverrides, PoolerConfig, TaskOption
 
 logger = init_logger(__name__)
 
@@ -181,11 +185,11 @@ class LLM:
         disable_custom_all_reduce: bool = False,
         disable_async_output_proc: bool = False,
         hf_token: Optional[Union[bool, str]] = None,
-        hf_overrides: Optional[HfOverrides] = None,
+        hf_overrides: Optional['HfOverrides'] = None,
         mm_processor_kwargs: Optional[dict[str, Any]] = None,
         # After positional args are removed, move this right below `model`
-        task: TaskOption = "auto",
-        override_pooler_config: Optional[PoolerConfig] = None,
+        task: "TaskOption" = "auto",
+        override_pooler_config: Optional["PoolerConfig"] = None,
         compilation_config: Optional[Union[int, dict[str, Any]]] = None,
         **kwargs,
     ) -> None:
@@ -195,6 +199,7 @@ class LLM:
         Note: if enforce_eager is unset (enforce_eager is None)
         it defaults to False.
         '''
+        from vllm.engine.arg_utils import EngineArgs
 
         if "disable_log_stats" not in kwargs:
             kwargs["disable_log_stats"] = True
@@ -208,6 +213,7 @@ class LLM:
 
         if compilation_config is not None:
             if isinstance(compilation_config, (int, dict)):
+                from vllm.config import CompilationConfig
                 compilation_config_instance = CompilationConfig.from_cli(
                     str(compilation_config))
             else:

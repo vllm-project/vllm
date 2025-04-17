@@ -4,15 +4,9 @@ from typing import Optional, Type
 
 from vllm.config import (LoRAConfig, ModelConfig, ParallelConfig,
                          SchedulerConfig, TokenizerPoolConfig)
-from vllm.executor.ray_utils import ray
 
 from .base_tokenizer_group import AnyTokenizer, BaseTokenizerGroup
 from .tokenizer_group import TokenizerGroup
-
-if ray:
-    from .ray_tokenizer_group import RayTokenizerGroupPool
-else:
-    RayTokenizerGroupPool = None  # type: ignore
 
 
 def init_tokenizer_from_configs(model_config: ModelConfig,
@@ -42,6 +36,13 @@ def get_tokenizer_group(tokenizer_pool_config: Optional[TokenizerPoolConfig],
             tokenizer_pool_config.pool_type, BaseTokenizerGroup):
         tokenizer_cls = tokenizer_pool_config.pool_type
     elif tokenizer_pool_config.pool_type == "ray":
+        from vllm.executor.ray_utils import ray
+
+        if ray:
+            from .ray_tokenizer_group import RayTokenizerGroupPool
+        else:
+            RayTokenizerGroupPool = None  # type: ignore
+
         if RayTokenizerGroupPool is None:
             raise ImportError(
                 "RayTokenizerGroupPool is not available. Please install "

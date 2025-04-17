@@ -228,6 +228,7 @@ class UsageMessage:
             self._send_to_server(data)
 
     def _send_to_server(self, data: dict[str, Any]) -> None:
+
         try:
             global_http_client = global_http_connection.get_sync_client()
             global_http_client.post(_USAGE_STATS_SERVER, json=data)

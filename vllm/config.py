@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
+from __future__ import annotations
+
 import ast
 import copy
 import enum
@@ -22,15 +24,13 @@ from typing import (TYPE_CHECKING, Any, Callable, ClassVar, Final, Literal,
 import torch
 from pydantic import BaseModel, Field, PrivateAttr
 from torch.distributed import ProcessGroup, ReduceOp
-from transformers import PretrainedConfig
 
 import vllm.envs as envs
 from vllm.compilation.inductor_pass import CallableInductorPass, InductorPass
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import (QUANTIZATION_METHODS,
                                                      get_quantization_config)
-from vllm.model_executor.models import ModelRegistry
-from vllm.platforms import CpuArchEnum, current_platform
+from vllm.platforms import CpuArchEnum
 from vllm.sampling_params import GuidedDecodingParams
 from vllm.tracing import is_otel_available, otel_import_error_traceback
 from vllm.transformers_utils.config import (
@@ -40,25 +40,35 @@ from vllm.transformers_utils.config import (
     try_get_generation_config, uses_mrope)
 from vllm.transformers_utils.s3_utils import S3Model
 from vllm.transformers_utils.utils import is_s3, maybe_model_redirect
-from vllm.utils import (GiB_bytes, LayerBlockType, cuda_device_count_stateless,
-                        get_cpu_memory, get_open_port, is_torch_equal_or_newer,
+from vllm.utils import (GiB_bytes, LayerBlockType, LazyLoader,
+                        cuda_device_count_stateless, get_cpu_memory,
+                        get_open_port, is_torch_equal_or_newer,
                         random_uuid, resolve_obj_by_qualname)
 
 if TYPE_CHECKING:
     from _typeshed import DataclassInstance
     from ray.util.placement_group import PlacementGroup
+    from transformers import PretrainedConfig
 
     from vllm.executor.executor_base import ExecutorBase
-    from vllm.model_executor.layers.quantization.base_config import (
-        QuantizationConfig)
+    from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS
     from vllm.model_executor.model_loader.loader import BaseModelLoader
     from vllm.transformers_utils.tokenizer_group.base_tokenizer_group import (
         BaseTokenizerGroup)
+    HfOverrides = Union[dict[str, Any], Callable[[PretrainedConfig],
+                                                 PretrainedConfig]]
 
     Config = TypeVar("Config", bound=DataclassInstance)
 else:
+    me_quant = LazyLoader("model_executor", globals(),
+                          "vllm.model_executor.layers.quantization")
+    me_models = LazyLoader("model_executor", globals(),
+                           "vllm.model_executor.models")
+
+    HfOverrides = None
     QuantizationConfig = None
-    Config = TypeVar("Config")
+
+from packaging.version import Version
 
 logger = init_logger(__name__)
 
@@ -88,9 +98,6 @@ _TASK_RUNNER: dict[_ResolvedTask, RunnerType] = {
     for runner, tasks in _RUNNER_TASKS.items()
     for task in tasks
 }
-
-HfOverrides = Union[dict[str, Any], Callable[[PretrainedConfig],
-                                             PretrainedConfig]]
 
 
 class SupportsHash(Protocol):
@@ -346,7 +353,7 @@ class ModelConfig:
         mm_processor_kwargs: Optional[dict[str, Any]] = None,
         disable_mm_preprocessor_cache: bool = False,
         override_neuron_config: Optional[dict[str, Any]] = None,
-        override_pooler_config: Optional["PoolerConfig"] = None,
+        override_pooler_config: Optional[PoolerConfig] = None,
         logits_processor_pattern: Optional[str] = None,
         generation_config: str = "auto",
         enable_sleep_mode: bool = False,
@@ -529,7 +536,7 @@ class ModelConfig:
 
     @property
     def registry(self):
-        return ModelRegistry
+        return me_models.ModelRegistry
 
     @property
     def architectures(self) -> list[str]:
@@ -562,7 +569,7 @@ class ModelConfig:
 
     def _init_multimodal_config(
         self, limit_mm_per_prompt: Optional[Mapping[str, int]]
-    ) -> Optional["MultiModalConfig"]:
+    ) -> Optional[MultiModalConfig]:
         if self.registry.is_multimodal_model(self.architectures):
             return MultiModalConfig(limit_per_prompt=limit_mm_per_prompt or {})
 
@@ -578,8 +585,8 @@ class ModelConfig:
 
     def _init_pooler_config(
         self,
-        override_pooler_config: Optional["PoolerConfig"],
-    ) -> Optional["PoolerConfig"]:
+        override_pooler_config: Optional[PoolerConfig],
+    ) -> Optional[PoolerConfig]:
 
         if self.runner_type == "pooling":
             user_config = override_pooler_config or PoolerConfig()
@@ -730,7 +737,8 @@ class ModelConfig:
         return quant_cfg
 
     def _verify_quantization(self) -> None:
-        supported_quantization = QUANTIZATION_METHODS
+        supported_quantization = me_quant.QUANTIZATION_METHODS
+
         optimized_quantization_methods = [
             "fp8", "marlin", "modelopt", "gptq_marlin_24", "gptq_marlin",
             "awq_marlin", "fbgemm_fp8", "compressed_tensors",
@@ -747,7 +755,7 @@ class ModelConfig:
 
             # Detect which checkpoint is it
             for name in QUANTIZATION_METHODS:
-                method = get_quantization_config(name)
+                method = me_quant.get_quantization_config(name)
                 quantization_override = method.override_quantization_method(
                     quant_cfg, self.quantization)
                 if quantization_override:
@@ -865,7 +873,7 @@ class ModelConfig:
 
     def verify_with_parallel_config(
         self,
-        parallel_config: "ParallelConfig",
+        parallel_config: ParallelConfig,
     ) -> None:
 
         if parallel_config.distributed_executor_backend == "external_launcher":
@@ -1018,7 +1026,7 @@ class ModelConfig:
         # equal to the number of attention heads.
         return self.hf_text_config.num_attention_heads
 
-    def get_num_kv_heads(self, parallel_config: "ParallelConfig") -> int:
+    def get_num_kv_heads(self, parallel_config: ParallelConfig) -> int:
         """Returns the number of KV heads per GPU."""
         if self.use_mla:
             # When using MLA during decode it becomes MQA
@@ -1032,13 +1040,12 @@ class ModelConfig:
         return max(1,
                    total_num_kv_heads // parallel_config.tensor_parallel_size)
 
-    def get_num_attention_heads(self,
-                                parallel_config: "ParallelConfig") -> int:
+    def get_num_attention_heads(self, parallel_config: ParallelConfig) -> int:
         num_heads = getattr(self.hf_text_config, "num_attention_heads", 0)
         return num_heads // parallel_config.tensor_parallel_size
 
     def get_layers_start_end_indices(
-            self, parallel_config: "ParallelConfig") -> tuple[int, int]:
+            self, parallel_config: ParallelConfig) -> tuple[int, int]:
         from vllm.distributed.utils import get_pp_indices
         if self.hf_text_config.model_type == "deepseek_mtp":
             total_num_hidden_layers = getattr(self.hf_text_config,
@@ -1053,13 +1060,13 @@ class ModelConfig:
         start, end = get_pp_indices(total_num_hidden_layers, pp_rank, pp_size)
         return start, end
 
-    def get_num_layers(self, parallel_config: "ParallelConfig") -> int:
+    def get_num_layers(self, parallel_config: ParallelConfig) -> int:
         start, end = self.get_layers_start_end_indices(parallel_config)
         return end - start
 
     def get_num_layers_by_block_type(
         self,
-        parallel_config: "ParallelConfig",
+        parallel_config: ParallelConfig,
         block_type: LayerBlockType = LayerBlockType.attention,
     ) -> int:
         # This function relies on 'layers_block_type' in hf_config,
@@ -1221,7 +1228,7 @@ class ModelConfig:
     @property
     def is_v1_compatible(self) -> bool:
         architectures = getattr(self.hf_config, "architectures", [])
-        return ModelRegistry.is_v1_compatible(architectures)
+        return me_models.ModelRegistry.is_v1_compatible(architectures)
 
     @property
     def is_matryoshka(self) -> bool:
@@ -1347,7 +1354,7 @@ class CacheConfig:
 
     def verify_with_parallel_config(
         self,
-        parallel_config: "ParallelConfig",
+        parallel_config: ParallelConfig,
     ) -> None:
         total_cpu_memory = get_cpu_memory()
         # FIXME(woosuk): Here, it is assumed that the GPUs in a tensor parallel
@@ -1376,7 +1383,7 @@ class TokenizerPoolConfig:
             pool type.
     """
     pool_size: int
-    pool_type: Union[str, type["BaseTokenizerGroup"]]
+    pool_type: Union[str, type[BaseTokenizerGroup]]
     extra_config: dict
 
     def compute_hash(self) -> str:
@@ -1408,9 +1415,9 @@ class TokenizerPoolConfig:
     @classmethod
     def create_config(
         cls, tokenizer_pool_size: int,
-        tokenizer_pool_type: Union[str, type["BaseTokenizerGroup"]],
+        tokenizer_pool_type: Union[str, type[BaseTokenizerGroup]],
         tokenizer_pool_extra_config: Optional[Union[str, dict]]
-    ) -> Optional["TokenizerPoolConfig"]:
+    ) -> Optional[TokenizerPoolConfig]:
         """Create a TokenizerPoolConfig from the given parameters.
 
         If tokenizer_pool_size is 0, return None.
@@ -1618,7 +1625,7 @@ class ParallelConfig:
         self.data_parallel_master_port += 1
         return answer
 
-    def stateless_init_dp_group(self) -> "ProcessGroup":
+    def stateless_init_dp_group(self) -> ProcessGroup:
         from vllm.distributed.utils import (
             stateless_init_torch_distributed_process_group)
 
@@ -1633,7 +1640,7 @@ class ParallelConfig:
         return dp_group
 
     @staticmethod
-    def has_unfinished_dp(dp_group: "ProcessGroup",
+    def has_unfinished_dp(dp_group: ProcessGroup,
                           has_unfinished: bool) -> bool:
         tensor = torch.tensor([has_unfinished],
                               dtype=torch.int32,
@@ -2798,7 +2805,7 @@ class PoolerConfig:
         return hash_str
 
     @staticmethod
-    def from_json(json_str: str) -> "PoolerConfig":
+    def from_json(json_str: str) -> PoolerConfig:
         return PoolerConfig(**json.loads(json_str))
 
 
@@ -3210,7 +3217,7 @@ class KVTransferConfig(BaseModel):
         return hash_str
 
     @classmethod
-    def from_cli(cls, cli_value: str) -> "KVTransferConfig":
+    def from_cli(cls, cli_value: str) -> KVTransferConfig:
         """Parse the CLI value for the kv cache transfer config."""
         return KVTransferConfig.model_validate_json(cli_value)
 
@@ -3447,7 +3454,7 @@ class CompilationConfig(BaseModel):
     __str__ = __repr__
 
     @classmethod
-    def from_cli(cls, cli_value: str) -> "CompilationConfig":
+    def from_cli(cls, cli_value: str) -> CompilationConfig:
         """Parse the CLI value for the compilation config."""
         if cli_value in ["0", "1", "2", "3"]:
             return cls(level=int(cli_value))
@@ -3499,7 +3506,7 @@ class CompilationConfig(BaseModel):
         self.static_forward_context = {}
         self.compilation_time = 0.0
 
-    def init_backend(self, vllm_config: "VllmConfig") -> Union[str, Callable]:
+    def init_backend(self, vllm_config: VllmConfig) -> Union[str, Callable]:
         if self.level == CompilationLevel.NO_COMPILATION:
             raise ValueError("No compilation level is set.")
 
@@ -3715,9 +3722,7 @@ class VllmConfig:
         """Get the quantization config."""
         from vllm.platforms import current_platform
         if model_config.quantization is not None:
-            from vllm.model_executor.model_loader.weight_utils import (
-                get_quant_config)
-            quant_config = get_quant_config(model_config, load_config)
+            quant_config = me_quant.get_quant_config(model_config, load_config)
             capability_tuple = current_platform.get_device_capability()
 
             if capability_tuple is not None:
@@ -3741,7 +3746,7 @@ class VllmConfig:
         self,
         hf_config: PretrainedConfig,
         architectures: Optional[list[str]] = None,
-    ) -> "VllmConfig":
+    ) -> VllmConfig:
         if architectures is not None:
             hf_config = copy.deepcopy(hf_config)
             hf_config.architectures = architectures

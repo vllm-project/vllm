@@ -8,12 +8,9 @@ from typing import (TYPE_CHECKING, Any, Callable, NamedTuple, Optional,
                     Protocol, Union)
 
 from torch import nn
-from transformers import BatchFeature, PretrainedConfig, ProcessorMixin
 from typing_extensions import TypeVar, assert_never
 
 from vllm.logger import init_logger
-from vllm.transformers_utils.processor import cached_processor_from_config
-from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.utils import (ClassRegistry, get_allowed_kwarg_only_overrides,
                         resolve_mm_processor_kwargs)
 
@@ -21,16 +18,19 @@ from .data import ProcessorInputs, SingletonInputs
 from .parse import split_enc_dec_inputs
 
 if TYPE_CHECKING:
+    from transformers import BatchFeature, PretrainedConfig, ProcessorMixin
+
     from vllm.config import ModelConfig
     from vllm.multimodal import (MultiModalDataDict, MultiModalPlaceholderDict,
                                  MultiModalRegistry)
     from vllm.sequence import SequenceData
+    from vllm.transformers_utils.tokenizer import AnyTokenizer
 
 logger = init_logger(__name__)
 
 _T = TypeVar("_T")
-_C = TypeVar("_C", bound=PretrainedConfig, default=PretrainedConfig)
-_P = TypeVar("_P", bound=ProcessorMixin, default=ProcessorMixin)
+_C = TypeVar("_C", bound="PretrainedConfig", default="PretrainedConfig")
+_P = TypeVar("_P", bound="ProcessorMixin", default="ProcessorMixin")
 
 
 @dataclass(frozen=True)
@@ -45,7 +45,7 @@ class InputContext:
 
     def get_hf_config(
         self,
-        typ: Union[type[_C], tuple[type[_C], ...]] = PretrainedConfig,
+        typ: Optional[Union[type[_C], tuple[type[_C], ...]]] = None,
         /,
     ) -> _C:
         """
@@ -56,6 +56,11 @@ class InputContext:
         Raises:
             TypeError: If the configuration is not of the specified type.
         """
+
+        if typ is None:
+            from transformers import PretrainedConfig
+            typ = PretrainedConfig
+
         hf_config = self.model_config.hf_config
         if not isinstance(hf_config, typ):
             raise TypeError("Invalid type of HuggingFace config. "
@@ -85,7 +90,7 @@ class InputContext:
 
     def get_hf_processor(
         self,
-        typ: Union[type[_P], tuple[type[_P], ...]] = ProcessorMixin,
+        typ: Optional[Union[type[_P], tuple[type[_P], ...]]] = None,
         /,
         **kwargs: object,
     ) -> _P:
@@ -97,6 +102,12 @@ class InputContext:
         Raises:
             TypeError: If the processor is not of the specified type.
         """
+
+        if typ is None:
+            from transformers import ProcessorMixin
+            typ = ProcessorMixin
+        from vllm.transformers_utils.processor import (
+            cached_processor_from_config)
         return cached_processor_from_config(
             self.model_config,
             processor_cls=typ,
@@ -124,15 +135,19 @@ class InputContext:
 
 @dataclass(frozen=True)
 class InputProcessingContext(InputContext):
-    tokenizer: AnyTokenizer
+    tokenizer: "AnyTokenizer"
     """The tokenizer used to tokenize the inputs."""
 
     def get_hf_processor(
         self,
-        typ: Union[type[_P], tuple[type[_P], ...]] = ProcessorMixin,
+        typ: Union[type[_P], tuple[type[_P], ...], None] = None,
         /,
         **kwargs: object,
     ) -> _P:
+
+        if typ is None:
+            from transformers import ProcessorMixin
+            typ = ProcessorMixin
         return super().get_hf_processor(
             typ,
             tokenizer=self.tokenizer,
@@ -141,10 +156,10 @@ class InputProcessingContext(InputContext):
 
     def call_hf_processor(
         self,
-        hf_processor: ProcessorMixin,
+        hf_processor: "ProcessorMixin",
         data: Mapping[str, object],
         kwargs: Mapping[str, object] = {},
-    ) -> BatchFeature:
+    ) -> "BatchFeature":
         """
         Call :code:`hf_processor` on the prompt :code:`data`
         (text, image, audio...) with configurable options :code:`kwargs`.
