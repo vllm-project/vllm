@@ -40,12 +40,8 @@ def rocm_aiter_asm_moe_tkw1(hidden_states,
     from aiter import ActivationType
     from aiter.fused_moe_bf16_asm import asm_moe_tkw1
 
-    if activation_str == "silu":
-        activation = ActivationType.Silu
-    elif activation_str == "gelu":
-        activation = ActivationType.Gelu
-    else:
-        activation = ActivationType.Silu
+    activation = \
+        ActivationType.Gelu if activation_str == "gelu" else ActivationType.Silu
 
     return asm_moe_tkw1(hidden_states,
                         w1,
