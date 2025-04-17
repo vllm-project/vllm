@@ -148,22 +148,22 @@ Our [OpenAI-Compatible Server](#openai-compatible-server) provides endpoints tha
 
 :::{warning}
 
-**Not all embeddings models support Matryoshka Embeddings. Changing the output dimensions for models that do not support Matryoshka Embeddings will lead to poor results. vllm returns an error for requests that attempt to change the output dimension (dimensions is not None) of an unsupported Matryoshka Embeddings model.**
+Not all embedding models are trained using Matryoshka Representation Learning. To avoid misuse of the `dimensions` parameter, vLLM returns an error for requests that attempt to change the output dimension of models that do not support Matryoshka Embeddings.
 
-For example, trying to change the output dimension of the BAAI/bge-m3 model will result in the following error.
+For example, setting `dimensions` parameter while using the `BAAI/bge-m3` model will result in the following error.
 
 ```json
 {"object":"error","message":"Model \"BAAI/bge-m3\" does not support matryoshka representation, changing output dimensions will lead to poor results.","type":"BadRequestError","param":null,"code":400}
 ```
-
-We hope that the open source community will adopt the terms “is_matryoshka ” or “matryoshka_dimensions ” to denote whether a model is compatible with Matryoshka Embeddings.
 :::
 
-### Manually support Matryoshka Embeddings
+### Manually enable Matryoshka Embeddings
 
-For models supported by Matryoshka Embeddings but not recognized by vllm, please manually enable Matryoshka Embeddings support using hf_overrides={"is_matryoshka": True} (Offline) or --hf_overrides '{"is_matryoshka":true}' (online) with caution.
+There is currently no official interface for specifying support for Matryoshka Embeddings. In vLLM, we simply check the existence of the fields `is_matryoshka` or matryoshka_dimensions inside `config.json`.
 
-For example, using the following command to start vllm server can manually support Matryoshka Embeddings.
+For models that support Matryoshka Embeddings but not recognized by vLLM, please manually override the config using `hf_overrides={"is_matryoshka": True}` (offline) or `--hf_overrides '{"is_matryoshka": true}'` (online).
+
+Here is an example to serve a model with Matryoshka Embeddings enabled.
 
 ```text
 vllm serve Snowflake/snowflake-arctic-embed-m-v1.5 --hf_overrides '{"is_matryoshka":true}'
