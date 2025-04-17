@@ -12,7 +12,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1, KVConnectorMetadata, KVConnectorRole)
 from vllm.logger import init_logger
 from vllm.v1.attention.backends.mla.common import MLACommonMetadata
-from vllm.v1.core.sched.output import CachedRequestData, NewRequestData
+from vllm.v1.core.sched.output import SchedulerOutput
 
 if TYPE_CHECKING:
     from vllm.attention.backends.abstract import AttentionMetadata
@@ -32,12 +32,11 @@ class ReqMeta:
     is_store: bool
 
     @staticmethod
-    def from_new_request(request: NewRequestData, block_size: int,
-                         is_store: bool) -> "ReqMeta":
-        valid_num_tokens = align_to_block_size(len(request.prompt_token_ids),
-                                               block_size)
-        token_ids = torch.tensor(request.prompt_token_ids)[:valid_num_tokens]
-        block_ids = torch.tensor(request.block_ids)
+    def make_meta(token_ids: list[int], block_ids: list[int], block_size: int,
+                  is_store: bool) -> "ReqMeta":
+        valid_num_tokens = align_to_block_size(len(token_ids), block_size)
+        token_ids = torch.tensor(token_ids)[:valid_num_tokens]
+        block_ids = torch.tensor(block_ids)
         num_blocks = block_ids.shape[0]
         block_offsets = torch.arange(0, block_size)
         slot_mapping = block_offsets.reshape((1, block_size)) + \
@@ -57,23 +56,15 @@ class SharedStorageConnectorMetadata(KVConnectorMetadata):
     def __init__(self):
         self.requests = []
 
-    def add_new_request(
+    def add_request(
         self,
-        request: NewRequestData,
+        token_ids: list[int],
+        block_ids: list[int],
         block_size: int,
         is_store: bool,
     ) -> None:
         self.requests.append(
-            ReqMeta.from_new_request(request, block_size, is_store))
-
-    def add_cached_request(
-        self,
-        request: CachedRequestData,
-        block_size: int,
-        is_store: bool,
-    ) -> None:
-        self.requests.append(
-            ReqMeta.from_cached_request(request, block_size, is_store))
+            ReqMeta.make_meta(token_ids, block_ids, block_size, is_store))
 
 
 class SharedStorageConnector(KVConnectorBase_V1):
@@ -85,7 +76,7 @@ class SharedStorageConnector(KVConnectorBase_V1):
     def __init__(self, vllm_config: "VllmConfig", role: KVConnectorRole):
         super().__init__(vllm_config=vllm_config, role=role)
         self._block_size = vllm_config.cache_config.block_size
-        self._requests_need_load: list[str] = []
+        self._requests_need_load: dict[str, Request] = {}
         transfer_config = vllm_config.kv_transfer_config
         self._storage_path = transfer_config.get_from_extra_config(
             "shared_storage_path", "/tmp")
@@ -277,12 +268,11 @@ class SharedStorageConnector(KVConnectorBase_V1):
         such that we load the KVs in the next forward pass.
         """
         if num_external_tokens > 0:
-            self._requests_need_load.append(request.request_id)
+            self._requests_need_load[request.request_id] = request
 
     def build_connector_meta(
         self,
-        new_reqs_data: NewRequestData,
-        resumed_reqs_data: CachedRequestData,
+        scheduler_output: SchedulerOutput,
     ) -> KVConnectorMetadata:
         """Build the connector metadata for this step.
 
@@ -295,28 +285,46 @@ class SharedStorageConnector(KVConnectorBase_V1):
         meta = SharedStorageConnectorMetadata()
 
         total_need_load = 0
-        for new_req in new_reqs_data:
+        for new_req in scheduler_output.scheduled_new_reqs:
             if new_req.req_id in self._requests_need_load:
-                meta.add_new_request(new_req, self._block_size, is_store=False)
+                meta.add_request(token_ids=new_req.prompt_token_ids,
+                                 block_ids=new_req.block_ids,
+                                 block_size=self._block_size,
+                                 is_store=False)
                 total_need_load += 1
             else:
                 # NOTE: here, we set the store and load being exclusive,
-                # but in LMCache use case, a single request can have both
-                # store and load status
+                # but a single request can have both store and load.
                 # NOTE(rob): for this debug implementation, we only cache
                 # the original prompt tokens.
                 if not self._found_match_for_request(new_req):
-                    meta.add_new_request(new_req,
-                                         self._block_size,
-                                         is_store=True)
+                    meta.add_request(token_ids=new_req.prompt_token_ids,
+                                     block_ids=new_req.block_ids,
+                                     block_size=self._block_size,
+                                     is_store=True)
 
-        # NOTE(rob): here we rely on the resumed requests being
-        # the first N requests in the list scheduled_cache_reqs.
-        for resumed_req in resumed_reqs_data:
-            if resumed_req.req_id in self._requests_need_load:
-                meta.add_cached_request(resumed_req,
-                                        self._block_size,
-                                        is_store=False)
+        for cached_req in scheduler_output.scheduled_cached_reqs:
+            # NOTE(rob): here we rely on the resumed requests being
+            # the first N requests in the list scheduled_cache_reqs.
+            if not cached_req.resumed_from_preemption:
+                break
+            if cached_req.req_id in self._requests_need_load:
+                # NOTE(rob): cached_req_data does not have the full
+                # list of token ids (only new tokens). So we look it
+                # up in the actual request object.
+                request = self._requests_need_load[cached_req.req_id]
+                total_tokens = (len(cached_req.new_token_ids) +
+                                cached_req.num_computed_tokens)
+                token_ids = request.all_token_ids[:total_tokens]
+
+                # NOTE(rob): For resumed req, new_block_ids is all
+                # of the block_ids for the request.
+                block_ids = cached_req.new_block_ids
+
+                meta.add_request(token_ids=token_ids,
+                                 block_ids=block_ids,
+                                 block_size=self._block_size,
+                                 is_store=False)
                 total_need_load += 1
 
         assert total_need_load == len(self._requests_need_load)

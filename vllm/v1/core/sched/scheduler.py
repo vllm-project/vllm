@@ -362,7 +362,9 @@ class Scheduler(SchedulerInterface):
                 # needed for this request.
                 if self.connector is not None:
                     self.connector.update_state_after_alloc(
-                        request, num_external_tokens)
+                        request,
+                        num_external_tokens,
+                    )
 
                 self.waiting.popleft()
                 if request.use_structured_output:
@@ -477,9 +479,7 @@ class Scheduler(SchedulerInterface):
         # 2. Wrap up all the KV cache load / save ops into an opaque object
         # 3. Clear the internal states of the connector
         if self.connector is not None:
-            meta = self.connector.build_connector_meta(new_reqs_data,
-                                                       resumed_reqs_data,
-                                                       running_reqs_data)
+            meta = self.connector.build_connector_meta(scheduler_output)
             scheduler_output.kv_connector_metadata = meta
 
         # Advance the number of computed tokens for the request AFTER

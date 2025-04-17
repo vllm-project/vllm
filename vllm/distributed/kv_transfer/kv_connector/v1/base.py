@@ -28,7 +28,7 @@ from typing import TYPE_CHECKING
 import torch
 
 from vllm.logger import init_logger
-from vllm.v1.core.sched.output import CachedRequestData, NewRequestData
+from vllm.v1.core.sched.output import SchedulerOutput
 
 if TYPE_CHECKING:
     from vllm.attention.backends.abstract import AttentionMetadata
@@ -196,10 +196,7 @@ class KVConnectorBase_V1(ABC):
 
     @abstractmethod
     def build_connector_meta(
-        self,
-        new_reqs_data: NewRequestData,
-        resumed_reqs_data: CachedRequestData,
-    ) -> KVConnectorMetadata:
+            self, scheduler_output: SchedulerOutput) -> KVConnectorMetadata:
         """
         Build the connector metadata for this step.
 
