@@ -27,7 +27,7 @@ def load_prompts(dataset_path, num_prompts):
     return prompts[:num_prompts]
 
 
-def main():
+def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--dataset",
@@ -45,11 +45,14 @@ def main():
     parser.add_argument("--enable_chunked_prefill", action='store_true')
     parser.add_argument("--max_num_batched_tokens", type=int, default=2048)
     parser.add_argument("--temp", type=float, default=0)
-    parser.add_argument("--use_v1", type=str, default="1", help='1 or 0')
-    args = parser.parse_args()
+    return parser.parse_args()
 
-    # TODO: remove this option once EAGLE in v1 is ready.
-    os.environ["VLLM_USE_V1"] = args.use_v1
+
+def main():
+
+    args = parse_args()
+
+    os.environ["VLLM_USE_V1"] = "1"
 
     model_dir = "meta-llama/Llama-3.1-8B-Instruct"
     eagle_dir = "yuhuili/EAGLE3-LLaMA3.1-Instruct-8B"

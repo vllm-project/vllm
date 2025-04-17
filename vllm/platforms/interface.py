@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING, NamedTuple, Optional, Tuple, Union
 import numpy as np
 import torch
 
-from vllm.inputs import PromptType
+from vllm.inputs import ProcessorInputs, PromptType
 from vllm.logger import init_logger
 
 if TYPE_CHECKING:
@@ -147,6 +147,9 @@ class Platform:
     def is_cuda_alike(self) -> bool:
         """Stateless version of :func:`torch.cuda.is_available`."""
         return self._enum in (PlatformEnum.CUDA, PlatformEnum.ROCM)
+
+    def is_sleep_mode_available(self) -> bool:
+        return self._enum == PlatformEnum.CUDA
 
     @classmethod
     def get_attn_backend_cls(cls, selected_backend: _Backend, head_size: int,
@@ -397,6 +400,7 @@ class Platform:
         cls,
         prompt: PromptType,
         params: Union[SamplingParams, PoolingParams],
+        processed_inputs: ProcessorInputs,
     ) -> None:
         """Raises if this request is unsupported on this platform"""
 

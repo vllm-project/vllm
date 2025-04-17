@@ -318,6 +318,18 @@ VLM_TEST_SETTINGS = {
         use_tokenizer_eos=True,
         patch_hf_runner=model_utils.internvl_patch_hf_runner,
     ),
+    "kimi_vl": VLMTestInfo(
+        models=["moonshotai/Kimi-VL-A3B-Instruct"],
+        test_type=(VLMTestType.IMAGE, VLMTestType.MULTI_IMAGE),
+        prompt_formatter=lambda img_prompt: f"<|im_user|>user<|im_middle|>{img_prompt}<|im_end|><|im_assistant|>assistant<|im_middle|>", # noqa: E501
+        img_idx_to_prompt=lambda _: "<|media_start|>image<|media_content|><|media_pad|><|media_end|>",  # noqa: E501
+        max_model_len=8192,
+        max_num_seqs=2,
+        dtype="bfloat16",
+        tensor_parallel_size=1,
+        vllm_output_post_proc=model_utils.kimiv_vl_vllm_to_hf_output,
+        marks=[large_gpu_mark(min_gb=48)],
+    ),
     "llama4": VLMTestInfo(
         models=["meta-llama/Llama-4-Scout-17B-16E-Instruct"],
         prompt_formatter=lambda img_prompt: f"<|begin_of_text|><|header_start|>user<|header_end|>\n\n{img_prompt}<|eot|><|header_start|>assistant<|header_end|>\n\n", # noqa: E501
