@@ -693,7 +693,7 @@ def load_params_config(model: Union[str, Path], revision: Optional[str],
 
     if config_type == "multimodal":
         multimodal_config = config_dict.pop("vision_encoder")
-        quantization_config = config_dict.get("quantization_config")
+        quantization_config = config_dict.get("quantization_config", {})
 
         config_dict = {
             "text_config": config_dict,
@@ -701,7 +701,7 @@ def load_params_config(model: Union[str, Path], revision: Optional[str],
         }
         config_dict["architectures"] = ["PixtralForConditionalGeneration"]
         config_dict["model_type"] = "pixtral"
-        if quantization_config is not None:
+        if quantization_config:
             config_dict["quantization_config"] = quantization_config
 
     config_dict.update(kwargs)
