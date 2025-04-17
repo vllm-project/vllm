@@ -23,7 +23,8 @@ if TYPE_CHECKING:
     from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 
 if current_platform.is_cuda():
-    from vllm.vllm_flash_attn import flash_attn_varlen_func
+    from vllm.vllm_flash_attn import (flash_attn_varlen_func,
+                                      get_scheduler_metadata)
 
 logger = init_logger(__name__)
 
@@ -92,6 +93,10 @@ class FlashAttentionMetadata:
     cu_prefix_query_lens: Optional[torch.Tensor]
     prefix_kv_lens: Optional[torch.Tensor]
     suffix_kv_lens: Optional[torch.Tensor]
+
+    # Optional aot scheduling
+    scheduler_metadata: Optional[torch.Tensor] = None
+    prefix_scheduler_metadata: Optional[torch.Tensor] = None
 
     # For logging.
     num_input_tokens: int = 0  # Number of tokens including padding.
@@ -277,7 +282,14 @@ def make_local_attention_virtual_batches(
 class FlashAttentionMetadataBuilder:
 
     def __init__(self, runner: "GPUModelRunner"):
+        model_config = runner.model_config
+
         self.runner = runner
+        self.aot_schedule = (get_flash_attn_version() == 3)
+        self.num_heads = model_config.get_num_attention_heads(
+            runner.parallel_config)
+        self.headdim = model_config.get_head_size()
+        self.page_size = self.runner.block_size
 
     def reorder_batch(self, input_batch: "InputBatch",
                       scheduler_output: "SchedulerOutput") -> bool:
@@ -319,6 +331,24 @@ class FlashAttentionMetadataBuilder:
             )
 
         use_cascade = common_prefix_len > 0
+
+        def schedule(cu_query_lens, max_query_len, seqlens, max_seq_len,
+                     causal):
+            if self.aot_schedule:
+                return get_scheduler_metadata(
+                    batch_size=num_reqs,
+                    max_seqlen_q=max_query_len,
+                    max_seqlen_k=max_seq_len,
+                    cache_seqlens=seqlens,
+                    num_heads_q=self.num_heads,
+                    num_heads_kv=self.num_heads,
+                    headdim=self.headdim,
+                    page_size=self.page_size,
+                    cu_seqlens_q=cu_query_lens,
+                    causal=causal,
+                )
+            return None
+
         if use_cascade:
             cu_prefix_query_lens = torch.tensor([0, num_actual_tokens],
                                                 dtype=torch.int32,
@@ -330,10 +360,28 @@ class FlashAttentionMetadataBuilder:
                               common_prefix_len)
             suffix_kv_lens = torch.from_numpy(suffix_kv_lens).to(
                 self.runner.device)
+            prefix_scheduler_metadata = schedule(
+                cu_query_lens=cu_prefix_query_lens,
+                max_query_len=num_actual_tokens,
+                seqlens=prefix_kv_lens,
+                max_seq_len=common_prefix_len,
+                causal=False)
+            scheduler_metadata = schedule(cu_query_lens=query_start_loc,
+                                          max_query_len=max_query_len,
+                                          seqlens=suffix_kv_lens,
+                                          max_seq_len=max_seq_len -
+                                          common_prefix_len,
+                                          causal=True)
         else:
             cu_prefix_query_lens = None
             prefix_kv_lens = None
             suffix_kv_lens = None
+            prefix_scheduler_metadata = None
+            scheduler_metadata = schedule(cu_query_lens=query_start_loc,
+                                          max_query_len=max_query_len,
+                                          seqlens=seq_lens,
+                                          max_seq_len=max_seq_len,
+                                          causal=True)
 
         attn_metadata = FlashAttentionMetadata(
             num_actual_tokens=num_actual_tokens,
@@ -345,10 +393,12 @@ class FlashAttentionMetadataBuilder:
             slot_mapping=slot_mapping,
             use_cascade=use_cascade,
             common_prefix_len=common_prefix_len,
+            scheduler_metadata=scheduler_metadata,
             cu_prefix_query_lens=cu_prefix_query_lens,
             prefix_kv_lens=prefix_kv_lens,
             suffix_kv_lens=suffix_kv_lens,
             local_attn_metadata=local_attn_metadata,
+            prefix_scheduler_metadata=prefix_scheduler_metadata,
         )
         return attn_metadata
 
@@ -515,6 +565,7 @@ class FlashAttentionImpl(AttentionImpl):
                 window_size=self.sliding_window,
                 block_table=block_table,
                 softcap=self.logits_soft_cap,
+                scheduler_metadata=attn_metadata.scheduler_metadata,
                 fa_version=self.vllm_flash_attn_version,
                 q_descale=layer._q_scale.expand(descale_shape),
                 k_descale=layer._k_scale.expand(descale_shape),
@@ -543,6 +594,8 @@ class FlashAttentionImpl(AttentionImpl):
             block_table=attn_metadata.block_table,
             common_prefix_len=attn_metadata.common_prefix_len,
             fa_version=self.vllm_flash_attn_version,
+            prefix_scheduler_metadata=attn_metadata.prefix_scheduler_metadata,
+            suffix_scheduler_metadata=attn_metadata.scheduler_metadata,
             q_descale=layer._q_scale,
             k_descale=layer._k_scale,
             v_descale=layer._v_scale,
@@ -636,6 +689,8 @@ def cascade_attention(
     block_table: torch.Tensor,
     common_prefix_len: int,
     fa_version: int,
+    prefix_scheduler_metadata: Optional[torch.Tensor] = None,
+    suffix_scheduler_metadata: Optional[torch.Tensor] = None,
     q_descale: Optional[torch.Tensor] = None,
     k_descale: Optional[torch.Tensor] = None,
     v_descale: Optional[torch.Tensor] = None,
@@ -667,6 +722,7 @@ def cascade_attention(
         block_table=block_table[:1],
         softcap=logits_soft_cap,
         return_softmax_lse=True,
+        scheduler_metadata=prefix_scheduler_metadata,
         fa_version=fa_version,
         q_descale=q_descale.expand(descale_shape)
         if q_descale is not None else None,
@@ -693,6 +749,7 @@ def cascade_attention(
         block_table=block_table[:, num_common_kv_blocks:],
         softcap=logits_soft_cap,
         return_softmax_lse=True,
+        scheduler_metadata=suffix_scheduler_metadata,
         fa_version=fa_version,
         q_descale=q_descale.expand(descale_shape)
         if q_descale is not None else None,
