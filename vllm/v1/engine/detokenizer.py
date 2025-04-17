@@ -200,7 +200,7 @@ class FastIncrementalDetokenizer(BaseIncrementalDetokenizer):
             special_token = self.added_token_ids.get(next_token_id)
             is_special = special_token is not None
             if is_special and self.last_special:
-                # Return raw token string without any prefixes spaces.
+                # Return raw token string without any prefixed spaces.
                 token = special_token
             self.last_special = is_special
 
