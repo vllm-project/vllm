@@ -152,8 +152,7 @@ class P2pNcclPipe:
                     tensor_size = tensor.element_size() * tensor.numel()
                     while (self.buffer_size + tensor_size
                            > self.buffer_size_threshold):
-                        oldest_tenser_id = next(iter(self.send_store))
-                        oldest_tenser = self.send_store.pop(oldest_tenser_id)
+                        _, oldest_tenser = self.send_store.popitem(last=False)
                         oldest_tenser_size = oldest_tenser.element_size(
                         ) * oldest_tenser.numel()
                         self.buffer_size -= oldest_tenser_size
@@ -184,10 +183,11 @@ class P2pNcclPipe:
             with self.recv_store_cv:
                 while tensor_id not in self.recv_store:
                     self.recv_store_cv.wait()
-                # TODO:Abatom, To avoid an overly large dictionary.
-                # tensor = self.recv_store.pop(tensor_id)
                 tensor = self.recv_store[tensor_id]
                 self.recv_store[tensor_id] = None
+                while len(self.recv_store) > 10000:
+                    self.recv_store.popitem(last=False)
+
             duration = time.time() - start_time
             if tensor is not None:
                 self.buffer_size -= (tensor.element_size() * tensor.numel())
@@ -259,6 +259,7 @@ class P2pNcclPipe:
                             "🤝ncclCommInitRank Success, %s👈%s, MyRank:%s",
                             self.zmq_address, remote_address.decode(), rank)
                 elif data["cmd"] == "PUT":
+                    tensor_id = data["tensor_id"]
                     try:
                         tensor = torch.empty(data["shape"],
                                              dtype=getattr(
@@ -281,23 +282,23 @@ class P2pNcclPipe:
                                 [remote_address, b"0"])
                             comm, rank = self.comms[remote_address.decode()]
                             self._recv(comm, tensor, rank ^ 1)
-                            logger.info(
+                            logger.debug(
                                 "🔵[PUT]Recv Tensor, %s👈%s, MyRank:%s, data:%s, "
                                 "shape:%s", self.zmq_address,
                                 remote_address.decode(), rank, data, tensor.shape)
 
-                        tensor_id = data["tensor_id"]
-                        with self.recv_store_cv:
-                            self.recv_store[tensor_id] = tensor
-                            self.recv_store_cv.notify()
-
                     except torch.cuda.OutOfMemoryError:
                         self.router_socket.send_multipart(
                             [remote_address, b"1"])
+                        tensor = None
                         logger.warning(
                             "🔴[PUT]Recv Tensor, Out Of Memory, %s👈%s, "
                             "data:%s", self.zmq_address,
                             remote_address.decode(), data)
+
+                    with self.recv_store_cv:
+                        self.recv_store[tensor_id] = tensor
+                        self.recv_store_cv.notify()
 
                 elif data["cmd"] == "GET":
                     tensor_id = data["tensor_id"]

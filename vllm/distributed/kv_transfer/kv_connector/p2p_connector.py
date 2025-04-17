@@ -5,11 +5,11 @@ from typing import TYPE_CHECKING, List, Tuple, Union
 
 import torch
 
-import vllm.envs as envs
-from vllm import _custom_ops as ops
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.base import KVConnectorBase
 from vllm.distributed.kv_transfer.kv_pipe.p2p_nccl_pipe import P2pNcclPipe
+from vllm.distributed.kv_transfer.kv_connector.utils import (
+    model_aware_kv_ops_helper as kv_helper)
 from vllm.logger import init_logger
 from vllm.sequence import IntermediateTensors
 
@@ -29,9 +29,7 @@ class P2pConnector(KVConnectorBase):
     ):
         self.rank = rank
         self.config = config.kv_transfer_config
-        self.tp_size = config.parallel_config.tensor_parallel_size
-        self.is_deepseek_mla = config.model_config.is_deepseek_mla
-        self.use_mla_opt = not envs.VLLM_MLA_DISABLE
+        self.kv_helper = kv_helper(config)
 
         assert self.config.kv_connector == "P2pConnector"
 
@@ -52,69 +50,25 @@ class P2pConnector(KVConnectorBase):
         hidden_or_intermediate_states: Union[torch.Tensor,
                                              IntermediateTensors],
     ) -> None:
-
         # input_tokens_tensor = model_input.input_tokens
         seq_lens = model_input.attn_metadata.seq_lens
         slot_mapping_flat = model_input.attn_metadata.slot_mapping.flatten()
-        num_prefill_tokens = model_input.attn_metadata.num_prefill_tokens
         request_ids = list(model_input.request_ids_to_seq_ids.keys())
         start_layer = model_executable.model.start_layer
         end_layer = model_executable.model.end_layer
+        num_heads, head_size = self.kv_helper.get_model_args(model_executable)
 
-        model_config = model_executable.model.config
-        num_heads = int(model_config.num_key_value_heads / self.tp_size)
-        hidden_size = model_config.hidden_size
-        num_attention_heads = model_config.num_attention_heads
-
-        # Deepseek's MLA (Multi-head Latent Attention) uses two different
-        # kv_cache shapes based on whether VLLM_MLA_DISABLE is set to 0.
-        # When VLLM_MLA_DISABLE=0 (default), forward absorb is applied,
-        # resulting in a kv_cache shape of [num_blks, blk_size, 1,
-        # kv_lora_rank + qk_rope_head_dim].
-        # When VLLM_MLA_DISABLE=1, standard FA is used instead, leading
-        # to a kv_cache shape of [2, num_blks, blk_size,
-        # num_key_value_heads / tp, qk_nope_head_dim + qk_rope_head_dim].
-        # For more details, see vllm/attention/backends/mla/common.py.
-        if self.is_deepseek_mla and self.use_mla_opt:
-            head_size = model_config.kv_lora_rank + \
-                model_config.qk_rope_head_dim
-            num_heads = 1
-        elif self.is_deepseek_mla and not self.use_mla_opt:
-            head_size = model_config.qk_nope_head_dim + \
-                model_config.qk_rope_head_dim
-        else:
-            head_size = getattr(model_config, "head_dim",
-                                int(hidden_size // num_attention_heads))
-
-        # query_lens contains new KV caches that are added to vLLM.
-        # so we will send them to decode instance
-        # FIXME(Kuntai): This assume that all requests are prefill.
         for idx, slen in enumerate(seq_lens):
             start_pos = sum(seq_lens[:idx])
             end_pos = start_pos + slen
 
-            if start_pos >= num_prefill_tokens:
-                # vllm/worker/model_runner.py::_prepare_model_input_tensors:
-                # - input_tokens[:num_prefill_tokens] contains prefill tokens.
-                # - input_tokens[num_prefill_tokens:] contains decode tokens.
-                logger.warning("You have some decode requests while using "
-                               "SimpleConnector. Their KVCache won't be sent.")
-                break
-
             # current_tokens = input_tokens_tensor[start_pos:end_pos]
-
             keys, values = [], []
 
             for layer_id in range(start_layer, end_layer):
                 kv_cache = kv_caches[layer_id - start_layer]
-
-                if self.is_deepseek_mla and self.use_mla_opt:
-                    key_cache = kv_cache.reshape(-1, num_heads, head_size)
-                    value_cache = kv_cache.reshape(-1, num_heads, head_size)
-                else:
-                    key_cache = kv_cache[0].reshape(-1, num_heads, head_size)
-                    value_cache = kv_cache[1].reshape(-1, num_heads, head_size)
-
+                key_cache, value_cache = self.kv_helper.get_kv_from_cache(
+                    kv_cache, num_heads, head_size)
                 current_slot_mapping = slot_mapping_flat[start_pos:end_pos]
 
                 keys.append(key_cache[current_slot_mapping].unsqueeze(0))
@@ -122,14 +76,13 @@ class P2pConnector(KVConnectorBase):
 
             keys = torch.cat(keys, dim=0)
             values = torch.cat(values, dim=0)
+            kvcache = torch.stack((keys, values), dim=0)
 
             request_id = request_ids[idx]
             ip, port = self.parse_request_id(request_id, True)
             remote_address = ip + ":" + str(port + self.rank)
 
-            self.p2p_nccl_pipe.send_tensor(request_id + "keys", keys,
-                                           remote_address)
-            self.p2p_nccl_pipe.send_tensor(request_id + "values", values,
+            self.p2p_nccl_pipe.send_tensor(request_id + "kv", kvcache,
                                            remote_address)
             self.p2p_nccl_pipe.send_tensor(
                 request_id + "hidden",
@@ -144,29 +97,16 @@ class P2pConnector(KVConnectorBase):
         kv_caches: List[torch.Tensor]
     ) -> Tuple[Union[torch.Tensor, IntermediateTensors], bool,
                "ModelInputForGPUWithSamplingMetadata"]:
-
-        # When bypass_model_exec is set to False, it means that at least for one
-        # request its corresponding KV cache or hidden state is missing.
-        # In this case we need to do prefilling to recompute missing KV cache
-        # and hidden states.
         bypass_model_exec = True
-
-        model_config = model_executable.model.config
-
         input_tokens_tensor = model_input.input_tokens
         seq_lens = model_input.attn_metadata.seq_lens
         num_prefill_tokens = model_input.attn_metadata.num_prefill_tokens
         slot_mapping = model_input.attn_metadata.slot_mapping.flatten()
         request_ids = list(model_input.request_ids_to_seq_ids.keys())
-
+        start_layer = model_executable.model.start_layer
+        end_layer = model_executable.model.end_layer
         hidden_or_intermediate_states_for_one_req = []
 
-        input_tokens_list = []
-        num_computed_tokens_list = []
-        start_pos_list = []
-
-        # enumerate different requests
-        # FIXME(Kuntai): This impl assumes that all requests are prefill.
         for idx, slen in enumerate(seq_lens):
             start_pos = sum(seq_lens[:idx])
             end_pos = start_pos + slen
@@ -178,86 +118,50 @@ class P2pConnector(KVConnectorBase):
                 # - input_tokens[num_prefill_tokens:] contains decode tokens.
                 logger.warning("You should set --enable_chunked_prefill=False "
                                "and --max_num_batched_tokens "
-                               "should be equal to --max_seq_len_to_capture")
+                               "should be equal to max_seq_len_to_capture")
                 bypass_model_exec = False
                 assert start_pos == num_prefill_tokens
                 break
 
             current_tokens = input_tokens_tensor[start_pos:end_pos]
-            num_tokens = slen
-
-            # collecting data for rebuilding the input
-            input_tokens_list.append(current_tokens)
-            start_pos_list.append(start_pos)
 
             request_id = request_ids[idx]
             ip, port = self.parse_request_id(request_id, False)
             remote_address = ip + ":" + str(port + self.rank)
 
-            keys = self.p2p_nccl_pipe.recv_tensor(request_id + "keys",
+            kvcache = self.p2p_nccl_pipe.recv_tensor(request_id + "kv",
                                                   remote_address)
-            values = self.p2p_nccl_pipe.recv_tensor(request_id + "values",
-                                                    remote_address)
             hidden = self.p2p_nccl_pipe.recv_tensor(request_id + "hidden",
                                                     remote_address)
 
-            num_computed_tokens = current_tokens.shape[0]
-            num_computed_tokens_list.append(num_computed_tokens)
-
-            # check if both KV cache and the hidden states are received
-            # If not, need to redo the forwarding to compute missing states
-            if not all([(num_computed_tokens == num_tokens), keys is not None,
-                        values is not None, hidden is not None]):
+            if kvcache is None or hidden is None:
+                # didn't find any match.
                 bypass_model_exec = False
-                break
+                continue
+
+            num_computed_tokens = current_tokens.shape[0]
 
             # update the end position based on how many tokens are cached.
             end_pos = start_pos + num_computed_tokens
 
-            # put received KV caches into paged memory
-            for i in range(model_executable.model.start_layer,
-                           model_executable.model.end_layer):
+            # call self.kv_store to get kv layer by layer
+            for layer_id in range(start_layer, end_layer):
+                layer = model_executable.model.layers[layer_id]
+                # get kvcache object
+                kv_cache = kv_caches[layer_id - start_layer]
 
-                kv_cache = kv_caches[i - model_executable.model.start_layer]
-                layer = model_executable.model.layers[i]
+                # get remote kvcache
+                remote_k, remote_v = kvcache[0][layer_id], kvcache[1][
+                    layer_id]
 
-                if self.is_deepseek_mla and self.use_mla_opt:
-                    layer.self_attn.attn = layer.self_attn.mla_attn
-                    k_c_normed_k_pe = keys[
-                        i - model_executable.model.start_layer].to(
-                            kv_cache.device).squeeze(1)
-                    k_c_normed = k_c_normed_k_pe[:, :model_config.kv_lora_rank]
-                    k_pe = k_c_normed_k_pe[:, model_config.kv_lora_rank:]
-                    ops.concat_and_cache_mla(
-                        k_c_normed,
-                        k_pe,
-                        kv_cache,
-                        slot_mapping[start_pos:end_pos],
-                        layer.self_attn.attn.kv_cache_dtype,
-                        layer.self_attn.attn._k_scale,
-                    )
-                else:
-                    key_cache, value_cache = kv_cache[0], kv_cache[1]
-                    ops.reshape_and_cache_flash(
-                        keys[i - model_executable.model.start_layer].to(
-                            key_cache.device),
-                        values[i - model_executable.model.start_layer].to(
-                            value_cache.device),
-                        key_cache,
-                        value_cache,
-                        slot_mapping[start_pos:end_pos],
-                        layer.self_attn.attn.kv_cache_dtype,
-                        layer.self_attn.attn._k_scale,
-                        layer.self_attn.attn._v_scale,
-                    )
+                self.kv_helper.put_kv_to_cache(model_executable, remote_k,
+                                               remote_v, layer, kv_cache,
+                                               slot_mapping, start_pos,
+                                               end_pos)
 
             hidden_or_intermediate_states_for_one_req.append(hidden)
 
         if not bypass_model_exec:
-            # Some of the KV cache is not retrieved
-            # Here we will fall back to normal model forwarding
-            # But optionally you can adjust model_input so that you only do
-            # prefilling on those tokens that are missing KV caches.
             logger.warning(
                 "[rank%d]: Failed to receive all KVs and hidden "
                 "states, redo model forwarding.", torch.distributed.get_rank())
@@ -295,5 +199,5 @@ class P2pConnector(KVConnectorBase):
         raise ValueError(
             f"Request id {request_id} does not contain hostname and port")
 
-    def close(self):
+    def close(self) -> None:
         self.p2p_nccl_pipe.close()
