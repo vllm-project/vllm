@@ -15,6 +15,8 @@ from vllm.transformers_utils.configs.internvl import InternVLChatConfig
 from vllm.transformers_utils.configs.jais import JAISConfig
 from vllm.transformers_utils.configs.kimi_vl import KimiVLConfig
 from vllm.transformers_utils.configs.medusa import MedusaConfig
+from vllm.transformers_utils.configs.minimax_text_01 import MiniMaxText01Config
+from vllm.transformers_utils.configs.minimax_vl_01 import MiniMaxVL01Config
 from vllm.transformers_utils.configs.mllama import MllamaConfig
 from vllm.transformers_utils.configs.mlp_speculator import MLPSpeculatorConfig
 from vllm.transformers_utils.configs.moonvit import MoonViTConfig
@@ -26,8 +28,6 @@ from vllm.transformers_utils.configs.skyworkr1v import SkyworkR1VChatConfig
 from vllm.transformers_utils.configs.solar import SolarConfig
 from vllm.transformers_utils.configs.telechat2 import Telechat2Config
 from vllm.transformers_utils.configs.ultravox import UltravoxConfig
-from vllm.transformers_utils.configs.minimax_text_01 import MiniMaxText01Config
-from vllm.transformers_utils.configs.minimax_vl_01 import MiniMaxVL01Config
 
 __all__ = [
     "ChatGLMConfig",

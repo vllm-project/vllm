@@ -29,8 +29,7 @@ from vllm.multimodal.processing import (BaseMultiModalProcessor,
                                         PromptUpdate)
 from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
 from vllm.sequence import IntermediateTensors
-from vllm.transformers_utils.configs.minimax_vl_01 import (
-    MiniMaxVL01Config)
+from vllm.transformers_utils.configs.minimax_vl_01 import MiniMaxVL01Config
 
 from .clip import CLIPVisionModel
 from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsPP
