@@ -2443,7 +2443,6 @@ class SpeculativeConfig:
             max_parallel_loading_workers,
             disable_custom_all_reduce=target_parallel_config.
             disable_custom_all_reduce,
-            tokenizer_pool_config=target_parallel_config.tokenizer_pool_config,
             ray_workers_use_nsight=target_parallel_config.
             ray_workers_use_nsight,
             placement_group=target_parallel_config.placement_group,
