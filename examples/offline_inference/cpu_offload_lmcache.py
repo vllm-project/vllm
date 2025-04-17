@@ -8,6 +8,7 @@ Requirements: Linux, Python: 3.10 or higher, CUDA: 12.1
 Learn more about LMCache environment setup, please refer to:
 https://docs.lmcache.ai/getting_started/installation.html
 """
+import contextlib
 import os
 import time
 
@@ -30,6 +31,7 @@ def setup_environment_variables():
     os.environ["LMCACHE_MAX_LOCAL_CPU_SIZE"] = "5.0"
 
 
+@contextlib.contextmanager
 def build_llm_with_lmcache():
     ktc = KVTransferConfig.from_cli(
         '{"kv_connector":"LMCacheConnector", "kv_role":"kv_both"}')
@@ -41,50 +43,57 @@ def build_llm_with_lmcache():
               max_model_len=8000,
               enable_chunked_prefill=False,
               gpu_memory_utilization=0.8)
-    return llm
+
+    try:
+        yield llm
+    finally:
+        # Clean up lmcache backend
+        LMCacheEngineBuilder.destroy(ENGINE_NAME)
 
 
-def print_output(llm, prompt, sampling_params, req_str):
+def print_output(
+    llm: LLM,
+    prompt: list[str],
+    sampling_params: SamplingParams,
+    req_str: str,
+):
     start = time.time()
     outputs = llm.generate(prompt, sampling_params)
     print("-" * 50)
     for output in outputs:
         generated_text = output.outputs[0].text
         print(f"Generated text: {generated_text!r}")
-    # ruff: noqa: E501
-    print(
-        f"Generation took {time.time() - start:.2f} seconds, {req_str} request done."
-    )
+    print(f"Generation took {time.time() - start:.2f} seconds, "
+          f"{req_str} request done.")
     print("-" * 50)
 
 
 def main():
     setup_environment_variables()
 
-    llm = build_llm_with_lmcache()
+    with build_llm_with_lmcache() as llm:
 
-    # This example script runs two requests with a shared prefix.
-    # Define the shared prompt and specific prompts
-    shared_prompt = "Hello, how are you?" * 1000
-    first_prompt = [
-        shared_prompt + "Hello, my name is",
-    ]
-    second_prompt = [
-        shared_prompt + "Tell me a very long story",
-    ]
+        # This example script runs two requests with a shared prefix.
+        # Define the shared prompt and specific prompts
+        shared_prompt = "Hello, how are you?" * 1000
+        first_prompt = [
+            shared_prompt + "Hello, my name is",
+        ]
+        second_prompt = [
+            shared_prompt + "Tell me a very long story",
+        ]
 
-    sampling_params = SamplingParams(temperature=0, top_p=0.95, max_tokens=10)
+        sampling_params = SamplingParams(temperature=0,
+                                         top_p=0.95,
+                                         max_tokens=10)
 
-    # Print the first output
-    print_output(llm, first_prompt, sampling_params, "first")
+        # Print the first output
+        print_output(llm, first_prompt, sampling_params, "first")
 
-    time.sleep(1)
+        time.sleep(1)
 
-    # print the second output
-    print_output(llm, second_prompt, sampling_params, "second")
-
-    # Clean up lmcache backend
-    LMCacheEngineBuilder.destroy(ENGINE_NAME)
+        # print the second output
+        print_output(llm, second_prompt, sampling_params, "second")
 
 
 if __name__ == "__main__":
