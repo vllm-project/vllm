@@ -493,6 +493,21 @@ if hasattr(torch.ops._C, "ggml_dequantize"):
                            dtype=torch.float16,
                            device=W.device)
 
+    @register_fake("_C::ggml_moe_a8_vec")
+    def _ggml_moe_a8_vec_fake(
+        X: torch.Tensor,
+        W: torch.Tensor,
+        topk_ids: torch.Tensor,
+        top_k: int,
+        quant_type: int,
+        row: torch.SymInt,
+        tokens: torch.SymInt,
+    ) -> torch.Tensor:
+        tokens = X.size(0)
+        return torch.empty((tokens * top_k, row),
+                           dtype=X.dtype,
+                           device=W.device)
+
 
 # cutlass
 def cutlass_scaled_mm_supports_fp4(cuda_device_capability: int) -> bool:
