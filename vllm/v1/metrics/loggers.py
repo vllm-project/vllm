@@ -26,14 +26,19 @@ class StatLoggerBase(ABC):
                iteration_stats: Optional[IterationStats]):
         ...
 
+    @abstractmethod
+    def log_engine_initialized(self):
+        ...
+
     def log(self):  # noqa
         pass
 
 
 class LoggingStatLogger(StatLoggerBase):
 
-    def __init__(self, engine_index: int = 0):
+    def __init__(self, vllm_config: VllmConfig, engine_index: int = 0):
         self.engine_index = engine_index
+        self.vllm_config = vllm_config
         self._reset(time.monotonic())
         self.last_scheduler_stats = SchedulerStats()
         # Prefix cache metrics. This cannot be reset.
@@ -114,12 +119,19 @@ class LoggingStatLogger(StatLoggerBase):
         if scheduler_stats.spec_decoding_stats is not None:
             self.spec_decoding_metrics.log(log_fn=log_fn)
 
+    def log_engine_initialized(self):
+        logger.info(
+            "vllm cache_config_info with initialization " \
+            "after num_gpu_blocks is: %d",
+            self.vllm_config.cache_config.num_gpu_blocks)
+
 
 class PrometheusStatLogger(StatLoggerBase):
 
     def __init__(self, vllm_config: VllmConfig, engine_index: int = 0):
         self._unregister_vllm_metrics()
-
+        self.vllm_config = vllm_config
+        self.engine_index = engine_index
         # Use this flag to hide metrics that were deprecated in
         # a previous release and which will be removed future
         self.show_hidden_metrics = \
@@ -341,13 +353,9 @@ class PrometheusStatLogger(StatLoggerBase):
                 documentation="Number of accepted tokens.",
                 labelnames=labelnames).labels(*labelvalues)
 
-        #
-        # Cache config info metric
-        #
-        self.log_metrics_info("cache_config", vllm_config.cache_config)
-
     def log_metrics_info(self, type: str, config_obj: SupportsMetricsInfo):
         metrics_info = config_obj.metrics_info()
+        metrics_info["engine"] = self.engine_index
 
         name, documentation = None, None
         if type == "cache_config":
@@ -442,6 +450,9 @@ class PrometheusStatLogger(StatLoggerBase):
         for collector in list(prometheus_client.REGISTRY._collector_to_names):
             if hasattr(collector, "_name") and "vllm" in collector._name:
                 prometheus_client.REGISTRY.unregister(collector)
+
+    def log_engine_initialized(self):
+        self.log_metrics_info("cache_config", self.vllm_config.cache_config)
 
 
 def build_buckets(mantissa_lst: list[int], max_value: int) -> list[int]:
