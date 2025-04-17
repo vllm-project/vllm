@@ -213,7 +213,7 @@ class PrometheusStatLogger(StatLoggerBase):
         #
         # Multi-modal cache
         #
-        mm_cache_keys = ("p0 processor", "p0 mirror", "p1 mirror")
+        mm_cache_keys = ("p0_processor", "p0_mirror", "p1_mirror")
 
         gauge_mm_cache_usage = prometheus_client.Gauge(
             name="vllm:mm_cache_usage",
