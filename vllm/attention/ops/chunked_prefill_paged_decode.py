@@ -84,7 +84,8 @@ def kernel_paged_attention_2d(
     head_mask = query_head_idx < (kv_head_idx + 1) * num_queries_per_kv
     head_mask = head_mask & (query_head_idx < num_query_heads)
 
-    dim_mask = tl.where(tl.arange(0, HEAD_SIZE_PADDED) < HEAD_SIZE, 1, 0).to(tl.int1)
+    dim_mask = tl.where(tl.arange(0, HEAD_SIZE_PADDED) < HEAD_SIZE, 1,
+                        0).to(tl.int1)
 
     # Q : (num_queries_per_kv, HEAD_SIZE,)
     Q = tl.load(
@@ -97,7 +98,8 @@ def kernel_paged_attention_2d(
 
     M = tl.full([num_queries_per_kv_padded], float("-inf"), dtype=tl.float32)
     L = tl.full([num_queries_per_kv_padded], 1.0, dtype=tl.float32)
-    acc = tl.zeros([num_queries_per_kv_padded, HEAD_SIZE_PADDED], dtype=tl.float32)
+    acc = tl.zeros([num_queries_per_kv_padded, HEAD_SIZE_PADDED],
+                   dtype=tl.float32)
 
     # sequence len for this particular sequence
     seq_len = tl.load(seq_lens_ptr + seq_idx)
@@ -134,7 +136,9 @@ def kernel_paged_attention_2d(
         )
 
         # K : (HEAD_SIZE, BLOCK_SIZE)
-        K_load = tl.load(key_cache_ptr + k_offset, mask=dim_mask[:, None], other=0.0)
+        K_load = tl.load(key_cache_ptr + k_offset,
+                         mask=dim_mask[:, None],
+                         other=0.0)
 
         if K_load.dtype.is_fp8():
             K = (K_load.to(tl.float32) * tl.load(k_scale)).to(Q.dtype)
@@ -142,7 +146,9 @@ def kernel_paged_attention_2d(
             K = K_load
 
         # V : (BLOCK_SIZE, HEAD_SIZE)
-        V_load = tl.load(value_cache_ptr + v_offset, mask=dim_mask[None, :], other=0.0)
+        V_load = tl.load(value_cache_ptr + v_offset,
+                         mask=dim_mask[None, :],
+                         other=0.0)
 
         if V_load.dtype.is_fp8():
             V = (V_load.to(tl.float32) * tl.load(v_scale)).to(Q.dtype)
@@ -154,7 +160,8 @@ def kernel_paged_attention_2d(
         seq_mask = seq_offset[None, :] < boundary
 
         # S : (num_queries_per_kv, BLOCK_SIZE,)
-        S = tl.where(head_mask[:, None] & seq_mask, 0.0, float("-inf")).to(tl.float32)
+        S = tl.where(head_mask[:, None] & seq_mask, 0.0,
+                     float("-inf")).to(tl.float32)
         S += scale * tl.dot(Q, K)
 
         context_len = seq_len - 1
@@ -197,7 +204,8 @@ def kernel_paged_attention_2d(
     )
 
     tl.store(
-        output_ptr + output_offset[:, None] + tl.arange(0, HEAD_SIZE_PADDED)[None, :],
+        output_ptr + output_offset[:, None] \
+            + tl.arange(0, HEAD_SIZE_PADDED)[None, :],
         acc,
         mask=dim_mask[None, :] & head_mask[:, None],
     )
@@ -282,7 +290,8 @@ def kernel_paged_attention_3d(
     head_mask = query_head_idx < (kv_head_idx + 1) * num_queries_per_kv
     head_mask = head_mask & (query_head_idx < num_query_heads)
 
-    dim_mask = tl.where(tl.arange(0, HEAD_SIZE_PADDED) < HEAD_SIZE, 1, 0).to(tl.int1)
+    dim_mask = tl.where(tl.arange(0, HEAD_SIZE_PADDED) < HEAD_SIZE, 1,
+                        0).to(tl.int1)
 
     # Q : (num_queries_per_kv, HEAD_SIZE,)
     Q = tl.load(
@@ -295,7 +304,8 @@ def kernel_paged_attention_3d(
 
     M = tl.full([num_queries_per_kv_padded], float("-inf"), dtype=tl.float32)
     L = tl.full([num_queries_per_kv_padded], 1.0, dtype=tl.float32)
-    acc = tl.zeros([num_queries_per_kv_padded, HEAD_SIZE_PADDED], dtype=tl.float32)
+    acc = tl.zeros([num_queries_per_kv_padded, HEAD_SIZE_PADDED],
+                   dtype=tl.float32)
 
     # alibi slope for this head
     if USE_ALIBI_SLOPES:
@@ -331,7 +341,9 @@ def kernel_paged_attention_3d(
         )
 
         # K : (HEAD_SIZE, BLOCK_SIZE)
-        K_load = tl.load(key_cache_ptr + k_offset, mask=dim_mask[:, None], other=0.0)
+        K_load = tl.load(key_cache_ptr + k_offset,
+                         mask=dim_mask[:, None],
+                         other=0.0)
 
         if K_load.dtype.is_fp8():
             K = (K_load.to(tl.float32) * tl.load(k_scale)).to(Q.dtype)
@@ -339,7 +351,9 @@ def kernel_paged_attention_3d(
             K = K_load
 
         # V : (BLOCK_SIZE, HEAD_SIZE)
-        V_load = tl.load(value_cache_ptr + v_offset, mask=dim_mask[None, :], other=0.0)
+        V_load = tl.load(value_cache_ptr + v_offset,
+                         mask=dim_mask[None, :],
+                         other=0.0)
 
         if V_load.dtype.is_fp8():
             V = (V_load.to(tl.float32) * tl.load(v_scale)).to(Q.dtype)
@@ -351,7 +365,8 @@ def kernel_paged_attention_3d(
         seq_mask = seq_offset[None, :] < boundary
 
         # S : (num_queries_per_kv, BLOCK_SIZE,)
-        S = tl.where(head_mask[:, None] & seq_mask, 0.0, float("-inf")).to(tl.float32)
+        S = tl.where(head_mask[:, None] & seq_mask, 0.0,
+                     float("-inf")).to(tl.float32)
         S += scale * tl.dot(Q, K)
 
         context_len = seq_len - 1
@@ -386,8 +401,10 @@ def kernel_paged_attention_3d(
         acc += tl.dot(P.to(V.dtype), V)
 
     segm_output_offset = (
-        seq_idx * (num_query_heads * MAX_NUM_SEGMENTS_PER_SEQ * HEAD_SIZE_PADDED)
-        + query_head_idx[:, None] * (MAX_NUM_SEGMENTS_PER_SEQ * HEAD_SIZE_PADDED)
+        seq_idx * (num_query_heads * MAX_NUM_SEGMENTS_PER_SEQ \
+            * HEAD_SIZE_PADDED)
+        + query_head_idx[:, None] * (MAX_NUM_SEGMENTS_PER_SEQ \
+            * HEAD_SIZE_PADDED)
         + segm_idx * HEAD_SIZE_PADDED
         + tl.arange(0, HEAD_SIZE_PADDED)[None, :]
     )
@@ -409,7 +426,7 @@ def kernel_paged_attention_3d(
 @triton.jit
 def reduce_segments(
     output_ptr,  # [num_seqs, num_query_heads, head_size]
-    segm_output_ptr, # [num_seqs, num_query_heads, max_num_segments, head_size]
+    segm_output_ptr, #[num_seqs, num_query_heads, max_num_segments, head_size]
     segm_max_ptr,  # [num_seqs, num_query_heads, max_num_segments]
     segm_expsum_ptr,  # [num_seqs, num_query_heads, max_num_segments]
     seq_lens_ptr,  # [num_seqs]
@@ -453,7 +470,8 @@ def reduce_segments(
     segm_mask = tl.arange(0, MAX_NUM_SEGMENTS_PER_SEQ) < tl.full(
         [MAX_NUM_SEGMENTS_PER_SEQ], act_num_segments, dtype=tl.int32
     )
-    dim_mask = tl.where(tl.arange(0, HEAD_SIZE_PADDED) < HEAD_SIZE, 1, 0).to(tl.int1)
+    dim_mask = tl.where(tl.arange(0, HEAD_SIZE_PADDED) < HEAD_SIZE, 1,
+                        0).to(tl.int1)
 
     # load segment maxima
     segm_offset = (
@@ -461,17 +479,20 @@ def reduce_segments(
         + query_head_idx * MAX_NUM_SEGMENTS_PER_SEQ
         + tl.arange(0, MAX_NUM_SEGMENTS_PER_SEQ)
     )
-    segm_max = tl.load(segm_max_ptr + segm_offset, mask=segm_mask, other=float("-inf"))
+    segm_max = tl.load(segm_max_ptr + segm_offset, mask=segm_mask,
+                       other=float("-inf"))
     overall_max = tl.max(segm_max)
 
     # load and rescale segment exp sums
-    segm_expsum = tl.load(segm_expsum_ptr + segm_offset, mask=segm_mask, other=0.0)
+    segm_expsum = tl.load(segm_expsum_ptr + segm_offset, mask=segm_mask,
+                          other=0.0)
     segm_expsum = segm_expsum * tl.exp(segm_max - overall_max)
     overall_expsum = tl.sum(segm_expsum)
 
     # load, rescale, and add segment attention outputs
     segm_output_offset = (
-        seq_idx * (num_query_heads * MAX_NUM_SEGMENTS_PER_SEQ * HEAD_SIZE_PADDED)
+        seq_idx * (num_query_heads * MAX_NUM_SEGMENTS_PER_SEQ \
+            * HEAD_SIZE_PADDED)
         + query_head_idx * (MAX_NUM_SEGMENTS_PER_SEQ * HEAD_SIZE_PADDED)
         + tl.arange(0, MAX_NUM_SEGMENTS_PER_SEQ)[:, None] * HEAD_SIZE_PADDED
         + tl.arange(0, HEAD_SIZE_PADDED)[None, :]
@@ -566,7 +587,8 @@ def chunked_prefill_paged_decode(
         key_cache = key_cache.view(target_dtype)
         value_cache = value_cache.view(target_dtype)
 
-    num_queries_per_kv_padded = max(triton.next_power_of_2(num_queries_per_kv), 16)
+    num_queries_per_kv_padded = max(triton.next_power_of_2(num_queries_per_kv),
+                                    16)
 
     use_custom = use_rocm_custom_paged_attention(
         query.dtype,
@@ -584,7 +606,8 @@ def chunked_prefill_paged_decode(
         assert _PARTITION_SIZE_ROCM % block_size == 0
         total_num_seq = query.shape[0]
         tmp_output = torch.empty(
-            size=(total_num_seq, num_query_heads, max_num_partitions, head_size),
+            size=(total_num_seq, num_query_heads, max_num_partitions,
+                  head_size),
             dtype=output.dtype,
             device=output.device,
         )
