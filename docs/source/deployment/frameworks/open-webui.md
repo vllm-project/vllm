@@ -4,7 +4,7 @@
 
 1. Install the (Docker)[https://docs.docker.com/engine/install/]
 
-2. Start the vLLM server with supported chat completion model, e.g.
+2. Start the vLLM server with the supported chat completion model, e.g.
 
 ```console
 vllm serve qwen/Qwen1.5-0.5B-Chat
@@ -24,4 +24,6 @@ ghcr.io/open-webui/open-webui:main
 1. Open it in the browser: <http://open-webui-host:3000/>
 
 On the top of the web page, you can see the model `qwen/Qwen1.5-0.5B-Chat`.
-![Spans details](https://imgur.com/a/pm1VRqG)
+
+:::{image} /assets/deployment/open_webui.png
+:::
