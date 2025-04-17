@@ -76,12 +76,18 @@ WEIGHT_SHAPES = {
     ],
 }
 
+# yapf: disable
 WEIGHT_SHAPES_MOE = {
     "nm-testing/Mixtral-8x7B-Instruct-v0.1": [
-        [8, 2, 4096, 28672],
-        [8, 2, 14336, 4096],
+        [8, 2, 4096, 14336],
     ],
-    "nm-testing/deepseekv2-lite": [
+    "nm-testing/Mixtral-8x7B-Instruct-v0.1-TP2": [
+        [8, 2, 4096, 14336 // 2],
+    ],
+    "nm-testing/Mixtral-8x7B-Instruct-v0.1-EP2": [
+        [8 // 2, 2, 4096, 14336],
+    ],
+    "nm-testing/deepseekv2-lite-TP1": [
         [64, 6, 2048, 1408],
     ],
     "ibm-granite/granite-3.0-1b-a400m": [
@@ -90,4 +96,62 @@ WEIGHT_SHAPES_MOE = {
     "ibm-granite/granite-3.0-3b-a800m": [
         [40, 8, 1024, 1536],
     ],
+    "ai21labs/Jamba-v0.1" : [
+        [16, 2, 4096, 14336]
+    ],
+    "ai21labs/Jamba-v0.1-TP2" : [
+        [16, 2, 4096, 14336 // 2]
+    ],
+    "ai21labs/Jamba-v0.1-EP2" : [
+        [16 // 2, 2, 4096, 14336]
+    ],
+    "deepseek-ai/DeepSeek-V2" : [
+        [160, 6, 5120, 1536]
+    ],
+    "deepseek-ai/DeepSeek-V2-TP8" : [
+        [160, 6, 5120, 1536 // 8]
+    ],
+    "deepseek-ai/DeepSeek-V2-EP8" : [
+        [160 // 8, 6, 5120, 1536]
+    ],
+    "Qwen/Qwen1.5-MoE-A2.7B-Chat" : [
+        [60, 4, 2048, 1408]
+    ],
+    "mistralai/Mixtral-8x22B-v0.1" : [
+        [8, 2, 6144, 16384]
+    ],
+    "mistralai/Mixtral-8x22B-v0.1-TP8" : [
+        [8, 2, 6144, 16384 // 8]
+    ],
+    "mistralai/Mixtral-8x22B-v0.1-EP8" : [
+        [8 // 8, 2, 6144, 16384]
+    ],
+    "deepseek-ai/DeepSeek-R1" : [
+        [256, 8, 7168, 18432]
+    ],
+    "deepseek-ai/DeepSeek-R1-TP8" : [
+        [256, 8, 7168, 18432 // 8]
+    ],
+    "deepseek-ai/DeepSeek-R1-EP8" : [
+        [256 // 8, 8, 7168, 18432]
+    ],
+    "meta-llama/Llama-4-Maverick-17B-128E-Instruct" : [
+        [128, 1, 5120, 8192]
+    ],
+    "meta-llama/Llama-4-Maverick-17B-128E-Instruct-TP8" : [
+        [128, 1, 5120, 8192 // 8]
+    ],
+    "meta-llama/Llama-4-Maverick-17B-128E-Instruct-EP8" : [
+        [128 // 8, 1, 5120, 8192]
+    ],
+    "meta-llama/Llama-4-Scout-17B-16E" : [
+        [16, 1, 5120, 8192]
+    ],
+    "meta-llama/Llama-4-Scout-17B-16E-TP4" : [
+        [16, 1, 5120, 8192 // 4]
+    ],
+    "meta-llama/Llama-4-Scout-17B-16E-EP4" : [
+        [16 // 4, 1, 5120, 8192]
+    ]
 }
+# yapf: disable
