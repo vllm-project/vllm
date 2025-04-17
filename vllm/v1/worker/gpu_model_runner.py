@@ -241,17 +241,18 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             device=self.device)
 
         # OPTIMIZATION: Cache the tensors rather than creating them every step.
-
-        # For long context, we may need to store using int64 so max token idx doesn't overflow 
-        # token_indices is calculated by adding (req_idx * max_model_len) to per-request token indices 
-        # e.g. [0, 1, 0, 1, 2, 3, 4, 0, 1, 2] 
+        # For long context, may need to store int64 so max idx doesn't overflow
+        # token_indices are calculated by adding (req_idx * max_model_len)
+        # to per-request indices e.g. [0, 1, 0, 1, 2, 3, 4, 0, 1, 2]
         # -> [0, 1, M, M + 1, M + 2, M + 3, M + 4, 2 * M, 2 * M + 1, 2 * M + 2]
         # where M is the max_model_len.
-        max_token_idx = self.max_num_tokens + self.max_num_reqs * self.max_model_len
+        max_token_idx = self.max_num_tokens + self.max_num_reqs * \
+                        self.max_model_len
         self.arange_np = np.arange(max(self.max_num_reqs + 1,
                                        self.max_model_len,
                                        self.max_num_tokens),
-                                   dtype=np.int32 if max_token_idx <= np.iinfo(np.int32).max else np.int64)
+                                   dtype=np.int32 if max_token_idx <= np.iinfo(
+                                       np.int32).max else np.int64)
 
         # NOTE(woosuk): These tensors are "stateless", i.e., they are literally
         # a faster version of creating a new tensor every time. Thus, we should
