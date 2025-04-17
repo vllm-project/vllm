@@ -9,6 +9,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.nn.parameter import Parameter, UninitializedParameter
 
+from vllm._aiter_ops import aiter_ops
 from vllm.distributed import (divide, get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size,
                               split_tensor_along_last_dim,
@@ -50,18 +51,12 @@ WEIGHT_LOADER_V2_SUPPORTED = [
 ]
 
 
-def rocm_aiter_tgemm_mm(x: torch.Tensor, weight: torch.Tensor,
-                        bias: torch.Tensor) -> torch.Tensor:
-    from aiter.tuned_gemm import tgemm
-    return tgemm.mm(x, weight, bias)
-
-
 def dispatch_unquantized_linear_func(
 ) -> Callable[[torch.Tensor, torch.Tensor, torch.Tensor], torch.Tensor]:
     from vllm.model_executor.layers.quantization.utils.w8a8_utils import (  # noqa: E501
         is_rocm_aiter_linear_enabled)
     if is_rocm_aiter_linear_enabled():
-        return rocm_aiter_tgemm_mm
+        return aiter_ops.rocm_aiter_tuned_gemm
     return F.linear
 
 

@@ -4,9 +4,11 @@ from typing import Callable, List, Optional, Tuple, Union
 
 import torch
 
+import vllm.envs as envs
 from vllm import _custom_ops as ops
+# from vllm.utils import direct_register_custom_op
+from vllm._aiter_ops import aiter_ops
 from vllm.config import CompilationLevel, get_current_vllm_config
-from vllm.envs import envs
 from vllm.platforms import current_platform
 
 # Input scaling factors are no longer optional in _scaled_mm starting
@@ -151,6 +153,50 @@ def cutlass_w8a8_scaled_mm(*, qinput: torch.Tensor, weight: torch.Tensor,
     return output.view(*output_shape)
 
 
+# def rocm_aiter_tuned_gemm_impl(
+#     input: torch.Tensor,
+#     weight: torch.Tensor,
+#     bias: Optional[torch.Tensor]=None,
+#     out_dtype: Optional[torch.dtype]=None,
+#     scale_a: Optional[torch.Tensor]=None,
+#     scale_b: Optional[torch.Tensor]=None) -> torch.Tensor:
+
+#     # This AITER function can be used for
+#     # - per-tensor activations + per-tensor weights
+#     #   e.g. vllm/model_executor/layers/linear.py
+#     # - per-token-activations + per-channel-weights
+#     #   e.g. vllm/model_executor/layers/quantization/utils/w8a8_utils.py
+#     from aiter.tuned_gemm import tgemm as aiter_tgemm
+
+#     return aiter_tgemm.mm(input,
+#                             weight.t(),
+#                             otype=out_dtype,
+#                             scale_a=scale_a,
+#                             scale_b=scale_b,
+#                             bias=bias)
+
+# def rocm_aiter_tuned_gemm_fake(
+#     input: torch.Tensor,
+#     weight: torch.Tensor,
+#     bias: Optional[torch.Tensor]=None,
+#     out_dtype: Optional[torch.dtype]=None,
+#     scale_a: Optional[torch.Tensor]=None,
+#     scale_b: Optional[torch.Tensor]=None) -> torch.Tensor:
+
+#     m, _ = input.shape
+#     n = weight.shape[1]
+#     return torch.empty((m, n), dtype=out_dtype, device=input.device)
+
+# if current_platform.is_rocm():
+#     direct_register_custom_op(
+#         op_name="rocm_aiter_tuned_gemm",
+#         op_func=rocm_aiter_tuned_gemm_impl,
+#         mutates_args=[],
+#         fake_impl=rocm_aiter_tuned_gemm_fake,
+#         dispatch_key=current_platform.dispatch_key,
+#     )
+
+
 def rocm_aiter_per_tensor_w8a8_scaled_mm(*, qinput: torch.Tensor,
                                          weight: torch.Tensor,
                                          out_dtype: torch.dtype,
@@ -159,16 +205,13 @@ def rocm_aiter_per_tensor_w8a8_scaled_mm(*, qinput: torch.Tensor,
                                          bias: torch.Tensor,
                                          input_2d: torch.Tensor,
                                          output_shape: List) -> torch.Tensor:
-    from aiter.tuned_gemm import tgemm as aiter_tgemm
 
-    output = aiter_tgemm.mm(qinput,
-                            weight.t(),
-                            otype=out_dtype,
-                            scale_a=scale_a,
-                            scale_b=scale_b,
-                            bias=bias)
-    if type(output) is tuple and len(output) == 2:
-        output = output[0]
+    output = aiter_ops.rocm_aiter_tuned_gemm(qinput,
+                                             weight,
+                                             out_dtype=out_dtype,
+                                             scale_a=scale_a,
+                                             scale_b=scale_b,
+                                             bias=bias)
 
     return torch.narrow(output, 0, 0, input_2d.shape[0]).view(*output_shape)
 
@@ -275,7 +318,7 @@ def dispatch_w8a8_scaled_mm(
         return cutlass_w8a8_scaled_mm
     if per_tensor_weights and per_tensor_activations:
         if is_rocm_aiter_linear_enabled():
-            return rocm_aiter_per_tensor_w8a8_scaled_mm
+            return aiter_ops.rocm_aiter_tuned_gemm
         return torch_per_tensor_w8a8_scaled_mm
     # torch.scaled_mm supports per tensor weights + activations only
     # so fallback to naive if per channel or per token
