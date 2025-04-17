@@ -585,8 +585,13 @@ def main(args: argparse.Namespace):
 
     if current_platform.is_rocm() and "HIP_VISIBLE_DEVICES" in os.environ:
         # Ray will set ROCR_VISIBLE_DEVICES for device visibility
+        logger.warning(
+            "Ray uses ROCR_VISIBLE_DEVICES to control device accessibility ."
+            "Replacing HIP_VISIBLE_DEVICES with ROCR_VISIBLE_DEVICES."
+        )
+        val = os.environ["HIP_VISIBLE_DEVICES"]
+        os.environ["ROCR_VISIBLE_DEVICES"] = val
         del os.environ["HIP_VISIBLE_DEVICES"]
-
 
     ray.init()
     num_gpus = int(ray.available_resources()["GPU"])
