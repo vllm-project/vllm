@@ -37,6 +37,11 @@ class AttnFusionPass(VllmInductorPass):
         QUANT_OP = torch.ops._C.static_scaled_fp8_quant.default
         EMPTY_OP = torch.ops.aten.empty.memory_format
 
+        # TODO(luka): move this to pass manager and be smarter with it
+        from torch._inductor.fx_utils import FakeTensorUpdater
+        fake_tensor_updater = FakeTensorUpdater(graph)
+        nodes_to_process = []
+
         self.dump_graph(graph, "before_attn_fusion")
         count = 0
         for node in graph.nodes:
@@ -88,33 +93,50 @@ class AttnFusionPass(VllmInductorPass):
             # After this point, all operations must succeed for the graph to
             # remain valid. That includes modifications to attention layers.
 
-            # 1. Set scale on Attention layer object
-            # TODO
-            attn_layer._o_scale = quant_node.kwargs['scale']
-            print(attn_layer)
+            # 1. Set scale on unified_attn
+            node.update_kwarg('output_scale', quant_node.kwargs['scale'])
 
-            # 2. Rewrite the graph
-            # 2.a Rewrite the initial buf alloc dtype
+            # 2. Rewrite the initial buf alloc dtype
             attn_output_buf.update_kwarg('dtype', quant_output.kwargs['dtype'])
             assert attn_output_buf.args == quant_output.args
             assert attn_output_buf.kwargs == quant_output.kwargs
-            assert quant_output.meta['val'].dtype == quant_dtype
-            attn_output_buf.meta['val'] = quant_output.meta['val']
+            # meta value fixed by FakeTensorUpdater
 
-            # 2.b Propagate the dtype TODO
-            # attn_output_view.meta['val'].dtype = quant_dtype
-            # node.meta['val'][1].dtype = quant_dtype
-            # attn_getitem.meta['val'].dtype = quant_dtype
+            # 3. Update the autofunc node meta, as the FakeTensorUpdater does
+            # not touch them. To get both the shape and type correct, we have
+            # to create the type manually, which is a bit ugly.
+            old_fake = node.meta['val'][1]
+            new_fake_tensor = torch.empty_like(old_fake, dtype=quant_dtype)
+            node.meta['val'] = (None, new_fake_tensor)
 
-            # 2.d Reshape output buffer back to 2d for scaled mm input
+            # 4. Autofunc nodes don't get updated, so add the next node to the
+            # update list. Also remove the meta value as the FakeTensorUpdater
+            # has a bug where the type is not considered in FakeTensor equality.
+            # No existing meta val forces a new one.
+            nodes_to_process.append(attn_getitem)
+            del attn_getitem.meta['val']
+
+            # 5. Reshape output buffer back to 2d for scaled mm input
             with graph.inserting_after(attn_getitem):
                 reshape_args = (attn_getitem, quant_output_shape)
                 attn_new_output = graph.call_function(RESHAPE_OP, reshape_args)
 
-            # 2.e Rebind users of quant to use output of attention directly:
+            # 6. Rebind users of quant to use output of attention directly:
             find_getitem(quant_node, 1).replace_all_uses_with(attn_new_output)
 
+            # Done, add to the count
             count += 1
+
+        # remove the quant nodes
+        graph.eliminate_dead_code()
+
+        # Manually force processing of nodes
+        for node in nodes_to_process:
+            node_hash = fake_tensor_updater.hash_node(node)
+            fake_tensor_updater.processed_hashes.remove(node_hash)
+
+        # Update the fake tensor data
+        fake_tensor_updater.incremental_update()
 
         logger.debug("fused quantization onto %s attention nodes", count)
         self.dump_graph(graph, "after_attn_fusion")
