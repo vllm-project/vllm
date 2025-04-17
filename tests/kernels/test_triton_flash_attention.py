@@ -7,12 +7,16 @@ Run `pytest tests/kernels/test_triton_flash_attention.py`.
 import pytest
 import torch
 
+# yapf: disable
 from vllm.attention.ops.triton_flash_attention import (SUPPORTED_LAYOUTS,
                                                        MetaData,
                                                        compute_alibi_tensor,
                                                        scale_fp8,
+                                                       triton_attention,
                                                        triton_attention_rocm)
 from vllm.platforms import current_platform
+
+# yapf: enable
 
 
 class ReferenceAttention:
@@ -374,6 +378,47 @@ def test_op_fwd_fp8(Z,
                                tri_out.to(torch.float32),
                                atol=7e-2,
                                rtol=2e-1)
+
+
+# TODO(luka): this test is supposed to replicate the arguments
+#  as they occur after the attention fusion pass.
+@pytest.mark.parametrize("fp8_kvcache", [True])
+@pytest.mark.parametrize("fused_o_quant", [True])
+def test_fused_fwd(fp8_kvcache: bool, fused_o_quant: bool):
+    current_platform.seed_everything(0)
+    torch.set_default_device("cuda")
+
+    MAX_SEQLENS = 512
+    N = 256
+    q = torch.empty(MAX_SEQLENS * N, 8, 128, dtype=torch.bfloat16)
+    k = torch.empty(MAX_SEQLENS * N, 8, 128, dtype=torch.bfloat16)
+    v = torch.empty(MAX_SEQLENS * N, 8, 128, dtype=torch.bfloat16)
+
+    cu_seqlens = torch.arange(0, N + 1, dtype=torch.int32) * MAX_SEQLENS
+
+    # fp8_scales = tuple(torch.rand(1) for _ in range(4)) if fp8_kvcache else None # noqa: E501
+    fp8_scales = (torch.tensor([1.0]), torch.tensor([0.0508]),
+                  torch.tensor([0.0508]),
+                  torch.tensor([1.0])) if fp8_kvcache else None
+    input_scale = torch.tensor([0.0019]) if fused_o_quant else None
+
+    out_dtype = current_platform.fp8_dtype(
+    ) if fused_o_quant else torch.bfloat16
+    o = torch.empty(MAX_SEQLENS * N, 8, 128, dtype=out_dtype)
+
+    triton_attention(q,
+                     k,
+                     v,
+                     o,
+                     cu_seqlens,
+                     cu_seqlens,
+                     MAX_SEQLENS,
+                     MAX_SEQLENS,
+                     causal=True,
+                     sm_scale=0.08838,
+                     bias=None,
+                     fp8_scales=fp8_scales,
+                     input_scale=input_scale)
 
 
 @pytest.mark.parametrize('Z, H, N_CTX_Q, N_CTX_K, D_HEAD', [
