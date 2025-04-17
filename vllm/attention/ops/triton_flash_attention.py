@@ -60,7 +60,7 @@ class MetaData:
     varlen = False
     eight_bit = False
     layout = None
-    dropout_p, return_encoded_softmax = 0.0, False
+    return_encoded_softmax = False
     eight_bit_dtype_triton = default_eight_bit_dtype_triton
     eight_bit_dtype_torch = default_eight_bit_dtype_torch
     output_dtype = None
@@ -119,10 +119,6 @@ class MetaData:
     def need_causal(self):
         self.causal = True
 
-    def need_dropout(self, dropout_p, return_encoded_softmax):
-        self.dropout_p = dropout_p
-        self.return_encoded_softmax = return_encoded_softmax
-
     def check_args(self, q, k, v, o):
         assert q.dim() == k.dim() and q.dim() == v.dim()
 
@@ -135,8 +131,6 @@ class MetaData:
             assert len(self.cu_seqlens_q) == len(self.cu_seqlens_k)
             # TODO: Remove once bias is supported with varlen
             assert self.bias is None
-            # TODO:Remove once dropout is supported with varlen
-            assert self.dropout_p == 0.0
             assert not self.return_encoded_softmax
         else:
             assert q.dim() == 4
@@ -179,29 +173,6 @@ def cdiv_fn(x, y):
 @triton.jit
 def max_fn(x, y):
     return tl.math.max(x, y)
-
-
-@triton.jit
-def dropout_offsets(philox_seed, philox_offset, dropout_p, m, n, stride):
-    ms = tl.arange(0, m)
-    ns = tl.arange(0, n)
-    return philox_offset + ms[:, None] * stride + ns[None, :]
-
-
-@triton.jit
-def dropout_rng(philox_seed, philox_offset, dropout_p, m, n, stride):
-    rng_offsets = dropout_offsets(philox_seed, philox_offset, dropout_p, m, n,
-                                  stride).to(tl.uint32)
-    # TODO: use tl.randint for better performance
-    return tl.rand(philox_seed, rng_offsets)
-
-
-@triton.jit
-def dropout_mask(philox_seed, philox_offset, dropout_p, m, n, stride):
-    rng_output = dropout_rng(philox_seed, philox_offset, dropout_p, m, n,
-                             stride)
-    rng_keep = rng_output > dropout_p
-    return rng_keep
 
 
 # Convenience function to load with optional boundary checks.
@@ -300,7 +271,6 @@ def _attn_fwd_inner(
     start_m,
     actual_seqlen_k,
     actual_seqlen_q,
-    dropout_p,
     philox_seed,
     batch_philox_offset,
     encoded_sm_ptrs,
@@ -322,7 +292,6 @@ def _attn_fwd_inner(
     OFFS_N: tl.constexpr,
     SHOULD_PRE_LOAD_V: tl.constexpr,
     SHOULD_MASK_STEPS: tl.constexpr,
-    SHOULD_ENABLE_DROPOUT: tl.constexpr,
     SHOULD_RETURN_ENCODED_SOFTMAX: tl.constexpr,
     USE_PADDED_HEAD: tl.constexpr,
     IS_ACTUAL_BLOCK_DMODEL: tl.constexpr,
@@ -405,18 +374,7 @@ def _attn_fwd_inner(
 
         # CAVEAT: Must update l_ij before applying dropout
         l_ij = tl.sum(p, 1)
-        if SHOULD_ENABLE_DROPOUT:
-            philox_offset = (batch_philox_offset +
-                             start_m * BLOCK_M * actual_seqlen_k + start_n -
-                             BLOCK_N)
-            keep = dropout_mask(philox_seed, philox_offset, dropout_p, BLOCK_M,
-                                BLOCK_N, actual_seqlen_k)
-            if SHOULD_RETURN_ENCODED_SOFTMAX:
-                tl.store(
-                    encoded_sm_ptrs,
-                    tl.where(keep, p, -p).to(encoded_sm_ptrs.type.element_ty))
-            p = tl.where(keep, p, 0.0)
-        elif SHOULD_RETURN_ENCODED_SOFTMAX:
+        if SHOULD_RETURN_ENCODED_SOFTMAX:
             tl.store(encoded_sm_ptrs, p.to(encoded_sm_ptrs.type.element_ty))
         # -- update output accumulator --
         alpha = tl.math.exp2(m_i - m_ij)
@@ -503,7 +461,7 @@ def get_cdna_autotune_configs():
             num_stages=1,
             num_warps=4),
     ], [
-        'IS_CAUSAL', 'dropout_p', 'MAX_SEQLENS_Q', 'MAX_SEQLENS_K',
+        'IS_CAUSAL', 'MAX_SEQLENS_Q', 'MAX_SEQLENS_K',
         'IS_ACTUAL_BLOCK_DMODEL', 'VARLEN', 'HQ', 'HK'
     ]
 
@@ -582,7 +540,7 @@ def get_rdna_autotune_configs():
             num_stages=1,
             num_warps=2),
     ], [
-        'IS_CAUSAL', 'dropout_p', 'MAX_SEQLENS_Q', 'MAX_SEQLENS_K',
+        'IS_CAUSAL', 'MAX_SEQLENS_Q', 'MAX_SEQLENS_K',
         'IS_ACTUAL_BLOCK_DMODEL', 'VARLEN', 'HQ', 'HK'
     ]
 
@@ -617,7 +575,7 @@ def get_general_autotune_configs():
             num_stages=1,
             num_warps=4),
     ], [
-        'IS_CAUSAL', 'dropout_p', 'MAX_SEQLENS_Q', 'MAX_SEQLENS_K',
+        'IS_CAUSAL', 'MAX_SEQLENS_Q', 'MAX_SEQLENS_K',
         'IS_ACTUAL_BLOCK_DMODEL', 'VARLEN', 'HQ', 'HK'
     ]
 
@@ -682,7 +640,6 @@ def attn_fwd(
     v_descale_has_singleton,
     cu_seqlens_q,
     cu_seqlens_k,
-    dropout_p,
     philox_seed,
     IS_PERSISTENT: tl.constexpr,
     IS_PERSISTENT_DYNAMIC: tl.constexpr,
@@ -705,7 +662,6 @@ def attn_fwd(
     BLOCK_N: tl.constexpr,
     SHOULD_PRE_LOAD_V: tl.constexpr,
     USE_BIAS: tl.constexpr,
-    SHOULD_ENABLE_DROPOUT: tl.constexpr,
     SHOULD_RETURN_ENCODED_SOFTMAX: tl.constexpr,
     USE_ALIBI: tl.constexpr,
     IS_EIGHT_BIT: tl.constexpr,
@@ -890,12 +846,7 @@ def attn_fwd(
                 else:
                     alibi_slope = None
 
-                if SHOULD_ENABLE_DROPOUT:
-                    off_hz = off_z * HQ + off_h_q
-                    batch_philox_offset = (philox_offset_base +
-                                           off_hz * seqlen_q * seqlen_k)
-                else:
-                    batch_philox_offset = 0
+                batch_philox_offset = 0
                 # We can ask to return the dropout mask without doing any
                 # dropout. In this case, we return an invalid pointer so
                 # indicate the mask is not valid.
@@ -975,7 +926,6 @@ def attn_fwd(
                         start_m,
                         seqlen_k,
                         seqlen_q,
-                        dropout_p,
                         philox_seed,
                         batch_philox_offset,
                         encoded_sm_ptrs,
@@ -1000,7 +950,6 @@ def attn_fwd(
                         # _, SHOULD_MASK_STEPS, ...
                         SHOULD_PRE_LOAD_V,
                         False,
-                        SHOULD_ENABLE_DROPOUT,
                         SHOULD_RETURN_ENCODED_SOFTMAX,
                         USE_PADDED_HEAD,
                         IS_ACTUAL_BLOCK_DMODEL,
@@ -1039,7 +988,6 @@ def attn_fwd(
                         start_m,
                         seqlen_k,
                         seqlen_q,
-                        dropout_p,
                         philox_seed,
                         batch_philox_offset,
                         encoded_sm_ptrs,
@@ -1062,7 +1010,6 @@ def attn_fwd(
                         # _, SHOULD_MASK_STEPS, ...
                         SHOULD_PRE_LOAD_V,
                         True,
-                        SHOULD_ENABLE_DROPOUT,
                         SHOULD_RETURN_ENCODED_SOFTMAX,
                         USE_PADDED_HEAD,
                         IS_ACTUAL_BLOCK_DMODEL,
@@ -1083,8 +1030,6 @@ def attn_fwd(
                 l_recip = 1 / l_i[:, None]
                 acc = acc * l_recip
 
-                if SHOULD_ENABLE_DROPOUT:
-                    acc = acc / (1 - dropout_p)
                 # If seqlen_q > seqlen_k but the delta is not a multiple of
                 # BLOCK_M, then we have one block with a row of all NaNs which
                 # come from computing softmax over a row of all
@@ -1298,7 +1243,6 @@ class _attention(torch.autograd.Function):
             v_descale.numel() == 1 if v_descale is not None else False,
             metadata.cu_seqlens_q,
             metadata.cu_seqlens_k,
-            dropout_p=metadata.dropout_p,
             philox_seed=philox_seed,
             philox_offset_base=philox_offset,
             encoded_softmax=encoded_softmax,
@@ -1313,7 +1257,6 @@ class _attention(torch.autograd.Function):
             BLOCK_DMODEL=padded_d_model,
             USE_BIAS=metadata.bias is not None,
             USE_ALIBI=metadata.alibi_slopes is not None,
-            SHOULD_ENABLE_DROPOUT=metadata.dropout_p > 0.0,
             SHOULD_RETURN_ENCODED_SOFTMAX=metadata.return_encoded_softmax,
             IS_EIGHT_BIT=metadata.eight_bit,
             USE_P_SCALE=metadata.eight_bit and metadata.use_p_scale,
@@ -1330,7 +1273,6 @@ class _attention(torch.autograd.Function):
         ctx.BLOCK_DMODEL = head_size
         ctx.causal = metadata.causal
         ctx.alibi_slopes = metadata.alibi_slopes
-        ctx.dropout_p = metadata.dropout_p
         ctx.philox_seed = philox_seed
         ctx.philox_offset = philox_offset
         ctx.encoded_softmax = encoded_softmax
