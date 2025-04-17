@@ -29,15 +29,13 @@ from collections import namedtuple
 from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
 from multiprocessing import shared_memory
-from typing import (TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple,
-                    Union)
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 from unittest.mock import patch
 
 import torch
 import torch.distributed
 from torch.distributed import Backend, ProcessGroup
 
-import vllm.distributed.kv_transfer.kv_transfer_agent as kv_transfer
 import vllm.envs as envs
 from vllm.distributed.device_communicators.base_device_communicator import (
     DeviceCommunicatorBase)
@@ -45,9 +43,6 @@ from vllm.distributed.utils import StatelessProcessGroup
 from vllm.logger import init_logger
 from vllm.utils import (direct_register_custom_op, resolve_obj_by_qualname,
                         supports_custom_op)
-
-if TYPE_CHECKING:
-    from vllm.config import VllmConfig
 
 
 @dataclass
@@ -772,14 +767,6 @@ def get_pp_group() -> GroupCoordinator:
 # kept for backward compatibility
 get_pipeline_model_parallel_group = get_pp_group
 
-_KV_TRANSFER: Optional[kv_transfer.KVTransferAgent] = None
-
-
-def get_kv_transfer_group() -> kv_transfer.KVTransferAgent:
-    assert _KV_TRANSFER is not None, (
-        "disaggregated KV cache transfer parallel group is not initialized")
-    return _KV_TRANSFER
-
 
 @contextmanager
 def graph_capture(device: torch.device):
@@ -960,26 +947,6 @@ def initialize_model_parallel(
         "rank %s in world size %s is assigned as "
         "DP rank %s, PP rank %s, TP rank %s", rank, world_size,
         _DP.rank_in_group, _PP.rank_in_group, _TP.rank_in_group)
-
-
-def ensure_kv_transfer_initialized(vllm_config: "VllmConfig") -> None:
-    """
-    Initialize KV cache transfer parallel group.
-    """
-
-    global _KV_TRANSFER
-
-    if vllm_config.kv_transfer_config is None:
-        return
-
-    if all([
-            vllm_config.kv_transfer_config.is_kv_transfer_instance,
-            _KV_TRANSFER is None
-    ]):
-        _KV_TRANSFER = kv_transfer.KVTransferAgent(
-            rank=get_world_group().rank,
-            local_rank=get_world_group().local_rank,
-            config=vllm_config)
 
 
 def ensure_model_parallel_initialized(

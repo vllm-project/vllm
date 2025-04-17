@@ -23,7 +23,8 @@ from vllm.attention.backends.abstract import AttentionState
 from vllm.attention.backends.utils import CommonAttentionState
 from vllm.config import CompilationLevel, VllmConfig
 from vllm.core.scheduler import SchedulerOutputs
-from vllm.distributed import get_kv_transfer_group, get_pp_group
+from vllm.distributed import get_pp_group
+from vllm.distributed.kv_transfer import get_kv_transfer_group
 from vllm.distributed.parallel_state import (get_tensor_model_parallel_rank,
                                              graph_capture)
 from vllm.forward_context import get_forward_context, set_forward_context
