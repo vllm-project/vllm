@@ -2771,6 +2771,7 @@ class MultiModalConfig:
     # TODO: Add configs to init vision tower or not.
 
 
+@config
 @dataclass
 class PoolerConfig:
     """Controls the behavior of output pooling in pooling models."""
