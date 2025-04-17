@@ -378,10 +378,10 @@ class KVCacheManager:
         """
         self.req_to_block_hashes.pop(request.request_id, None)
 
-    def get_kv_events(self) -> list[KVCacheEvent]:
-        """Get the KV cache events.
+    def take_events(self) -> list[KVCacheEvent]:
+        """Take the KV cache events from the block pool.
 
         Returns:
             A list of KV cache events.
         """
-        return self.block_pool.extract_kv_events()
+        return self.block_pool.take_events()

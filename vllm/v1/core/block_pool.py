@@ -313,8 +313,8 @@ class BlockPool:
         """
         return 1.0 - (self.get_num_free_blocks() / self.num_gpu_blocks)
 
-    def extract_kv_events(self) -> list[KVCacheEvent]:
-        """Atomically extracts all events and clears the queue.
+    def take_events(self) -> list[KVCacheEvent]:
+        """Atomically takes all events and clears the queue.
         
         Returns:
             A list of KV cache events.

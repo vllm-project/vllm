@@ -134,8 +134,6 @@ class AsyncLLM(EngineClient):
 
         # FIXME(rob): refactor VllmConfig to include the StatLoggers
         # include StatLogger in the Oracle decision.
-
-        # TODO (alec) ask rob about this
         if stat_loggers is not None:
             raise ValueError("Custom StatLoggers are not yet supported on V1. "
                              "Explicitly set VLLM_USE_V1=0 to disable V1.")

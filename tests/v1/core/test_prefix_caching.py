@@ -731,7 +731,7 @@ def test_kv_cache_events(blocks_to_cache: int):
     # Allocate Blocks
     # Should see a single block stored event with a blocks_to_cache number of
     # block hashes
-    # get_kv_events should reset the kv_event_queue
+    # take_events should reset the kv_event_queue
     manager = KVCacheManager(
         make_kv_cache_config(block_size, num_blocks),
         max_model_len=8192,
@@ -743,7 +743,7 @@ def test_kv_cache_events(blocks_to_cache: int):
     num_tokens = block_size * blocks_to_cache
     req0 = make_request("0", list(range(num_tokens)))
     _ = manager.allocate_slots(req0, num_tokens)
-    events = manager.get_kv_events()
+    events = manager.take_events()
 
     block = events[-1]
     assert (len(block.block_hashes) == blocks_to_cache == len(
@@ -760,7 +760,7 @@ def test_kv_cache_events(blocks_to_cache: int):
     manager.free(req0)
     req1 = make_request("1", list(range(num_tokens)))
     _ = manager.allocate_slots(req1, num_tokens)
-    events = manager.get_kv_events()
+    events = manager.take_events()
 
     for blocks in events[:-1]:
         assert blocks.block_hashes[0] in stored_block_hash
@@ -773,7 +773,7 @@ def test_kv_cache_events(blocks_to_cache: int):
     # Should see a single all blocks cleared event
     manager.free(req1)
     manager.reset_prefix_cache()
-    events = manager.get_kv_events()
+    events = manager.take_events()
 
     assert isinstance(events[-1], AllBlocksCleared)
     assert len(manager.block_pool.cached_block_hash_to_block) == 0

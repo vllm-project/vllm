@@ -740,7 +740,7 @@ class Scheduler(SchedulerInterface):
         engine_core_outputs = EngineCoreOutputs(
             outputs=outputs,
             scheduler_stats=self.make_stats(spec_decoding_stats),
-            kv_cache_events=self.kv_cache_manager.get_kv_events(),
+            kv_cache_events=self.kv_cache_manager.take_events(),
         )
         if self.include_finished_set:
             #TODO currently sending duplicates here, improve this
