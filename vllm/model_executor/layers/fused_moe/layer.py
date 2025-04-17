@@ -459,7 +459,7 @@ class FusedMoE(torch.nn.Module):
         self.custom_routing_function = custom_routing_function
         if is_hpu:
             from vllm_hpu_extension.ops import DynamicFusedMOE
-            self.hpu_fused_moe = DynamicFusedMOE(self.num_experts)
+            self.hpu_fused_moe = DynamicFusedMOE(self.global_num_experts)
 
         self.scoring_func = scoring_func
         self.e_score_correction_bias = e_score_correction_bias
