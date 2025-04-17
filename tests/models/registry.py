@@ -147,7 +147,7 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
                                          min_transformers_version="4.50"),
     "GlmForCausalLM": _HfExamplesInfo("THUDM/glm-4-9b-chat-hf"),
     "Glm4ForCausalLM": _HfExamplesInfo(
-        "THUDM/GLM-4-32B-Chat-0414",
+        "THUDM/GLM-4-32B-0414",
         is_available_online=False,
         min_transformers_version="4.52.dev0"
     ),
