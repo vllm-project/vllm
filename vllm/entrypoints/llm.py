@@ -44,6 +44,8 @@ from vllm.transformers_utils.tokenizer_group import TokenizerGroup
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils import (Counter, Device, deprecate_args, deprecate_kwargs,
                         is_list_of)
+from vllm.zero_overhead.v0.llm_engine import ZeroOverheadEngine
+from vllm.zero_overhead.v0.utils import is_zero_auto_thread, is_zero_overhead
 
 logger = init_logger(__name__)
 
@@ -245,8 +247,12 @@ class LLM:
         )
 
         # Create the Engine (autoselects V0 vs V1)
-        self.llm_engine = LLMEngine.from_engine_args(
-            engine_args=engine_args, usage_context=UsageContext.LLM_CLASS)
+        if is_zero_overhead():
+            self.llm_engine = ZeroOverheadEngine.from_engine_args(
+                engine_args=engine_args, usage_context=UsageContext.LLM_CLASS)
+        else:
+            self.llm_engine = LLMEngine.from_engine_args(
+                engine_args=engine_args, usage_context=UsageContext.LLM_CLASS)
         self.engine_class = type(self.llm_engine)
 
         self.request_counter = Counter()
@@ -1444,6 +1450,8 @@ class LLM:
 
         if use_tqdm:
             pbar.close()
+        if is_zero_auto_thread():
+            self.llm_engine.finish_thread()
         # Sort the outputs by request ID.
         # This is necessary because some requests may be finished earlier than
         # its previous requests.

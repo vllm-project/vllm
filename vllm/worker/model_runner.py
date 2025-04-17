@@ -58,6 +58,7 @@ from vllm.worker.model_runner_base import (
     _add_sampling_metadata_broadcastable_dict,
     _init_attn_metadata_from_tensor_dict,
     _init_sampling_metadata_from_tensor_dict)
+from vllm.zero_overhead.v0.utils import is_zero_overhead
 
 if TYPE_CHECKING:
     from vllm.attention.backends.abstract import AttentionBackend
@@ -1630,6 +1631,9 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
     _model_input_cls: Type[ModelInputForGPUWithSamplingMetadata] = (
         ModelInputForGPUWithSamplingMetadata)
     _builder_cls: Type[ModelInputForGPUBuilder] = ModelInputForGPUBuilder
+    if is_zero_overhead():
+        from vllm.zero_overhead.v0.model_runner import ZeroOverheadModelInputForGpuBuilder
+        _builder_cls = ZeroOverheadModelInputForGpuBuilder
 
     def make_model_input_from_broadcasted_tensor_dict(
         self,
