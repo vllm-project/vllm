@@ -457,10 +457,6 @@ class FusedMoE(torch.nn.Module):
         self.num_expert_group = num_expert_group
         self.topk_group = topk_group
         self.custom_routing_function = custom_routing_function
-        if is_hpu:
-            from vllm_hpu_extension.ops import DynamicFusedMOE
-            self.hpu_fused_moe = DynamicFusedMOE(self.global_num_experts)
-
         self.scoring_func = scoring_func
         self.e_score_correction_bias = e_score_correction_bias
         self.activation = activation
@@ -468,7 +464,7 @@ class FusedMoE(torch.nn.Module):
         if self.scoring_func != "softmax" and not self.use_grouped_topk:
             raise ValueError("Only softmax scoring function is supported for "
                              "non-grouped topk.")
-        if current_platform.is_hpu():
+        if is_hpu:
             from vllm_hpu_extension.ops import DynamicFusedMOE
             self.hpu_fused_moe = DynamicFusedMOE(self.global_num_experts)
 
