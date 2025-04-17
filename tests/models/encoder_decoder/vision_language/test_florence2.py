@@ -13,12 +13,12 @@ from ....conftest import IMAGE_ASSETS, HfRunner, VllmRunner, _ImageAssets
 from ...utils import check_logprobs_close
 
 MODELS = ["microsoft/Florence-2-base"]
-# Florence-2 uses BartFastTokenizer which can't be loaded from AutoTokenizer
-# Therefore, we borrow the BartTokenizer from the original Bart model
-TOKENIZER = "facebook/bart-base"
+# Florence-2 model repo's tokenizer config is missing some special tokens.
+# Therefore, we use a converted tokenizer from a forked repo
+TOKENIZER = "Isotr0py/Florence-2-tokenizer"
 HF_IMAGE_PROMPTS = IMAGE_ASSETS.prompts({
     "stop_sign":
-    "<CAPTION>",  # special task token
+    "<OD>",  # special task token which will output special tokens
     "cherry_blossom":
     "Describe in detail what is shown in the image.",
 })
@@ -45,7 +45,6 @@ def hf_to_vllm_output(hf_output: tuple[list[int], str,
     output_ids, output_str, out_logprobs = hf_output
 
     output_str = output_str.replace("</s>", "").replace("<s>", "")
-    output_ids = [ids for ids in output_ids if ids not in [0, 2]]
 
     return output_ids, output_str, out_logprobs
 
@@ -71,8 +70,11 @@ def run_test(
                      enforce_eager=True) as vllm_model:
         vllm_outputs_per_case = [
             vllm_model.generate_encoder_decoder_greedy_logprobs(
-                prompts, max_tokens, num_logprobs=num_logprobs)
-            for prompts in inputs
+                prompts,
+                max_tokens,
+                num_logprobs=num_logprobs,
+                skip_special_tokens=False,
+            ) for prompts in inputs
         ]
 
     hf_inputs = [get_hf_images_prompts(prompts) for prompts in inputs]
@@ -93,6 +95,7 @@ def run_test(
             outputs_1_lst=vllm_outputs,
             name_0="hf",
             name_1="vllm",
+            num_outputs_0_skip_tokens=1,
         )
 
 
