@@ -415,19 +415,17 @@ class MLACommonMetadataBuilder(Generic[M]):
         # the above loop
         num_decodes = len(decodes)
         num_prefills = len(prefills)
-        first_prefill = 0
         modified_batch = False
 
         for i in range(1, min(num_decodes, num_prefills) + 1):
             # If the decode is at the "back" of the batch, i, we can swap it
             # with the prefill closest to the front of the batch
-            if decodes[num_decodes - i] >= num_decodes:
-                input_batch.swap_states(prefills[first_prefill],
-                                        decodes[num_decodes - i])
-                first_prefill += 1
-                modified_batch = True
-            else:
+            decode_idx = decodes[num_decodes - i]
+            if decode_idx < num_decodes:
                 break
+
+            input_batch.swap_states(prefills[i - 1], decode_idx)
+            modified_batch = True
 
         # Save for next `build` call
         # TODO(lucas): this is a bit of a hack, we should probably have a
