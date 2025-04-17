@@ -3668,6 +3668,7 @@ class CompilationConfig(BaseModel):
         enable_fusion: bool = True
         enable_noop: bool = True
         enable_sequence_parallelism: bool = False
+        enable_attn_fusion: bool = False
 
         def uuid(self):
             """
@@ -3676,15 +3677,20 @@ class CompilationConfig(BaseModel):
             Do not include dump_graph_* in the hash - they don't affect
             compilation.
             """
-            dict_ = self.model_dump(include={"enable_fusion", "enable_noop", \
-                "enable_sequence_parallelism"})
+            dict_ = self.model_dump(
+                exclude={"dump_graph_stages", "dump_graph_dir"})
             return InductorPass.hash_dict(dict_)
 
         def model_post_init(self, __context: Any) -> None:
-            if not self.enable_noop and self.enable_fusion:
-                logger.warning_once(
-                    "Fusion enabled but reshape elimination disabled. "
-                    "RMSNorm + quant (fp8) fusion might not work")
+            if not self.enable_noop:
+                if self.enable_fusion:
+                    logger.warning_once(
+                        "Fusion enabled but reshape elimination disabled. "
+                        "RMSNorm + quant (fp8) fusion might not work")
+                if self.enable_attn_fusion:
+                    logger.warning_once(
+                        "Fusion enabled but reshape elimination disabled. "
+                        "Attention + quant (fp8) fusion might not work")
 
     pass_config: PassConfig = Field(default_factory=PassConfig)
 

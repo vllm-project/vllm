@@ -58,8 +58,9 @@ class PostGradPassManager(CustomGraphPass):
         if self.pass_config.enable_sequence_parallelism:
             self.passes += [SequenceParallelismPass(config)]
 
-        # TODO enable flag
-        self.passes += [AttnFusionPass(config)]
+        if self.pass_config.enable_attn_fusion:
+            self.passes += [AttnFusionPass(config)]
+
         self.fix_functionalization = FixFunctionalizationPass(config)
 
     def add(self, pass_: InductorPass):
