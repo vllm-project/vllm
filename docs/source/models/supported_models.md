@@ -338,7 +338,7 @@ See [this page](#generative-models) for more information on how to use generativ
   * ✅︎
 - * `Glm4ForCausalLM`
   * GLM-4-0414
-  * `THUDM/GLM-4-32B-Chat-0414`, etc.
+  * `THUDM/GLM-4-32B-0414`, etc.
   * ✅︎
   * ✅︎
 - * `GPT2LMHeadModel`
