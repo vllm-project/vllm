@@ -337,7 +337,7 @@ steps:
   - tests/kernels/moe
   - vllm/model_executor/layers/fused_moe/
   commands:
-    - pytest -v -s kernels/moe --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
+    - pytest -v -s kernels/moe
 
 - label: Mamba Kernels Test
   source_file_dependencies:
