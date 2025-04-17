@@ -43,17 +43,20 @@ class SpecDecodingMetrics:
         self.num_accepted_tokens.append(
             spec_decoding_stats.num_accepted_tokens)
 
-    def log(self):
+    def log(self, log_fn=logger.info):
         num_draft_tokens = np.sum(self.num_draft_tokens)
         num_accepted_tokens = np.sum(self.num_accepted_tokens)
 
-        draft_acceptance_rate = (num_accepted_tokens / num_draft_tokens
-                                 if num_draft_tokens > 0 else float("nan"))
+        draft_acceptance_rate = (num_accepted_tokens / num_draft_tokens *
+                                 100 if num_draft_tokens > 0 else float("nan"))
 
-        logger.info(
-            "Speculative metrics: "
-            "Draft acceptance rate: %.3f, "
-            "Number of accepted tokens: %d, "
-            "Number of draft tokens: %d, ", draft_acceptance_rate,
-            num_accepted_tokens, num_draft_tokens)
+        log_fn(
+            "SpecDecoding metrics: "
+            "Draft acceptance rate: %.1f%%, "
+            "Accepted: %d tokens, "
+            "Drafted: %d tokens",
+            draft_acceptance_rate,
+            num_accepted_tokens,
+            num_draft_tokens,
+        )
         self.reset()

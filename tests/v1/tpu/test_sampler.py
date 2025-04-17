@@ -34,3 +34,8 @@ def test_sampler_different(model_name: str):
     sampling_params = SamplingParams(temperature=0.1, min_p=0.8, max_tokens=64)
     output2 = llm.generate(prompts, sampling_params)
     assert output[0].outputs[0].text != output2[0].outputs[0].text
+
+    with pytest.raises(ValueError):
+        # Unsupported `seed` param.
+        sampling_params = SamplingParams(temperature=0.3, seed=42)
+        output2 = llm.generate(prompts, sampling_params)

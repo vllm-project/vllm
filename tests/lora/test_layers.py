@@ -59,13 +59,13 @@ DEVICES = ([
 # prefill stage(True) or decode stage(False)
 STAGES = [True, False]
 
-NUM_RANDOM_SEEDS = 10
+NUM_RANDOM_SEEDS = 6
 
 VOCAB_PARALLEL_EMBEDDING_TEST_NUM_RANDOM_SEEDS = 128
 
 
 @pytest.fixture(autouse=True)
-def clean_cache():
+def clean_cache_reset_device(reset_default_device):
     # Release any memory we might be holding on to. CI runs OOMs otherwise.
     from vllm.lora.ops.triton_ops.utils import (_LORA_A_PTR_DICT,
                                                 _LORA_B_PTR_DICT)

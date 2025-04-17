@@ -83,8 +83,8 @@ spda_o = scaled_dot_product_attention(
 return spda_o @ W_O
 
 NOTE: in the actual code,
-    `kv_b_proj` is [W_UK; W_UV] concatnated per head
-    `q_b_proj` is [W_UQ; W_QR] concatnated per head
+    `kv_b_proj` is [W_UK; W_UV] concatenated per head
+    `q_b_proj` is [W_UQ; W_QR] concatenated per head
     `out_proj` is W_O
 
 
@@ -195,7 +195,7 @@ from vllm import _custom_ops as ops
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionLayer,
                                               AttentionMetadata,
                                               MLAAttentionImpl)
-from vllm.attention.ops.triton_merge_attn_states import merge_attn_states
+from vllm.attention.ops.merge_attn_states import merge_attn_states
 from vllm.logger import init_logger
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                LinearBase, RowParallelLinear,
