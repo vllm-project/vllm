@@ -3,7 +3,6 @@ import dataclasses
 import gc
 import itertools
 import math
-from array import array
 from functools import partial
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Type, Union, cast
 
@@ -18,8 +17,7 @@ from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.model_executor.sampling_metadata import SequenceGroupToSample
 from vllm.sampling_params import SamplingParams
 from vllm.sequence import (CompletionSequenceGroupOutput, IntermediateTensors,
-                           Logprob, SequenceData, SequenceGroupMetadata,
-                           SequenceOutput)
+                           Logprob, SequenceGroupMetadata, SequenceOutput)
 from vllm.utils import is_fake_hpu
 from vllm.worker.hpu_model_runner import (HpuModelAdapter, HPUModelRunnerBase,
                                           ModelInputForHPUWithSamplingMetadata,
@@ -347,7 +345,10 @@ class HPUEncoderDecoderModelRunner(
 
     def profile_run(self) -> None:
         num_layers = self.model_config.get_num_layers(self.parallel_config)
-        kv_caches = [None] * num_layers
+        kv_caches = [
+            torch.tensor([], dtype=self.model_config.dtype, device=self.device)
+            for _ in range(num_layers)
+        ]
         max_batch_size = self.max_num_prefill_seqs
         _, max_seq_len = self.bucketing_ctx.get_max_prompt_shape()
         max_seq_len = min(self.max_num_batched_tokens // max_batch_size,
@@ -433,42 +434,38 @@ class HPUEncoderDecoderModelRunner(
         sampling_params = SamplingParams(temperature=temperature)
         num_blocks = math.ceil(seq_len / self.block_size)
         cross_block_table: Optional[List[int]] = None
-        seq_len = max(seq_len, 1)
-        mm_counts = self.mm_registry.get_mm_limits_per_prompt(
-            self.model_config)
-        num_images = mm_counts["image"]
         max_mm_tokens = self.mm_registry.get_max_multimodal_tokens(
-            self.model_config) * num_images
-        decoder_dummy_data \
-            = self.input_registry.dummy_data_for_profiling(
-                self.model_config,
-                seq_len,
-                self.mm_registry,
-                is_encoder_data=False)
+            self.model_config)
         encoder_dummy_data \
             = self.input_registry.dummy_data_for_profiling(
-                self.model_config,
-                max_mm_tokens,
-                self.mm_registry,
-                is_encoder_data=True)
+            self.model_config,
+            max_mm_tokens,
+            self.mm_registry,
+            is_encoder_data=True)
+        seq_len = max(seq_len, 1)
         if is_prompt:
-            input_len = seq_len
             output_len = 0
             block_tables = None
             cross_block_table = None
         else:
-            input_len = seq_len - 1
             output_len = 1
             block_tables = {group_id: [_PAD_BLOCK_ID] * num_blocks}
             # limit cross blocks to the number of available blocks
             num_cross_blocks = min(self.bucketing_ctx.num_hpu_blocks,
                                    max_mm_tokens) // self.block_size
             cross_block_table = [_PAD_BLOCK_ID] * num_cross_blocks
-        prompt_token_ids = [0] * input_len
         output_token_ids = [1] * output_len
-        prompt_token_ids_array = array('l', prompt_token_ids)  # noqa: F821
-        seq_data = SequenceData(prompt_token_ids_array)
+        decoder_dummy_data = self.input_registry \
+            .dummy_data_for_profiling(self.model_config,
+                                      seq_len,
+                                      self.mm_registry,
+                                      is_encoder_data=False)
+        seq_data = decoder_dummy_data.seq_data
+        if not is_prompt:
+            # subtract 1 here to avoid warning
+            seq_data._prompt_token_ids = seq_data._prompt_token_ids[:-1]
         seq_data.output_token_ids = output_token_ids
+
         return SequenceGroupMetadata(
             request_id=str(group_id),
             is_prompt=is_prompt,
