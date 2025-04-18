@@ -95,7 +95,7 @@ COPY requirements/build.txt requirements/build.txt
 ENV UV_HTTP_TIMEOUT=500
 
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv pip install --system -r requirements/build.txt
+    uv pip install --system -r requirements/build.txt --index-strategy unsafe-best-match
 
 COPY . .
 ARG GIT_REPO_CHECK=0
@@ -167,7 +167,7 @@ COPY requirements/lint.txt requirements/lint.txt
 COPY requirements/test.txt requirements/test.txt
 COPY requirements/dev.txt requirements/dev.txt
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv pip install --system -r requirements/dev.txt
+    uv pip install --system -r requirements/dev.txt --index-strategy unsafe-best-match
 #################### DEV IMAGE ####################
 
 #################### vLLM installation IMAGE ####################
@@ -253,7 +253,7 @@ COPY ./vllm/collect_env.py .
 # TODO: Remove this once FlashInfer AOT wheel is fixed
 COPY requirements/build.txt requirements/build.txt
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv pip install --system -r requirements/build.txt
+    uv pip install --system -r requirements/build.txt --index-strategy unsafe-best-match
 
 #################### vLLM installation IMAGE ####################
 
@@ -270,7 +270,7 @@ ENV UV_HTTP_TIMEOUT=500
 
 # install development dependencies (for testing)
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv pip install --system -r requirements/dev.txt
+    uv pip install --system -r requirements/dev.txt --index-strategy unsafe-best-match
 
 # install development dependencies (for testing)
 RUN --mount=type=cache,target=/root/.cache/uv \
