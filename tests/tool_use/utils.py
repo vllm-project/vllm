@@ -98,6 +98,20 @@ CONFIGS: dict[str, ServerConfig] = {
         "extended":
         True
     },
+    "llama4_json": {
+        "model":
+        "meta-llama/Llama-4-Scout-17B-16E-Instruct",
+        "arguments": [
+            "--enforce-eager", "--no-enable-prefix-caching", "-tp", "4",
+            "--distributed-executor-backend", "mp", "--tool-call-parser",
+            "llama4_json", "--chat-template",
+            str(VLLM_PATH / "examples/tool_chat_template_llama4_json.jinja")
+        ],
+        "supports_parallel":
+        True,
+        "extended":
+        True
+    },
     "mistral": {
         "model":
         "mistralai/Mistral-7B-Instruct-v0.3",
