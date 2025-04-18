@@ -134,9 +134,6 @@ def rocm_aiter_fused_experts(
         # AITER tkw1 kernel for FP8 models with `apply_router_weight_on_input`
         # This applies topk_weights on the GEMM output of the first FC layer
         #  rather than the second FC.
-        assert apply_router_weight_on_input, (
-            "aiter's tkw1 MoE only supports models with"
-            " apply_router_weight_on_input.")
         assert (topk_weights.dim() == 2
                 ), "`topk_weights` should be in shape (num_tokens, topk)"
         assert topk_weights.shape[-1] == 1, (
