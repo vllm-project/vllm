@@ -312,6 +312,13 @@ steps:
   commands:
   - pytest -v -s compile/test_full_graph.py
 
+- label: Core Operation Kernels Test
+  source_file_dependencies:
+  - csrc/
+  - tests/kernels/core
+  commands:
+    - pytest -v -s kernels/core
+
 - label: Attention Kernels Test %N
   source_file_dependencies:
   - csrc/attention/
@@ -322,14 +329,13 @@ steps:
     - pytest -v -s kernels/attention --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
   parallelism: 2
 
-- label: Quantization Kernels Test %N
+- label: Quantization Kernels Test
   source_file_dependencies:
   - csrc/quantization/
   - vllm/model_executor/layers/quantization
   - tests/kernels/quantization
   commands:
-    - pytest -v -s kernels/quantization --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
-  parallelism: 2
+    - pytest -v -s kernels/quantization
 
 - label: MoE Kernels Test
   source_file_dependencies:
@@ -345,13 +351,6 @@ steps:
   - tests/kernels/mamba
   commands:
     - pytest -v -s kernels/mamba
-
-- label: Core Operation Kernels Test
-  source_file_dependencies:
-  - csrc/
-  - tests/kernels/core
-  commands:
-    - pytest -v -s kernels/core
 
 - label: Tensorizer Test # 11min
   # mirror_hardwares: [amd]
