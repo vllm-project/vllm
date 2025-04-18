@@ -305,7 +305,7 @@ class QuarkConfig(QuantizationConfig):
                                  is_static_input_scheme=True,
                                  input_symmetric=input_config.get("symmetric"))
         elif self._is_mx_fp4(weight_config, input_config):
-            return QuarkW4A4MXFP4(input_config)
+            return QuarkW4A4MXFP4(weight_config, input_config)
 
         raise NotImplementedError("No quark compatible scheme was found. "
                                   f"Weight config: {weight_config}, "
