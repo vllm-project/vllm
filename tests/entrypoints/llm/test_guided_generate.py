@@ -305,7 +305,7 @@ def test_disable_guided_decoding_fallback(sample_regex, llm):
     with pytest.raises(
             ValueError,
             match="xgrammar does not support advanced JSON schema features "
-            "string length, item limits, or property bounds."):
+            "like string length, item limits, or property bounds."):
         llm.generate(prompts="This should fail",
                      sampling_params=sampling_params,
                      use_tqdm=True)
