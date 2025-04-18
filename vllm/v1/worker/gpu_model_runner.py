@@ -991,6 +991,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
     ) -> Union[ModelRunnerOutput, torch.Tensor]:
         # Update KVConnector with the KVConnector metadata forward().
         if has_kv_transfer_group():
+            # Background KV cache transfers can happen here,
+            # since kv_connector_metadata has the req_ids to send/receive.
+            # Not sure I like doing it here since this does not have to do
+            # with model execution but this way we don't do a separate rpc.
             get_kv_transfer_group().bind_connector_metadata(
                 scheduler_output.kv_connector_metadata)
 

@@ -271,9 +271,9 @@ class SharedStorageConnector(KVConnectorBase_V1):
             self._requests_need_load[request.request_id] = request
 
     def build_connector_meta(
-        self,
-        scheduler_output: SchedulerOutput,
-    ) -> KVConnectorMetadata:
+            self, scheduler_output: SchedulerOutput,
+            sending_KV_req_ids: set[str],
+            waiting_KV_req_ids: set[str]) -> KVConnectorMetadata:
         """Build the connector metadata for this step.
 
         This function should NOT modify any fields in the scheduler_output.
@@ -281,6 +281,8 @@ class SharedStorageConnector(KVConnectorBase_V1):
 
         Args:
             scheduler_output (SchedulerOutput): the scheduler output object.
+            sending_KV_req_ids (set[str]): Request IDs to send
+            waiting_KV_req_ids (set[str]): Request IDs to receive
         """
         meta = SharedStorageConnectorMetadata()
 
