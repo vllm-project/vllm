@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import enum
-from typing import Union
+from typing import Dict, Union
 
 from cutlass_library import *
 
@@ -21,7 +21,7 @@ class MixedInputKernelScheduleType(enum.Enum):
     TmaWarpSpecializedCooperative = enum_auto()
 
 
-VLLMDataTypeNames: dict[Union[VLLMDataType, DataType], str] = {
+VLLMDataTypeNames: Dict[Union[VLLMDataType, DataType], str] = {
     **DataTypeNames,  # type: ignore
     **{
         VLLMDataType.u4b8: "u4b8",
@@ -29,7 +29,7 @@ VLLMDataTypeNames: dict[Union[VLLMDataType, DataType], str] = {
     }
 }
 
-VLLMDataTypeTag: dict[Union[VLLMDataType, DataType], str] = {
+VLLMDataTypeTag: Dict[Union[VLLMDataType, DataType], str] = {
     **DataTypeTag,  # type: ignore
     **{
         VLLMDataType.u4b8: "cutlass::vllm_uint4b8_t",
@@ -37,7 +37,7 @@ VLLMDataTypeTag: dict[Union[VLLMDataType, DataType], str] = {
     }
 }
 
-VLLMDataTypeSize: dict[Union[VLLMDataType, DataType], int] = {
+VLLMDataTypeSize: Dict[Union[VLLMDataType, DataType], int] = {
     **DataTypeSize,  # type: ignore
     **{
         VLLMDataType.u4b8: 4,
@@ -45,7 +45,7 @@ VLLMDataTypeSize: dict[Union[VLLMDataType, DataType], int] = {
     }
 }
 
-VLLMDataTypeVLLMScalarTypeTag: dict[Union[VLLMDataType, DataType], str] = {
+VLLMDataTypeVLLMScalarTypeTag: Dict[Union[VLLMDataType, DataType], str] = {
     VLLMDataType.u4b8: "vllm::kU4B8",
     VLLMDataType.u8b128: "vllm::kU8B128",
     DataType.u4: "vllm::kU4",
@@ -56,7 +56,7 @@ VLLMDataTypeVLLMScalarTypeTag: dict[Union[VLLMDataType, DataType], str] = {
     DataType.bf16: "vllm::kBfloat16",
 }
 
-VLLMDataTypeTorchDataTypeTag: dict[Union[VLLMDataType, DataType], str] = {
+VLLMDataTypeTorchDataTypeTag: Dict[Union[VLLMDataType, DataType], str] = {
     DataType.u8: "at::ScalarType::Byte",
     DataType.s8: "at::ScalarType::Char",
     DataType.e4m3: "at::ScalarType::Float8_e4m3fn",
@@ -66,7 +66,7 @@ VLLMDataTypeTorchDataTypeTag: dict[Union[VLLMDataType, DataType], str] = {
     DataType.f32: "at::ScalarType::Float",
 }
 
-VLLMKernelScheduleTag: dict[Union[
+VLLMKernelScheduleTag: Dict[Union[
     MixedInputKernelScheduleType, KernelScheduleType], str] = {
         **KernelScheduleTag,  # type: ignore
         **{

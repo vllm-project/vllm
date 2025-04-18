@@ -2,7 +2,7 @@
 
 import enum
 import time
-from typing import Any, Optional, Union
+from typing import List, Optional, Union
 
 import msgspec
 
@@ -51,10 +51,10 @@ class EngineCoreRequest(
     # NOTE(ywang96): original text prompt is needed when a request is added to
     # Detokenizer, but set to None when it is added to EngineCoreClient.
     prompt: Optional[str]
-    prompt_token_ids: list[int]
-    mm_inputs: Optional[list[MultiModalKwargs]]
-    mm_hashes: Optional[list[str]]
-    mm_placeholders: Optional[list[PlaceholderRange]]
+    prompt_token_ids: List[int]
+    mm_inputs: Optional[List[Optional[MultiModalKwargs]]]
+    mm_hashes: Optional[List[str]]
+    mm_placeholders: Optional[List[PlaceholderRange]]
     sampling_params: SamplingParams
     eos_token_id: Optional[int]
     arrival_time: float
@@ -65,7 +65,6 @@ class EngineCoreEventType(enum.IntEnum):
     """The type of engine core request event."""
     QUEUED = 1
     SCHEDULED = 2
-    PREEMPTED = 3
 
 
 class EngineCoreEvent(msgspec.Struct):
@@ -93,30 +92,18 @@ class EngineCoreOutput(
         gc=False):  # type: ignore[call-arg]
 
     request_id: str
-    new_token_ids: list[int]
+    new_token_ids: List[int]
 
     new_logprobs: Optional[LogprobsLists] = None
     new_prompt_logprobs_tensors: Optional[LogprobsTensors] = None
 
     finish_reason: Optional[FinishReason] = None
     stop_reason: Union[int, str, None] = None
-    events: Optional[list[EngineCoreEvent]] = None
+    events: Optional[List[EngineCoreEvent]] = None
 
     @property
     def finished(self) -> bool:
         return self.finish_reason is not None
-
-
-class UtilityOutput(
-        msgspec.Struct,
-        array_like=True,  # type: ignore[call-arg]
-        gc=False):  # type: ignore[call-arg]
-
-    call_id: int
-
-    # Non-None implies the call failed, result should be None.
-    failure_message: Optional[str] = None
-    result: Any = None
 
 
 class EngineCoreOutputs(
@@ -128,18 +115,10 @@ class EngineCoreOutputs(
     #NOTE(Nick): We could consider ways to make this more compact,
     # e.g. columnwise layout
 
-    engine_index: int = 0
-
     # [num_reqs]
-    outputs: list[EngineCoreOutput] = []
-    scheduler_stats: Optional[SchedulerStats] = None
+    outputs: List[EngineCoreOutput]
+    scheduler_stats: Optional[SchedulerStats]
     timestamp: float = 0.0
-
-    utility_output: Optional[UtilityOutput] = None
-    finished_requests: Optional[set[str]] = None
-
-    # In DP case, used to signal that the engine is paused.
-    engine_paused: bool = False
 
     def __post_init__(self):
         if self.timestamp == 0.0:
@@ -153,5 +132,6 @@ class EngineCoreRequestType(enum.Enum):
     """
     ADD = b'\x00'
     ABORT = b'\x01'
-    START_DP = b'\x02'
-    UTILITY = b'\x03'
+    PROFILE = b'\x02'
+    RESET_PREFIX_CACHE = b'\x03'
+    ADD_LORA = b'\x04'

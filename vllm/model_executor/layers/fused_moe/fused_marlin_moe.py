@@ -7,7 +7,6 @@ import torch
 
 from vllm.model_executor.layers.fused_moe.fused_moe import (
     fused_topk, moe_align_block_size, try_get_optimal_moe_config)
-from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
 from vllm.utils import direct_register_custom_op
 
@@ -239,7 +238,7 @@ def fused_marlin_moe(
     max_workspace_size = (max(2 * N, K) // 64) * 16
     workspace = torch.zeros(max_workspace_size,
                             dtype=torch.int,
-                            device=current_platform.device_type,
+                            device="cuda",
                             requires_grad=False)
 
     if has_no_zp:

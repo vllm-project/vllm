@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
+from typing import List
+
 import pytest
 
 import vllm
@@ -10,15 +12,7 @@ MODEL_PATH = "microsoft/phi-2"
 PROMPT_TEMPLATE = "### Instruct: {sql_prompt}\n\n### Context: {context}\n\n### Output:"  # noqa: E501
 
 
-@pytest.fixture(autouse=True)
-def v1(run_with_both_engines_lora):
-    # Simple autouse wrapper to run both engines for each test
-    # This can be promoted up to conftest.py to run for every
-    # test in a package
-    pass
-
-
-def do_sample(llm: vllm.LLM, lora_path: str, lora_id: int) -> list[str]:
+def do_sample(llm: vllm.LLM, lora_path: str, lora_id: int) -> List[str]:
     prompts = [
         PROMPT_TEMPLATE.format(
             sql_prompt=
@@ -47,13 +41,21 @@ def do_sample(llm: vllm.LLM, lora_path: str, lora_id: int) -> list[str]:
         if lora_id else None,
     )
     # Print the outputs.
-    generated_texts: list[str] = []
+    generated_texts: List[str] = []
     for output in outputs:
         prompt = output.prompt
         generated_text = output.outputs[0].text.strip()
         generated_texts.append(generated_text)
         print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
     return generated_texts
+
+
+@pytest.fixture(autouse=True)
+def v1(run_with_both_engines_lora):
+    # Simple autouse wrapper to run both engines for each test
+    # This can be promoted up to conftest.py to run for every
+    # test in a package
+    pass
 
 
 # Skipping for V1 for now as we are hitting,

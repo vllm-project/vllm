@@ -1,7 +1,0 @@
-{%- for message in messages -%}
-    {%- if message['role'] == 'user' -%}
-        {{- message['content'] -}}
-    {%- elif message['role'] == 'assistant' -%}
-        {{- message['content'] -}}
-    {%- endif -%}
-{%- endfor -%}

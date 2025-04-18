@@ -3,8 +3,7 @@
 import asyncio
 import base64
 import time
-from collections.abc import AsyncGenerator
-from typing import Final, Literal, Optional, Union, cast
+from typing import AsyncGenerator, Final, List, Literal, Optional, Union, cast
 
 import numpy as np
 from fastapi import Request
@@ -32,7 +31,7 @@ logger = init_logger(__name__)
 def _get_embedding(
     output: EmbeddingOutput,
     encoding_format: Literal["float", "base64"],
-) -> Union[list[float], str]:
+) -> Union[List[float], str]:
     if encoding_format == "float":
         return output.embedding
     elif encoding_format == "base64":
@@ -84,7 +83,7 @@ class OpenAIServingEmbedding(OpenAIServing):
             return self.create_error_response(
                 "dimensions is currently not supported")
 
-        model_name = self._get_model_name(request.model)
+        model_name = request.model
         request_id = f"embd-{self._base_request_id(raw_request)}"
         created_time = int(time.time())
 
@@ -139,12 +138,12 @@ class OpenAIServingEmbedding(OpenAIServing):
                      truncate_prompt_tokens=truncate_prompt_tokens,
                      add_special_tokens=request.add_special_tokens,
                  )
-        except (ValueError, TypeError) as e:
+        except ValueError as e:
             logger.exception("Error in preprocessing prompt inputs")
             return self.create_error_response(str(e))
 
         # Schedule the request and get the result generator.
-        generators: list[AsyncGenerator[PoolingRequestOutput, None]] = []
+        generators: List[AsyncGenerator[PoolingRequestOutput, None]] = []
         try:
             pooling_params = request.to_pooling_params()
 
@@ -179,7 +178,7 @@ class OpenAIServingEmbedding(OpenAIServing):
         num_prompts = len(engine_prompts)
 
         # Non-streaming response
-        final_res_batch: list[Optional[PoolingRequestOutput]]
+        final_res_batch: List[Optional[PoolingRequestOutput]]
         final_res_batch = [None] * num_prompts
         try:
             async for i, res in result_generator:
@@ -187,7 +186,7 @@ class OpenAIServingEmbedding(OpenAIServing):
 
             assert all(final_res is not None for final_res in final_res_batch)
 
-            final_res_batch_checked = cast(list[PoolingRequestOutput],
+            final_res_batch_checked = cast(List[PoolingRequestOutput],
                                            final_res_batch)
 
             response = self.request_output_to_embedding_response(
@@ -207,13 +206,13 @@ class OpenAIServingEmbedding(OpenAIServing):
 
     def request_output_to_embedding_response(
         self,
-        final_res_batch: list[PoolingRequestOutput],
+        final_res_batch: List[PoolingRequestOutput],
         request_id: str,
         created_time: int,
         model_name: str,
         encoding_format: Literal["float", "base64"],
     ) -> EmbeddingResponse:
-        items: list[EmbeddingResponseData] = []
+        items: List[EmbeddingResponseData] = []
         num_prompt_tokens = 0
 
         for idx, final_res in enumerate(final_res_batch):

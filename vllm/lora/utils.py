@@ -15,21 +15,20 @@ from vllm.logger import init_logger
 from vllm.lora.fully_sharded_layers import (
     ColumnParallelLinearWithShardedLoRA,
     MergedColumnParallelLinearWithShardedLoRA,
-    MergedQKVParallelLinearWithShardedLoRA, QKVParallelLinearWithShardedLoRA,
+    MergedQKVParallelLinearWithShardedLora, QKVParallelLinearWithShardedLora,
     RowParallelLinearWithShardedLoRA)
 # being imported for _all_lora_classes below
 # yapf conflicts with isort for this block
 # yapf: disable
 from vllm.lora.layers import (BaseLayerWithLoRA, ColumnParallelLinearWithLoRA,
-                              LinearScalingRotaryEmbeddingWithLoRA,
+                              LinearScalingRotaryEmbeddingWithLora,
                               LogitsProcessorWithLoRA,
                               MergedColumnParallelLinearWithLoRA,
-                              MergedQKVParallelLinearWithLoRA,
-                              QKVParallelLinearWithLoRA,
+                              MergedQKVParallelLinearWithLora,
+                              QKVParallelLinearWithLora,
                               ReplicatedLinearWithLoRA,
                               RowParallelLinearWithLoRA,
                               VocabParallelEmbeddingWithLoRA)
-from vllm.model_executor.layers.linear import LinearBase
 # yapf: enable
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
@@ -41,17 +40,17 @@ _all_lora_classes: Set[Type[BaseLayerWithLoRA]] = {
     VocabParallelEmbeddingWithLoRA,
     ColumnParallelLinearWithLoRA,
     MergedColumnParallelLinearWithLoRA,
-    QKVParallelLinearWithLoRA,
-    MergedQKVParallelLinearWithLoRA,
+    QKVParallelLinearWithLora,
+    MergedQKVParallelLinearWithLora,
     RowParallelLinearWithLoRA,
     ReplicatedLinearWithLoRA,
     LogitsProcessorWithLoRA,
     ColumnParallelLinearWithShardedLoRA,
-    QKVParallelLinearWithShardedLoRA,
+    QKVParallelLinearWithShardedLora,
     MergedColumnParallelLinearWithShardedLoRA,
-    MergedQKVParallelLinearWithShardedLoRA,
+    MergedQKVParallelLinearWithShardedLora,
     RowParallelLinearWithShardedLoRA,
-    LinearScalingRotaryEmbeddingWithLoRA,
+    LinearScalingRotaryEmbeddingWithLora,
 }
 
 
@@ -66,10 +65,9 @@ def from_layer(layer: nn.Module,
                                       lora_config=lora_config,
                                       packed_modules_list=packed_modules_list,
                                       model_config=model_config):
-            instance_layer = lora_cls(layer)
-            instance_layer.create_lora_weights(max_loras, lora_config,
-                                               model_config)
-            return instance_layer
+            ret = lora_cls(layer)
+            ret.create_lora_weights(max_loras, lora_config, model_config)
+            return ret
     return layer
 
 
@@ -170,23 +168,6 @@ def is_regex_target_modules(load_modules: Union[str, List[str]],
             suffix = match.group(1).split("|")
             return is_subset(suffix, expected_lora_modules)
     return False
-
-
-def get_supported_lora_modules(model: nn.Module) -> List[str]:
-    """
-    In vLLM, all linear layers support LoRA.
-    """
-    supported_lora_modules: Set[str] = set()
-    # step1: traverse the model to get all the linear subfixes.
-    for name, module in model.named_modules():
-        if isinstance(module, (LinearBase, )):
-            supported_lora_modules.add(name.split(".")[-1])
-    # step 2: get the embedding modules if the model's mbedding_modules
-    # is not empty.
-    if model.embedding_modules:
-        for name in model.embedding_modules:
-            supported_lora_modules.add(name)
-    return list(supported_lora_modules)
 
 
 def get_adapter_absolute_path(lora_path: str) -> str:

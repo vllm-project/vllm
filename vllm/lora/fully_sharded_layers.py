@@ -13,8 +13,8 @@ from vllm.distributed.communication_op import (
 from vllm.distributed.parallel_state import get_tensor_model_parallel_rank
 from vllm.lora.layers import (ColumnParallelLinearWithLoRA,
                               MergedColumnParallelLinearWithLoRA,
-                              MergedQKVParallelLinearWithLoRA,
-                              QKVParallelLinearWithLoRA,
+                              MergedQKVParallelLinearWithLora,
+                              QKVParallelLinearWithLora,
                               RowParallelLinearWithLoRA)
 
 if TYPE_CHECKING:
@@ -167,9 +167,9 @@ class MergedColumnParallelLinearWithShardedLoRA(
         )
 
 
-class QKVParallelLinearWithShardedLoRA(QKVParallelLinearWithLoRA):
+class QKVParallelLinearWithShardedLora(QKVParallelLinearWithLora):
     """
-    Differs from QKVParallelLinearWithLoRA by slicing the
+    Differs from QKVParallelLinearWithLora by slicing the
     LoRA A's also.
 
     Based on S-LoRA, slicing happens along the rank dim.
@@ -202,9 +202,9 @@ class QKVParallelLinearWithShardedLoRA(QKVParallelLinearWithLoRA):
         )
 
 
-class MergedQKVParallelLinearWithShardedLoRA(MergedQKVParallelLinearWithLoRA):
+class MergedQKVParallelLinearWithShardedLora(MergedQKVParallelLinearWithLora):
     """
-    Differs from MergedQKVParallelLinearWithLoRA by slicing the 
+    Differs from MergedQKVParallelLinearWithLora by slicing the 
     LoRA A's also.
 
     Based on S-LoRA, slicing happens along the rank dim.

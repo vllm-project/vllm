@@ -1,11 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 
+from typing import List, Type
+
 import pytest
 import torch.nn.functional as F
-from PIL import Image
-
-from vllm.assets.base import get_vllm_public_assets
-from vllm.assets.image import VLM_IMAGES_DIR
 
 from ....conftest import IMAGE_ASSETS, HfRunner, PromptImageInput, VllmRunner
 from ....utils import large_gpu_test
@@ -31,9 +29,9 @@ MODELS = ["TIGER-Lab/VLM2Vec-Full"]
 
 
 def _run_test(
-    hf_runner: type[HfRunner],
-    vllm_runner: type[VllmRunner],
-    input_texts: list[str],
+    hf_runner: Type[HfRunner],
+    vllm_runner: Type[VllmRunner],
+    input_texts: List[str],
     input_images: PromptImageInput,
     model: str,
     *,
@@ -57,7 +55,8 @@ def _run_test(
         for inputs in all_inputs:
             # Based on: https://github.com/TIGER-AI-Lab/VLM2Vec/blob/db3b951bccabba220c1f53ab46a734e50dd2fc08/src/model.py
             outputs = hf_model.model(
-                **hf_model.wrap_device(inputs),
+                **hf_model.wrap_device(inputs,
+                                       device=hf_model.model.device.type),
                 return_dict=True,
                 output_hidden_states=True,
             )
@@ -116,15 +115,6 @@ def test_models_image(
         (text, asset.pil_image)
         for text, asset in zip(HF_IMAGE_PROMPTS, image_assets)
     ]
-    # add cases for special_tokens
-    input_texts_images.append((
-        "\n<s><|user|>\n <|image_1|>\n\t <s>"
-        "Represent the given image for classification<|end|>"
-        "\n<|assistant|>\n",
-        Image.open(
-            get_vllm_public_assets(filename="cherry_blossom.jpg",
-                                   s3_prefix=VLM_IMAGES_DIR)),
-    ))
     input_texts = [text for text, _ in input_texts_images]
     input_images = [image for _, image in input_texts_images]
 

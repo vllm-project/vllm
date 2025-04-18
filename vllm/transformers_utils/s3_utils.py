@@ -46,8 +46,6 @@ def glob(s3=None,
     """
     if s3 is None:
         s3 = boto3.client("s3")
-    if not path.endswith("/"):
-        path = path + "/"
     bucket_name, _, paths = list_files(s3,
                                        path=path,
                                        allow_pattern=allow_pattern)
@@ -111,7 +109,6 @@ class S3Model:
         for sig in (signal.SIGINT, signal.SIGTERM):
             existing_handler = signal.getsignal(sig)
             signal.signal(sig, self._close_by_signal(existing_handler))
-
         self.dir = tempfile.mkdtemp()
 
     def __del__(self):
@@ -143,9 +140,6 @@ class S3Model:
             ignore_pattern: A list of patterns of which files not to pull.
 
         """
-        if not s3_model_path.endswith("/"):
-            s3_model_path = s3_model_path + "/"
-
         bucket_name, base_dir, files = list_files(self.s3, s3_model_path,
                                                   allow_pattern,
                                                   ignore_pattern)
@@ -153,9 +147,8 @@ class S3Model:
             return
 
         for file in files:
-            destination_file = os.path.join(
-                self.dir,
-                file.removeprefix(base_dir).lstrip("/"))
+            destination_file = os.path.join(self.dir,
+                                            file.removeprefix(base_dir))
             local_dir = Path(destination_file).parent
             os.makedirs(local_dir, exist_ok=True)
             self.s3.download_file(bucket_name, file, destination_file)

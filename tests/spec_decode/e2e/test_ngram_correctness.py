@@ -48,20 +48,16 @@ from .conftest import run_equality_correctness_test
 @pytest.mark.parametrize("baseline_llm_kwargs", [{}])
 @pytest.mark.parametrize("test_llm_kwargs", [
     {
-        "speculative_config": {
-            "method": "ngram",
-            "num_speculative_tokens": 5,
-            "prompt_lookup_max": 3,
-            "disable_mqa_scorer": False,
-        },
+        "speculative_model": "[ngram]",
+        "num_speculative_tokens": 5,
+        "ngram_prompt_lookup_max": 3,
+        "speculative_disable_mqa_scorer": False,
     },
     {
-        "speculative_config": {
-            "method": "ngram",
-            "num_speculative_tokens": 5,
-            "prompt_lookup_max": 3,
-            "disable_mqa_scorer": True,
-        },
+        "speculative_model": "[ngram]",
+        "num_speculative_tokens": 5,
+        "ngram_prompt_lookup_max": 3,
+        "speculative_disable_mqa_scorer": True,
     },
 ])
 @pytest.mark.parametrize("output_len", [
@@ -105,20 +101,16 @@ def test_ngram_e2e_greedy_correctness(vllm_runner, common_llm_kwargs,
 @pytest.mark.parametrize("baseline_llm_kwargs", [{}])
 @pytest.mark.parametrize("test_llm_kwargs", [
     {
-        "speculative_config": {
-            "method": "ngram",
-            "num_speculative_tokens": 5,
-            "prompt_lookup_max": 3,
-            "disable_logprobs": False,
-        },
+        "speculative_model": "[ngram]",
+        "num_speculative_tokens": 5,
+        "ngram_prompt_lookup_max": 3,
+        "disable_logprobs_during_spec_decoding": False,
     },
     {
-        "speculative_config": {
-            "method": "ngram",
-            "num_speculative_tokens": 5,
-            "prompt_lookup_max": 3,
-            "disable_logprobs": True,
-        },
+        "speculative_model": "[ngram]",
+        "num_speculative_tokens": 5,
+        "ngram_prompt_lookup_max": 3,
+        "disable_logprobs_during_spec_decoding": True,
     },
 ])
 @pytest.mark.parametrize("output_len", [
@@ -133,20 +125,19 @@ def test_ngram_e2e_greedy_logprobs(vllm_runner, common_llm_kwargs,
                                    batch_size: int, output_len: int, seed: int,
                                    logprobs: int):
     """Verify greedy equality on a tiny model with different batch size."""
-    run_equality_correctness_test(
-        vllm_runner,
-        common_llm_kwargs,
-        per_test_common_llm_kwargs,
-        baseline_llm_kwargs,
-        test_llm_kwargs,
-        batch_size,
-        max_output_len=output_len,
-        seed=seed,
-        temperature=0.0,
-        logprobs=logprobs,
-        prompt_logprobs=logprobs,
-        disable_logprobs=test_llm_kwargs["speculative_config"]
-        ["disable_logprobs"])
+    run_equality_correctness_test(vllm_runner,
+                                  common_llm_kwargs,
+                                  per_test_common_llm_kwargs,
+                                  baseline_llm_kwargs,
+                                  test_llm_kwargs,
+                                  batch_size,
+                                  max_output_len=output_len,
+                                  seed=seed,
+                                  temperature=0.0,
+                                  logprobs=logprobs,
+                                  prompt_logprobs=logprobs,
+                                  disable_logprobs=test_llm_kwargs[
+                                      'disable_logprobs_during_spec_decoding'])
 
 
 @pytest.mark.parametrize(
@@ -168,21 +159,17 @@ def test_ngram_e2e_greedy_logprobs(vllm_runner, common_llm_kwargs,
 @pytest.mark.parametrize("baseline_llm_kwargs", [{}])
 @pytest.mark.parametrize("test_llm_kwargs", [
     {
-        "speculative_config": {
-            "method": "ngram",
-            "num_speculative_tokens": 5,
-            "prompt_lookup_max": 3,
-        },
+        "speculative_model": "[ngram]",
+        "num_speculative_tokens": 5,
+        "ngram_prompt_lookup_max": 3,
         "enable_chunked_prefill": False,
     },
     {
-        "speculative_config": {
-            "method": "ngram",
-            "num_speculative_tokens": 5,
-            "prompt_lookup_max": 3,
-            "disable_mqa_scorer": True,
-        },
+        "speculative_model": "[ngram]",
+        "num_speculative_tokens": 5,
+        "ngram_prompt_lookup_max": 3,
         "enable_chunked_prefill": True,
+        "speculative_disable_mqa_scorer": True,
         "max_num_batched_tokens": 4,
         "max_num_seqs": 4
     },
@@ -227,21 +214,17 @@ def test_ngram_e2e_greedy_correctness_with_preemption(
     "test_llm_kwargs",
     [
         {
-            "speculative_config": {
-                "method": "ngram",
-                "num_speculative_tokens": k,
-                "prompt_lookup_max": 3,
-            },
+            "speculative_model": "[ngram]",
+            "num_speculative_tokens": k,
+            "ngram_prompt_lookup_max": 3,
         }
         # Try a range of common k, as well as large speculation.
         for k in [1, 3, 5]
     ] + [
         {
-            "speculative_config": {
-                "method": "ngram",
-                "num_speculative_tokens": k,
-                "prompt_lookup_max": 1,
-            },
+            "speculative_model": "[ngram]",
+            "num_speculative_tokens": k,
+            "ngram_prompt_lookup_max": 1,
         }
         # Try a range of common k, as well as large speculation.
         for k in [1, 3, 5]
@@ -260,7 +243,7 @@ def test_ngram_different_k(vllm_runner, common_llm_kwargs,
                            seed: int):
     """Verify that ngram speculative decoding produces exact equality
     to without spec decode with many different values of k and
-    different ngram prompt_lookup_max.
+    different ngram_prompt_lookup_max.
     """
     run_equality_correctness_test(vllm_runner,
                                   common_llm_kwargs,
@@ -283,25 +266,22 @@ def test_ngram_different_k(vllm_runner, common_llm_kwargs,
     }])
 @pytest.mark.parametrize("per_test_common_llm_kwargs", [{}])
 @pytest.mark.parametrize("baseline_llm_kwargs", [{}])
-@pytest.mark.parametrize("test_llm_kwargs", [{
-    "speculative_config": {
-        "method": "ngram",
-        "num_speculative_tokens": 5,
-        "prompt_lookup_max": 3,
-        "disable_by_batch_size": 4
-    },
-}, {
-    "speculative_config": {
-        "method": "ngram",
-        "num_speculative_tokens": 5,
-        "prompt_lookup_max": 3,
-        "disable_by_batch_size": 4,
-        "disable_mqa_scorer": True,
-    },
-    "enable_chunked_prefill": True,
-    "max_num_batched_tokens": 4,
-    "max_num_seqs": 4
-}])
+@pytest.mark.parametrize("test_llm_kwargs",
+                         [{
+                             "speculative_model": "[ngram]",
+                             "num_speculative_tokens": 5,
+                             "ngram_prompt_lookup_max": 3,
+                             "speculative_disable_by_batch_size": 4
+                         }, {
+                             "speculative_model": "[ngram]",
+                             "num_speculative_tokens": 5,
+                             "ngram_prompt_lookup_max": 3,
+                             "speculative_disable_by_batch_size": 4,
+                             "enable_chunked_prefill": True,
+                             "speculative_disable_mqa_scorer": True,
+                             "max_num_batched_tokens": 4,
+                             "max_num_seqs": 4
+                         }])
 @pytest.mark.parametrize("batch_size", [1, 5])
 @pytest.mark.parametrize(
     "output_len",
@@ -316,7 +296,7 @@ def test_ngram_disable_queue(vllm_runner, common_llm_kwargs,
                              seed: int):
     """Verify that ngram speculative decoding produces exact equality
     to without spec decode with many different values of k and
-    different ngram prompt_lookup_max.
+    different ngram_prompt_lookup_max.
     """
     run_equality_correctness_test(vllm_runner,
                                   common_llm_kwargs,
@@ -336,17 +316,18 @@ def test_ngram_disable_queue(vllm_runner, common_llm_kwargs,
 
         # Skip cuda graph recording for fast test.
         "enforce_eager": True,
+
+        # Required for spec decode.
+        "speculative_model": "[ngram]",
+        "num_speculative_tokens": 5,
+        "ngram_prompt_lookup_max": 3,
     }])
 @pytest.mark.parametrize("per_test_common_llm_kwargs", [{}])
 @pytest.mark.parametrize("baseline_llm_kwargs", [{}])
-@pytest.mark.parametrize("test_llm_kwargs", [{
-    "speculative_config": {
-        "method": "ngram",
-        "num_speculative_tokens": 5,
-        "prompt_lookup_max": 3,
-        "disable_mqa_scorer": True,
-    },
-}])
+@pytest.mark.parametrize("test_llm_kwargs",
+                         [{
+                             "speculative_disable_mqa_scorer": True,
+                         }])
 @pytest.mark.parametrize("batch_size", [1, 5])
 @pytest.mark.parametrize(
     "output_len",

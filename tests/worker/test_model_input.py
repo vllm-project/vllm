@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import dataclasses
+from typing import List, Tuple, Type
 
 import torch
 
@@ -26,15 +27,15 @@ class MockAttentionBackend(AttentionBackend):
         raise NotImplementedError
 
     @staticmethod
-    def get_metadata_cls() -> type["AttentionMetadata"]:
+    def get_metadata_cls() -> Type["AttentionMetadata"]:
         return AttentionMetadata
 
     @staticmethod
-    def get_builder_cls() -> type["AttentionMetadataBuilder"]:
+    def get_builder_cls() -> Type["AttentionMetadataBuilder"]:
         return AttentionMetadataBuilder
 
     @staticmethod
-    def get_state_cls() -> type["CommonAttentionState"]:
+    def get_state_cls() -> Type["CommonAttentionState"]:
         return CommonAttentionState
 
     @staticmethod
@@ -43,7 +44,7 @@ class MockAttentionBackend(AttentionBackend):
         block_size: int,
         num_kv_heads: int,
         head_size: int,
-    ) -> tuple[int, ...]:
+    ) -> Tuple[int, ...]:
         raise NotImplementedError
 
     @staticmethod
@@ -56,7 +57,7 @@ class MockAttentionBackend(AttentionBackend):
 
     @staticmethod
     def copy_blocks(
-        kv_caches: list[torch.Tensor],
+        kv_caches: List[torch.Tensor],
         src_to_dists: torch.Tensor,
     ) -> None:
         pass

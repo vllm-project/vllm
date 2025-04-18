@@ -2,10 +2,6 @@
 #include <torch/all.h>
 #include <cmath>
 
-#if defined(__APPLE__)
-  #include "omp.h"
-#endif
-
 namespace vec_op {
 
 #ifdef ARM_BF16_SUPPORT

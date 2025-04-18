@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
-from dataclasses import dataclass, field
-from typing import Optional
+from dataclasses import dataclass
+from typing import List, Optional
 
 from vllm.engine.output_processor.stop_checker import StopChecker
 from vllm.logger import init_logger
@@ -16,45 +16,40 @@ logger = init_logger(__name__)
 class IncrementalDetokenizer:
 
     # Generation data
-    token_ids: list[int]
-    output_text: str = ""
-    tokens: list[str] = field(default_factory=list)
-    prompt_len: int = 0
+    output_text: str
+    tokens: List[str]
+    token_ids: List[int]
+    prompt_len: int
 
     # Stop strings
-    stop: list[str] = field(default_factory=list)
-    include_stop_str_in_output: bool = False
+    stop: List[str]
+    include_stop_str_in_output: bool
 
     # Metadata for incremental detokenization
-    prefix_offset: int = 0
-    read_offset: int = 0
+    prefix_offset: int
+    read_offset: int
 
     # Parameters for detokenization
-    skip_special_tokens: bool = True
-    spaces_between_special_tokens: bool = True
+    skip_special_tokens: bool
+    spaces_between_special_tokens: bool
 
-    # Tokenizer for this request,
-    # None if detokenization is disabled.
-    tokenizer: Optional[AnyTokenizer] = None
+    # Tokenizer for this request
+    tokenizer: AnyTokenizer
 
     # Accounting for stop string buffering
-    stop_buffer_length: int = 0
+    stop_buffer_length: int
     _last_output_text_offset: int = 0
 
     @property
-    def output_token_ids(self) -> list[int]:
-        return self.token_ids if not self.prompt_len else (
-            self.token_ids[self.prompt_len:])
+    def output_token_ids(self) -> List[int]:
+        return self.token_ids[self.prompt_len:]
 
     @classmethod
     def from_new_request(
         cls,
-        tokenizer: Optional[AnyTokenizer],
+        tokenizer: AnyTokenizer,
         request: EngineCoreRequest,
     ) -> "IncrementalDetokenizer":
-
-        if tokenizer is None:
-            return cls(token_ids=[])
 
         tokens, prefix_offset, read_offset = convert_prompt_ids_to_tokens(
             tokenizer=tokenizer,
@@ -71,6 +66,7 @@ class IncrementalDetokenizer:
             stop_buffer_length = 0
 
         return cls(
+            output_text="",
             tokens=tokens,
             # Detokenizer mutates this list, so need a unique copy.
             # NOTE(Nick): could we take ownership of it though?
@@ -88,8 +84,7 @@ class IncrementalDetokenizer:
             stop_buffer_length=stop_buffer_length,
         )
 
-    def update(self, new_token_ids: list[int],
-               stop_terminated: bool) -> Optional[str]:
+    def update(self, new_token_ids: List[int]) -> Optional[str]:
         """
         Update RequestState for the request_id by:
             1) Detokenize the new token ids incrementally.
@@ -97,21 +92,6 @@ class IncrementalDetokenizer:
 
         Return matched stop string or None.
         """
-        if not new_token_ids:
-            # Skip detokenization if no new token ids
-            return None
-        if self.tokenizer is None:
-            # Skip detokenization if no tokenizer
-            self.token_ids.extend(new_token_ids)
-            return None
-
-        if stop_terminated and not self.include_stop_str_in_output:
-            # If stop-terminated, exclude last token from detokenization
-            # based on include_stop_str_in_output parameter.
-            skipped_stop_token_id = new_token_ids[-1]
-            new_token_ids = new_token_ids[:-1]
-        else:
-            skipped_stop_token_id = None
 
         # 1) Detokenize the new token ids incrementally.
         # TODO(woosuk): This method becomes very inefficient when the number of
@@ -139,14 +119,7 @@ class IncrementalDetokenizer:
 
         self.output_text += decoded_text
 
-        if stop_terminated:
-            if skipped_stop_token_id is not None:
-                # Cleanup after skipping detokenization
-                self.token_ids.append(skipped_stop_token_id)
-            # Stop token triggered; skip stop string check
-            return None
-
-        # 2) Evaluate stop strings.
+        # 2) Evaluate stop criteria.
         stop_string = None
         if self.stop:
             stop = StopChecker.check_stop_strings(

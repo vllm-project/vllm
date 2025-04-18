@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 """vllm.entrypoints.api_server with some extra logging for testing."""
-from collections.abc import Iterable
-from typing import Any
+from typing import Any, Dict, Iterable
 
 import uvicorn
 from fastapi.responses import JSONResponse, Response
@@ -25,7 +24,7 @@ class AsyncLLMEngineWithStats(AsyncLLMEngine):
         self._num_aborts += len(ids)
         await super()._engine_abort(ids)
 
-    def testing_stats(self) -> dict[str, Any]:
+    def testing_stats(self) -> Dict[str, Any]:
         return {"num_aborted_requests": self._num_aborts}
 
 
