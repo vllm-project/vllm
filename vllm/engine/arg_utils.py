@@ -16,7 +16,7 @@ from typing_extensions import TypeIs
 
 import vllm.envs as envs
 from vllm import version
-from vllm.config import (BlockSize, CacheConfig, CacheDtype, CompilationConfig,
+from vllm.config import (BlockSize, CacheConfig, CacheDType, CompilationConfig,
                          Config, ConfigFormat, DecodingConfig, Device,
                          DeviceConfig, DistributedExecutorBackend, HfOverrides,
                          KVTransferConfig, LoadConfig, LoadFormat, LoRAConfig,
@@ -138,7 +138,7 @@ class EngineArgs:
     load_format: str = LoadConfig.load_format
     config_format: ConfigFormat = ConfigFormat.AUTO
     dtype: str = 'auto'
-    kv_cache_dtype: CacheDtype = CacheConfig.cache_dtype
+    kv_cache_dtype: CacheDType = CacheConfig.cache_dtype
     seed: Optional[int] = None
     max_model_len: Optional[int] = None
     # Note: Specifying a custom executor backend by passing a class

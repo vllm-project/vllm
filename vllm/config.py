@@ -1247,7 +1247,7 @@ class ModelConfig:
 
 
 BlockSize = Literal[8, 16, 32, 64, 128]
-CacheDtype = Literal["auto", "fp8", "fp8_e4m3", "fp8_e5m2"]
+CacheDType = Literal["auto", "fp8", "fp8_e4m3", "fp8_e5m2"]
 PrefixCachingHashAlgo = Literal["builtin", "sha256"]
 
 
@@ -1271,7 +1271,7 @@ class CacheConfig:
     set the GPU memory utilization to 0.5 for each instance."""
     swap_space: float = 4
     """Size of the CPU swap space per GPU (in GiB)."""
-    cache_dtype: CacheDtype = "auto"
+    cache_dtype: CacheDType = "auto"
     """Data type for kv cache storage. If "auto", will use model data type.
     CUDA 11.8+ supports fp8 (=fp8_e4m3) and fp8_e5m2. ROCm (AMD GPU) supports
     fp8 (=fp8_e4m3)."""
@@ -1356,7 +1356,7 @@ class CacheConfig:
     def _verify_cache_dtype(self) -> None:
         if self.cache_dtype == "auto":
             pass
-        elif self.cache_dtype in get_args(CacheDtype):
+        elif self.cache_dtype in get_args(CacheDType):
             logger.info(
                 "Using fp8 data type to store kv cache. It reduces the GPU "
                 "memory footprint and boosts the performance. "
