@@ -34,7 +34,7 @@ class ReqMeta:
     is_store: bool
 
     @staticmethod
-    def make_meta(request_id: srt, token_ids: list[int], block_ids: list[int],
+    def make_meta(request_id: str, token_ids: list[int], block_ids: list[int],
                   block_size: int, is_store: bool) -> "ReqMeta":
         valid_num_tokens = align_to_block_size(len(token_ids), block_size)
         token_ids_tensor = torch.tensor(token_ids)[:valid_num_tokens]
@@ -60,15 +60,16 @@ class P2pNcclConnectorMetadata(KVConnectorMetadata):
         self.requests = []
 
     def add_request(
-            self,
-            request_id: srt,
-            token_ids: list[int],
-            block_ids: list[int],
-            block_size: int,
-            is_store: bool,
+        self,
+        request_id: str,
+        token_ids: list[int],
+        block_ids: list[int],
+        block_size: int,
+        is_store: bool,
     ) -> None:
         self.requests.append(
-            ReqMeta.make_meta(request_id, token_ids, block_ids, block_size, is_store))
+            ReqMeta.make_meta(request_id, token_ids, block_ids, block_size,
+                              is_store))
 
 
 class P2pNcclConnector(KVConnectorBase_V1):
@@ -79,6 +80,7 @@ class P2pNcclConnector(KVConnectorBase_V1):
         self._block_size = vllm_config.cache_config.block_size
         self._requests_need_load: dict[str, Request] = {}
         self.config = vllm_config.kv_transfer_config
+        self.rank = rank
 
         self.p2p_nccl_pipe = P2pNcclPipe(
             local_rank=local_rank,  # type: ignore
@@ -103,9 +105,9 @@ class P2pNcclConnector(KVConnectorBase_V1):
         attn_metadata = forward_context.attn_metadata
 
         def inject_kv_into_layer(
-                dst_kv_cache_layer: torch.Tensor,
-                src_kv_cache: torch.Tensor,
-                slot_mapping: torch.Tensor,
+            dst_kv_cache_layer: torch.Tensor,
+            src_kv_cache: torch.Tensor,
+            slot_mapping: torch.Tensor,
         ) -> None:
             """Inject the KV cache into the layer.
 
@@ -138,7 +140,7 @@ class P2pNcclConnector(KVConnectorBase_V1):
         # Get the metadata
         metadata: KVConnectorMetadata = \
             self._get_connector_metadata()
-        assert isinstance(metadata, SharedStorageConnectorMetadata)
+        assert isinstance(metadata, P2pNcclConnectorMetadata)
 
         if metadata is None:
             logger.warning(
@@ -194,8 +196,8 @@ class P2pNcclConnector(KVConnectorBase_V1):
         """
 
         def extract_kv_from_layer(
-                layer: torch.Tensor,
-                slot_mapping: torch.Tensor,
+            layer: torch.Tensor,
+            slot_mapping: torch.Tensor,
         ) -> torch.Tensor:
             """Extract the KV cache from the layer.
 
@@ -205,13 +207,13 @@ class P2pNcclConnector(KVConnectorBase_V1):
             if isinstance(attn_metadata, MLACommonMetadata):
                 num_pages, page_size = layer.shape[0], layer.shape[1]
                 return layer.reshape(num_pages * page_size, -1)[slot_mapping,
-                ...]
+                                                                ...]
             num_pages, page_size = layer.shape[1], layer.shape[2]
             return layer.reshape(2, num_pages * page_size, -1)[:, slot_mapping,
-                   ...]
+                                                               ...]
 
         connector_metadata = self._get_connector_metadata()
-        assert isinstance(connector_metadata, SharedStorageConnectorMetadata)
+        assert isinstance(connector_metadata, P2pNcclConnectorMetadata)
         for request in connector_metadata.requests:
             if request.is_store:
                 request_id = request.request_id
@@ -226,9 +228,9 @@ class P2pNcclConnector(KVConnectorBase_V1):
         return
 
     def get_num_new_matched_tokens(
-            self,
-            request: "Request",
-            num_computed_tokens: int,
+        self,
+        request: "Request",
+        num_computed_tokens: int,
     ) -> int:
         """
         Get number of new tokens that can be loaded from the
@@ -258,8 +260,8 @@ class P2pNcclConnector(KVConnectorBase_V1):
             self._requests_need_load[request.request_id] = request
 
     def build_connector_meta(
-            self,
-            scheduler_output: SchedulerOutput,
+        self,
+        scheduler_output: SchedulerOutput,
     ) -> KVConnectorMetadata:
         """Build the connector metadata for this step.
 
@@ -269,7 +271,7 @@ class P2pNcclConnector(KVConnectorBase_V1):
         Args:
             scheduler_output (SchedulerOutput): the scheduler output object.
         """
-        meta = SharedStorageConnectorMetadata()
+        meta = P2pNcclConnectorMetadata()
 
         total_need_load = 0
         for new_req in scheduler_output.scheduled_new_reqs:
