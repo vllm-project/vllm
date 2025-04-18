@@ -176,7 +176,7 @@ class QuarkConfig(QuantizationConfig):
         is_static_weight = not weight_quant.get("is_dynamic")
         is_per_tensor_or_channel_weight = (weight_quant.get("qscheme")
                                            in ["per_tensor", "per_channel"])
-
+        
         if not (is_fp8_dtype and is_static_weight
                 and is_per_tensor_or_channel_weight):
             return False
