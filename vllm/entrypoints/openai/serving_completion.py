@@ -30,7 +30,7 @@ from vllm.entrypoints.openai.serving_models import OpenAIServingModels
 from vllm.logger import init_logger
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import BeamSearchParams, SamplingParams
-from vllm.sequence import Logprob
+from vllm.sequence import InbandEngineStats, Logprob
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.utils import merge_async_iterators
 
@@ -65,7 +65,8 @@ class OpenAIServingCompletion(OpenAIServing):
         self,
         request: CompletionRequest,
         raw_request: Optional[Request] = None,
-    ) -> Union[AsyncGenerator[str, None], CompletionResponse, ErrorResponse]:
+    ) -> Union[AsyncGenerator[str, None], tuple[
+            CompletionResponse, Optional[InbandEngineStats]], ErrorResponse]:
         """Completion API similar to OpenAI's API.
 
         See https://platform.openai.com/docs/api-reference/completions/create
@@ -216,15 +217,16 @@ class OpenAIServingCompletion(OpenAIServing):
             final_res_batch_checked = cast(list[RequestOutput],
                                            final_res_batch)
 
-            response = self.request_output_to_completion_response(
-                final_res_batch_checked,
-                request,
-                request_id,
-                created_time,
-                model_name,
-                tokenizer,
-                request_metadata,
-            )
+            response, inband_engine_stats = (
+                self.request_output_to_completion_response(
+                    final_res_batch_checked,
+                    request,
+                    request_id,
+                    created_time,
+                    model_name,
+                    tokenizer,
+                    request_metadata,
+                ))
         except asyncio.CancelledError:
             return self.create_error_response("Client disconnected")
         except ValueError as e:
@@ -242,7 +244,7 @@ class OpenAIServingCompletion(OpenAIServing):
 
             return fake_stream_generator()
 
-        return response
+        return response, inband_engine_stats
 
     async def completion_stream_generator(
         self,
@@ -400,16 +402,21 @@ class OpenAIServingCompletion(OpenAIServing):
         model_name: str,
         tokenizer: AnyTokenizer,
         request_metadata: RequestResponseMetadata,
-    ) -> CompletionResponse:
+    ) -> tuple[CompletionResponse, Optional[InbandEngineStats]]:
         choices: list[CompletionResponseChoice] = []
         num_prompt_tokens = 0
         num_generated_tokens = 0
-
+        # choose latest stats from the batch of request outputs
+        latest_engine_stats: Optional[InbandEngineStats] = None
         for final_res in final_res_batch:
             prompt_token_ids = final_res.prompt_token_ids
             assert prompt_token_ids is not None
             prompt_logprobs = clamp_prompt_logprobs(final_res.prompt_logprobs)
             prompt_text = final_res.prompt
+            if not latest_engine_stats or (
+                    final_res.inband_engine_stats and latest_engine_stats.now
+                    < final_res.inband_engine_stats.now):
+                latest_engine_stats = final_res.inband_engine_stats
 
             token_ids: GenericSequence[int]
             out_logprobs: Optional[GenericSequence[Optional[dict[int,
@@ -482,7 +489,7 @@ class OpenAIServingCompletion(OpenAIServing):
             model=model_name,
             choices=choices,
             usage=usage,
-        )
+        ), latest_engine_stats
 
     def _create_completion_logprobs(
         self,
