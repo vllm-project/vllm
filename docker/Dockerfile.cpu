@@ -121,6 +121,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 ADD ./tests/ ./tests/
 ADD ./examples/ ./examples/
 ADD ./benchmarks/ ./benchmarks/
+ADD ./vllm/collect_env.py .
 
 # install development dependencies (for testing)
 RUN --mount=type=cache,target=/root/.cache/uv \

@@ -241,6 +241,7 @@ if [ "$TARGETPLATFORM" != "linux/arm64" ]; then \
 fi
 COPY examples examples
 COPY benchmarks benchmarks
+COPY ./vllm/collect_env.py .
 
 # Although we build Flashinfer with AOT mode, there's still
 # some issues w.r.t. JIT compilation. Therefore we need to
