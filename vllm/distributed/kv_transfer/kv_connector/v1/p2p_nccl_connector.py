@@ -75,7 +75,7 @@ class P2pNcclConnectorMetadata(KVConnectorMetadata):
 class P2pNcclConnector(KVConnectorBase_V1):
 
     def __init__(self, vllm_config: "VllmConfig", role: KVConnectorRole,
-                 rank: Optional[int], local_rank: Optional[int]):
+                 rank: int, local_rank: int):
         super().__init__(vllm_config=vllm_config, role=role)
         self._block_size = vllm_config.cache_config.block_size
         self._requests_need_load: dict[str, Request] = {}
@@ -83,10 +83,10 @@ class P2pNcclConnector(KVConnectorBase_V1):
         self.rank = rank
 
         self.p2p_nccl_pipe = P2pNcclPipe(
-            local_rank=local_rank,  # type: ignore
+            local_rank=local_rank,
             config=self.config,
             hostname="",
-            port_offset=rank,  # type: ignore
+            port_offset=rank,
         )
 
     def start_load_kv(self, forward_context: "ForwardContext",
