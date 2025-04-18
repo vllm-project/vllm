@@ -390,7 +390,7 @@ def test_guided_json_completion_with_enum(llm, guided_decoding_backend: str):
 @pytest.mark.parametrize("guided_decoding_backend", GUIDED_DECODING_BACKENDS)
 def test_guided_number_range_json_completion(llm,
                                              guided_decoding_backend: str):
-    sample_number_range_schema = {
+    sample_output_schema = {
         "type": "object",
         "properties": {
             "age": {
@@ -403,23 +403,22 @@ def test_guided_number_range_json_completion(llm,
                 "minimum": 0.0,
                 "maximum": 100.0
             },
-            "level": {
-                "type": "integer",
-                "minimum": 1,
-                "maximum": 10
+            "zipcode": {
+                "type": "string",
+                "pattern": r"^\d{5}(-\d{4})?$"
             },
         },
-        "required": ["age", "score", "level"],
+        "required": ["age", "score", "zipcode"],
     }
     sampling_params = SamplingParams(
         temperature=1.0,
         max_tokens=1000,
-        guided_decoding=GuidedDecodingParams(json=sample_number_range_schema,
+        guided_decoding=GuidedDecodingParams(json=sample_output_schema,
                                              backend=guided_decoding_backend),
     )
     outputs = llm.generate(
         prompts=[
-            "Create a JSON object for a user with age, score, and level."
+            "Create a JSON object for a user with age, score, and zipcode."
         ] * 2,
         sampling_params=sampling_params,
         use_tqdm=True,
@@ -436,49 +435,8 @@ def test_guided_number_range_json_completion(llm,
         assert generated_text is not None
         print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
         output_json = json.loads(generated_text)
-        jsonschema.validate(instance=output_json,
-                            schema=sample_number_range_schema)
+        jsonschema.validate(instance=output_json, schema=sample_output_schema)
         assert 18 <= output_json["age"] <= 99
         assert 0.0 <= output_json["score"] <= 100.0
-        assert 1 <= output_json["level"] <= 10
-
-
-@pytest.mark.skip_global_cleanup
-@pytest.mark.parametrize("guided_decoding_backend", GUIDED_DECODING_BACKENDS)
-def test_guided_pattern_json_completion(llm, guided_decoding_backend: str):
-    sample_pattern_schema = {
-        "type": "object",
-        "properties": {
-            "zipcode": {
-                "type": "string",
-                "pattern": r"^\d{5}(-\d{4})?$"
-            },
-        },
-        "required": ["zipcode"],
-    }
-    sampling_params = SamplingParams(
-        temperature=1.0,
-        max_tokens=1000,
-        guided_decoding=GuidedDecodingParams(json=sample_pattern_schema,
-                                             backend=guided_decoding_backend),
-    )
-    outputs = llm.generate(
-        prompts=["Create a JSON object for a US zipcode (5 or 9 digits)."] * 2,
-        sampling_params=sampling_params,
-        use_tqdm=True,
-    )
-
-    assert outputs is not None
-
-    for output in outputs:
-        assert output is not None
-        assert isinstance(output, RequestOutput)
-        prompt = output.prompt
-
-        generated_text = output.outputs[0].text
-        assert generated_text is not None
-        print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
-        output_json = json.loads(generated_text)
-        jsonschema.validate(instance=output_json, schema=sample_pattern_schema)
         assert (re.fullmatch(r"^\d{5}(-\d{4})?$", output_json["zipcode"])
                 is not None)
