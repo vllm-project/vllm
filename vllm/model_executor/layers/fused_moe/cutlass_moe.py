@@ -134,9 +134,18 @@ def cutlass_moe_fp8(
                                  dtype=torch.int32,
                                  device=device)
 
-    a_map = torch.zeros((local_topk_ids.numel()),
-                        dtype=torch.int32,
-                        device=device)
+    a_map_initializer = torch.empty
+    c2_initializer = torch.empty
+    if expert_map is not None:
+        # With expert_map each Rank processes only a subset of experts. As
+        # a result not all of a_map and c2 tensors are filled. We fill it
+        # zeros for correctness.
+        a_map_initializer = torch.zeros
+        c2_initializer = torch.zeros
+
+    a_map = a_map_initializer((local_topk_ids.numel()),
+                              dtype=torch.int32,
+                              device=device)
     c_map = torch.empty((local_topk_ids.numel()),
                         dtype=torch.int32,
                         device=device)
@@ -149,7 +158,7 @@ def cutlass_moe_fp8(
     rep_a1_scales = a1_scale[a_map] if per_act_token else a1_scale
 
     c1 = torch.empty((m * topk, n * 2), device=device, dtype=out_dtype)
-    c2 = torch.zeros((m * topk, k), device=device, dtype=out_dtype)
+    c2 = c2_initializer((m * topk, k), device=device, dtype=out_dtype)
 
     ops.cutlass_moe_mm(c1, rep_a_q, w1_q, rep_a1_scales, w1_scale,
                        expert_offsets[:-1], problem_sizes1, ab_strides1,
