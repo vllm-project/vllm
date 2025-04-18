@@ -46,7 +46,7 @@ def test_qwen2_5_vl_get_window_indices_correctness(window_size, patch_size,
                     seqlens_window_numba,
                     cu_seqlens_full_numba,
                     cu_seqlens_window_numba,
-                ) = scheduler.generate_by_numba(grid_thw)
+                ) = scheduler.generate_by_torch_with_numba(grid_thw)
 
                 assert window_indices_torch.dtype == \
                     window_indices_numba.dtype, get_assertion_msg(grid_thw)
@@ -150,7 +150,7 @@ def test_qwen2_5_vl_get_window_indices_multi_items_correctness(
                 seqlens_window_numba,
                 cu_seqlens_full_numba,
                 cu_seqlens_window_numba,
-            ) = scheduler.generate_by_numba(grid_thw)
+            ) = scheduler.generate_by_torch_with_numba(grid_thw)
 
             assert window_indices_torch.dtype == \
                 window_indices_numba.dtype, get_assertion_msg(grid_thw)

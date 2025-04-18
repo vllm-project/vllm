@@ -534,12 +534,31 @@ class Qwen2VisionRotaryEmbedding(nn.Module):
 
 
 class Qwen2VLViTRotaryPosGenerator:
-    "Generating rotary position ids for Qwen2/2.5-VL's ViT"
+    """
+    Generating rotary position ids for Qwen2/2.5-VL's ViT
+    """
 
     spatial_merge_size: int
+
     device: torch.device
+
     embedding_position_seq: torch.Tensor
+    """
+    preallocated constant seq from 0 to max_position_embeddings
+
+    - example: tensor([0, 1, 2, ..., 32767])
+    """
+
     merge_unit_delta: torch.Tensor
+    """
+    h / w delta inside a merge unit
+    
+    - shape: (spatial_merge_size * spatial_merge_size, 2)
+    - example: tensor([[0, 0],
+                       [0, 1],
+                       [1, 0],
+                       [1, 1]])
+    """
 
     def __init__(
         self,
@@ -551,8 +570,6 @@ class Qwen2VLViTRotaryPosGenerator:
         self.device = device
 
         if device.type != "cpu":
-            # preallocated constant seq
-            # - example: tensor([0, 1, 2, ..., 32767])
             self.embedding_position_seq = torch.arange(
                 start=0,
                 end=max_position_embeddings,
@@ -570,17 +587,18 @@ class Qwen2VLViTRotaryPosGenerator:
                 .view(-1)
             merge_unit_delta_w = merge_seq.repeat(spatial_merge_size)
 
-            # shape: (spatial_merge_size * spatial_merge_size, 2)
-            # - h / w delta inside a merge unit
-            # - fixed for a specific `spatial_merge_size`
-            # - example: tensor([[0, 0],
-            #                    [0, 1],
-            #                    [1, 0],
-            #                    [1, 1]])
             self.merge_unit_delta = torch.stack(
                 [merge_unit_delta_h, merge_unit_delta_w], dim=1).to(device)
 
     def generate_by_torch(self, grid_thw: torch.Tensor) -> torch.Tensor:
+        """
+        original PyTorch implementation.
+
+        Arguments:
+            grid_thw: torch.Tensor[N, 3] of (T, H, W) per image / video
+        Returns:
+            torch.Tensor[T, 2] of (hpos_id, wpos_id) for all tokens
+        """
         pos_ids = []
         for t, h, w in grid_thw:
             hpos_ids = torch.arange(h).unsqueeze(1).expand(-1, w)
@@ -643,8 +661,6 @@ class Qwen2VLViTRotaryPosGenerator:
     ) -> torch.Tensor:
         """
         optimized version of `generate_torch`
-
-        suitable for running on device
         """
         out = torch.empty(
             (out_len, 2),
@@ -699,8 +715,6 @@ class Qwen2VLViTRotaryPosGenerator:
     ) -> np.ndarray:
         """
         numba optimized version of `generate_torch`
-
-        suitable for running on cpu
         """
         total_seqlen = 0
         for t, h, w in grid_thw:
@@ -762,6 +776,9 @@ class Qwen2VLViTRotaryPosGenerator:
             self._numba_kernel(grid_thw.numpy(), self.spatial_merge_size))
 
     def generate(self, grid_thw: torch.Tensor) -> torch.Tensor:
+        """
+        dispatch function of Qwen2VLViTRotaryPosGenerator
+        """
         if self.device.type == "cpu":
             return self.generate_by_numba(grid_thw)
 

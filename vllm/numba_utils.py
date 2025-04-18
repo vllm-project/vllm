@@ -1,4 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
+"""
+Utilities for numba-based operations
+"""
 
 from ctypes import c_void_p
 from typing import overload
@@ -16,10 +19,14 @@ from numba.extending import intrinsic
 def numba_array_memcpy(dst_arr: c_void_p, dst_offset: int, src_arr: c_void_p,
                        src_offset: int, elem_count: int) -> None:
     """
-    memcpy for numpy array in numba nopython mode
+    Copy a block of data within a numpy array for numba nopython mode.
 
-    NOTE:
-    - pass `dst_arr` and `src_arr` arg by `arr.ctypes`
+    Parameters:
+        dst_arr: c_void_p           # pointer to destination array buffer
+        dst_offset: int             # start offset (in elements) for destination
+        src_arr: c_void_p           # pointer to source array buffer
+        src_offset: int             # start offset (in elements) for source
+        elem_count: int             # number of elements to copy
     """
     ...
 
@@ -34,11 +41,10 @@ def numba_array_memcpy(
     elem_count: types.Integer,
 ):
     """
-    memcpy for numpy array in numba nopython mode
+    LLVM intrinsic for `numba_array_memcpy`
 
-    NOTE:
-    - this is the llvm ir code generator, 
-      for actual usage please see the overload above
+    This is the LLVM IR code generator, for actual func signature 
+    please refer to the overload above.
     """
 
     assert dst_arr.dtype == src_arr.dtype, \
@@ -79,5 +85,7 @@ def numba_array_memcpy(
 
 @jit(nopython=True, inline="always")
 def numba_cdiv(a: int, b: int) -> int:
-    """inline ceiling division in numba nopython mode"""
-    return -(-a // b)
+    """
+    Compute integer ceiling division in numba.
+    """
+    return -(a // -b)

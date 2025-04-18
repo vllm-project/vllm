@@ -488,6 +488,16 @@ class Qwen2_5_VisionRotaryEmbedding(nn.Module):
 
 
 class Qwen2_5_VisionAttentionScheduler:
+    """
+    Generate attention related tensors for Qwen2.5-VL ViT, including:
+        - window_indices
+        - reverse_indices
+        - full_seqlens
+        - window_seqlens
+        - cu_full_seqlens
+        - cu_window_seqlens
+    """
+
     spatial_merge_size: int
     spatial_merge_unit: int
     window_size: int
@@ -525,6 +535,19 @@ class Qwen2_5_VisionAttentionScheduler:
             torch.Tensor,  # cu_full_seqlens
             torch.Tensor,  # cu_window_seqlens
     ]:
+        """
+        original PyTorch implementation
+
+        Arguments:
+            grid_thw: Tensor of shape (B, 3) where each row is (T, H, W).
+        Returns:
+            window_indices: 1D index mapping into flattened merged cells.
+            reverse_indices: argsort of window_indices for restoring order.
+            full_seqlens: per-frame token counts before windowing.
+            window_seqlens: lengths of each attention window.
+            cu_full_seqlens: cumsum of full_seq_lengths with leading zero.
+            cu_window_seqlens: cumsum of window_seq_lengths with leading zero.
+        """
         grid_thw = grid_thw.to(self.device)
 
         full_seqlens = torch.repeat_interleave(grid_thw[:, 1] * grid_thw[:, 2],
@@ -722,7 +745,7 @@ class Qwen2_5_VisionAttentionScheduler:
             cu_window_seqlens.shape[0],
         )
 
-    def generate_by_numba(
+    def generate_by_torch_with_numba(
         self,
         grid_thw: torch.Tensor,
     ) -> tuple[
@@ -734,7 +757,10 @@ class Qwen2_5_VisionAttentionScheduler:
             torch.Tensor,  # cu_window_seqlens
     ]:
         """
-        numba optimized version of generate_by_torch
+        numba + torch accelerated implementation
+
+        for documents of arguments and return values, please refer to 
+            `generate_by_torch`
 
         NOTE:
         - it prevents zero in `window_seqlens`, so there is no need to call 
@@ -777,11 +803,30 @@ class Qwen2_5_VisionAttentionScheduler:
         reverse_indices = torch.empty(indices_length,
                                       dtype=torch.int64,
                                       device=self.device)
+        # same as torch.argsort(window_indices) and faster
         reverse_indices.index_put_((window_indices, ),
                                    self.position_seq[:indices_length])
 
         return (window_indices, reverse_indices, full_seqlens, window_seqlens,
                 cu_full_seqlens, cu_window_seqlens)
+
+    def generate(
+        self,
+        grid_thw: torch.Tensor,
+    ) -> tuple[
+            torch.Tensor,  # window_indices
+            torch.Tensor,  # reverse_indices
+            torch.Tensor,  # full_seqlens
+            torch.Tensor,  # window_seqlens
+            torch.Tensor,  # cu_full_seqlens
+            torch.Tensor,  # cu_window_seqlens
+    ]:
+        """
+        dispatch function of Qwen2_5_VisionAttentionScheduler
+        
+        currently always use `generate_by_torch_with_numba`
+        """
+        return self.generate_by_torch_with_numba(grid_thw)
 
 
 class Qwen2_5_VisionTransformer(nn.Module):
@@ -902,7 +947,7 @@ class Qwen2_5_VisionTransformer(nn.Module):
             seqlens_window,
             cu_seqlens_full,
             cu_seqlens_window,
-        ) = self.vision_attn_scheduler.generate_by_numba(grid_thw)
+        ) = self.vision_attn_scheduler.generate(grid_thw)
 
         # reshape
         seq_len, _ = hidden_states.size()
