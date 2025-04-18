@@ -64,7 +64,10 @@ class QuarkW4A4MXFP4(QuarkScheme):
         return 89
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        pass
+        layer.weight = torch.nn.Parameter(layer.weight.data,
+                                           requires_grad=False)
+        layer.weight_scale = torch.nn.Parameter(layer.weight_scale.data,
+                                          requires_grad=False)
 
     def create_weights(self, layer: torch.nn.Module,
                        output_partition_sizes: List[int],
@@ -137,6 +140,6 @@ class QuarkW4A4MXFP4(QuarkScheme):
         output = F.linear(qdq_x, dq_weight, bias)
         print("output", output.shape, output.dtype)
 
-        # TODO: handle output quantization to fp8 for KV.
+        # TODO: handle output quantization to fp8 for KV?
 
         return output.to(dtype=input_dtype).view(*output_shape)

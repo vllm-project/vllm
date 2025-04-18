@@ -627,6 +627,8 @@ class ROCmFlashAttentionImpl(AttentionImpl):
         print("using layer._k_scale", layer._k_scale)
         print("using layer._v_scale", layer._v_scale)
 
+        print("kv_cache", kv_cache.dtype, kv_cache.shape)
+
         # Only update KV cache for decoder self-attention
         # and encoder-decoder cross-attention
         if self.attn_type not in [
