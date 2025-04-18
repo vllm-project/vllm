@@ -434,6 +434,13 @@ function (define_gpu_extension_target GPU_MOD_NAME)
   target_compile_options(${GPU_MOD_NAME} PRIVATE
     $<$<COMPILE_LANGUAGE:${GPU_LANGUAGE}>:${GPU_COMPILE_FLAGS}>)
 
+  if (TORCH_CXX_FLAGS)
+      # keep the same flags as torch, especially for flags like
+      # GLIBCXX_USE_CXX11_ABI
+      message(STATUS "Find and use torch CXX flags: ${TORCH_CXX_FLAGS}")
+      target_compile_options(${GPU_MOD_NAME} PRIVATE ${TORCH_CXX_FLAGS})
+  endif()
+
   target_compile_definitions(${GPU_MOD_NAME} PRIVATE
     "-DTORCH_EXTENSION_NAME=${GPU_MOD_NAME}")
 
