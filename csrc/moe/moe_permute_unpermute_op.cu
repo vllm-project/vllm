@@ -2,13 +2,14 @@
 #include <torch/all.h>
 #include <ATen/cuda/CUDAContext.h>
 #include "permute_unpermute_kernels/moe_permute_unpermute_kernel.h"
+#include "permute_unpermute_kernels/dispatch.h"
 #include "core/registration.h"
 
 void moe_permute(
-    torch::Tensor& input,                            // [n_token, hidden]
-    torch::Tensor& topk_weights,                     //[n_token, topk]
+    const torch::Tensor& input,                      // [n_token, hidden]
+    const torch::Tensor& topk_weights,               //[n_token, topk]
     torch::Tensor& topk_ids,                         // [n_token, topk]
-    torch::Tensor& token_expert_indicies,            // [n_token, topk]
+    const torch::Tensor& token_expert_indicies,      // [n_token, topk]
     const std::optional<torch::Tensor>& expert_map,  // [n_expert]
     int64_t n_expert, int64_t n_local_expert, int64_t topk,
     const std::optional<int64_t>& align_block_size,
@@ -60,13 +61,12 @@ void moe_permute(
   // and scan local expert_first_token_offset for each ep rank for next group
   // gemm.
   if (expert_map.has_value()) {
-    int* expert_map_ptr = reinterpret_cast<int*>(expert_map.value().data_ptr());
+    const int* expert_map_ptr = get_ptr<int>(expert_map.value());
     valid_num_ptr =
         get_ptr<int64_t>(expert_first_token_offset) + n_local_expert;
     preprocessTopkIdLauncher(get_ptr<int>(topk_ids), n_token * topk,
                              expert_map_ptr, n_expert, stream);
   }
-  // std::cout << "tops id " << topk_ids << std::endl;
   // expert sort topk expert id and scan expert id get expert_first_token_offset
   sortAndScanExpert(get_ptr<int>(topk_ids), get_ptr<int>(token_expert_indicies),
                     get_ptr<int>(permuted_experts_id),
@@ -74,9 +74,6 @@ void moe_permute(
                     get_ptr<int64_t>(expert_first_token_offset), n_token,
                     n_expert, n_local_expert, topk, sorter,
                     get_ptr<int>(sort_workspace), stream);
-  // std::cout << "permuted_experts_id" << permuted_experts_id << std::endl;
-  // std::cout << "dst_row_id2src_row_id_map" << dst_row_id2src_row_id_map
-  //           << std::endl;
 
   // dispatch expandInputRowsKernelLauncher
   MOE_DISPATCH(input.scalar_type(), [&] {
@@ -101,11 +98,11 @@ void moe_permute(
 }
 
 void moe_unpermute(
-    torch::Tensor& permuted_hidden_states,     // [n_token * topk, hidden]
-    torch::Tensor& topk_weights,               //[n_token, topk]
-    torch::Tensor& topk_ids,                   // [n_token, topk]
-    torch::Tensor& src_row_id2dst_row_id_map,  // [n_token, topk]
-    torch::Tensor& expert_first_token_offset,  // [n_local_expert+1]
+    const torch::Tensor& permuted_hidden_states,     // [n_token * topk, hidden]
+    const torch::Tensor& topk_weights,               //[n_token, topk]
+    const torch::Tensor& topk_ids,                   // [n_token, topk]
+    const torch::Tensor& src_row_id2dst_row_id_map,  // [n_token, topk]
+    const torch::Tensor& expert_first_token_offset,  // [n_local_expert+1]
     int64_t n_expert, int64_t n_local_expert, int64_t topk,
     torch::Tensor& hidden_states  // [n_token, hidden]
 ) {
@@ -122,7 +119,7 @@ void moe_unpermute(
   auto n_token = hidden_states.size(0);
   auto n_hidden = hidden_states.size(1);
   auto stream = at::cuda::getCurrentCUDAStream().stream();
-  int64_t* valid_ptr =
+  const int64_t* valid_ptr =
       get_ptr<int64_t>(expert_first_token_offset) + n_local_expert;
   MOE_DISPATCH(hidden_states.scalar_type(), [&] {
     finalizeMoeRoutingKernelLauncher<scalar_t, scalar_t>(
