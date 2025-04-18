@@ -290,13 +290,13 @@ bool is_valid_config(thread_config_t const& th_config, int thread_m_blocks,
     COMMON_GET_IF_M234(W_TYPE, 8, 4, 128)  \
     COMMON_GET_IF_M234(W_TYPE, 4, 8, 128)
 
-  #define BIGGROUP_GET_IF_M1(W_TYPE, N_BLOCKS, K_BLOCKS, NUM_THREADS)       \
+  #define BIGGROUP_GET_IF_M1(W_TYPE, N_BLOCKS, K_BLOCKS, NUM_THREADS)     \
     _GET_IF(W_TYPE, 1, N_BLOCKS, K_BLOCKS, true, -1, NUM_THREADS, false)  \
     _GET_IF(W_TYPE, 1, N_BLOCKS, K_BLOCKS, true, 8, NUM_THREADS, false)   \
     _GET_IF(W_TYPE, 1, N_BLOCKS, K_BLOCKS, false, -1, NUM_THREADS, false) \
     _GET_IF(W_TYPE, 1, N_BLOCKS, K_BLOCKS, false, 8, NUM_THREADS, false)
 
-  #define BIGGROUP_GET_IF_M234(W_TYPE, N_BLOCKS, K_BLOCKS, NUM_THREADS)     \
+  #define BIGGROUP_GET_IF_M234(W_TYPE, N_BLOCKS, K_BLOCKS, NUM_THREADS)   \
     _GET_IF(W_TYPE, 2, N_BLOCKS, K_BLOCKS, false, -1, NUM_THREADS, false) \
     _GET_IF(W_TYPE, 2, N_BLOCKS, K_BLOCKS, false, 8, NUM_THREADS, false)  \
     _GET_IF(W_TYPE, 3, N_BLOCKS, K_BLOCKS, false, -1, NUM_THREADS, false) \
@@ -685,8 +685,8 @@ torch::Tensor gptq_marlin_gemm(
   if (use_fp32_reduce) {
     int max_m_block_size = (size_m + 16 - 1) / 16 * 16;
     max_m_block_size = min(max_m_block_size, 64);
-    int max_c_tmp_size = sms * max_m_block_size *
-                         MARLIN_NAMESPACE_NAME::max_thread_n;
+    int max_c_tmp_size =
+        sms * max_m_block_size * MARLIN_NAMESPACE_NAME::max_thread_n;
     c_tmp = torch::empty({max_c_tmp_size}, options_fp32);
   } else {
     c_tmp = torch::empty({0}, options_fp32);

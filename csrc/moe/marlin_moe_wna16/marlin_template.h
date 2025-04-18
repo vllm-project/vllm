@@ -49,9 +49,9 @@ template <typename scalar_t,  // compute dtype, half or nv_float16
                                       // only works when thread_m_blocks == 1
           const int stages,  // number of stages for the async global->shared
                              // fetch pipeline
-          const int group_blocks,    // number of consecutive 16x16 blocks
-                                     // with a separate quantization scale
-          const bool is_zp_float     // is zero point of float16 type?
+          const int group_blocks,  // number of consecutive 16x16 blocks
+                                   // with a separate quantization scale
+          const bool is_zp_float   // is zero point of float16 type?
           >
 __global__ void Marlin(
     const int4* __restrict__ A,  // fp16 input matrix of shape mxk
@@ -76,9 +76,8 @@ __global__ void Marlin(
     int prob_k,             // reduction dimension k
     int* locks,             // extra global storage for barrier synchronization
     bool use_atomic_add,    // whether to use atomic add to reduce
-    bool use_fp32_reduce,    // whether to use fp32 global reduce
-    int max_shared_mem
-) {}
+    bool use_fp32_reduce,   // whether to use fp32 global reduce
+    int max_shared_mem) {}
 
 }  // namespace MARLIN_NAMESPACE_NAME
 
@@ -291,9 +290,9 @@ template <typename scalar_t,  // compute dtype, half or nv_float16
                                       // only works when thread_m_blocks == 1
           const int stages,  // number of stages for the async global->shared
                              // fetch pipeline
-          const int group_blocks,    // number of consecutive 16x16 blocks
-                                     // with a separate quantization scale
-          const bool is_zp_float     // is zero point of float16 type?
+          const int group_blocks,  // number of consecutive 16x16 blocks
+                                   // with a separate quantization scale
+          const bool is_zp_float   // is zero point of float16 type?
           >
 __global__ void Marlin(
     const int4* __restrict__ A,  // fp16 input matrix of shape mxk
@@ -319,8 +318,7 @@ __global__ void Marlin(
     int* locks,             // extra global storage for barrier synchronization
     bool use_atomic_add,    // whether to use atomic add to reduce
     bool use_fp32_reduce,   // whether to use fp32 global reduce
-    int max_shared_mem
-) {
+    int max_shared_mem) {
   // Each threadblock processes one "stripe" of the B matrix with (roughly) the
   // same size, which might involve multiple column "slices" (of width 16 *
   // `thread_n_blocks`). Stripes are defined as shown in the 3x3 matrix 5 SM
@@ -397,7 +395,8 @@ __global__ void Marlin(
   int64_t B_expert_off = 0;
 
   int4* sh_block_sorted_ids_int4 = sh;
-  int4* sh_rd_block_sorted_ids_int4 = sh_block_sorted_ids_int4 + moe_block_size / 4;
+  int4* sh_rd_block_sorted_ids_int4 =
+      sh_block_sorted_ids_int4 + moe_block_size / 4;
   int4* sh_block_topk_weights_int4 =
       sh_rd_block_sorted_ids_int4 + moe_block_size / 4;
   int4* sh_new = sh_block_topk_weights_int4 + moe_block_size / 4;
@@ -452,7 +451,8 @@ __global__ void Marlin(
 
   #pragma unroll
       for (int i = 0; i < 4; i++)
-        sh_rd_block_sorted_ids[tid4 * 4 + i] = sh_block_sorted_ids[tid4 * 4 + i] / top_k;
+        sh_rd_block_sorted_ids[tid4 * 4 + i] =
+            sh_block_sorted_ids[tid4 * 4 + i] / top_k;
 
       if (mul_topk_weights) {
   #pragma unroll
@@ -765,9 +765,9 @@ __global__ void Marlin(
   static_assert(thread_m_blocks * 16 * thread_n_blocks * 16 / 8 <=
                 stages * b_sh_stage);
   int4* sh_a = sh_s + sh_s_size;
-  constexpr int shm_size_used = moe_block_size * 3 / 4 +
-      stages * (g_idx_stage + zp_sh_stage) + sh_s_size +
-      (sh_red_size > sh_b_size ? sh_red_size : sh_b_size);
+  constexpr int shm_size_used =
+      moe_block_size * 3 / 4 + stages * (g_idx_stage + zp_sh_stage) +
+      sh_s_size + (sh_red_size > sh_b_size ? sh_red_size : sh_b_size);
 
   // all remaining shared memory is used to cache A (input)
   // sh_a_max_row is at least ` stages * 16 * thread_m_blocks `
@@ -831,8 +831,11 @@ __global__ void Marlin(
   // Asynchronously fetch the next A, B and s tile from global to the next
   // shared memory pipeline location.
   bool should_load_a = true;
-  int max_allowed_stage_data = ((sh_a_max_row - moe_block_size) / block_num_valid_tokens + 1) / stages * stages;
-  auto fetch_to_shared = [&](int pipe, int a_off, bool pred = true, int pipe_a = 0) {
+  int max_allowed_stage_data =
+      ((sh_a_max_row - moe_block_size) / block_num_valid_tokens + 1) / stages *
+      stages;
+  auto fetch_to_shared = [&](int pipe, int a_off, bool pred = true,
+                             int pipe_a = 0) {
     if (pred) {
       if (should_load_a) {
         int4* sh_a_stage = sh_a + pipe_a * block_num_valid_tokens * a_sh_stride;
@@ -842,7 +845,8 @@ __global__ void Marlin(
           int64_t sorted_row = 0;
           if (!m_block_size_8 || row < 8)
             sorted_row = sh_rd_block_sorted_ids[row];
-          int64_t true_idx = sorted_row * a_gl_stride + a_gl_rd_col + a_gl_rd_delta_o * a_off;
+          int64_t true_idx =
+              sorted_row * a_gl_stride + a_gl_rd_col + a_gl_rd_delta_o * a_off;
           cp_async4_pred(&sh_a_stage[a_sh_wr_trans[i]], &A[true_idx],
                          row < block_num_valid_tokens);
         }
@@ -1672,19 +1676,25 @@ __global__ void Marlin(
 
     int max_num_stage_groups = max_allowed_stage_data / stages;
 
-    for (int stage_group_id = 0; stage_group_id < max_num_stage_groups; stage_group_id++) {
+    for (int stage_group_id = 0; stage_group_id < max_num_stage_groups;
+         stage_group_id++) {
   #pragma unroll
       for (int pipe = 0; pipe < stages;) {
   #pragma unroll
         for (int k = 0; k < b_sh_wr_iters; k++) {
-            int idx = (pipe >= stages && stage_group_id == max_num_stage_groups - 1) ? (pipe - stages) : (pipe + stage_group_id * stages);
-            fetch_to_registers(k + 1, pipe % stages, idx);
+          int idx =
+              (pipe >= stages && stage_group_id == max_num_stage_groups - 1)
+                  ? (pipe - stages)
+                  : (pipe + stage_group_id * stages);
+          fetch_to_registers(k + 1, pipe % stages, idx);
           fetch_scales_to_registers(k + 1, pipe);
           fetch_zp_to_registers(k + 1, pipe);
           if (k == b_sh_wr_iters - 2) {
-              int idx = (pipe >= 1 && stage_group_id == max_num_stage_groups - 1) ? (pipe - 1) : (pipe + (stage_group_id + 1) * stages - 1);
-              fetch_to_shared((pipe + stages - 1) % stages, pipe,
-                              slice_iters >= stages, idx);
+            int idx = (pipe >= 1 && stage_group_id == max_num_stage_groups - 1)
+                          ? (pipe - 1)
+                          : (pipe + (stage_group_id + 1) * stages - 1);
+            fetch_to_shared((pipe + stages - 1) % stages, pipe,
+                            slice_iters >= stages, idx);
             pipe++;
             wait_for_stage();
             init_same_group(pipe % stages);
@@ -1709,7 +1719,8 @@ __global__ void Marlin(
         }
         int last_group_id = g_idx[last_g_idx];
         if (last_group_id >= sh_first_group_id + sh_num_groups) {
-          fetch_act_order_scales_to_shared(false, first_group_id, last_group_id);
+          fetch_act_order_scales_to_shared(false, first_group_id,
+                                           last_group_id);
           __syncthreads();
         }
       }
@@ -1809,10 +1820,13 @@ __global__ void Marlin(
       init_slice();
 
       if (slice_col == 0) {
-        max_allowed_stage_data = ((sh_a_max_row - moe_block_size) / block_num_valid_tokens + 1) / stages * stages;
+        max_allowed_stage_data =
+            ((sh_a_max_row - moe_block_size) / block_num_valid_tokens + 1) /
+            stages * stages;
       }
 
-      if (slice_col == 0 || old_slice_row || prob_k > thread_k_blocks * 16 * max_allowed_stage_data) {
+      if (slice_col == 0 || old_slice_row ||
+          prob_k > thread_k_blocks * 16 * max_allowed_stage_data) {
         should_load_a = true;
       } else {
         should_load_a = false;

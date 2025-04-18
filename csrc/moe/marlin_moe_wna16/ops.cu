@@ -314,15 +314,15 @@ bool is_valid_config(thread_config_t const& th_config, int thread_m_blocks,
     COMMON_GET_IF_M1(W_TYPE, 8, 8, 256)    \
     COMMON_GET_IF_M1(W_TYPE, 8, 4, 128)    \
     COMMON_GET_IF_M234(W_TYPE, 16, 4, 256) \
-    COMMON_GET_IF_M234(W_TYPE, 8, 4, 128)  \
+    COMMON_GET_IF_M234(W_TYPE, 8, 4, 128)
 
-  #define BIGGROUP_GET_IF_M1(W_TYPE, N_BLOCKS, K_BLOCKS, NUM_THREADS)       \
+  #define BIGGROUP_GET_IF_M1(W_TYPE, N_BLOCKS, K_BLOCKS, NUM_THREADS)     \
     _GET_IF(W_TYPE, 1, N_BLOCKS, K_BLOCKS, true, -1, NUM_THREADS, false)  \
     _GET_IF(W_TYPE, 1, N_BLOCKS, K_BLOCKS, true, 8, NUM_THREADS, false)   \
     _GET_IF(W_TYPE, 1, N_BLOCKS, K_BLOCKS, false, -1, NUM_THREADS, false) \
     _GET_IF(W_TYPE, 1, N_BLOCKS, K_BLOCKS, false, 8, NUM_THREADS, false)
 
-  #define BIGGROUP_GET_IF_M234(W_TYPE, N_BLOCKS, K_BLOCKS, NUM_THREADS)     \
+  #define BIGGROUP_GET_IF_M234(W_TYPE, N_BLOCKS, K_BLOCKS, NUM_THREADS)   \
     _GET_IF(W_TYPE, 2, N_BLOCKS, K_BLOCKS, false, -1, NUM_THREADS, false) \
     _GET_IF(W_TYPE, 2, N_BLOCKS, K_BLOCKS, false, 8, NUM_THREADS, false)  \
     _GET_IF(W_TYPE, 3, N_BLOCKS, K_BLOCKS, false, -1, NUM_THREADS, false) \
@@ -351,7 +351,7 @@ bool is_valid_config(thread_config_t const& th_config, int thread_m_blocks,
     FZP_GET_IF_M1(W_TYPE, 8, 8, 256)    \
     FZP_GET_IF_M1(W_TYPE, 8, 4, 128)    \
     FZP_GET_IF_M234(W_TYPE, 16, 4, 256) \
-    FZP_GET_IF_M234(W_TYPE, 8, 4, 128)  \
+    FZP_GET_IF_M234(W_TYPE, 8, 4, 128)
 
   // We currently have 4-bit models only with group_blocks == 4
   #define ACT_GET_IF_M1(W_TYPE, N_BLOCKS, K_BLOCKS, NUM_THREADS)        \
@@ -367,7 +367,7 @@ bool is_valid_config(thread_config_t const& th_config, int thread_m_blocks,
     ACT_GET_IF_M1(W_TYPE, 8, 8, 256)    \
     ACT_GET_IF_M1(W_TYPE, 8, 4, 128)    \
     ACT_GET_IF_M234(W_TYPE, 16, 4, 256) \
-    ACT_GET_IF_M234(W_TYPE, 8, 4, 128)  \
+    ACT_GET_IF_M234(W_TYPE, 8, 4, 128)
 
 template <typename scalar_t>
 MarlinFuncPtr get_marlin_kernel(const vllm::ScalarType q_type,
@@ -389,7 +389,6 @@ MarlinFuncPtr get_marlin_kernel(const vllm::ScalarType q_type,
 
   ACT_GET_IF(vllm::kU4B8)
   ACT_GET_IF(vllm::kU8B128)
-
 
   return kernel;
 }
@@ -473,14 +472,14 @@ void marlin_mm(const void* A, const void* B, void* C, void* C_tmp, void* s,
   bool m_block_size_8 = moe_block_size == 8;
 
   if (has_zp) {
-    TORCH_CHECK(
-        q_type == vllm::kU4,
-        "q_type must be u4 when has_zp = True. Got = ", q_type.str());
+    TORCH_CHECK(q_type == vllm::kU4,
+                "q_type must be u4 when has_zp = True. Got = ", q_type.str());
   } else {
-    TORCH_CHECK(
-        q_type == vllm::kU4B8 || q_type == vllm::kU8B128 || q_type == vllm::kFE4M3fn,
-        "q_type must be uint4b8, uint8b128 or fp8e4m3 when has_zp = False. Got = ",
-        q_type.str());
+    TORCH_CHECK(q_type == vllm::kU4B8 || q_type == vllm::kU8B128 ||
+                    q_type == vllm::kFE4M3fn,
+                "q_type must be uint4b8, uint8b128 or fp8e4m3 when has_zp = "
+                "False. Got = ",
+                q_type.str());
   }
 
   TORCH_CHECK(prob_m > 0 && prob_n > 0 && prob_k > 0, "Invalid MNK = [", prob_m,
@@ -799,10 +798,11 @@ torch::Tensor moe_wna16_marlin_gemm(
         b_q_type == vllm::kU4,
         "b_q_type must be u4 when has_zp = True. Got = ", b_q_type.str());
   } else {
-    TORCH_CHECK(
-        b_q_type == vllm::kU4B8 || b_q_type == vllm::kU8B128 || b_q_type == vllm::kFE4M3fn,
-        "b_q_type must be uint4b8, uint8b128 or fp8e4m3 when has_zp = False. Got = ",
-        b_q_type.str());
+    TORCH_CHECK(b_q_type == vllm::kU4B8 || b_q_type == vllm::kU8B128 ||
+                    b_q_type == vllm::kFE4M3fn,
+                "b_q_type must be uint4b8, uint8b128 or fp8e4m3 when has_zp = "
+                "False. Got = ",
+                b_q_type.str());
   }
 
   if (has_zp && is_zp_float) {

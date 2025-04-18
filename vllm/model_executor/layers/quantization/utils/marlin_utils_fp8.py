@@ -73,10 +73,6 @@ def prepare_fp8_layer_for_marlin(layer: torch.nn.Module,
 
     # WORKSPACE
     layer.workspace = marlin_make_workspace_new(device)
-    if layer.weight_block_size is None:
-        group_size = -1
-    else:
-        group_size = layer.weight_block_size[1]
 
     # WEIGHT
     # Repack weights to marlin format
@@ -103,7 +99,15 @@ def prepare_fp8_layer_for_marlin(layer: torch.nn.Module,
         assert False
 
     if layer.weight_block_size is None:
-        scales = scales.view(1, 1).repeat_interleave(part_size_n, 1)
+        group_size = -1
+    else:
+        group_size = layer.weight_block_size[1]
+
+    if layer.weight_block_size is None:
+        if scales.nelement() == 1:
+            scales = scales.view(1, 1).repeat_interleave(part_size_n, 1)
+        else:
+            scales = scales.view(part_size_n, 1)
     else:
         block_n = layer.weight_block_size[0]
         scales = scales.T.repeat_interleave(block_n, 1)
@@ -128,19 +132,13 @@ def prepare_moe_fp8_layer_for_marlin(layer: torch.nn.Module,
     k = layer.hidden_size
     n = layer.intermediate_size_per_partition
 
-    device = layer.w13_weight.device
-    if layer.weight_block_size is None:
-        group_size = -1
-    else:
-        group_size = layer.weight_block_size[1]
-
     # WORKSPACE
+    device = layer.w13_weight.device
     layer.workspace = marlin_make_workspace_new(device, 4)
     perm = torch.empty(0, dtype=torch.int, device=device)
 
     # WEIGHT
     # Repack weights to marlin format
-    tensor_list = []
     for name in ["w13_weight", "w2_weight"]:
         weight = getattr(layer, name)
         tensor_list = []
@@ -174,6 +172,11 @@ def prepare_moe_fp8_layer_for_marlin(layer: torch.nn.Module,
 
     # WEIGHT SCALES
     # Permute scales
+    if layer.weight_block_size is None:
+        group_size = -1
+    else:
+        group_size = layer.weight_block_size[1]
+
     for name in ["w13", "w2"]:
         if name + "_weight_scale" in dir(layer):
             new_name = name + "_weight_scale"

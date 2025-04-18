@@ -8,9 +8,11 @@ import torch
 import vllm._custom_ops as ops
 from vllm.model_executor.layers.fused_moe.fused_moe import (
     moe_align_block_size, try_get_optimal_moe_config)
-from vllm.scalar_type import scalar_types, ScalarType
+from vllm.model_executor.layers.quantization.utils.marlin_utils import (
+    marlin_make_workspace_new)
+from vllm.scalar_type import ScalarType, scalar_types
 from vllm.utils import direct_register_custom_op
-from vllm.model_executor.layers.quantization.utils.marlin_utils import marlin_make_workspace_new
+
 
 def fused_marlin_moe(hidden_states: torch.Tensor,
                      w1: torch.Tensor,
