@@ -6,7 +6,6 @@ from typing import TYPE_CHECKING, Any, Optional
 import torch
 
 from vllm.attention.backends.abstract import AttentionType
-from vllm.attention.backends.utils import is_flash_attn_mla_supported
 from vllm.logger import init_logger
 from vllm.v1.attention.backends.mla.common import (MLACommonBackend,
                                                    MLACommonDecodeMetadata,
@@ -14,6 +13,7 @@ from vllm.v1.attention.backends.mla.common import (MLACommonBackend,
                                                    MLACommonMetadata,
                                                    MLACommonMetadataBuilder)
 from vllm.vllm_flash_attn import flash_attn_varlen_func
+from vllm.vllm_flash_attn.fa_utils import flash_attn_supports_mla
 
 if TYPE_CHECKING:
     pass
@@ -21,7 +21,7 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
-class FlashMLABackend(MLACommonBackend):
+class FlashAttnMLABackend(MLACommonBackend):
 
     @staticmethod
     def get_name() -> str:
@@ -42,7 +42,9 @@ class FlashMLABackend(MLACommonBackend):
 
 @dataclass
 class FlashAttnMLADecodeMetadata(MLACommonDecodeMetadata):
-    pass
+    query_start_loc: torch.Tensor
+    max_query_len: int
+    max_seq_len: int
 
 
 @dataclass
@@ -59,15 +61,24 @@ class FlashAttnMLAMetadataBuilder(
         self.num_q_heads = self.runner.model_config.get_num_attention_heads(
             self.runner.parallel_config)
 
-    def _build_decode(self, input_positions: torch.Tensor,
-                      block_table: torch.Tensor,
-                      seq_lens: torch.Tensor) -> FlashAttnMLADecodeMetadata:
-        #
+    def _build_decode(self, seq_lens_cpu: torch.Tensor,
+                      seq_lens_device: torch.Tensor,
+                      query_start_loc_cpu: torch.Tensor,
+                      query_start_loc_device: torch.Tensor,
+                      input_positions: torch.Tensor,
+                      block_table: torch.Tensor) -> FlashAttnMLADecodeMetadata:
+
+        query_lens_cpu = (query_start_loc_cpu[1:] - query_start_loc_cpu[:-1])
+        max_query_len = query_lens_cpu.max().item()
+        max_seq_len = seq_lens_cpu.max().item()
 
         return FlashAttnMLADecodeMetadata(
             input_positions=input_positions,
             block_table=block_table,
-            seq_lens=seq_lens,
+            seq_lens=seq_lens_device,
+            query_start_loc=query_start_loc_device,
+            max_query_len=max_query_len,
+            max_seq_len=max_seq_len,
         )
 
 
@@ -92,7 +103,7 @@ class FlashAttnMLAImpl(MLACommonImpl[MLACommonMetadata]):
                          blocksparse_params, logits_soft_cap, attn_type,
                          **mla_args)
 
-        assert is_flash_attn_mla_supported(), \
+        assert flash_attn_supports_mla(), \
             "FlashAttnMLA is not supported on this device"
 
         unsupported_features = [
@@ -132,10 +143,10 @@ class FlashAttnMLAImpl(MLACommonImpl[MLACommonMetadata]):
             k=kv_pe_cache.unsqueeze(-2),  # Add head dim of 1
             v=kv_c_cache.unsqueeze(-2),  # Add head dim of 1
             q_v=q_nope,
-            max_seqlen_q=decode_meta.max_decode_query_len,
+            max_seqlen_q=decode_meta.max_query_len,
             cu_seqlens_q=decode_meta.query_start_loc,
-            max_seqlen_k=decode_meta.max_decode_seq_len,
-            seqused_k=decode_meta.seq_lens_tensor,
+            max_seqlen_k=decode_meta.max_seq_len,
+            seqused_k=decode_meta.seq_lens,
             block_table=decode_meta.block_tables,
             softmax_scale=self.scale,
             causal=True,

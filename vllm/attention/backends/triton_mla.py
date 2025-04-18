@@ -1,32 +1,29 @@
 # SPDX-License-Identifier: Apache-2.0
 
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Type
+from typing import Any, Dict, List, Optional, Type
 
 import torch
 
-from vllm.attention.backends.abstract import AttentionType
+from vllm.attention.backends.abstract import (AttentionType,
+                                              is_quantized_kv_cache)
 from vllm.attention.backends.mla.common import (MLACommonBackend,
                                                 MLACommonImpl,
                                                 MLACommonMetadata)
-from vllm.vllm_flash_attn.fa_utils import flash_attn_supports_mla
-from vllm.vllm_flash_attn import flash_attn_varlen_func
-
-if TYPE_CHECKING:
-    pass
+from vllm.attention.ops.triton_decode_attention import decode_attention_fwd
 
 
-class FlashAttnMLABackend(MLACommonBackend):
+class TritonMLABackend(MLACommonBackend):
 
     @staticmethod
     def get_name() -> str:
-        return "FLASHATTN_MLA"
+        return "TRITON_MLA"
 
     @staticmethod
-    def get_impl_cls() -> Type["FlashAttnMLAImpl"]:
-        return FlashAttnMLAImpl
+    def get_impl_cls() -> Type["TritonMLAImpl"]:
+        return TritonMLAImpl
 
 
-class FlashAttnMLAImpl(MLACommonImpl[MLACommonMetadata]):
+class TritonMLAImpl(MLACommonImpl[MLACommonMetadata]):
 
     def __init__(
             self,
@@ -47,15 +44,12 @@ class FlashAttnMLAImpl(MLACommonImpl[MLACommonMetadata]):
                          blocksparse_params, logits_soft_cap, attn_type,
                          **mla_args)
 
-        assert flash_attn_supports_mla(), \
-            "FlashAttnMLA is not supported on this device"
-
         unsupported_features = [
             alibi_slopes, sliding_window, blocksparse_params, logits_soft_cap
         ]
         if any(unsupported_features):
             raise NotImplementedError(
-                "FlashMLAImpl does not support one of the following: "
+                "TritonMLAImpl does not support one of the following: "
                 "alibi_slopes, sliding_window, blocksparse_params, "
                 "logits_soft_cap")
 
@@ -63,7 +57,11 @@ class FlashAttnMLAImpl(MLACommonImpl[MLACommonMetadata]):
             raise NotImplementedError("Encoder self-attention and "
                                       "encoder/decoder cross-attention "
                                       "are not implemented for "
-                                      "FlashMLAImpl")
+                                      "TritonMLAImpl")
+
+        if is_quantized_kv_cache(self.kv_cache_dtype):
+            raise NotImplementedError(
+                "TritonMLA with FP8 KV cache not yet supported")
 
     def _forward_decode(
         self,
@@ -73,28 +71,43 @@ class FlashAttnMLAImpl(MLACommonImpl[MLACommonMetadata]):
         attn_metadata: MLACommonMetadata,
     ) -> torch.Tensor:
         assert kv_c_and_k_pe_cache.numel() > 0
-        if self.kv_cache_dtype.startswith("fp8"):
-            raise NotImplementedError("FP8 FlashMLA not yet supported")
 
         decode_meta = attn_metadata.decode_metadata
         assert decode_meta is not None
+        B = q_nope.shape[0]
 
-        kv_c_cache = kv_c_and_k_pe_cache[..., :self.kv_lora_rank]
-        kv_pe_cache = kv_c_and_k_pe_cache[..., self.kv_lora_rank:]
+        q = torch.cat([q_nope, q_pe], dim=-1)
+        o = torch.zeros(B,
+                        self.num_heads,
+                        self.kv_lora_rank,
+                        dtype=q.dtype,
+                        device=q.device)
 
-        o = flash_attn_varlen_func(
-            q=q_pe,
-            k=kv_pe_cache.unsqueeze(-2),  # Add head dim of 1
-            v=kv_c_cache.unsqueeze(-2),  # Add head dim of 1
-            q_v=q_nope,
-            max_seqlen_q=decode_meta.max_decode_query_len,
-            cu_seqlens_q=decode_meta.query_start_loc,
-            max_seqlen_k=decode_meta.max_decode_seq_len,
-            seqused_k=decode_meta.seq_lens_tensor,
-            block_table=decode_meta.block_tables,
-            softmax_scale=self.scale,
-            causal=True,
-            fa_version=3  # only version 3 is supported
+        num_kv_splits = 4  # TODO: heuristic
+
+        # TODO(lucas) Allocate ahead of time
+        attn_logits = torch.empty(
+            (
+                B,
+                self.num_heads,
+                num_kv_splits,
+                # NOTE(lucas) idk why the +1 is here but sglang has it so we
+                # just mirror that
+                self.kv_lora_rank + 1,
+            ),
+            dtype=torch.float32,
+            device=q.device,
         )
+
+        # Add a head dim of 1
+        kv_c_and_k_pe_cache = kv_c_and_k_pe_cache.unsqueeze(2)
+        kv_c_cache = kv_c_and_k_pe_cache[..., :self.kv_lora_rank]
+        PAGE_SIZE = kv_c_and_k_pe_cache.size(1)
+
+        # Run MQA
+        decode_attention_fwd(q, kv_c_and_k_pe_cache, kv_c_cache, o,
+                             decode_meta.block_tables,
+                             decode_meta.seq_lens_tensor, attn_logits,
+                             num_kv_splits, self.scale, PAGE_SIZE)
 
         return self._v_up_proj_and_o_proj(o)

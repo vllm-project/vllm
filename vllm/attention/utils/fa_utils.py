@@ -69,6 +69,7 @@ def flash_attn_supports_fp8() -> bool:
 
 
 def flash_attn_supports_mla():
+    from vllm.platforms import current_platform
     if current_platform.is_cuda():
         try:
             from vllm.vllm_flash_attn.flash_attn_interface import (

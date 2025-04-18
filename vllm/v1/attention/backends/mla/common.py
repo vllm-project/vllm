@@ -370,35 +370,6 @@ class MLACommonMetadata(Generic[D]):
                             FlashInferPrefillMetadata,
                             CudnnPrefillMetadata]] = None
 
-        @dataclass
-        class ChunkedContextMetadata:
-            # New for MLA (compared to FlashAttention)
-            # For handling chunked prefill
-            cu_seq_lens: torch.Tensor
-            starts: torch.Tensor
-            seq_tot: list[int]
-            max_seq_lens: list[int]
-            workspace: torch.Tensor
-
-        # Input positions for rotrary embeddings since for MLA the rotary
-        # position embeddings are applied inside the attention backend
-        input_positions: torch.Tensor
-        block_table: torch.Tensor
-        query_start_loc: torch.Tensor
-        max_query_len: int
-        chunked_context: Optional[ChunkedContextMetadata] = None
-
-    @dataclass
-    class DecodeMetadata:
-        # Input positions for rotrary embeddings since for MLA the rotary
-        # position embeddings are applied inside the attention backend
-        input_positions: torch.Tensor
-        block_table: torch.Tensor
-        seq_lens: torch.Tensor
-
-    decode: Optional[DecodeMetadata] = None
-    prefill: Optional[PrefillMetadata] = None
-
     def __post_init__(self):
         if self.head_dim is not None:
             MLACommonBackend.validate_head_size(self.head_dim)
@@ -432,6 +403,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
     understand this class
     """
     reorder_batch_threshold: ClassVar[int] = 1
+    decode_threshold: int = 1
 
     def __init__(self,
                  kv_cache_spec: AttentionSpec,
@@ -585,11 +557,17 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
         prefill.prefill_main = self._fi_prefill_main
         prefill.prefill_chunks = self._fi_prefill_chunks
 
-    def _build_decode(self, block_table_tensor: torch.Tensor,
-                      seq_lens: torch.Tensor):
+    def _build_decode(self,
+                      block_table_tensor: torch.Tensor,
+                      seq_lens_cpu: torch.Tensor,
+                      seq_lens_device: torch.Tensor,
+                      query_start_loc_cpu: torch.Tensor,
+                      query_start_loc_device: torch.Tensor,
+                      input_positions: torch.Tensor):
         return MLACommonDecodeMetadata(
+            input_positions=input_positions,
             block_table=block_table_tensor,
-            seq_lens=seq_lens,
+            seq_lens=seq_lens_device,
         )
 
     def build_for_cudagraph_capture(
@@ -621,6 +599,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
         device = self.device
         block_table_tensor = common_attn_metadata.block_table_tensor
         slot_mapping = common_attn_metadata.slot_mapping
+        device = self.runner.device
 
         query_start_loc = common_attn_metadata.query_start_loc
         query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu
@@ -733,6 +712,12 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
             decode_metadata = self._build_decode(
                 block_table_tensor=block_table_tensor[:num_decodes, ...],
                 seq_lens=seq_lens[:num_decodes],
+                query_start_loc_device=query_start_loc[:self._num_decodes + 1],
+                query_start_loc_cpu=query_start_loc_cpu[:self._num_decodes +
+                                                        1],
+                seq_lens_device=seq_lens[:self._num_decodes],
+                seq_lens_cpu=seq_lens_cpu[:self._num_decodes],
+                input_positions=input_positions[:self._num_decode_tokens],
             )
 
         attn_metadata = self.metadata_cls(
