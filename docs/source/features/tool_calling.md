@@ -169,7 +169,7 @@ Known issues:
 
 VLLM provides two JSON based chat templates for Llama 3.1 and 3.2:
 
-* `examples/tool_chat_template_llama3.1_json.jinja` - this is the "official" chat template for the Llama 3.1 
+* `examples/tool_chat_template_llama3.1_json.jinja` - this is the "official" chat template for the Llama 3.1
 models, but tweaked so that it works better with vLLM.
 * `examples/tool_chat_template_llama3.2_json.jinja` - this extends upon the Llama 3.1 chat template by adding support for
 images.
