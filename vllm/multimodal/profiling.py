@@ -226,13 +226,15 @@ class MultiModalProfiler(Generic[_I]):
                 "the input text is short. To avoid this, you should "
                 "increase `max_model_len` and `max_num_batched_tokens`, "
                 "reduce `max_num_seqs`, and/or reduce `mm_counts`.")
+            # V0 does not support chunked prefill.
+            logger.warning_once(message)
             # V1 enabled chunked prefill by default, and too short
             # max_num_batched_tokens can cause correctness issue,
             # so we need to raise error to avoid it.
-            if envs.VLLM_USE_V1:
-                raise ValueError(message)
-            # V0 does not support chunked prefill.
-            logger.warning_once(message)
+            # TODO(Isotr0py): activate the below logic once V1 support
+            # encoder-decoder models.
+            # if envs.VLLM_USE_V1:
+            #     raise ValueError(message)
 
         return DummyEncoderData(encoder_prompt_token_ids)
 
