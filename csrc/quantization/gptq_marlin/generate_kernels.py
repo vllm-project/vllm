@@ -78,7 +78,8 @@ def generate_new_kernels():
             c_dtype = "half" if dtype == "fp16" else "nv_bfloat16"
 
             is_zp_float_list = [False]
-            if dtype == "fp16" and scalar_type == "vllm::kU4" and group_blocks == 4:
+            if dtype == "fp16" and scalar_type == "vllm::kU4" and \
+                    group_blocks == 4:
                 is_zp_float_list.append(True)
 
             for is_zp_float in is_zp_float_list:

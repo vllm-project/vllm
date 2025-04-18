@@ -578,11 +578,9 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             expand_weights, is_rocm_aiter_block_scaled_moe_enabled,
             is_rocm_aiter_moe_enabled, shuffle_weights)
 
-        size_k_first = True
         # TODO (rob): refactor block quant into separate class.
         if self.block_quant:
             assert self.quant_config.activation_scheme == "dynamic"
-            size_k_first = False
             if current_platform.is_fp8_fnuz():
                 w13_weight, w13_weight_scale_inv, w13_input_scale = \
                     normalize_e4m3fn_to_e4m3fnuz(
