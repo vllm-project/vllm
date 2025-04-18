@@ -53,12 +53,20 @@ def test_compilation_config():
     assert args.compilation_config.level == 3
 
     # set to string form of a dict
-    args = parser.parse_args(["--compilation-config", "{'level': 3}"])
-    assert args.compilation_config.level == 3
+    args = parser.parse_args([
+        "--compilation-config",
+        "{'level': 3, 'cudagraph_capture_sizes': [1, 2, 4, 8]}",
+    ])
+    assert (args.compilation_config.level == 3 and
+            args.compilation_config.cudagraph_capture_sizes == [1, 2, 4, 8])
 
     # set to string form of a dict
-    args = parser.parse_args(["--compilation-config={'level': 3}"])
-    assert args.compilation_config.level == 3
+    args = parser.parse_args([
+        "--compilation-config="
+        "{'level': 3, 'cudagraph_capture_sizes': [1, 2, 4, 8]}",
+    ])
+    assert (args.compilation_config.level == 3 and
+            args.compilation_config.cudagraph_capture_sizes == [1, 2, 4, 8])
 
 
 def test_prefix_cache_default():

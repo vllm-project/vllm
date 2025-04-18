@@ -939,10 +939,11 @@ class EngineArgs:
                             'testing only. level 3 is the recommended level '
                             'for production.\n'
                             'To specify the full compilation config, '
-                            'use a JSON string.\n'
+                            'use a JSON string, e.g. ``{"level": 3, '
+                            '"cudagraph_capture_sizes": [1, 2, 4, 8]}``\n'
                             'Following the convention of traditional '
-                            'compilers, using -O without space is also '
-                            'supported. -O3 is equivalent to -O 3.')
+                            'compilers, using ``-O`` without space is also '
+                            'supported. ``-O3`` is equivalent to ``-O 3``.')
 
         parser.add_argument('--kv-transfer-config',
                             type=KVTransferConfig.from_cli,
