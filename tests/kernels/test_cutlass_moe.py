@@ -140,7 +140,7 @@ def run_with_expert_maps(num_experts: int, num_local_experts: int,
 
     def slice_experts():
         slice_params = [
-            "w1", "w2", "ab_strides1", "ab_strides2", "c_strides1",
+            "w1_q", "w2_q", "ab_strides1", "ab_strides2", "c_strides1",
             "c_strides2", "w1_scale", "w2_scale"
         ]
         full_tensors = {
@@ -187,10 +187,10 @@ def run_8_bit(moe_tensors: MOETensors8Bit,
 
     kwargs = {
         'a': moe_tensors.a,
-        'w1': moe_tensors.w1_q.transpose(1, 2),  # type: ignore[union-attr]
-        'w2': moe_tensors.w2_q.transpose(1, 2),  # type: ignore[union-attr]
+        'w1_q': moe_tensors.w1_q.transpose(1, 2),  # type: ignore[union-attr]
+        'w2_q': moe_tensors.w2_q.transpose(1, 2),  # type: ignore[union-attr]
         'topk_weights': topk_weights,
-        'topk_ids': topk_ids,
+        'topk_ids_': topk_ids,
         'ab_strides1': moe_tensors.ab_strides1,
         'c_strides1': moe_tensors.c_strides1,
         'ab_strides2': moe_tensors.ab_strides2,
