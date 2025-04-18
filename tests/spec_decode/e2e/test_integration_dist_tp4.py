@@ -3,8 +3,6 @@
 tensor parallelism.
 """
 
-import json
-
 import openai
 import pytest
 import torch
@@ -26,7 +24,12 @@ SPEC_MODEL = "JackFram/llama-68m"
         "4",
     ]])
 @pytest.mark.parametrize("per_test_common_llm_kwargs", [
-    [],
+    [
+        "--speculative-model",
+        f"{SPEC_MODEL}",
+        "--num-speculative-tokens",
+        "5",
+    ],
 ])
 @pytest.mark.parametrize("baseline_llm_kwargs", [[]])
 @pytest.mark.parametrize(
@@ -34,12 +37,8 @@ SPEC_MODEL = "JackFram/llama-68m"
     [
         #TODO(wooyeon): add spec_draft_dp=2 case
         [
-            "--speculative_config",
-            json.dumps({
-                "model": f"{SPEC_MODEL}",
-                "num_speculative_tokens": 5,
-                "draft_tensor_parallel_size": 1,
-            }),
+            "--speculative-draft-tensor-parallel-size",
+            "1",
         ],
     ])
 @pytest.mark.parametrize("batch_size", [2])
@@ -79,14 +78,15 @@ def test_draft_model_tp_lt_target_model_tp4(common_llm_kwargs,
     "test_llm_kwargs",
     [
         [
+            "--speculative-model",
+            f"{SPEC_MODEL}",
+            "--num-speculative-tokens",
+            "5",
+
             # Artificially limit the draft model max model len; this forces vLLM
             # to skip speculation once the sequences grow beyond 32-k tokens.
-            "--speculative_config",
-            json.dumps({
-                "model": f"{SPEC_MODEL}",
-                "num_speculative_tokens": 5,
-                "max_model_len": 32,
-            }),
+            "--speculative-max-model-len",
+            "32",
         ],
     ])
 @pytest.mark.parametrize("batch_size", [8])

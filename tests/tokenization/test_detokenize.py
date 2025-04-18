@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
-from collections.abc import Generator
-from typing import Any, Optional
+from typing import Any, Dict, Generator, List, Optional
 
 import pytest
 from transformers import AutoTokenizer
@@ -164,7 +163,7 @@ def detokenizer(tokenizer_name: str) -> Detokenizer:
 
 @pytest.fixture(name="complete_sequence_token_ids")
 def create_complete_sequence_token_ids(complete_sequence: str,
-                                       tokenizer) -> list[int]:
+                                       tokenizer) -> List[int]:
     complete_sequence_token_ids = tokenizer(complete_sequence).input_ids
     return complete_sequence_token_ids
 
@@ -179,7 +178,7 @@ def create_sequence(prompt_token_ids=None):
 
 
 def create_dummy_logprobs(
-        complete_sequence_token_ids: list[int]) -> list[dict[int, Logprob]]:
+        complete_sequence_token_ids: List[int]) -> List[Dict[int, Logprob]]:
     return [{
         token_id: Logprob(logprob=0.0),
         token_id + 1: Logprob(logprob=0.1)
@@ -187,10 +186,10 @@ def create_dummy_logprobs(
 
 
 def create_dummy_prompt_logprobs(
-        complete_sequence_token_ids: list[int]
-) -> list[Optional[dict[int, Any]]]:
+        complete_sequence_token_ids: List[int]
+) -> List[Optional[Dict[int, Any]]]:
     # logprob for the first prompt token is None.
-    logprobs: list[Optional[dict[int, Any]]] = [None]
+    logprobs: List[Optional[Dict[int, Any]]] = [None]
     logprobs.extend(create_dummy_logprobs(complete_sequence_token_ids)[1:])
     return logprobs
 
@@ -199,7 +198,7 @@ def create_dummy_prompt_logprobs(
 @pytest.mark.parametrize("tokenizer_name", TOKENIZERS)
 @pytest.mark.parametrize("skip_special_tokens", [True, False], indirect=True)
 def test_decode_sequence_logprobs(complete_sequence: str,
-                                  complete_sequence_token_ids: list[int],
+                                  complete_sequence_token_ids: List[int],
                                   detokenizer: Detokenizer,
                                   skip_special_tokens: bool):
     """Verify Detokenizer decodes logprobs correctly."""
@@ -209,8 +208,8 @@ def test_decode_sequence_logprobs(complete_sequence: str,
     # Run sequentially.
     seq = create_sequence()
     dummy_logprobs = create_dummy_logprobs(complete_sequence_token_ids)
-    sequential_logprobs_text_chosen_token: list[str] = []
-    sequential_logprobs_text_other_token: list[str] = []
+    sequential_logprobs_text_chosen_token: List[str] = []
+    sequential_logprobs_text_other_token: List[str] = []
     for new_token, logprobs in zip(complete_sequence_token_ids,
                                    dummy_logprobs):
         seq.append_token_id(new_token, logprobs)
@@ -233,7 +232,7 @@ def test_decode_sequence_logprobs(complete_sequence: str,
 
 @pytest.mark.parametrize("complete_sequence", TRUTH)
 @pytest.mark.parametrize("tokenizer_name", TOKENIZERS)
-def test_decode_prompt_logprobs(complete_sequence_token_ids: list[int],
+def test_decode_prompt_logprobs(complete_sequence_token_ids: List[int],
                                 detokenizer: Detokenizer):
     """Verify Detokenizer decodes prompt logprobs correctly."""
     sampling_params = SamplingParams(skip_special_tokens=True,
@@ -250,7 +249,7 @@ def test_decode_prompt_logprobs(complete_sequence_token_ids: list[int],
                                                dummy_logprobs,
                                                position_offset=0)
     # First logprob is None.
-    decoded_prompt_logprobs: list[dict[int, Any]] = dummy_logprobs[
+    decoded_prompt_logprobs: List[Dict[int, Any]] = dummy_logprobs[
         1:]  # type: ignore
 
     # decoded_prompt_logprobs doesn't contain the first token.
@@ -279,12 +278,7 @@ def test_decode_prompt_logprobs_chunked_prefill(
     model,
     chunked_prefill_token_size: int,
     example_prompts,
-    monkeypatch,
 ):
-    # VLLM V1 does not use incremental detokenization for
-    # prompt logprobs, so this test strategy is irrelevant.
-    monkeypatch.setenv("VLLM_USE_V1", "0")
-
     max_num_seqs = 256
     enable_chunked_prefill = False
     max_num_batched_tokens = None

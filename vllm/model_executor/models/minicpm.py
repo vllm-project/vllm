@@ -23,13 +23,13 @@
 # limitations under the License.
 """Inference-only MiniCPM model compatible with HuggingFace weights."""
 import math
-from typing import Any, Dict, Iterable, Optional, Set, Tuple, Union
+from typing import Any, Dict, Iterable, List, Optional, Set, Tuple, Union
 
 import torch
 from torch import nn
 from transformers import PretrainedConfig
 
-from vllm.attention import Attention
+from vllm.attention import Attention, AttentionMetadata
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import (get_pp_group, get_tensor_model_parallel_rank,
@@ -51,7 +51,6 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.model_executor.utils import set_weight_attrs
-from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 
 from .interfaces import SupportsLoRA, SupportsPP
@@ -99,13 +98,13 @@ class MiniCPMMoE(nn.Module):
             torch.empty(self.num_total_experts,
                         2 * self.intermediate_size,
                         self.hidden_size,
-                        device=current_platform.device_type,
+                        device="cuda",
                         dtype=self.params_dtype))
         self.w2s = nn.Parameter(
             torch.empty(self.num_total_experts,
                         self.hidden_size,
                         self.intermediate_size,
-                        device=current_platform.device_type,
+                        device="cuda",
                         dtype=self.params_dtype))
 
         set_weight_attrs(self.ws, {
@@ -257,6 +256,8 @@ class MiniCPMAttention(nn.Module):
         self,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
+        kv_cache: torch.Tensor,
+        attn_metadata: AttentionMetadata,
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
@@ -264,7 +265,7 @@ class MiniCPMAttention(nn.Module):
         q, k = q.float(), k.float()
         q, k = self.rotary_emb(positions, q, k)
         q, k = q.to(orig_dtype), k.to(orig_dtype)
-        attn_output = self.attn(q, k, v)
+        attn_output = self.attn(q, k, v, kv_cache, attn_metadata)
         output, _ = self.o_proj(attn_output)
         return output
 
@@ -329,6 +330,8 @@ class MiniCPMDecoderLayer(nn.Module):
         self,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
+        kv_cache: torch.Tensor,
+        attn_metadata: AttentionMetadata,
         residual: Optional[torch.Tensor],
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         # Self Attention
@@ -337,6 +340,8 @@ class MiniCPMDecoderLayer(nn.Module):
         hidden_states = self.self_attn(
             positions=positions,
             hidden_states=hidden_states,
+            kv_cache=kv_cache,
+            attn_metadata=attn_metadata,
         )
         hidden_states = residual + hidden_states * \
             (self.config.scale_depth / math.sqrt(self.config.num_hidden_layers))
@@ -365,6 +370,7 @@ class MiniCPMModel(nn.Module):
         self.config = config
         self.cache_config = cache_config
         self.quant_config = quant_config
+        self.padding_idx = config.pad_token_id
         lora_vocab = (lora_config.lora_extra_vocab_size *
                       (lora_config.max_loras or 1)) if lora_config else 0
         self.vocab_size = config.vocab_size + lora_vocab
@@ -402,6 +408,8 @@ class MiniCPMModel(nn.Module):
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
+        kv_caches: List[torch.Tensor],
+        attn_metadata: AttentionMetadata,
         intermediate_tensors: Optional[IntermediateTensors] = None,
         inputs_embeds: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, IntermediateTensors]:
@@ -415,10 +423,13 @@ class MiniCPMModel(nn.Module):
             hidden_states = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
 
-        for layer in self.layers[self.start_layer:self.end_layer]:
+        for i in range(self.start_layer, self.end_layer):
+            layer = self.layers[i]
             hidden_states, residual = layer(
                 positions,
                 hidden_states,
+                kv_caches[i - self.start_layer],
+                attn_metadata,
                 residual,
             )
         if not get_pp_group().is_last_rank:
@@ -511,6 +522,14 @@ class MiniCPMForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
     }
 
     # LoRA specific attributes
+    supported_lora_modules = [
+        "qkv_proj",
+        "o_proj",
+        "gate_up_proj",
+        "down_proj",
+        "embed_tokens",
+        "lm_head",
+    ]
     embedding_modules = {
         "embed_tokens": "input_embeddings",
         "lm_head": "output_embeddings",
@@ -567,10 +586,13 @@ class MiniCPMForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
+        kv_caches: List[torch.Tensor],
+        attn_metadata: AttentionMetadata,
         intermediate_tensors: Optional[IntermediateTensors] = None,
         inputs_embeds: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, IntermediateTensors]:
-        hidden_states = self.model(input_ids, positions, intermediate_tensors,
+        hidden_states = self.model(input_ids, positions, kv_caches,
+                                   attn_metadata, intermediate_tensors,
                                    inputs_embeds)
         return hidden_states
 

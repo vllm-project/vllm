@@ -1,12 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 
-from typing import Callable
+from functools import partial
+from typing import Callable, Dict, List, Type
 
 import pytest
 import torch
-import torch.nn.functional as F
 from PIL import Image
-from transformers import Qwen2VLForConditionalGeneration
+from transformers import BatchEncoding, Qwen2VLForConditionalGeneration
 
 from ....conftest import IMAGE_ASSETS, HfRunner, PromptImageInput, VllmRunner
 from ....utils import large_gpu_test
@@ -67,7 +67,7 @@ def get_messages(image: Image.Image, text: str, embed_text: bool):
 
 
 def apply_chat_template_and_add_eos(
-    messages: list[dict],
+    messages: List[Dict],
     apply_chat_template_fn: Callable,
 ):
     prompt = apply_chat_template_fn(
@@ -75,12 +75,16 @@ def apply_chat_template_and_add_eos(
     return prompt
 
 
+def postprocess_inputs(hf_model: HfRunner, inputs: BatchEncoding, **kwargs):
+    return hf_model.model.prepare_inputs_for_generation(**inputs, **kwargs)
+
+
 def _run_test(
-    hf_runner: type[HfRunner],
-    vllm_runner: type[VllmRunner],
-    input_texts: list[str],
+    hf_runner: Type[HfRunner],
+    vllm_runner: Type[VllmRunner],
+    input_texts: List[str],
     input_images: PromptImageInput,
-    embed_texts: list[bool],
+    embed_texts: List[bool],
     model: str,
     *,
     dtype: str,
@@ -114,8 +118,14 @@ def _run_test(
     with hf_runner(model,
                    dtype=dtype,
                    auto_cls=Qwen2VLForConditionalGeneration) as hf_model:
-
-        prompts = []
+        hf_model.postprocess_inputs = partial(
+            postprocess_inputs,
+            hf_model,
+            cache_position=torch.arange(
+                0,
+                1,  # 1 for batch size
+                requires_grad=False),
+            use_cache=False)
         for text, image, embed_text in zip(input_texts, input_images,
                                            embed_texts):
             # dse requires non-standard input processing
@@ -123,34 +133,20 @@ def _run_test(
             messages = get_messages(image, text, embed_text)
             prompt = apply_chat_template_and_add_eos(
                 messages, hf_model.processor.apply_chat_template)
-
-            prompts.append(prompt)
-
-        all_inputs = hf_model.get_inputs(
-            prompts=prompts,
-            images=input_images,
-        )
-
-        with torch.no_grad():
-            all_outputs = []
-            for inputs in all_inputs:
-                inputs = hf_model.model.prepare_inputs_for_generation(
-                    **inputs,
-                    cache_position=torch.arange(1),  # 1 for batch size
-                    use_cache=False,
-                )
+            inputs = hf_model.get_inputs(
+                prompts=[[prompt]],
+                images=[[image]],
+            )
+            with torch.no_grad():
                 outputs = hf_model.model(
-                    **hf_model.wrap_device(inputs),
+                    **hf_model.wrap_device(inputs[0],
+                                           device=hf_model.model.device.type),
                     return_dict=True,
                     output_hidden_states=True,
                 )
-                pooled_output = F.normalize(outputs.hidden_states[-1][0, -1],
-                                            p=2,
-                                            dim=-1)
-
-                all_outputs.append(pooled_output.tolist())
-
-            hf_outputs = all_outputs
+                pooled_output = torch.nn.functional.normalize(
+                    outputs.hidden_states[-1][0, -1], p=2, dim=-1)
+            hf_outputs.append(pooled_output.tolist())
 
     check_embeddings_close(
         embeddings_0_lst=hf_outputs,

@@ -3,10 +3,7 @@
 
 Run `pytest tests/distributed/test_comm_ops.py`.
 """
-
-from __future__ import annotations
-
-from typing import Any, Callable
+import os
 
 import pytest
 import ray
@@ -20,18 +17,12 @@ from ..utils import init_test_distributed_environment, multi_process_parallel
 
 
 @ray.remote(num_gpus=1, max_calls=1)
-def all_reduce_test_worker(
-    monkeypatch: pytest.MonkeyPatch,
-    tp_size: int,
-    pp_size: int,
-    rank: int,
-    distributed_init_port: str,
-):
+def all_reduce_test_worker(tp_size: int, pp_size: int, rank: int,
+                           distributed_init_port: str):
     # it is important to delete the CUDA_VISIBLE_DEVICES environment variable
     # so that each worker can see all the GPUs
     # they will be able to set the device to the correct GPU
-    monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
-
+    os.environ.pop("CUDA_VISIBLE_DEVICES", None)
     device = torch.device(f"cuda:{rank}")
     torch.cuda.set_device(device)
     init_test_distributed_environment(tp_size, pp_size, rank,
@@ -48,17 +39,12 @@ def all_reduce_test_worker(
 
 
 @ray.remote(num_gpus=1, max_calls=1)
-def all_gather_test_worker(
-    monkeypatch: pytest.MonkeyPatch,
-    tp_size: int,
-    pp_size: int,
-    rank: int,
-    distributed_init_port: str,
-):
+def all_gather_test_worker(tp_size: int, pp_size: int, rank: int,
+                           distributed_init_port: str):
     # it is important to delete the CUDA_VISIBLE_DEVICES environment variable
     # so that each worker can see all the GPUs
     # they will be able to set the device to the correct GPU
-    monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
+    os.environ.pop("CUDA_VISIBLE_DEVICES", None)
     device = torch.device(f"cuda:{rank}")
     torch.cuda.set_device(device)
     init_test_distributed_environment(tp_size, pp_size, rank,
@@ -81,17 +67,12 @@ def all_gather_test_worker(
 
 
 @ray.remote(num_gpus=1, max_calls=1)
-def broadcast_tensor_dict_test_worker(
-    monkeypatch: pytest.MonkeyPatch,
-    tp_size: int,
-    pp_size: int,
-    rank: int,
-    distributed_init_port: str,
-):
+def broadcast_tensor_dict_test_worker(tp_size: int, pp_size: int, rank: int,
+                                      distributed_init_port: str):
     # it is important to delete the CUDA_VISIBLE_DEVICES environment variable
     # so that each worker can see all the GPUs
     # they will be able to set the device to the correct GPU
-    monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
+    os.environ.pop("CUDA_VISIBLE_DEVICES", None)
     device = torch.device(f"cuda:{rank}")
     torch.cuda.set_device(device)
     init_test_distributed_environment(tp_size, pp_size, rank,
@@ -125,14 +106,9 @@ def broadcast_tensor_dict_test_worker(
 
 
 @ray.remote(num_gpus=1, max_calls=1)
-def send_recv_tensor_dict_test_worker(
-    monkeypatch: pytest.MonkeyPatch,
-    tp_size: int,
-    pp_size: int,
-    rank: int,
-    distributed_init_port: str,
-):
-    monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
+def send_recv_tensor_dict_test_worker(tp_size: int, pp_size: int, rank: int,
+                                      distributed_init_port: str):
+    os.environ.pop("CUDA_VISIBLE_DEVICES", None)
     device = torch.device(f"cuda:{rank}")
     torch.cuda.set_device(device)
     init_test_distributed_environment(tp_size, pp_size, rank,
@@ -170,14 +146,9 @@ def send_recv_tensor_dict_test_worker(
 
 
 @ray.remote(num_gpus=1, max_calls=1)
-def send_recv_test_worker(
-    monkeypatch: pytest.MonkeyPatch,
-    tp_size: int,
-    pp_size: int,
-    rank: int,
-    distributed_init_port: str,
-):
-    monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
+def send_recv_test_worker(tp_size: int, pp_size: int, rank: int,
+                          distributed_init_port: str):
+    os.environ.pop("CUDA_VISIBLE_DEVICES", None)
     device = torch.device(f"cuda:{rank}")
     torch.cuda.set_device(device)
     init_test_distributed_environment(tp_size, pp_size, rank,
@@ -203,12 +174,8 @@ def send_recv_test_worker(
     all_reduce_test_worker, all_gather_test_worker,
     broadcast_tensor_dict_test_worker
 ])
-def test_multi_process_tensor_parallel(
-    monkeypatch: pytest.MonkeyPatch,
-    tp_size: int,
-    test_target: Callable[..., Any],
-):
-    multi_process_parallel(monkeypatch, tp_size, 1, test_target)
+def test_multi_process_tensor_parallel(tp_size, test_target):
+    multi_process_parallel(tp_size, 1, test_target)
 
 
 @pytest.mark.skipif(torch.cuda.device_count() < 2,
@@ -216,12 +183,8 @@ def test_multi_process_tensor_parallel(
 @pytest.mark.parametrize("pp_size", [2])
 @pytest.mark.parametrize(
     "test_target", [send_recv_test_worker, send_recv_tensor_dict_test_worker])
-def test_multi_process_pipeline_parallel(
-    monkeypatch: pytest.MonkeyPatch,
-    pp_size: int,
-    test_target: Callable[..., Any],
-):
-    multi_process_parallel(monkeypatch, 1, pp_size, test_target)
+def test_multi_process_pipeline_parallel(pp_size, test_target):
+    multi_process_parallel(1, pp_size, test_target)
 
 
 @pytest.mark.skipif(torch.cuda.device_count() < 4,
@@ -234,9 +197,5 @@ def test_multi_process_pipeline_parallel(
     broadcast_tensor_dict_test_worker
 ])
 def test_multi_process_tensor_parallel_pipeline_parallel(
-    tp_size: int,
-    pp_size: int,
-    test_target: Callable[..., Any],
-    monkeypatch: pytest.MonkeyPatch,
-):
-    multi_process_parallel(monkeypatch, tp_size, pp_size, test_target)
+        tp_size, pp_size, test_target):
+    multi_process_parallel(tp_size, pp_size, test_target)

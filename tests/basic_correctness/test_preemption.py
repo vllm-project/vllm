@@ -17,17 +17,8 @@ from vllm.core.scheduler import (ARTIFICIAL_PREEMPTION_MAX_CNT,
 from ..models.utils import check_outputs_equal
 
 MODELS = [
-    "distilbert/distilgpt2",
+    "facebook/opt-125m",
 ]
-
-
-@pytest.fixture(scope="function", autouse=True)
-def use_v0_only(monkeypatch):
-    """
-    We should enable this for V1, but VLLM_TEST_ENABLE_ARTIFICIAL_PREEMPT,
-    so use VLLM_USE_V1=0 for all tests in the file.
-    """
-    monkeypatch.setenv('VLLM_USE_V1', '0')
 
 
 @pytest.fixture(scope="module", autouse=True)

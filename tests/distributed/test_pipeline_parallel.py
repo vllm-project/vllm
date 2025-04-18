@@ -9,7 +9,7 @@ WARNING: This test runs in both single-node (4 GPUs) and multi-node
 import json
 import os
 from dataclasses import dataclass
-from typing import Literal, NamedTuple, Optional
+from typing import List, Literal, NamedTuple, Optional
 
 import pytest
 
@@ -17,23 +17,11 @@ from vllm.config import TaskOption
 from vllm.logger import init_logger
 
 from ..models.registry import HF_EXAMPLE_MODELS
-from ..utils import compare_two_settings, create_new_process_for_each_test
+from ..utils import compare_two_settings, fork_new_process_for_each_test
 
 logger = init_logger("test_pipeline_parallel")
 
 VLLM_MULTI_NODE = os.getenv("VLLM_MULTI_NODE", "0") == "1"
-
-
-@pytest.fixture(scope="function", autouse=True)
-def use_v0_only(monkeypatch):
-    """
-    For PP, we fall back to V0 by default. This means
-    that the TP baseline runs with V1 while the PP engine
-    runs with V0. This gives divergent results with dummy
-    weights. Once we enable V1 by default for PP, we can
-    remove this.
-    """
-    monkeypatch.setenv('VLLM_USE_V1', '0')
 
 
 class ParallelSetup(NamedTuple):
@@ -50,14 +38,14 @@ class PPTestOptions(NamedTuple):
 
 @dataclass
 class PPTestSettings:
-    parallel_setups: list[ParallelSetup]
+    parallel_setups: List[ParallelSetup]
     # NOTE: the length of distributed_backends and
     # vllm_major_versions should be the same, and they
     # are first zipped together to iterate over all
     # test settings.
-    distributed_backends: list[str]
+    distributed_backends: List[str]
     # vllm major version: "0" for V0, "1" for V1
-    vllm_major_versions: list[str]
+    vllm_major_versions: List[str]
     task: TaskOption
     test_options: PPTestOptions
 
@@ -175,8 +163,6 @@ TEXT_GENERATION_MODELS = {
     "inceptionai/jais-13b-chat": PPTestSettings.fast(),
     "ai21labs/Jamba-tiny-dev": PPTestSettings.fast(),
     "meta-llama/Llama-3.2-1B-Instruct": PPTestSettings.detailed(),
-    # Tests TransformersForCausalLM
-    "ArthurZ/Ilama-3.2-1B": PPTestSettings.fast(),
     "openbmb/MiniCPM-2B-sft-bf16": PPTestSettings.fast(),
     "openbmb/MiniCPM3-4B": PPTestSettings.fast(),
     # Uses Llama
@@ -217,7 +203,7 @@ EMBEDDING_MODELS = {  # type: ignore[var-annotated]
 
 MULTIMODAL_MODELS = {
     # [Decoder-only]
-    "Salesforce/blip2-opt-6.7b": PPTestSettings.fast(),
+    "Salesforce/blip2-opt-2.7b": PPTestSettings.fast(),
     "facebook/chameleon-7b": PPTestSettings.fast(),
     "adept/fuyu-8b": PPTestSettings.fast(),
     "THUDM/glm-4v-9b": PPTestSettings.fast(),
@@ -228,7 +214,7 @@ MULTIMODAL_MODELS = {
     "llava-hf/llava-onevision-qwen2-0.5b-ov-hf": PPTestSettings.fast(),
     "openbmb/MiniCPM-Llama3-V-2_5": PPTestSettings.fast(),
     "allenai/Molmo-7B-D-0924": PPTestSettings.fast(),
-    "microsoft/Phi-3.5-vision-instruct": PPTestSettings.fast(),
+    "microsoft/Phi-3-vision-128k-instruct": PPTestSettings.fast(),
     "mistralai/Pixtral-12B-2409": PPTestSettings.fast(load_format="dummy"),
     "Qwen/Qwen-VL-Chat": PPTestSettings.fast(),
     "Qwen/Qwen2-Audio-7B-Instruct": PPTestSettings.fast(),
@@ -245,14 +231,13 @@ TEST_MODELS = [
     # [LANGUAGE GENERATION]
     "microsoft/Phi-3.5-MoE-instruct",
     "meta-llama/Llama-3.2-1B-Instruct",
-    "ArthurZ/Ilama-3.2-1B",
     "ibm/PowerLM-3b",
     # [LANGUAGE EMBEDDING]
     "intfloat/e5-mistral-7b-instruct",
     "BAAI/bge-multilingual-gemma2",
     # [MULTIMODAL GENERATION]
     "OpenGVLab/InternVL2-1B",
-    "microsoft/Phi-3.5-vision-instruct",
+    "microsoft/Phi-3-vision-128k-instruct",
     "fixie-ai/ultravox-v0_5-llama-3_2-1b",
     # [LANGUAGE GENERATION - HYBRID ARCH]
     "ai21labs/Jamba-tiny-dev",
@@ -290,11 +275,11 @@ def _compare_tp(
     if load_format == "dummy":
         # Avoid OOM
         text_overrides = {
-            "num_hidden_layers": 4,
-            "hidden_size": 512,
-            "intermediate_size": 800,
-            "num_attention_heads": 4,
-            "num_key_value_heads": 1,
+            "num_layers": 1,
+            "num_hidden_layers": 1,
+            "num_experts": 2,
+            "num_experts_per_tok": 2,
+            "num_local_experts": 2,
         }
 
         if is_multimodal:
@@ -339,8 +324,8 @@ def _compare_tp(
     specific_case = tp_size == 2 and pp_size == 2 and chunked_prefill
     if distributed_backend == "ray" and (vllm_major_version == "1"
                                          or specific_case):
-        # For V1, test Ray Compiled Graph for all the tests
-        # For V0, test Ray Compiled Graph for a subset of the tests
+        # For V1, test Ray ADAG for all the tests
+        # For V0, test Ray ADAG for a subset of the tests
         pp_env = {
             "VLLM_USE_V1": vllm_major_version,
             "VLLM_USE_RAY_COMPILED_DAG": "1",
@@ -348,14 +333,10 @@ def _compare_tp(
             "VLLM_USE_RAY_COMPILED_DAG_NCCL_CHANNEL": "1",
         }
         # Temporary. Currently when zeromq + SPMD is used, it does not properly
-        # terminate because of a Ray Compiled Graph issue.
+        # terminate because of aDAG issue.
         common_args.append("--disable-frontend-multiprocessing")
     else:
         pp_env = None
-
-    tp_env = {
-        "VLLM_USE_V1": vllm_major_version,
-    }
 
     pp_args = [
         *common_args,
@@ -381,20 +362,13 @@ def _compare_tp(
     ]
 
     try:
-        compare_two_settings(model_id,
-                             pp_args,
-                             tp_args,
-                             pp_env,
-                             tp_env,
-                             method=method)
+        compare_two_settings(model_id, pp_args, tp_args, pp_env, method=method)
     except Exception:
-        testing_ray_compiled_graph = pp_env is not None
-        if testing_ray_compiled_graph and vllm_major_version == "0":
-            # Ray Compiled Graph tests are flaky for V0,
-            # so we don't want to fail the test
-            logger.exception("Ray Compiled Graph tests failed")
-        else:
+        if pp_env is None:
             raise
+        else:
+            # Ray ADAG tests are flaky, so we don't want to fail the test
+            logger.exception("Ray ADAG tests failed")
 
 
 @pytest.mark.parametrize(
@@ -405,7 +379,7 @@ def _compare_tp(
         for params in settings.iter_params(model_id) if model_id in TEST_MODELS
     ],
 )
-@create_new_process_for_each_test()
+@fork_new_process_for_each_test
 def test_tp_language_generation(
     model_id: str,
     parallel_setup: ParallelSetup,
@@ -434,7 +408,7 @@ def test_tp_language_generation(
         for params in settings.iter_params(model_id) if model_id in TEST_MODELS
     ],
 )
-@create_new_process_for_each_test()
+@fork_new_process_for_each_test
 def test_tp_language_embedding(
     model_id: str,
     parallel_setup: ParallelSetup,
@@ -463,7 +437,7 @@ def test_tp_language_embedding(
         for params in settings.iter_params(model_id) if model_id in TEST_MODELS
     ],
 )
-@create_new_process_for_each_test()
+@fork_new_process_for_each_test
 def test_tp_multimodal_generation(
     model_id: str,
     parallel_setup: ParallelSetup,

@@ -37,8 +37,8 @@ from vllm.transformers_utils.configs import (ChatGLMConfig, Cohere2Config,
                                              MLPSpeculatorConfig, MPTConfig,
                                              NemotronConfig, NVLM_D_Config,
                                              Olmo2Config, RWConfig,
-                                             SkyworkR1VChatConfig, SolarConfig,
-                                             Telechat2Config, UltravoxConfig)
+                                             SolarConfig, Telechat2Config,
+                                             UltravoxConfig)
 # yapf: enable
 from vllm.transformers_utils.utils import check_gguf_file
 from vllm.utils import resolve_obj_by_qualname
@@ -76,7 +76,6 @@ _CONFIG_REGISTRY: Dict[str, Type[PretrainedConfig]] = {
     "NVLM_D": NVLM_D_Config,
     "olmo2": Olmo2Config,
     "solar": SolarConfig,
-    "skywork_chat": SkyworkR1VChatConfig,
     "telechat": Telechat2Config,
     "ultravox": UltravoxConfig,
     **_CONFIG_REGISTRY_OVERRIDE_HF
@@ -116,21 +115,8 @@ def list_repo_files(
     token: Union[str, bool, None] = None,
 ) -> list[str]:
 
-    def lookup_files() -> list[str]:
-        # directly list files if model is local
-        if (local_path := Path(repo_id)).exists():
-            return [
-                str(file.relative_to(local_path))
-                for file in local_path.rglob('*') if file.is_file()
-            ]
-        # if model is remote, use hf_hub api to list files
+    def lookup_files():
         try:
-            if VLLM_USE_MODELSCOPE:
-                from vllm.transformers_utils.utils import (
-                    modelscope_list_repo_files)
-                return modelscope_list_repo_files(repo_id,
-                                                  revision=revision,
-                                                  token=token)
             return hf_list_repo_files(repo_id,
                                       revision=revision,
                                       repo_type=repo_type,
@@ -152,6 +138,7 @@ def file_exists(
     revision: Optional[str] = None,
     token: Union[str, bool, None] = None,
 ) -> bool:
+
     file_list = list_repo_files(repo_id,
                                 repo_type=repo_type,
                                 revision=revision,
@@ -162,8 +149,8 @@ def file_exists(
 # In offline mode the result can be a false negative
 def file_or_path_exists(model: Union[str, Path], config_name: str,
                         revision: Optional[str]) -> bool:
-    if (local_path := Path(model)).exists():
-        return (local_path / config_name).is_file()
+    if Path(model).exists():
+        return (Path(model) / config_name).is_file()
 
     # Offline mode support: Check if config file is cached already
     cached_filepath = try_to_load_from_cache(repo_id=model,
@@ -254,33 +241,14 @@ def get_config(
         model = Path(model).parent
 
     if config_format == ConfigFormat.AUTO:
-        try:
-            if is_gguf or file_or_path_exists(
-                    model, HF_CONFIG_NAME, revision=revision):
-                config_format = ConfigFormat.HF
-            elif file_or_path_exists(model,
-                                     MISTRAL_CONFIG_NAME,
-                                     revision=revision):
-                config_format = ConfigFormat.MISTRAL
-            else:
-                raise ValueError(
-                    "Could not detect config format for no config file found. "
-                    "Ensure your model has either config.json (HF format) "
-                    "or params.json (Mistral format).")
-
-        except Exception as e:
-            error_message = (
-                "Invalid repository ID or local directory specified:"
-                " '{model}'.\nPlease verify the following requirements:\n"
-                "1. Provide a valid Hugging Face repository ID.\n"
-                "2. Specify a local directory that contains a recognized "
-                "configuration file.\n"
-                "   - For Hugging Face models: ensure the presence of a "
-                "'config.json'.\n"
-                "   - For Mistral models: ensure the presence of a "
-                "'params.json'.\n").format(model=model)
-
-            raise ValueError(error_message) from e
+        if is_gguf or file_or_path_exists(
+                model, HF_CONFIG_NAME, revision=revision):
+            config_format = ConfigFormat.HF
+        elif file_or_path_exists(model, MISTRAL_CONFIG_NAME,
+                                 revision=revision):
+            config_format = ConfigFormat.MISTRAL
+        else:
+            raise ValueError(f"No supported config format found in {model}.")
 
     if config_format == ConfigFormat.HF:
         config_dict, _ = PretrainedConfig.get_config_dict(
@@ -329,14 +297,7 @@ def get_config(
     elif config_format == ConfigFormat.MISTRAL:
         config = load_params_config(model, revision, token=HF_TOKEN, **kwargs)
     else:
-        supported_formats = [
-            fmt.value for fmt in ConfigFormat if fmt != ConfigFormat.AUTO
-        ]
-        raise ValueError(
-            f"Unsupported config format: {config_format}. "
-            f"Supported formats are: {', '.join(supported_formats)}. "
-            f"Ensure your model uses one of these configuration formats "
-            f"or specify the correct format explicitly.")
+        raise ValueError(f"Unsupported config format: {config_format}")
 
     # Special architecture mapping check for GGUF models
     if is_gguf:
@@ -421,17 +382,17 @@ def get_hf_file_to_dict(file_name: str,
 @cache
 def get_pooling_config(model: str, revision: Optional[str] = 'main'):
     """
-    This function gets the pooling and normalize
-    config from the model - only applies to
-    sentence-transformers models.
+    This function gets the pooling and normalize 
+    config from the model - only applies to 
+    sentence-transformers models. 
 
     Args:
         model (str): The name of the Hugging Face model.
-        revision (str, optional): The specific version
+        revision (str, optional): The specific version 
         of the model to use. Defaults to 'main'.
 
     Returns:
-        dict: A dictionary containing the pooling
+        dict: A dictionary containing the pooling 
         type and whether normalization is used.
     """
 
@@ -531,13 +492,14 @@ def get_sentence_transformer_tokenizer_config(model: str,
             if encoder_dict:
                 break
 
-    if not encoder_dict and not model.startswith("/"):
+    if not encoder_dict:
         try:
             # If model is on HuggingfaceHub, get the repo files
             repo_files = list_repo_files(model,
                                          revision=revision,
                                          token=HF_TOKEN)
-        except Exception:
+        except Exception as e:
+            logger.debug("Error getting repo files", e)
             repo_files = []
 
         for config_name in sentence_transformer_config_files:
@@ -712,7 +674,6 @@ def load_params_config(model: Union[str, Path], revision: Optional[str],
 
 def get_hf_image_processor_config(
     model: Union[str, Path],
-    hf_token: Optional[Union[bool, str]] = None,
     revision: Optional[str] = None,
     **kwargs,
 ) -> Dict[str, Any]:
@@ -722,10 +683,7 @@ def get_hf_image_processor_config(
     # Separate model folder from file path for GGUF models
     if check_gguf_file(model):
         model = Path(model).parent
-    return get_image_processor_config(model,
-                                      token=hf_token,
-                                      revision=revision,
-                                      **kwargs)
+    return get_image_processor_config(model, revision=revision, **kwargs)
 
 
 def get_hf_text_config(config: PretrainedConfig):

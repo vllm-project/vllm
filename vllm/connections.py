@@ -1,8 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
-from collections.abc import Mapping, MutableMapping
 from pathlib import Path
-from typing import Optional
+from typing import Mapping, MutableMapping, Optional
 from urllib.parse import urlparse
 
 import aiohttp

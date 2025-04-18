@@ -1,11 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 
+from typing import List
+
 import pytest
 
 import vllm
+from tests.utils import fork_new_process_for_each_test
 from vllm.lora.request import LoRARequest
 
-from ..utils import create_new_process_for_each_test, multi_gpu_test
+from ..utils import multi_gpu_test
 
 MODEL_PATH = "THUDM/chatglm3-6b"
 
@@ -18,15 +21,7 @@ EXPECTED_LORA_OUTPUT = [
 ]
 
 
-@pytest.fixture(autouse=True)
-def v1(run_with_both_engines_lora):
-    # Simple autouse wrapper to run both engines for each test
-    # This can be promoted up to conftest.py to run for every
-    # test in a package
-    pass
-
-
-def do_sample(llm: vllm.LLM, lora_path: str, lora_id: int) -> list[str]:
+def do_sample(llm: vllm.LLM, lora_path: str, lora_id: int) -> List[str]:
     prompts = [
         PROMPT_TEMPLATE.format(query="How many singers do we have?"),
         PROMPT_TEMPLATE.format(
@@ -45,7 +40,7 @@ def do_sample(llm: vllm.LLM, lora_path: str, lora_id: int) -> list[str]:
         lora_request=LoRARequest(str(lora_id), lora_id, lora_path)
         if lora_id else None)
     # Print the outputs.
-    generated_texts: list[str] = []
+    generated_texts: List[str] = []
     for output in outputs:
         prompt = output.prompt
         generated_text = output.outputs[0].text.strip()
@@ -54,7 +49,16 @@ def do_sample(llm: vllm.LLM, lora_path: str, lora_id: int) -> list[str]:
     return generated_texts
 
 
-@create_new_process_for_each_test()
+@pytest.fixture(autouse=True)
+def v1(run_with_both_engines_lora):
+    # Simple autouse wrapper to run both engines for each test
+    # This can be promoted up to conftest.py to run for every
+    # test in a package
+    pass
+
+
+@pytest.mark.skip_v1
+@fork_new_process_for_each_test
 def test_chatglm3_lora(chatglm3_lora_files):
     llm = vllm.LLM(MODEL_PATH,
                    max_model_len=1024,
@@ -73,8 +77,9 @@ def test_chatglm3_lora(chatglm3_lora_files):
         assert output2[i] == EXPECTED_LORA_OUTPUT[i]
 
 
+@pytest.mark.skip_v1
 @multi_gpu_test(num_gpus=4)
-@create_new_process_for_each_test()
+@fork_new_process_for_each_test
 def test_chatglm3_lora_tp4(chatglm3_lora_files):
     llm = vllm.LLM(MODEL_PATH,
                    max_model_len=1024,
@@ -94,8 +99,9 @@ def test_chatglm3_lora_tp4(chatglm3_lora_files):
         assert output2[i] == EXPECTED_LORA_OUTPUT[i]
 
 
+@pytest.mark.skip_v1
 @multi_gpu_test(num_gpus=4)
-@create_new_process_for_each_test()
+@fork_new_process_for_each_test
 def test_chatglm3_lora_tp4_fully_sharded_loras(chatglm3_lora_files):
     llm = vllm.LLM(MODEL_PATH,
                    max_model_len=1024,

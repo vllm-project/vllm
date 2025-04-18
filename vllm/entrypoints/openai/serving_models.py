@@ -4,15 +4,15 @@ import json
 import pathlib
 from dataclasses import dataclass
 from http import HTTPStatus
-from typing import Optional, Union
+from typing import List, Optional, Union
 
 from vllm.config import ModelConfig
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.openai.protocol import (ErrorResponse,
-                                              LoadLoRAAdapterRequest,
+                                              LoadLoraAdapterRequest,
                                               ModelCard, ModelList,
                                               ModelPermission,
-                                              UnloadLoRAAdapterRequest)
+                                              UnloadLoraAdapterRequest)
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.prompt_adapter.request import PromptAdapterRequest
@@ -53,10 +53,10 @@ class OpenAIServingModels:
         self,
         engine_client: EngineClient,
         model_config: ModelConfig,
-        base_model_paths: list[BaseModelPath],
+        base_model_paths: List[BaseModelPath],
         *,
-        lora_modules: Optional[list[LoRAModulePath]] = None,
-        prompt_adapters: Optional[list[PromptAdapterPath]] = None,
+        lora_modules: Optional[List[LoRAModulePath]] = None,
+        prompt_adapters: Optional[List[PromptAdapterPath]] = None,
     ):
         super().__init__()
 
@@ -65,7 +65,7 @@ class OpenAIServingModels:
         self.engine_client = engine_client
 
         self.static_lora_modules = lora_modules
-        self.lora_requests: list[LoRARequest] = []
+        self.lora_requests: List[LoRARequest] = []
         self.lora_id_counter = AtomicCounter(0)
 
         self.prompt_adapter_requests = []
@@ -88,14 +88,14 @@ class OpenAIServingModels:
         if self.static_lora_modules is None:
             return
         for lora in self.static_lora_modules:
-            load_request = LoadLoRAAdapterRequest(lora_path=lora.path,
+            load_request = LoadLoraAdapterRequest(lora_path=lora.path,
                                                   lora_name=lora.name)
             load_result = await self.load_lora_adapter(
                 request=load_request, base_model_name=lora.base_model_name)
             if isinstance(load_result, ErrorResponse):
                 raise ValueError(load_result.message)
 
-    def is_base_model(self, model_name) -> bool:
+    def is_base_model(self, model_name):
         return any(model.name == model_name for model in self.base_model_paths)
 
     def model_name(self, lora_request: Optional[LoRARequest] = None) -> str:
@@ -140,7 +140,7 @@ class OpenAIServingModels:
 
     async def load_lora_adapter(
             self,
-            request: LoadLoRAAdapterRequest,
+            request: LoadLoraAdapterRequest,
             base_model_name: Optional[str] = None
     ) -> Union[ErrorResponse, str]:
         error_check_ret = await self._check_load_lora_adapter_request(request)
@@ -162,7 +162,7 @@ class OpenAIServingModels:
         except BaseException as e:
             error_type = "BadRequestError"
             status_code = HTTPStatus.BAD_REQUEST
-            if "No adapter found" in str(e):
+            if isinstance(e, ValueError) and "No adapter found" in str(e):
                 error_type = "NotFoundError"
                 status_code = HTTPStatus.NOT_FOUND
 
@@ -177,7 +177,7 @@ class OpenAIServingModels:
 
     async def unload_lora_adapter(
             self,
-            request: UnloadLoRAAdapterRequest) -> Union[ErrorResponse, str]:
+            request: UnloadLoraAdapterRequest) -> Union[ErrorResponse, str]:
         error_check_ret = await self._check_unload_lora_adapter_request(request
                                                                         )
         if error_check_ret is not None:
@@ -192,7 +192,7 @@ class OpenAIServingModels:
         return f"Success: LoRA adapter '{lora_name}' removed successfully."
 
     async def _check_load_lora_adapter_request(
-            self, request: LoadLoRAAdapterRequest) -> Optional[ErrorResponse]:
+            self, request: LoadLoraAdapterRequest) -> Optional[ErrorResponse]:
         # Check if both 'lora_name' and 'lora_path' are provided
         if not request.lora_name or not request.lora_path:
             return create_error_response(
@@ -214,7 +214,7 @@ class OpenAIServingModels:
 
     async def _check_unload_lora_adapter_request(
             self,
-            request: UnloadLoRAAdapterRequest) -> Optional[ErrorResponse]:
+            request: UnloadLoraAdapterRequest) -> Optional[ErrorResponse]:
         # Check if either 'lora_name' or 'lora_int_id' is provided
         if not request.lora_name and not request.lora_int_id:
             return create_error_response(

@@ -9,8 +9,7 @@ import torch
 from vllm._ipex_ops import ipex_ops
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionLayer,
-                                              AttentionMetadata, AttentionType,
-                                              is_quantized_kv_cache)
+                                              AttentionMetadata, AttentionType)
 from vllm.attention.backends.utils import CommonAttentionState
 from vllm.attention.ops.paged_attn import (PagedAttention,
                                            PagedAttentionMetadata)
@@ -146,7 +145,7 @@ class IpexAttnBackendImpl(AttentionImpl[IpexAttnMetadata]):
             raise ValueError(
                 f"Head size {head_size} is not supported by PagedAttention. "
                 f"Supported head sizes are: {supported_head_sizes}.")
-        if is_quantized_kv_cache(kv_cache_dtype):
+        if kv_cache_dtype != "auto":
             raise NotImplementedError(
                 "IPEX backend does not support FP8 KV cache. "
                 "Please use xFormers backend instead.")

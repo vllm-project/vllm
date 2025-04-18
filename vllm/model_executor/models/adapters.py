@@ -99,17 +99,16 @@ def _create_pooling_model_cls(
                     mapper = WeightsMapper(orig_to_new_prefix={"model.": ""})
                     weights = mapper.apply(weights)
 
-                    loaded_params = self.model.load_weights(weights)
-                    loaded_params = {f"model.{name}" for name in loaded_params}
-                    return loaded_params
+                    self.model.load_weights(weights)
+                    return
 
             # For most other models
             if hasattr(orig_cls, "load_weights"):
-                return orig_cls.load_weights(self, weights)  # type: ignore
+                orig_cls.load_weights(self, weights)  # type: ignore
             # Fallback
             else:
                 loader = AutoWeightsLoader(self)
-                return loader.load_weights(weights)
+                loader.load_weights(weights)
 
     return ModelForPooling  # type: ignore
 
@@ -161,6 +160,7 @@ def as_classification_model(cls: _T) -> _T:
         return cls
 
     # Lazy import
+    from vllm.attention import AttentionMetadata
     from vllm.config import VllmConfig
     from vllm.model_executor.layers.linear import RowParallelLinear
     from vllm.model_executor.layers.pooler import PoolingType
@@ -201,10 +201,13 @@ def as_classification_model(cls: _T) -> _T:
             self,
             input_ids: torch.Tensor,
             positions: torch.Tensor,
+            kv_caches: list[torch.Tensor],
+            attn_metadata: AttentionMetadata,
             intermediate_tensors: Optional[IntermediateTensors] = None,
             inputs_embeds: Optional[torch.Tensor] = None,
         ) -> torch.Tensor:
-            hidden_states = super().forward(input_ids, positions,
+            hidden_states = super().forward(input_ids, positions, kv_caches,
+                                            attn_metadata,
                                             intermediate_tensors,
                                             inputs_embeds)
             logits, _ = self.score(hidden_states)

@@ -39,7 +39,6 @@ class QQQConfig(QuantizationConfig):
         group_size: int,
         is_sym: bool = True,
     ) -> None:
-        super().__init__()
         self.weight_bits = weight_bits
         self.group_size = group_size
         self.is_sym = is_sym
