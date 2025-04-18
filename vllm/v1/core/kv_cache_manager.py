@@ -171,8 +171,9 @@ class KVCacheManager:
 
         Args:
             request: The request to allocate slots.
-            num_tokens: The number of tokens to allocate. Note that this does
-                not include the tokens that have already been computed.
+            num_tokens: The number of tokens to allocate, including external
+                tokens. Note that this does not include tokens that have
+                already been computed locally (i.e. new_computed_blocks).
             new_computed_blocks: A list of new computed blocks just hitting the
                 prefix caching.
             num_lookahead_tokens: The number of speculative tokens to allocate.

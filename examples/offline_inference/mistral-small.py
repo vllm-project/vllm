@@ -16,11 +16,11 @@ from vllm.sampling_params import SamplingParams
 # # Mistral format
 # vllm serve mistralai/Mistral-Small-3.1-24B-Instruct-2503 \
 #   --tokenizer-mode mistral --config-format mistral --load-format mistral \
-#   --limit-mm-per-prompt 'image=4' --max-model-len 16384
+#   --limit-mm-per-prompt '{"image":4}' --max-model-len 16384
 #
 # # HF format
 # vllm serve mistralai/Mistral-Small-3.1-24B-Instruct-2503 \
-#   --limit-mm-per-prompt 'image=4' --max-model-len 16384
+#   --limit-mm-per-prompt '{"image":4}' --max-model-len 16384
 # ```
 #
 # - Client:
@@ -168,7 +168,7 @@ def run_advanced_demo(args: argparse.Namespace):
     print("-" * 50)
 
 
-def main():
+def parse_args():
     parser = argparse.ArgumentParser(
         description="Run a demo in simple or advanced mode.")
 
@@ -187,8 +187,11 @@ def main():
         '--disable-mm-preprocessor-cache',
         action='store_true',
         help='If True, disables caching of multi-modal preprocessor/mapper.')
+    return parser.parse_args()
 
-    args = parser.parse_args()
+
+def main():
+    args = parse_args()
 
     if args.mode == "simple":
         print("Running simple demo...")

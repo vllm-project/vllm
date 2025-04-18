@@ -7,7 +7,7 @@ import json
 import re
 import threading
 from dataclasses import MISSING, dataclass, fields
-from typing import (TYPE_CHECKING, Any, Callable, Dict, List, Literal, Mapping,
+from typing import (TYPE_CHECKING, Any, Callable, Dict, List, Literal,
                     Optional, Tuple, Type, TypeVar, Union, cast, get_args,
                     get_origin)
 
@@ -16,15 +16,16 @@ from typing_extensions import TypeIs
 
 import vllm.envs as envs
 from vllm import version
-from vllm.config import (CacheConfig, CompilationConfig, ConfigFormat,
-                         DecodingConfig, DeviceConfig,
+from vllm.config import (CacheConfig, CompilationConfig, Config, ConfigFormat,
+                         DecodingConfig, Device, DeviceConfig,
                          DistributedExecutorBackend, HfOverrides,
                          KVTransferConfig, LoadConfig, LoadFormat, LoRAConfig,
-                         ModelConfig, ModelImpl, ObservabilityConfig,
-                         ParallelConfig, PoolerConfig, PromptAdapterConfig,
-                         SchedulerConfig, SchedulerPolicy, SpeculativeConfig,
-                         TaskOption, TokenizerPoolConfig, VllmConfig,
-                         get_attr_docs)
+                         ModelConfig, ModelImpl, MultiModalConfig,
+                         ObservabilityConfig, ParallelConfig, PoolerConfig,
+                         PoolType, PromptAdapterConfig, SchedulerConfig,
+                         SchedulerPolicy, SpeculativeConfig, TaskOption,
+                         TokenizerPoolConfig, VllmConfig, get_attr_docs,
+                         get_field)
 from vllm.executor.executor_base import ExecutorBase
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS
@@ -44,27 +45,17 @@ logger = init_logger(__name__)
 
 ALLOWED_DETAILED_TRACE_MODULES = ["model", "worker", "all"]
 
-DEVICE_OPTIONS = [
-    "auto",
-    "cuda",
-    "neuron",
-    "cpu",
-    "tpu",
-    "xpu",
-    "hpu",
-]
-
 # object is used to allow for special typing forms
 T = TypeVar("T")
 TypeHint = Union[type[Any], object]
 TypeHintT = Union[type[T], object]
 
 
-def optional_arg(val: str, return_type: type[T]) -> Optional[T]:
+def optional_arg(val: str, return_type: Callable[[str], T]) -> Optional[T]:
     if val == "" or val == "None":
         return None
     try:
-        return cast(Callable, return_type)(val)
+        return return_type(val)
     except ValueError as e:
         raise argparse.ArgumentTypeError(
             f"Value {val} cannot be converted to {return_type}.") from e
@@ -82,8 +73,11 @@ def optional_float(val: str) -> Optional[float]:
     return optional_arg(val, float)
 
 
-def nullable_kvs(val: str) -> Optional[Mapping[str, int]]:
-    """Parses a string containing comma separate key [str] to value [int]
+def nullable_kvs(val: str) -> Optional[dict[str, int]]:
+    """NOTE: This function is deprecated, args should be passed as JSON
+    strings instead.
+    
+    Parses a string containing comma separate key [str] to value [int]
     pairs into a dictionary.
 
     Args:
@@ -115,6 +109,17 @@ def nullable_kvs(val: str) -> Optional[Mapping[str, int]]:
         out_dict[key] = parsed_value
 
     return out_dict
+
+
+def optional_dict(val: str) -> Optional[dict[str, int]]:
+    if re.match("^{.*}$", val):
+        return optional_arg(val, json.loads)
+
+    logger.warning(
+        "Failed to parse JSON string. Attempting to parse as "
+        "comma-separated key=value pairs. This will be deprecated in a "
+        "future release.")
+    return nullable_kvs(val)
 
 
 @dataclass
@@ -178,13 +183,16 @@ class EngineArgs:
     enforce_eager: Optional[bool] = None
     max_seq_len_to_capture: int = 8192
     disable_custom_all_reduce: bool = ParallelConfig.disable_custom_all_reduce
-    tokenizer_pool_size: int = 0
+    tokenizer_pool_size: int = TokenizerPoolConfig.pool_size
     # Note: Specifying a tokenizer pool by passing a class
     # is intended for expert use only. The API may change without
     # notice.
-    tokenizer_pool_type: Union[str, Type["BaseTokenizerGroup"]] = "ray"
-    tokenizer_pool_extra_config: Optional[Dict[str, Any]] = None
-    limit_mm_per_prompt: Optional[Mapping[str, int]] = None
+    tokenizer_pool_type: Union[PoolType, Type["BaseTokenizerGroup"]] = \
+        TokenizerPoolConfig.pool_type
+    tokenizer_pool_extra_config: dict[str, Any] = \
+        get_field(TokenizerPoolConfig, "extra_config")
+    limit_mm_per_prompt: dict[str, int] = \
+        get_field(MultiModalConfig, "limit_per_prompt")
     mm_processor_kwargs: Optional[Dict[str, Any]] = None
     disable_mm_preprocessor_cache: bool = False
     enable_lora: bool = False
@@ -199,14 +207,14 @@ class EngineArgs:
     long_lora_scaling_factors: Optional[Tuple[float]] = None
     lora_dtype: Optional[Union[str, torch.dtype]] = 'auto'
     max_cpu_loras: Optional[int] = None
-    device: str = 'auto'
+    device: Device = DeviceConfig.device
     num_scheduler_steps: int = SchedulerConfig.num_scheduler_steps
     multi_step_stream_outputs: bool = SchedulerConfig.multi_step_stream_outputs
     ray_workers_use_nsight: bool = ParallelConfig.ray_workers_use_nsight
     num_gpu_blocks_override: Optional[int] = None
     num_lookahead_slots: int = SchedulerConfig.num_lookahead_slots
-    model_loader_extra_config: Optional[
-        dict] = LoadConfig.model_loader_extra_config
+    model_loader_extra_config: dict = \
+        get_field(LoadConfig, "model_loader_extra_config")
     ignore_patterns: Optional[Union[str,
                                     List[str]]] = LoadConfig.ignore_patterns
     preemption_mode: Optional[str] = SchedulerConfig.preemption_mode
@@ -246,7 +254,7 @@ class EngineArgs:
 
     additional_config: Optional[Dict[str, Any]] = None
     enable_reasoning: Optional[bool] = None
-    reasoning_parser: Optional[str] = None
+    reasoning_parser: Optional[str] = DecodingConfig.reasoning_backend
     use_tqdm_on_load: bool = LoadConfig.use_tqdm_on_load
 
     def __post_init__(self):
@@ -294,14 +302,15 @@ class EngineArgs:
             """Check if the class is a custom type."""
             return cls.__module__ != "builtins"
 
-        def get_kwargs(cls: type[Any]) -> dict[str, Any]:
+        def get_kwargs(cls: type[Config]) -> dict[str, Any]:
             cls_docs = get_attr_docs(cls)
             kwargs = {}
             for field in fields(cls):
                 name = field.name
-                # One of these will always be present
-                default = (field.default_factory
-                           if field.default is MISSING else field.default)
+                default = field.default
+                # This will only be True if default is MISSING
+                if field.default_factory is not MISSING:
+                    default = field.default_factory()
                 kwargs[name] = {"default": default, "help": cls_docs[name]}
 
                 # Make note of if the field is optional and get the actual
@@ -331,8 +340,9 @@ class EngineArgs:
                 elif can_be_type(field_type, float):
                     kwargs[name][
                         "type"] = optional_float if optional else float
+                elif can_be_type(field_type, dict):
+                    kwargs[name]["type"] = optional_dict
                 elif (can_be_type(field_type, str)
-                      or can_be_type(field_type, dict)
                       or is_custom_type(field_type)):
                     kwargs[name]["type"] = optional_str if optional else str
                 else:
@@ -470,18 +480,22 @@ class EngineArgs:
                             'Examples:\n'
                             '- 1k → 1000\n'
                             '- 1K → 1024\n')
-        parser.add_argument(
+
+        # Guided decoding arguments
+        guided_decoding_kwargs = get_kwargs(DecodingConfig)
+        guided_decoding_group = parser.add_argument_group(
+            title="DecodingConfig",
+            description=DecodingConfig.__doc__,
+        )
+        guided_decoding_group.add_argument(
             '--guided-decoding-backend',
-            type=str,
-            default=DecodingConfig.guided_decoding_backend,
-            help='Which engine will be used for guided decoding'
-            ' (JSON schema / regex etc) by default. Currently support '
-            'https://github.com/mlc-ai/xgrammar and '
-            'https://github.com/guidance-ai/llguidance.'
-            'Valid backend values are "xgrammar", "guidance", and "auto". '
-            'With "auto", we will make opinionated choices based on request '
-            'contents and what the backend libraries currently support, so '
-            'the behavior is subject to change in each release.')
+            **guided_decoding_kwargs["guided_decoding_backend"])
+        guided_decoding_group.add_argument(
+            "--reasoning-parser",
+            # This choices is a special case because it's not static
+            choices=list(ReasoningParserManager.reasoning_parsers),
+            **guided_decoding_kwargs["reasoning_backend"])
+
         parser.add_argument(
             '--logits-processor-pattern',
             type=optional_str,
@@ -674,39 +688,29 @@ class EngineArgs:
                             'Additionally for encoder-decoder models, if the '
                             'sequence length of the encoder input is larger '
                             'than this, we fall back to the eager mode.')
-        parser.add_argument('--tokenizer-pool-size',
-                            type=int,
-                            default=EngineArgs.tokenizer_pool_size,
-                            help='Size of tokenizer pool to use for '
-                            'asynchronous tokenization. If 0, will '
-                            'use synchronous tokenization.')
-        parser.add_argument('--tokenizer-pool-type',
-                            type=str,
-                            default=EngineArgs.tokenizer_pool_type,
-                            help='Type of tokenizer pool to use for '
-                            'asynchronous tokenization. Ignored '
-                            'if tokenizer_pool_size is 0.')
-        parser.add_argument('--tokenizer-pool-extra-config',
-                            type=optional_str,
-                            default=EngineArgs.tokenizer_pool_extra_config,
-                            help='Extra config for tokenizer pool. '
-                            'This should be a JSON string that will be '
-                            'parsed into a dictionary. Ignored if '
-                            'tokenizer_pool_size is 0.')
+
+        # Tokenizer arguments
+        tokenizer_kwargs = get_kwargs(TokenizerPoolConfig)
+        tokenizer_group = parser.add_argument_group(
+            title="TokenizerPoolConfig",
+            description=TokenizerPoolConfig.__doc__,
+        )
+        tokenizer_group.add_argument('--tokenizer-pool-size',
+                                     **tokenizer_kwargs["pool_size"])
+        tokenizer_group.add_argument('--tokenizer-pool-type',
+                                     **tokenizer_kwargs["pool_type"])
+        tokenizer_group.add_argument('--tokenizer-pool-extra-config',
+                                     **tokenizer_kwargs["extra_config"])
 
         # Multimodal related configs
-        parser.add_argument(
-            '--limit-mm-per-prompt',
-            type=nullable_kvs,
-            default=EngineArgs.limit_mm_per_prompt,
-            # The default value is given in
-            # MultiModalConfig.get_default_limit_per_prompt
-            help=('For each multimodal plugin, limit how many '
-                  'input instances to allow for each prompt. '
-                  'Expects a comma-separated list of items, '
-                  'e.g.: `image=16,video=2` allows a maximum of 16 '
-                  'images and 2 videos per prompt. Defaults to '
-                  '1 (V0) or 999 (V1) for each modality.'))
+        multimodal_kwargs = get_kwargs(MultiModalConfig)
+        multimodal_group = parser.add_argument_group(
+            title="MultiModalConfig",
+            description=MultiModalConfig.__doc__,
+        )
+        multimodal_group.add_argument('--limit-mm-per-prompt',
+                                      **multimodal_kwargs["limit_per_prompt"])
+
         parser.add_argument(
             '--mm-processor-kwargs',
             default=None,
@@ -784,11 +788,15 @@ class EngineArgs:
                             type=int,
                             default=EngineArgs.max_prompt_adapter_token,
                             help='Max number of PromptAdapters tokens')
-        parser.add_argument("--device",
-                            type=str,
-                            default=EngineArgs.device,
-                            choices=DEVICE_OPTIONS,
-                            help='Device type for vLLM execution.')
+
+        # Device arguments
+        device_kwargs = get_kwargs(DeviceConfig)
+        device_group = parser.add_argument_group(
+            title="DeviceConfig",
+            description=DeviceConfig.__doc__,
+        )
+        device_group.add_argument("--device", **device_kwargs["device"])
+
         parser.add_argument('--num-scheduler-steps',
                             type=int,
                             default=1,
@@ -933,10 +941,11 @@ class EngineArgs:
                             'testing only. level 3 is the recommended level '
                             'for production.\n'
                             'To specify the full compilation config, '
-                            'use a JSON string.\n'
+                            'use a JSON string, e.g. ``{"level": 3, '
+                            '"cudagraph_capture_sizes": [1, 2, 4, 8]}``\n'
                             'Following the convention of traditional '
-                            'compilers, using -O without space is also '
-                            'supported. -O3 is equivalent to -O 3.')
+                            'compilers, using ``-O`` without space is also '
+                            'supported. ``-O3`` is equivalent to ``-O 3``.')
 
         parser.add_argument('--kv-transfer-config',
                             type=KVTransferConfig.from_cli,
@@ -1010,16 +1019,6 @@ class EngineArgs:
             help="Whether to enable reasoning_content for the model. "
             "If enabled, the model will be able to generate reasoning content."
         )
-
-        parser.add_argument(
-            "--reasoning-parser",
-            type=str,
-            choices=list(ReasoningParserManager.reasoning_parsers),
-            default=None,
-            help=
-            "Select the reasoning parser depending on the model that you're "
-            "using. This is used to parse the reasoning content into OpenAI "
-            "API format. Required for ``--enable-reasoning``.")
 
         parser.add_argument(
             "--disable-cascade-attn",
@@ -1302,8 +1301,6 @@ class EngineArgs:
 
         if self.qlora_adapter_name_or_path is not None and \
             self.qlora_adapter_name_or_path != "":
-            if self.model_loader_extra_config is None:
-                self.model_loader_extra_config = {}
             self.model_loader_extra_config[
                 "qlora_adapter_name_or_path"] = self.qlora_adapter_name_or_path
 
@@ -1522,12 +1519,6 @@ class EngineArgs:
                 _raise_or_fallback(feature_name="Speculative Decoding",
                                    recommend_to_remove=False)
                 return False
-
-        # No Disaggregated Prefill so far.
-        if self.kv_transfer_config != EngineArgs.kv_transfer_config:
-            _raise_or_fallback(feature_name="--kv-transfer-config",
-                               recommend_to_remove=False)
-            return False
 
         # No XFormers so far.
         V1_BACKENDS = [
