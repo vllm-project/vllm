@@ -1855,7 +1855,7 @@ class BatchedExperts(mk.FusedMoEPermuteExpertsUnpermute):
         a: torch.Tensor,
     ) -> Tuple[int, int, torch.dtype]:
         max_num_tokens = a.shape[1]
-        workspace13 = num_experts * max_num_tokens * K
+        workspace13 = num_experts * max_num_tokens * K * 2 # *2 = HACK!!!!!
         workspace2 = max_num_tokens * (N // 2)
         return (workspace13, workspace2, a_dtype)
 
@@ -1886,7 +1886,8 @@ class BatchedExperts(mk.FusedMoEPermuteExpertsUnpermute):
         print(f"global_num_experts = {global_num_experts}")
         num_experts = global_num_experts
         out = _resize_cache(workspace13, (num_experts, max_num_tokens, w2.shape[1]))
-        for expert in range(num_experts):
+        num_local_experts = expert_num_tokens.numel()
+        for expert in range(num_local_experts):  # num_experts
             num = expert_num_tokens[expert]
             if num > 0:
                 tmp = _resize_cache(workspace2, (num, w1.shape[1] // 2))
