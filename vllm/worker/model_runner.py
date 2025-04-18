@@ -286,10 +286,7 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
                         for seq_id in range(len(self.seq_ids)):
                             self.input_tokens[seq_id].clear()
 
-                    if inputs_embeds is not None:
-                        self.inputs_embeds = inputs_embeds
-                    else:
-                        self.inputs_embeds = None
+                    self.inputs_embeds = inputs_embeds
 
                     if input_positions:
                         self.input_positions = input_positions
