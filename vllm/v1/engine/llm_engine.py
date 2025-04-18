@@ -203,12 +203,13 @@ class LLMEngine:
         child_requests = []
         for idx in range(n):
             request_id, params = parent_req.get_child_info(idx)
-            child = request if idx == n - 1 else copy(request)
-            child.request_id, child.sampling_params = request_id, params
-            child_requests.append(child)
+            child_request = request if idx == n - 1 else copy(request)
+            child_request.request_id = request_id
+            child_request.sampling_params = params
+            child_requests.append(child_request)
 
             # Make a new RequestState and queue.
-            self.output_processor.add_request(child, parent_req, idx)
+            self.output_processor.add_request(child_request, parent_req, idx)
 
         # Add the batch of child requests to EngineCore.
         self.engine_core.add_request_batched(child_requests)
