@@ -147,7 +147,7 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
                                          min_transformers_version="4.50"),
     "GlmForCausalLM": _HfExamplesInfo("THUDM/glm-4-9b-chat-hf"),
     "Glm4ForCausalLM": _HfExamplesInfo(
-        "THUDM/GLM-4-32B-Chat-0414",
+        "THUDM/GLM-4-32B-0414",
         is_available_online=False,
         min_transformers_version="4.52.dev0"
     ),
@@ -366,7 +366,7 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     # Florence-2 uses BartFastTokenizer which can't be loaded from AutoTokenizer
     # Therefore, we borrow the BartTokenizer from the original Bart model
     "Florence2ForConditionalGeneration": _HfExamplesInfo("microsoft/Florence-2-base",  # noqa: E501
-                                                         tokenizer="facebook/bart-base",
+                                                         tokenizer="Isotr0py/Florence-2-tokenizer",
                                                          trust_remote_code=True),  # noqa: E501
     "MllamaForConditionalGeneration": _HfExamplesInfo("meta-llama/Llama-3.2-11B-Vision-Instruct"),  # noqa: E501
     "WhisperForConditionalGeneration": _HfExamplesInfo("openai/whisper-large-v3"),  # noqa: E501
