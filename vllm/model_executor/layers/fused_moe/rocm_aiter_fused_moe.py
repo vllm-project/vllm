@@ -1,18 +1,31 @@
 # SPDX-License-Identifier: Apache-2.0
+from functools import cache
 from typing import List, Optional
 
 import torch
 
 import vllm.envs as envs
+from vllm.config import get_current_vllm_config
+from vllm.model_executor.model_loader.utils import get_architecture_class_name
 from vllm.platforms import current_platform
 
+SUPPORTED_MODEL_ARCHS = [
+    "MixtralForCausalLM", "DeepseekForCausalLM", "DeepseekV2ForCausalLM",
+    "DeepseekV3ForCausalLM"
+]
 
+
+@cache
 def is_rocm_aiter_moe_enabled() -> bool:
+    model_cls_name = get_architecture_class_name(
+        get_current_vllm_config().model_config)
     return current_platform.is_rocm() \
         and envs.VLLM_ROCM_USE_AITER_MOE \
         and envs.VLLM_ROCM_USE_AITER \
+        and model_cls_name in SUPPORTED_MODEL_ARCHS
 
 
+@cache
 def is_rocm_aiter_block_scaled_moe_enabled() -> bool:
     return is_rocm_aiter_moe_enabled() and \
         envs.VLLM_ROCM_USE_AITER_FP8_BLOCK_SCALED_MOE
