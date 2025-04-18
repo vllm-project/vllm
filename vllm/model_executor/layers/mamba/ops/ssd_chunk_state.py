@@ -8,13 +8,19 @@
 import math
 
 import torch
-import triton
-import triton.language as tl
+
+from vllm.triton_utils import HAS_TRITON
+
+if HAS_TRITON:
+    import triton
+    import triton.language as tl
+
+from vllm.triton_utils import triton_autotune_decorator, triton_jit_decorator
 
 from .mamba_ssm import softplus
 
 
-@triton.autotune(
+@triton_autotune_decorator(
     configs=[
         triton.Config({'BLOCK_SIZE_H': 1}),
         triton.Config({'BLOCK_SIZE_H': 2}),
@@ -26,7 +32,7 @@ from .mamba_ssm import softplus
     ],
     key=['chunk_size', 'nheads'],
 )
-@triton.jit
+@triton_jit_decorator
 def _chunk_cumsum_fwd_kernel(
     # Pointers to matrices
     dt_ptr,
@@ -110,7 +116,7 @@ def _chunk_cumsum_fwd_kernel(
              mask=(offs_h[:, None] < nheads) & (offs_c[None, :] < chunk_size))
 
 
-@triton.autotune(
+@triton_autotune_decorator(
     configs=[
         triton.Config(
             {
@@ -187,7 +193,7 @@ def _chunk_cumsum_fwd_kernel(
     ],
     key=['hdim', 'dstate', 'chunk_size'],
 )
-@triton.jit
+@triton_jit_decorator
 def _chunk_state_fwd_kernel(
     # Pointers to matrices
     x_ptr,
@@ -311,7 +317,7 @@ def _chunk_state_fwd_kernel(
     tl.store(states_ptrs, states, mask=c_mask)
 
 
-@triton.autotune(
+@triton_autotune_decorator(
     configs=[
         triton.Config(
             {
@@ -388,7 +394,7 @@ def _chunk_state_fwd_kernel(
     ],
     key=['hdim', 'dstate', 'chunk_size'],
 )
-@triton.jit
+@triton_jit_decorator
 def _chunk_state_varlen_kernel(
     # Pointers to matrices
     x_ptr,

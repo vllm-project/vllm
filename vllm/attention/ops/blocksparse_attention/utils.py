@@ -8,7 +8,11 @@ from functools import lru_cache
 
 import numpy as np
 import torch
-import triton
+
+from vllm.triton_utils import HAS_TRITON
+
+if HAS_TRITON:
+    import triton
 
 
 class csr_matrix:
