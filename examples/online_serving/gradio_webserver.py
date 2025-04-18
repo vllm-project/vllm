@@ -21,7 +21,7 @@ def http_bot(prompt):
 
     for chunk in response.iter_lines(chunk_size=8192,
                                      decode_unicode=False,
-                                     delimiter=b"\n"):
+                                     delimiter=b"\0"):
         if chunk:
             data = json.loads(chunk.decode("utf-8"))
             output = data["text"][0]

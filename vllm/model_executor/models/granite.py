@@ -22,13 +22,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Inference-only IBM Granite model compatible with HuggingFace weights."""
-from typing import Any, Dict, Iterable, Optional, Set, Tuple, Union
+from typing import Any, Dict, Iterable, List, Optional, Set, Tuple, Union
 
 import torch
 from torch import nn
 from transformers import GraniteConfig
 
-from vllm.attention import Attention
+from vllm.attention import Attention, AttentionMetadata
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
@@ -166,11 +166,13 @@ class GraniteAttention(nn.Module):
         self,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
+        kv_cache: torch.Tensor,
+        attn_metadata: AttentionMetadata,
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
         q, k = self.rotary_emb(positions, q, k)
-        attn_output = self.attn(q, k, v)
+        attn_output = self.attn(q, k, v, kv_cache, attn_metadata)
         output, _ = self.o_proj(attn_output)
         return output
 
@@ -231,6 +233,8 @@ class GraniteDecoderLayer(nn.Module):
         self,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
+        kv_cache: torch.Tensor,
+        attn_metadata: AttentionMetadata,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         # Self Attention
         residual = hidden_states
@@ -238,6 +242,8 @@ class GraniteDecoderLayer(nn.Module):
         hidden_states = self.self_attn(
             positions=positions,
             hidden_states=hidden_states,
+            kv_cache=kv_cache,
+            attn_metadata=attn_metadata,
         )
         hidden_states = residual + hidden_states * self.residual_multiplier
         # Fully Connected
@@ -260,6 +266,7 @@ class GraniteModel(nn.Module):
         lora_config = vllm_config.lora_config
 
         self.config = config
+        self.padding_idx = config.pad_token_id
         lora_vocab = (lora_config.lora_extra_vocab_size *
                       (lora_config.max_loras or 1)) if lora_config else 0
         self.vocab_size = config.vocab_size + lora_vocab
@@ -293,6 +300,8 @@ class GraniteModel(nn.Module):
         self,
         input_ids: Optional[torch.Tensor],
         positions: torch.Tensor,
+        kv_caches: List[torch.Tensor],
+        attn_metadata: AttentionMetadata,
         intermediate_tensors: Optional[IntermediateTensors],
         inputs_embeds: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, IntermediateTensors]:
@@ -309,8 +318,14 @@ class GraniteModel(nn.Module):
             hidden_states = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
 
-        for layer in self.layers[self.start_layer:self.end_layer]:
-            hidden_states = layer(positions, hidden_states)
+        for i in range(self.start_layer, self.end_layer):
+            layer = self.layers[i]
+            hidden_states = layer(
+                positions,
+                hidden_states,
+                kv_caches[i - self.start_layer],
+                attn_metadata,
+            )
 
         if not get_pp_group().is_last_rank:
             return IntermediateTensors({
@@ -336,6 +351,10 @@ class GraniteForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
     }
 
     # LoRA specific attributes
+    supported_lora_modules = [
+        "qkv_proj", "o_proj", "gate_up_proj", "down_proj", "embed_tokens",
+        "lm_head"
+    ]
     embedding_modules = {
         "embed_tokens": "input_embeddings",
         "lm_head": "output_embeddings",
@@ -390,10 +409,13 @@ class GraniteForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
+        kv_caches: List[torch.Tensor],
+        attn_metadata: AttentionMetadata,
         intermediate_tensors: Optional[IntermediateTensors] = None,
         inputs_embeds: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, IntermediateTensors]:
-        model_output = self.model(input_ids, positions, intermediate_tensors,
+        model_output = self.model(input_ids, positions, kv_caches,
+                                  attn_metadata, intermediate_tensors,
                                   inputs_embeds)
         return model_output
 

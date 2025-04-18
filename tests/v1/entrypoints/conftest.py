@@ -29,7 +29,6 @@ def sample_regex():
             r"(25[0-5]|(2[0-4]|1\d|[1-9]|)\d)")
 
 
-# Note: Ensure this only uses attributes compatible with xgrammar
 @pytest.fixture
 def sample_json_schema():
     return {
@@ -45,7 +44,9 @@ def sample_json_schema():
                 "type": "array",
                 "items": {
                     "type": "string",
-                }
+                    "maxLength": 10
+                },
+                "minItems": 3
             },
             "work_history": {
                 "type": "array",
@@ -70,9 +71,8 @@ def sample_json_schema():
     }
 
 
-# A schema unsupported by xgrammar
 @pytest.fixture
-def unsupported_json_schema():
+def sample_complex_json_schema():
     return {
         "type": "object",
         "properties": {
@@ -150,19 +150,7 @@ def sample_guided_choice():
 
 
 @pytest.fixture
-def sample_sql_ebnf():
-    return """
-root ::= select_statement
-select_statement ::= "SELECT" column "from" table "where" condition
-column ::= "col_1" | "col_2"
-table ::= "table_1" | "table_2"
-condition ::= column "=" number
-number ::= "1" | "2"
-"""
-
-
-@pytest.fixture
-def sample_sql_lark():
+def sample_sql_statements():
     return ("""
 start: select_statement
 select_statement: "SELECT" column "from" table "where" condition

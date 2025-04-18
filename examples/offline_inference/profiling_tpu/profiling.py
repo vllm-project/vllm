@@ -4,6 +4,7 @@ import argparse
 import dataclasses
 import os
 import time
+from typing import List
 
 import numpy as np
 import torch_xla.debug.profiler as xp
@@ -34,7 +35,7 @@ def main(args: argparse.Namespace):
     dummy_prompt_token_ids = np.random.randint(10000,
                                                size=(args.batch_size,
                                                      args.input_len))
-    dummy_prompts: list[PromptType] = [{
+    dummy_prompts: List[PromptType] = [{
         "prompt_token_ids": batch
     } for batch in dummy_prompt_token_ids.tolist()]
 

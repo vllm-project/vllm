@@ -7,12 +7,11 @@ For most models, the prompt format should follow corresponding examples
 on HuggingFace model repository.
 """
 from argparse import Namespace
-from dataclasses import asdict
 from typing import Literal, NamedTuple, Optional, TypedDict, Union, get_args
 
 from PIL.Image import Image
 
-from vllm import LLM, EngineArgs
+from vllm import LLM
 from vllm.multimodal.utils import fetch_image
 from vllm.utils import FlexibleArgumentParser
 
@@ -38,12 +37,12 @@ Query = Union[TextQuery, ImageQuery, TextImageQuery]
 
 
 class ModelRequestData(NamedTuple):
-    engine_args: EngineArgs
+    llm: LLM
     prompt: str
     image: Optional[Image]
 
 
-def run_e5_v(query: Query) -> ModelRequestData:
+def run_e5_v(query: Query):
     llama3_template = '<|start_header_id|>user<|end_header_id|>\n\n{}<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n \n'  # noqa: E501
 
     if query["modality"] == "text":
@@ -59,20 +58,20 @@ def run_e5_v(query: Query) -> ModelRequestData:
         modality = query['modality']
         raise ValueError(f"Unsupported query modality: '{modality}'")
 
-    engine_args = EngineArgs(
+    llm = LLM(
         model="royokong/e5-v",
         task="embed",
         max_model_len=4096,
     )
 
     return ModelRequestData(
-        engine_args=engine_args,
+        llm=llm,
         prompt=prompt,
         image=image,
     )
 
 
-def run_vlm2vec(query: Query) -> ModelRequestData:
+def run_vlm2vec(query: Query):
     if query["modality"] == "text":
         text = query["text"]
         prompt = f"Find me an everyday image that matches the given caption: {text}"  # noqa: E501
@@ -88,7 +87,7 @@ def run_vlm2vec(query: Query) -> ModelRequestData:
         modality = query['modality']
         raise ValueError(f"Unsupported query modality: '{modality}'")
 
-    engine_args = EngineArgs(
+    llm = LLM(
         model="TIGER-Lab/VLM2Vec-Full",
         task="embed",
         trust_remote_code=True,
@@ -96,7 +95,7 @@ def run_vlm2vec(query: Query) -> ModelRequestData:
     )
 
     return ModelRequestData(
-        engine_args=engine_args,
+        llm=llm,
         prompt=prompt,
         image=image,
     )
@@ -127,18 +126,15 @@ def get_query(modality: QueryModality):
     raise ValueError(msg)
 
 
-def run_encode(model: str, modality: QueryModality, seed: Optional[int]):
+def run_encode(model: str, modality: QueryModality):
     query = get_query(modality)
     req_data = model_example_map[model](query)
-
-    engine_args = asdict(req_data.engine_args) | {"seed": seed}
-    llm = LLM(**engine_args)
 
     mm_data = {}
     if req_data.image is not None:
         mm_data["image"] = req_data.image
 
-    outputs = llm.embed({
+    outputs = req_data.llm.embed({
         "prompt": req_data.prompt,
         "multi_modal_data": mm_data,
     })
@@ -148,7 +144,7 @@ def run_encode(model: str, modality: QueryModality, seed: Optional[int]):
 
 
 def main(args: Namespace):
-    run_encode(args.model_name, args.modality, args.seed)
+    run_encode(args.model_name, args.modality)
 
 
 model_example_map = {
@@ -171,10 +167,5 @@ if __name__ == "__main__":
                         default="image",
                         choices=get_args(QueryModality),
                         help='Modality of the input.')
-    parser.add_argument("--seed",
-                        type=int,
-                        default=None,
-                        help="Set the seed when initializing `vllm.LLM`.")
-
     args = parser.parse_args()
     main(args)

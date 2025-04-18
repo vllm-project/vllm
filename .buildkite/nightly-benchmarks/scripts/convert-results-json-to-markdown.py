@@ -84,13 +84,8 @@ if __name__ == "__main__":
             # this result is generated via `benchmark_serving.py`
 
             # attach the benchmarking command to raw_result
-            try:
-                with open(test_file.with_suffix(".commands")) as f:
-                    command = json.loads(f.read())
-            except OSError as e:
-                print(e)
-                continue
-
+            with open(test_file.with_suffix(".commands")) as f:
+                command = json.loads(f.read())
             raw_result.update(command)
 
             # update the test name of this result
@@ -104,13 +99,8 @@ if __name__ == "__main__":
             # this result is generated via `benchmark_latency.py`
 
             # attach the benchmarking command to raw_result
-            try:
-                with open(test_file.with_suffix(".commands")) as f:
-                    command = json.loads(f.read())
-            except OSError as e:
-                print(e)
-                continue
-
+            with open(test_file.with_suffix(".commands")) as f:
+                command = json.loads(f.read())
             raw_result.update(command)
 
             # update the test name of this result
@@ -131,13 +121,8 @@ if __name__ == "__main__":
             # this result is generated via `benchmark_throughput.py`
 
             # attach the benchmarking command to raw_result
-            try:
-                with open(test_file.with_suffix(".commands")) as f:
-                    command = json.loads(f.read())
-            except OSError as e:
-                print(e)
-                continue
-
+            with open(test_file.with_suffix(".commands")) as f:
+                command = json.loads(f.read())
             raw_result.update(command)
 
             # update the test name of this result

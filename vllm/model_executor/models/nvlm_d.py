@@ -6,8 +6,7 @@
 # Copyright (c) 2024 NVIDIA
 # Licensed under Apache 2.0 License [see LICENSE for details]
 # --------------------------------------------------------
-from collections.abc import Mapping, Sequence
-from typing import Optional
+from typing import Mapping, Optional
 
 import torch
 import torch.nn as nn
@@ -18,8 +17,8 @@ from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import MultiModalKwargs
 from vllm.multimodal.parse import (ImageEmbeddingItems, ImageProcessorItems,
                                    MultiModalDataItems)
-from vllm.multimodal.processing import (PromptReplacement, PromptUpdate,
-                                        PromptUpdateDetails)
+from vllm.multimodal.processing import (PromptReplacement,
+                                        PromptReplacementDetails)
 from vllm.multimodal.profiling import ProcessorInputs
 
 from .intern_vit import InternVisionModel
@@ -36,16 +35,16 @@ class NVLMProcessor(BaseInternVLProcessor):
     def image_token_id(self) -> int:
         return self.tokenizer.get_vocab()[IMG_PAD]
 
-    def get_image_repl(
+    def get_image_repl_features(
         self,
         feature_size: int,
         num_patches: Optional[int],
-    ) -> PromptUpdateDetails[str]:
+    ) -> str:
         if num_patches is None:
             raise NotImplementedError("Embedding inputs are not supported")
 
         tile_pos_identifiers = [f"<tile_{i}>" for i in range(1, num_patches)]
-        if self.use_thumbnail:
+        if self.use_thumbnail and num_patches != 1:
             tile_pos_identifiers += ["<tile_global_thumbnail>"]
 
         context_size = feature_size // num_patches
@@ -55,9 +54,14 @@ class NVLMProcessor(BaseInternVLProcessor):
         # We include the start and end as well because "<Image><tile" is
         # tokenized as ["<Image", "><", "tile"], resulting in assertion error
         # when trying to find "<tile" as a subsequence of "<Image><tile"
-        repl = "<Image>" + features + "</Image>"
+        return "<Image>" + features + "</Image>"
 
-        return PromptUpdateDetails(full=repl, features=repl)
+    def get_image_repl_full(
+        self,
+        feature_size: int,
+        num_patches: Optional[int],
+    ) -> str:
+        return self.get_image_repl_features(feature_size, num_patches)
 
 
 class NVLMProcessingInfo(BaseInternVLProcessingInfo):
@@ -65,23 +69,14 @@ class NVLMProcessingInfo(BaseInternVLProcessingInfo):
     def get_hf_processor(
         self,
         *,
-        min_dynamic_patch: Optional[int] = None,
         max_dynamic_patch: Optional[int] = None,
         dynamic_image_size: Optional[bool] = None,
-        **kwargs: object,
     ) -> NVLMProcessor:
-        if min_dynamic_patch is not None:
-            kwargs["min_dynamic_patch"] = min_dynamic_patch
-        if max_dynamic_patch is not None:
-            kwargs["max_dynamic_patch"] = max_dynamic_patch
-        if dynamic_image_size is not None:
-            kwargs["dynamic_image_size"] = dynamic_image_size
-
-        return self.ctx.init_processor(
-            NVLMProcessor,
-            config=self.get_hf_config(),
-            tokenizer=self.get_tokenizer(),
-            **kwargs,
+        return NVLMProcessor(
+            self.get_hf_config(),
+            self.get_tokenizer(),
+            max_dynamic_patch=max_dynamic_patch,
+            dynamic_image_size=dynamic_image_size,
         )
 
     def get_max_image_tokens(self) -> int:
@@ -138,12 +133,12 @@ class NVLMDummyInputsBuilder(InternVLDummyInputsBuilder[NVLMProcessingInfo]):
 
 class NVLMMultiModalProcessor(InternVLMultiModalProcessor[NVLMProcessingInfo]):
 
-    def _get_prompt_updates(
+    def _get_prompt_replacements(
         self,
         mm_items: MultiModalDataItems,
         hf_processor_mm_kwargs: Mapping[str, object],
         out_mm_kwargs: MultiModalKwargs,
-    ) -> Sequence[PromptUpdate]:
+    ) -> list[PromptReplacement]:
         hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
 
         if "image_num_patches" in out_mm_kwargs:
@@ -175,11 +170,11 @@ class NVLMMultiModalProcessor(InternVLMultiModalProcessor[NVLMProcessingInfo]):
             if num_patches is not None:
                 assert isinstance(num_patches, int)
 
-            repl = hf_processor.get_image_repl(feature_size, num_patches)
-
-            return PromptUpdateDetails(
-                full=repl.full + "\n",
-                features=repl.features + "\n",
+            return PromptReplacementDetails(
+                full=hf_processor.get_image_repl_full(feature_size,
+                                                      num_patches) + "\n",
+                features=hf_processor.get_image_repl_features(
+                    feature_size, num_patches) + "\n",
             )
 
         # See note in dummy data regarding why we have the extra newline

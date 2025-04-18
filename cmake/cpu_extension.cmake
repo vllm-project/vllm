@@ -33,6 +33,8 @@ endif()
 
 if(MACOSX_FOUND)
     list(APPEND CXX_COMPILE_FLAGS
+        "-Xpreprocessor"
+        "-fopenmp"
         "-DVLLM_CPU_EXTENSION")
 else()
     list(APPEND CXX_COMPILE_FLAGS
@@ -79,7 +81,6 @@ else()
     find_isa(${CPUINFO} "POWER9" POWER9_FOUND)
     find_isa(${CPUINFO} "asimd" ASIMD_FOUND) # Check for ARM NEON support
     find_isa(${CPUINFO} "bf16" ARM_BF16_FOUND) # Check for ARM BF16 support
-    find_isa(${CPUINFO} "S390" S390_FOUND)
 endif()
 
 
@@ -128,16 +129,8 @@ elseif (ASIMD_FOUND)
 elseif(APPLE_SILICON_FOUND)
     message(STATUS "Apple Silicon Detected")
     set(ENABLE_NUMA OFF)
-elseif (S390_FOUND)
-    message(STATUS "S390 detected")
-    # Check for S390 VXE support
-    list(APPEND CXX_COMPILE_FLAGS
-        "-mvx"
-        "-mzvector"
-        "-march=native"
-        "-mtune=native")
 else()
-    message(FATAL_ERROR "vLLM CPU backend requires AVX512, AVX2, Power9+ ISA, S390X ISA or ARMv8 support.")
+    message(FATAL_ERROR "vLLM CPU backend requires AVX512, AVX2, Power9+ ISA or ARMv8 support.")
 endif()
 
 #
@@ -147,7 +140,7 @@ if (AVX512_FOUND AND NOT AVX512_DISABLED)
     FetchContent_Declare(
         oneDNN
         GIT_REPOSITORY https://github.com/oneapi-src/oneDNN.git
-        GIT_TAG  v3.7.1
+        GIT_TAG  v3.6
         GIT_PROGRESS TRUE
         GIT_SHALLOW TRUE
     )
@@ -188,14 +181,12 @@ set(VLLM_EXT_SRC
     "csrc/cpu/cache.cpp"
     "csrc/cpu/utils.cpp"
     "csrc/cpu/layernorm.cpp"
-    "csrc/cpu/mla_decode.cpp"
     "csrc/cpu/pos_encoding.cpp"
     "csrc/cpu/torch_bindings.cpp")
 
 if (AVX512_FOUND AND NOT AVX512_DISABLED)
     set(VLLM_EXT_SRC
         "csrc/cpu/quant.cpp"
-        "csrc/cpu/shm.cpp"
         ${VLLM_EXT_SRC})
 endif()
 

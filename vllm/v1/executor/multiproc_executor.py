@@ -5,13 +5,12 @@ import pickle
 import signal
 import sys
 import time
-import traceback
 import weakref
 from dataclasses import dataclass
 from enum import Enum, auto
 from functools import partial
 from multiprocessing.process import BaseProcess
-from typing import Any, Callable, Optional, Union
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 import cloudpickle
 import psutil
@@ -78,7 +77,7 @@ class MultiprocExecutor(Executor):
         scheduler_output_handle = self.rpc_broadcast_mq.export_handle()
 
         # Create workers
-        self.workers: list[WorkerProcHandle] = []
+        self.workers: List[WorkerProcHandle] = []
         for rank in range(self.world_size):
             worker = WorkerProc.make_worker_process(self.vllm_config, rank,
                                                     rank,
@@ -95,8 +94,8 @@ class MultiprocExecutor(Executor):
     def collective_rpc(self,
                        method: Union[str, Callable],
                        timeout: Optional[float] = None,
-                       args: tuple = (),
-                       kwargs: Optional[dict] = None) -> list[Any]:
+                       args: Tuple = (),
+                       kwargs: Optional[Dict] = None) -> List[Any]:
         start_time = time.monotonic()
         kwargs = kwargs or {}
 
@@ -171,7 +170,7 @@ class MultiprocExecutor(Executor):
 
     def shutdown(self):
         """Properly shut down the executor and its workers"""
-        if not getattr(self, 'shutting_down', False):
+        if getattr(self, 'shutting_down', False):
             self.shutting_down = True
             for w in self.workers:
                 w.worker_response_mq = None
@@ -209,7 +208,7 @@ class WorkerProc:
         self.rank = rank
         wrapper = WorkerWrapperBase(vllm_config=vllm_config, rpc_rank=rank)
         # TODO: move `init_worker` to executor level as a collective rpc call
-        all_kwargs: list[dict] = [
+        all_kwargs: List[Dict] = [
             {} for _ in range(vllm_config.parallel_config.world_size)
         ]
         all_kwargs[rank] = {
@@ -217,10 +216,9 @@ class WorkerProc:
             "local_rank": local_rank,
             "rank": rank,
             "distributed_init_method": distributed_init_method,
-            "is_driver_worker": rank == 0,
         }
         wrapper.init_worker(all_kwargs)
-        self.worker = wrapper
+        self.worker = wrapper.worker
 
         pid = os.getpid()
         _add_prefix(sys.stdout, f"VllmWorker rank={rank}", pid)
@@ -235,10 +233,7 @@ class WorkerProc:
         worker_response_mq_handle = self.worker_response_mq.export_handle()
 
         # Send Readiness signal to EngineCore process.
-        # Set linger here because we want to ensure the message has
-        # been sent before the context is closed.
-        with zmq_socket_ctx(ready_path, zmq.constants.PUSH,
-                            linger=10000) as ready_socket:
+        with zmq_socket_ctx(ready_path, zmq.constants.PUSH) as ready_socket:
             payload = pickle.dumps(worker_response_mq_handle,
                                    protocol=pickle.HIGHEST_PROTOCOL)
             ready_socket.send_string(WorkerProc.READY_STR)
@@ -273,13 +268,11 @@ class WorkerProc:
         proc = context.Process(target=WorkerProc.worker_main,
                                kwargs=process_kwargs,
                                daemon=True)
+        proc.start()
 
-        with zmq_socket_ctx(ready_path, zmq.constants.PULL) as ready_socket:
-            proc.start()
-
-            # Wait for startup
-            worker_response_mq_handle = WorkerProc.wait_for_startup(
-                proc, ready_socket)
+        # Wait for startup
+        worker_response_mq_handle = WorkerProc.wait_for_startup(
+            proc, ready_path)
 
         worker_response_mq = MessageQueue.create_from_handle(
             worker_response_mq_handle, 0)
@@ -342,22 +335,23 @@ class WorkerProc:
     @staticmethod
     def wait_for_startup(
         proc: BaseProcess,
-        ready_socket: zmq.Socket,
+        ready_path: str,
     ) -> Optional[Handle]:
         """Wait until the Worker is ready."""
+        with zmq_socket_ctx(ready_path, zmq.constants.PULL) as socket:
 
-        # Wait for Worker to send READY.
-        while ready_socket.poll(timeout=POLLING_TIMEOUT_MS) == 0:
-            logger.debug("Waiting for WorkerProc to startup.")
+            # Wait for Worker to send READY.
+            while socket.poll(timeout=POLLING_TIMEOUT_MS) == 0:
+                logger.debug("Waiting for WorkerProc to startup.")
 
-            if not proc.is_alive():
-                raise RuntimeError("WorkerProc failed to start.")
+                if not proc.is_alive():
+                    raise RuntimeError("WorkerProc failed to start.")
 
-        message = ready_socket.recv_string()
-        assert message == WorkerProc.READY_STR
-        handle_frame = ready_socket.recv(copy=False)
-        handle = pickle.loads(handle_frame.buffer)
-        return handle
+            message = socket.recv_string()
+            assert message == WorkerProc.READY_STR
+            handle_frame = socket.recv(copy=False)
+            handle = pickle.loads(handle_frame.buffer)
+            return handle
 
     class ResponseStatus(Enum):
         SUCCESS = auto()
@@ -375,9 +369,6 @@ class WorkerProc:
                     func = partial(cloudpickle.loads(method), self.worker)
                 output = func(*args, **kwargs)
             except Exception as e:
-                # Notes have been introduced in python 3.11
-                if hasattr(e, "add_note"):
-                    e.add_note(traceback.format_exc())
                 self.worker_response_mq.enqueue(
                     (WorkerProc.ResponseStatus.FAILURE, e))
                 logger.exception("WorkerProc hit an exception: %s", exc_info=e)

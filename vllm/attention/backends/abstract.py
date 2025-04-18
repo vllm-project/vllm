@@ -232,7 +232,6 @@ class AttentionMetadataBuilder(ABC, Generic[T]):
 
 class AttentionLayer(Protocol):
 
-    _q_scale: torch.Tensor
     _k_scale: torch.Tensor
     _v_scale: torch.Tensor
     _k_scale_float: float
@@ -295,7 +294,3 @@ class MLAAttentionImpl(AttentionImpl[T], Generic[T]):
         output: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         raise NotImplementedError
-
-
-def is_quantized_kv_cache(kv_cache_dtype: str) -> bool:
-    return kv_cache_dtype != "auto"

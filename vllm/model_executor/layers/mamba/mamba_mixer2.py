@@ -14,7 +14,6 @@ from vllm.distributed import (divide, get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size,
                               tensor_model_parallel_all_gather,
                               tensor_model_parallel_all_reduce)
-from vllm.forward_context import get_forward_context
 from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                RowParallelLinear)
@@ -134,8 +133,7 @@ def extra_groups_for_head_shards(ngroups: int, tp_size: int):
     if ngroups % tp_size == 0:
         return 0
 
-    # for n_groups == 1, this is exactly tp_size - n_groups
-    return tp_size - ngroups
+    return tp_size - ngroups % tp_size
 
 
 def mamba_v2_sharded_weight_loader(
@@ -155,7 +153,7 @@ def mamba_v2_sharded_weight_loader(
         boundary, loaded_boundary = 0, 0
 
         # - iterate over the shard specs
-        for full_dim, extra, duplicate_groups in shard_spec:
+        for full_dim, extra, ratio in shard_spec:
             # - full dim is the model dim (before TP).
             # - extra > 0, means there is expected overall increase
             #   of dimensions. This is so because of replication.
@@ -169,9 +167,7 @@ def mamba_v2_sharded_weight_loader(
             # - compute the rank into the loaded shard.
             # - if there is replication, different TP shards will
             #   take from the same rank.
-            # NOTE: currently we only support duplication
-            # in the case where num_groups == 1
-            rank = 0 if duplicate_groups else tp_rank
+            rank = tp_rank // ratio
 
             # - leftmost boundary index into loaded weight.
             loaded_skip = rank * shard_size
@@ -237,22 +233,11 @@ class MambaMixer2(CustomOp):
         # - HOWEVER IF, world_size DOES NOT divide groups, then we need
         #   to allocate extra space in the shard, such that groups
         #   may be replicated to follow the head shard.
-        # - NOTE: currently for the world size DOES NOT divide groups
-        #   case, we only support the case when n_groups == 1
         self.tp_size = get_tensor_model_parallel_world_size()
         tp_rank = get_tensor_model_parallel_rank()
 
         assert num_heads % self.tp_size == 0, \
             "Tensor parallel world size must divide num heads."
-
-        assert (n_groups % self.tp_size) == 0 or n_groups == 1, \
-            (
-                "If tensor parallel world size does not divide num_heads, "
-                "then num_groups must equal 1."
-            )
-
-        assert self.tp_size == 1 or quant_config is None, \
-            "Tensor parallel currently not supported for quantized models."
 
         self.ssm_state_size = ssm_state_size
         self.activation = activation
@@ -299,10 +284,11 @@ class MambaMixer2(CustomOp):
             self.n_groups * self.ssm_state_size,  # expected model size
             (self.n_groups - n_groups) *
             self.ssm_state_size,  # extra dims assigned
-            n_groups == 1,  # if there was only one group
+            self.num_heads //
+            n_groups,  # ratio for mapping back to original group
         )
-        intermediate_settings = (intermediate_size, 0, False)
-        head_setings = (self.num_heads, 0, False)
+        intermediate_settings = (intermediate_size, 0, 1)
+        head_setings = (self.num_heads, 0, 1)
 
         # - the weight already has a "weight_loader" attribute
         #   which set_weight_attrs will raise if we do not
@@ -334,24 +320,22 @@ class MambaMixer2(CustomOp):
                 ], self.tp_size, tp_rank)
             })
 
-        if quant_config is None:
-            # - quant layers do not have a weight loader
-            delattr(self.in_proj.weight, "weight_loader")
-            set_weight_attrs(
-                self.in_proj.weight,
-                {
-                    "weight_loader":
-                    mamba_v2_sharded_weight_loader(
-                        [
-                            intermediate_settings,  # for gate
-                            intermediate_settings,
-                            group_shard_settings,
-                            group_shard_settings,
-                            head_setings,  # for dt
-                        ],
-                        self.tp_size,
-                        tp_rank)
-                })
+        delattr(self.in_proj.weight, "weight_loader")
+        set_weight_attrs(
+            self.in_proj.weight,
+            {
+                "weight_loader":
+                mamba_v2_sharded_weight_loader(
+                    [
+                        intermediate_settings,  # for gate
+                        intermediate_settings,
+                        group_shard_settings,
+                        group_shard_settings,
+                        head_setings,  # for dt
+                    ],
+                    self.tp_size,
+                    tp_rank)
+            })
 
         # - these are TPed by heads to reduce the size of the
         #   temporal shape
@@ -381,16 +365,17 @@ class MambaMixer2(CustomOp):
                                        eps=rms_norm_eps)
 
     def forward_native(self, hidden_states: torch.Tensor,
+                       attn_metadata: AttentionMetadata,
                        conv_state: torch.Tensor, ssm_state: torch.Tensor):
         pass
 
     def forward_cuda(
         self,
         hidden_states: torch.Tensor,
+        attn_metadata: AttentionMetadata,
         mamba_cache_params: MambaCacheParams,
         sequence_idx: Optional[torch.Tensor] = None,
     ):
-        attn_metadata: AttentionMetadata = get_forward_context().attn_metadata
 
         seq_len, _ = hidden_states.shape
         groups_time_state_size = self.n_groups * self.ssm_state_size
@@ -470,11 +455,10 @@ class MambaMixer2(CustomOp):
         if has_prefill:
 
             initial_states = None
-            if has_initial_states is not None and torch.any(
-                    has_initial_states):
-                zero_init_indices = mamba_cache_params.state_indices_tensor[
-                    ~has_initial_states]
-                mamba_cache_params.ssm_state[zero_init_indices] = 0
+            if has_initial_states is not None and any(has_initial_states):
+                for idx in mamba_cache_params.state_indices_tensor[
+                        ~has_initial_states]:
+                    mamba_cache_params.ssm_state[idx].zero_()
                 initial_states = mamba_cache_params.ssm_state[
                     mamba_cache_params.state_indices_tensor]
 
@@ -500,8 +484,8 @@ class MambaMixer2(CustomOp):
 
             # update ssm states
             # - varlen state is a (batch, nheads, headdim, dstate) tensor
-            mamba_cache_params.ssm_state[
-                mamba_cache_params.state_indices_tensor] = varlen_state
+            for i, idx in enumerate(mamba_cache_params.state_indices_tensor):
+                mamba_cache_params.ssm_state[idx].copy_(varlen_state[i])
 
             # - reshape
             hidden_states = scan_output.view(seq_len, -1)

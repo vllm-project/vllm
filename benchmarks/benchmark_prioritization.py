@@ -5,7 +5,7 @@ import dataclasses
 import json
 import random
 import time
-from typing import Optional
+from typing import List, Optional, Tuple
 
 from transformers import AutoTokenizer, PreTrainedTokenizerBase
 
@@ -13,17 +13,12 @@ from vllm.engine.arg_utils import EngineArgs
 from vllm.utils import FlexibleArgumentParser
 
 
-#Select a equi-probable random priority
-def get_random_flag():
-    return 0 if random.random() < 0.5 else 1
-
-
 def sample_requests(
     dataset_path: str,
     num_requests: int,
     tokenizer: PreTrainedTokenizerBase,
     fixed_output_len: Optional[int],
-) -> list[tuple[str, int, int, int]]:
+) -> List[Tuple[str, int, int]]:
     if fixed_output_len is not None and fixed_output_len < 4:
         raise ValueError("output_len too small")
 
@@ -40,7 +35,7 @@ def sample_requests(
     random.shuffle(dataset)
 
     # Filter out sequences that are too long or too short
-    filtered_dataset: list[tuple[str, int, int]] = []
+    filtered_dataset: List[Tuple[str, int, int]] = []
     for i in range(len(dataset)):
         if len(filtered_dataset) == num_requests:
             break
@@ -60,7 +55,8 @@ def sample_requests(
             # Prune too long sequences.
             continue
 
-        priority = get_random_flag()
+        #Select a equi-probable random priority
+        priority = 0 if random.random() < 0.5 else 1
 
         filtered_dataset.append((prompt, prompt_len, output_len, priority))
 
@@ -68,19 +64,12 @@ def sample_requests(
 
 
 def run_vllm(
-    requests: list[tuple[str, int, int]],
+    requests: List[Tuple[str, int, int]],
     n: int,
     engine_args: EngineArgs,
-    disable_detokenize: bool = False,
 ) -> float:
     from vllm import LLM, SamplingParams
     llm = LLM(**dataclasses.asdict(engine_args))
-
-    assert all(
-        llm.llm_engine.model_config.max_model_len >= (request[1] + request[2])
-        for request in requests), (
-            "Please ensure that max_model_len is greater than the sum of"
-            " input_len and output_len for all requests.")
 
     # Add the requests to the engine.
     prompts = []
@@ -96,7 +85,6 @@ def run_vllm(
                 top_p=1.0,
                 ignore_eos=True,
                 max_tokens=output_len,
-                detokenize=not disable_detokenize,
             ))
 
     start = time.perf_counter()
@@ -115,16 +103,15 @@ def main(args: argparse.Namespace):
     if args.dataset is None:
         # Synthesize a prompt with the given input length.
         prompt = "hi" * (args.input_len - 1)
-        requests = [(prompt, args.input_len, args.output_len,
-                     get_random_flag()) for _ in range(args.num_prompts)]
+        requests = [(prompt, args.input_len, args.output_len)
+                    for _ in range(args.num_prompts)]
     else:
         requests = sample_requests(args.dataset, args.num_prompts, tokenizer,
                                    args.output_len)
 
     if args.backend == "vllm":
         elapsed_time = run_vllm(requests, args.n,
-                                EngineArgs.from_cli_args(args),
-                                args.disable_detokenize)
+                                EngineArgs.from_cli_args(args))
     else:
         raise ValueError(f"Unknown backend: {args.backend}")
     total_num_tokens = sum(prompt_len + output_len
@@ -177,12 +164,6 @@ if __name__ == "__main__":
         type=str,
         default=None,
         help='Path to save the throughput results in JSON format.')
-    parser.add_argument(
-        '--disable-detokenize',
-        action='store_true',
-        help=("Do not detokenize responses (i.e. do not include "
-              "detokenization time in the latency measurement)"),
-    )
 
     parser = EngineArgs.add_cli_args(parser)
     args = parser.parse_args()

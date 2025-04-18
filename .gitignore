@@ -2,8 +2,7 @@
 /vllm/_version.py
 
 # vllm-flash-attn built from source
-vllm/vllm_flash_attn/*
-!vllm/vllm_flash_attn/fa_utils.py
+vllm/vllm_flash_attn/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
@@ -198,7 +197,7 @@ _build/
 hip_compat.h
 
 # Benchmark dataset
-benchmarks/**/*.json
+benchmarks/*.json
 
 # Linting
 actionlint

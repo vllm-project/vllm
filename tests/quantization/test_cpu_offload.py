@@ -26,9 +26,7 @@ def test_cpu_offload_fp8():
 
 @pytest.mark.skipif(not is_quant_method_supported("gptq_marlin"),
                     reason="gptq_marlin is not supported on this GPU type.")
-def test_cpu_offload_gptq(monkeypatch):
-    # This quant method is sensitive to dummy weights, so we force real weights
-    monkeypatch.setenv('VLLM_TEST_FORCE_LOAD_FORMAT', 'auto')
+def test_cpu_offload_gptq():
     # Test GPTQ Marlin
     compare_two_settings("Qwen/Qwen2-1.5B-Instruct-GPTQ-Int4", [],
                          ["--cpu-offload-gb", "1"],
@@ -42,9 +40,7 @@ def test_cpu_offload_gptq(monkeypatch):
 
 @pytest.mark.skipif(not is_quant_method_supported("awq_marlin"),
                     reason="awq_marlin is not supported on this GPU type.")
-def test_cpu_offload_awq(monkeypatch):
-    # This quant method is sensitive to dummy weights, so we force real weights
-    monkeypatch.setenv('VLLM_TEST_FORCE_LOAD_FORMAT', 'auto')
+def test_cpu_offload_awq():
     # Test AWQ Marlin
     compare_two_settings("Qwen/Qwen2-1.5B-Instruct-AWQ", [],
                          ["--cpu-offload-gb", "1"],
@@ -58,9 +54,7 @@ def test_cpu_offload_awq(monkeypatch):
 
 @pytest.mark.skipif(not is_quant_method_supported("gptq_marlin"),
                     reason="gptq_marlin is not supported on this GPU type.")
-def test_cpu_offload_compressed_tensors(monkeypatch):
-    # This quant method is sensitive to dummy weights, so we force real weights
-    monkeypatch.setenv('VLLM_TEST_FORCE_LOAD_FORMAT', 'auto')
+def test_cpu_offload_compressed_tensors():
     # Test wNa16
     compare_two_settings("nm-testing/tinyllama-oneshot-w4a16-channel-v2", [],
                          ["--cpu-offload-gb", "1"],

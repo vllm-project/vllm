@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
+from typing import List
+
 import pytest
 
 from vllm.inputs import zip_enc_dec_prompts
@@ -43,7 +45,7 @@ def test_parse_single_batch_string_consistent(string_input: str):
 
 
 @pytest.mark.parametrize('token_input', TOKEN_INPUTS)
-def test_parse_single_batch_token_consistent(token_input: list[int]):
+def test_parse_single_batch_token_consistent(token_input: List[int]):
     assert parse_and_batch_prompt(token_input) \
         == parse_and_batch_prompt([token_input])
 

@@ -2,8 +2,9 @@
 
 import time
 from collections import defaultdict
-from collections.abc import Sequence as GenericSequence
-from typing import Any, Optional
+from typing import Any, Dict, List, Optional
+from typing import Sequence as GenericSequence
+from typing import Tuple
 
 from vllm import SamplingParams
 from vllm.core.scheduler import Scheduler, SchedulerOutputs
@@ -18,10 +19,11 @@ def create_dummy_prompt(
     prompt_length: int = -1,
     block_size: Optional[int] = None,
     lora_request: Optional[LoRARequest] = None,
-    prompt_tokens: Optional[list[int]] = None,
+    best_of: int = 1,
+    prompt_tokens: Optional[List[int]] = None,
     min_tokens: int = 0,
     max_tokens: int = 16,
-) -> tuple[Sequence, SequenceGroup]:
+) -> Tuple[Sequence, SequenceGroup]:
     if not block_size:
         block_size = prompt_length
 
@@ -31,24 +33,22 @@ def create_dummy_prompt(
         prompt_tokens = list(range(prompt_length))
 
     prompt_str = " ".join([str(t) for t in prompt_tokens])
-    prompt = Sequence(
-        int(request_id),
-        inputs=token_inputs(prompt_tokens, prompt=prompt_str),
-        block_size=block_size,
-    )
-    seq_group = SequenceGroup(
-        request_id=request_id,
-        seqs=[prompt],
-        arrival_time=time.time(),
-        sampling_params=SamplingParams(max_tokens=max_tokens,
-                                       min_tokens=min_tokens),
-        lora_request=lora_request,
-    )
+    prompt = Sequence(int(request_id),
+                      inputs=token_inputs(prompt_tokens, prompt=prompt_str),
+                      block_size=block_size)
+    seq_group = SequenceGroup(request_id=request_id,
+                              seqs=[prompt],
+                              arrival_time=time.time(),
+                              sampling_params=SamplingParams(
+                                  best_of=best_of,
+                                  max_tokens=max_tokens,
+                                  min_tokens=min_tokens),
+                              lora_request=lora_request)
 
     return prompt, seq_group
 
 
-def create_dummy_lora_sequence(request_id: int, token_ids: list[int],
+def create_dummy_lora_sequence(request_id: int, token_ids: List[int],
                                block_size: int, lora_int_id: int) -> Sequence:
     return Sequence(seq_id=request_id,
                     inputs=token_inputs(token_ids),
@@ -58,7 +58,7 @@ def create_dummy_lora_sequence(request_id: int, token_ids: list[int],
                                              lora_int_id=lora_int_id))
 
 
-def create_dummy_sequence(request_id: int, token_ids: list[int],
+def create_dummy_sequence(request_id: int, token_ids: List[int],
                           block_size: int) -> Sequence:
     return Sequence(
         seq_id=request_id,
@@ -73,7 +73,8 @@ def create_dummy_prompt_encoder_decoder(
     encoder_prompt_length: int,
     block_size: Optional[int] = None,
     lora_request: Optional[LoRARequest] = None,
-) -> tuple[Sequence, Sequence, SequenceGroup]:
+    best_of: int = 1,
+) -> Tuple[Sequence, Sequence, SequenceGroup]:
     if not block_size:
         block_size = decoder_prompt_length
 
@@ -102,6 +103,7 @@ def create_dummy_prompt_encoder_decoder(
 
     seq_group = SequenceGroup(request_id=request_id,
                               seqs=[decoder_prompt],
+                              sampling_params=SamplingParams(best_of=best_of),
                               arrival_time=time.time(),
                               lora_request=lora_request,
                               encoder_seq=encoder_prompt)
@@ -123,7 +125,7 @@ def create_seq_group(
 
     prompt_token_ids = [0] * seq_prompt_len
 
-    seqs: list[Sequence] = []
+    seqs: List[Sequence] = []
     for seq_id_offset, output_len in enumerate(seq_output_lens):
         seq = Sequence(
             seq_id=seq_id_start + seq_id_offset,
@@ -239,7 +241,7 @@ class SchedulerProxy:
 
     def __init__(self, scheduler: Scheduler):
         self.scheduler_ = scheduler
-        self.call_history: dict[str, list[Any]] = defaultdict(list)
+        self.call_history: Dict[str, List[Any]] = defaultdict(list)
 
     def __getattr__(self, name: str) -> Any:
 
@@ -251,6 +253,6 @@ class SchedulerProxy:
         return wrapper
 
     def last_schedule_ret(
-        self, ) -> tuple[list[SequenceGroupMetadata], SchedulerOutputs, Any]:
+        self, ) -> Tuple[List[SequenceGroupMetadata], SchedulerOutputs, Any]:
         _, _, ret = self.call_history["schedule"][-1]
         return ret

@@ -24,12 +24,12 @@
 # limitations under the License.
 """Inference-only Exaone model compatible with HuggingFace weights."""
 
-from typing import Any, Dict, Iterable, Optional, Set, Tuple, Union
+from typing import Any, Dict, Iterable, List, Optional, Set, Tuple, Union
 
 import torch
 from torch import nn
 
-from vllm.attention import Attention
+from vllm.attention import Attention, AttentionMetadata
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
@@ -51,7 +51,7 @@ from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs.exaone import ExaoneConfig
 
 from .interfaces import SupportsLoRA, SupportsPP
-from .utils import (AutoWeightsLoader, PPMissingLayer, is_pp_missing_parameter,
+from .utils import (PPMissingLayer, is_pp_missing_parameter,
                     make_empty_intermediate_tensors_factory, make_layers,
                     maybe_prefix)
 
@@ -179,11 +179,13 @@ class ExaoneAttention(nn.Module):
         self,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
+        kv_cache: torch.Tensor,
+        attn_metadata: AttentionMetadata,
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
         q, k = self.rotary_emb(positions, q, k)
-        attn_output = self.attn(q, k, v)
+        attn_output = self.attn(q, k, v, kv_cache, attn_metadata)
         output, _ = self.out_proj(attn_output)
         return output
 
@@ -223,10 +225,14 @@ class ExaoneBlockAttention(nn.Module):
         self,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
+        kv_cache: torch.Tensor,
+        attn_metadata: AttentionMetadata,
     ) -> torch.Tensor:
         return self.attention(
             positions=positions,
             hidden_states=hidden_states,
+            kv_cache=kv_cache,
+            attn_metadata=attn_metadata,
         )
 
 
@@ -282,6 +288,8 @@ class ExaoneDecoderLayer(nn.Module):
         self,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
+        kv_cache: torch.Tensor,
+        attn_metadata: AttentionMetadata,
         residual: Optional[torch.Tensor],
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         # Self Attention
@@ -293,6 +301,8 @@ class ExaoneDecoderLayer(nn.Module):
         hidden_states = self.attn(
             positions=positions,
             hidden_states=hidden_states,
+            kv_cache=kv_cache,
+            attn_metadata=attn_metadata,
         )
 
         # Fully Connected
@@ -313,7 +323,7 @@ class ExaoneModel(nn.Module):
         lora_config = vllm_config.lora_config
 
         self.config = config
-        self.quant_config = quant_config
+        self.padding_idx = config.pad_token_id
         lora_vocab = ((lora_config.lora_extra_vocab_size *
                        (lora_config.max_loras or 1)) if lora_config else 0)
         self.vocab_size = config.vocab_size + lora_vocab
@@ -355,6 +365,8 @@ class ExaoneModel(nn.Module):
         self,
         input_ids: Optional[torch.Tensor],
         positions: torch.Tensor,
+        kv_caches: List[torch.Tensor],
+        attn_metadata: AttentionMetadata,
         intermediate_tensors: Optional[IntermediateTensors],
         inputs_embeds: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, IntermediateTensors]:
@@ -369,10 +381,13 @@ class ExaoneModel(nn.Module):
             hidden_states = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
 
-        for layer in self.h[self.start_layer:self.end_layer]:
+        for i in range(self.start_layer, self.end_layer):
+            layer = self.h[i]
             hidden_states, residual = layer(
                 positions,
                 hidden_states,
+                kv_caches[i - self.start_layer],
+                attn_metadata,
                 residual,
             )
 
@@ -384,72 +399,6 @@ class ExaoneModel(nn.Module):
 
         hidden_states, _ = self.ln_f(hidden_states, residual)
         return hidden_states
-
-    def load_weights(self, weights: Iterable[Tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
-        stacked_params_mapping = [
-            # (param_name, shard_name, shard_id)
-            (".qkv_proj", ".q_proj", "q"),
-            (".qkv_proj", ".k_proj", "k"),
-            (".qkv_proj", ".v_proj", "v"),
-            (".gate_up_proj", ".c_fc_0", 0),
-            (".gate_up_proj", ".c_fc_1", 1),
-        ]
-        params_dict = dict(self.named_parameters())
-        loaded_params: Set[str] = set()
-        for name, loaded_weight in weights:
-            if "rotary_emb.inv_freq" in name:
-                continue
-            if ("rotary_emb.cos_cached" in name
-                    or "rotary_emb.sin_cached" in name):
-                # Models trained using ColossalAI may include these tensors in
-                # the checkpoint. Skip them.
-                continue
-            if (self.quant_config is not None and
-                (scale_name := self.quant_config.get_cache_scale(name))):
-                # Loading kv cache quantization scales
-                param = params_dict[scale_name]
-                weight_loader = getattr(param, "weight_loader",
-                                        default_weight_loader)
-                loaded_weight = (loaded_weight if loaded_weight.dim() == 0 else
-                                 loaded_weight[0])
-                weight_loader(param, loaded_weight)
-                loaded_params.add(scale_name)
-                continue
-            for param_name, weight_name, shard_id in stacked_params_mapping:
-                if weight_name not in name:
-                    continue
-                name = name.replace(weight_name, param_name)
-                # Skip loading extra bias for GPTQ models.
-                if name.endswith(".bias") and name not in params_dict:
-                    continue
-
-                if is_pp_missing_parameter(name, self):
-                    continue
-
-                param = params_dict[name]
-                weight_loader = param.weight_loader
-                weight_loader(param, loaded_weight, shard_id)
-
-                break
-            else:
-                # Skip loading extra bias for GPTQ models.
-                if name.endswith(".bias") and name not in params_dict:
-                    continue
-                # Remapping the name of FP8 kv-scale.
-                name = maybe_remap_kv_scale_name(name, params_dict)
-                if name is None:
-                    continue
-
-                if is_pp_missing_parameter(name, self):
-                    continue
-
-                param = params_dict[name]
-                weight_loader = getattr(param, "weight_loader",
-                                        default_weight_loader)
-                weight_loader(param, loaded_weight)
-            loaded_params.add(name)
-        return loaded_params
 
 
 class ExaoneForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
@@ -466,6 +415,14 @@ class ExaoneForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
     }
 
     # LoRA specific attributes
+    supported_lora_modules = [
+        "qkv_proj",
+        "out_proj",
+        "gate_up_proj",
+        "c_proj",
+        "wte",
+        "lm_head",
+    ]
     embedding_modules = {
         "wte": "input_embeddings",
         "lm_head": "output_embeddings",
@@ -522,11 +479,14 @@ class ExaoneForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
+        kv_caches: List[torch.Tensor],
+        attn_metadata: AttentionMetadata,
         intermediate_tensors: Optional[IntermediateTensors] = None,
         inputs_embeds: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, IntermediateTensors]:
-        model_output = self.transformer(input_ids, positions,
-                                        intermediate_tensors, inputs_embeds)
+        model_output = self.transformer(input_ids, positions, kv_caches,
+                                        attn_metadata, intermediate_tensors,
+                                        inputs_embeds)
         return model_output
 
     def compute_logits(
@@ -548,12 +508,71 @@ class ExaoneForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
 
     def load_weights(self, weights: Iterable[Tuple[str,
                                                    torch.Tensor]]) -> Set[str]:
-        loader = AutoWeightsLoader(
-            self,
+        stacked_params_mapping = [
+            # (param_name, shard_name, shard_id)
+            (".qkv_proj", ".q_proj", "q"),
+            (".qkv_proj", ".k_proj", "k"),
+            (".qkv_proj", ".v_proj", "v"),
+            (".gate_up_proj", ".c_fc_0", 0),
+            (".gate_up_proj", ".c_fc_1", 1),
+        ]
+        params_dict = dict(self.named_parameters())
+        loaded_params: Set[str] = set()
+        for name, loaded_weight in weights:
+            if "rotary_emb.inv_freq" in name:
+                continue
+            if ("rotary_emb.cos_cached" in name
+                    or "rotary_emb.sin_cached" in name):
+                # Models trained using ColossalAI may include these tensors in
+                # the checkpoint. Skip them.
+                continue
             # With tie_word_embeddings, we can skip lm_head.weight
             # The weight might appear unnecessarily in the files if the model is
             # processed with quantization, LoRA, fine-tuning, etc.
-            skip_prefixes=(["lm_head."]
-                           if self.config.tie_word_embeddings else None),
-        )
-        return loader.load_weights(weights)
+            if self.config.tie_word_embeddings and "lm_head.weight" in name:
+                continue
+            if (self.quant_config is not None and
+                (scale_name := self.quant_config.get_cache_scale(name))):
+                # Loading kv cache quantization scales
+                param = params_dict[scale_name]
+                weight_loader = getattr(param, "weight_loader",
+                                        default_weight_loader)
+                loaded_weight = (loaded_weight if loaded_weight.dim() == 0 else
+                                 loaded_weight[0])
+                weight_loader(param, loaded_weight)
+                loaded_params.add(scale_name)
+                continue
+            for param_name, weight_name, shard_id in stacked_params_mapping:
+                if weight_name not in name:
+                    continue
+                name = name.replace(weight_name, param_name)
+                # Skip loading extra bias for GPTQ models.
+                if name.endswith(".bias") and name not in params_dict:
+                    continue
+
+                if is_pp_missing_parameter(name, self):
+                    continue
+
+                param = params_dict[name]
+                weight_loader = param.weight_loader
+                weight_loader(param, loaded_weight, shard_id)
+
+                break
+            else:
+                # Skip loading extra bias for GPTQ models.
+                if name.endswith(".bias") and name not in params_dict:
+                    continue
+                # Remapping the name of FP8 kv-scale.
+                name = maybe_remap_kv_scale_name(name, params_dict)
+                if name is None:
+                    continue
+
+                if is_pp_missing_parameter(name, self):
+                    continue
+
+                param = params_dict[name]
+                weight_loader = getattr(param, "weight_loader",
+                                        default_weight_loader)
+                weight_loader(param, loaded_weight)
+            loaded_params.add(name)
+        return loaded_params

@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
-from collections.abc import Iterable
-from typing import Union
+from typing import Iterable, List, Tuple, Union
 
 from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
                                               DeltaMessage,
@@ -13,7 +12,7 @@ from vllm.entrypoints.openai.tool_parsers import ToolParser
 class StreamingToolReconstructor:
 
     def __init__(self, assert_one_tool_per_delta: bool = True):
-        self.tool_calls: list[ToolCall] = []
+        self.tool_calls: List[ToolCall] = []
         self.other_content: str = ""
         self._assert_one_tool_per_delta = assert_one_tool_per_delta
 
@@ -73,7 +72,7 @@ def run_tool_extraction(
     request: Union[ChatCompletionRequest, None] = None,
     streaming: bool = False,
     assert_one_tool_per_delta: bool = True,
-) -> tuple[Union[str, None], list[ToolCall]]:
+) -> Tuple[Union[str, None], List[ToolCall]]:
     if streaming:
         reconstructor = run_tool_extraction_streaming(
             tool_parser,
@@ -107,7 +106,7 @@ def run_tool_extraction_streaming(
     reconstructor = StreamingToolReconstructor(
         assert_one_tool_per_delta=assert_one_tool_per_delta)
     previous_text = ""
-    previous_tokens: list[int] = []
+    previous_tokens: List[int] = []
     for delta in model_deltas:
         token_delta = [
             tool_parser.vocab.get(token)

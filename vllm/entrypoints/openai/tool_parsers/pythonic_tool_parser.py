@@ -3,8 +3,7 @@
 import ast
 import json
 import re
-from collections.abc import Sequence
-from typing import Any, Union
+from typing import Any, Sequence, Tuple, Union
 
 from transformers import PreTrainedTokenizerBase
 
@@ -205,7 +204,7 @@ def _handle_single_tool(call: ast.Call) -> ToolCall:
                                           arguments=json.dumps(arguments)))
 
 
-def _make_valid_python(text: str) -> Union[tuple[str, str], None]:
+def _make_valid_python(text: str) -> Union[Tuple[str, str], None]:
     bracket_stack = []
     for index, char in enumerate(text):
         if char in {"[", "(", "{"}:
