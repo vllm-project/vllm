@@ -28,6 +28,8 @@ from functools import cached_property, partial
 from typing import (Callable, Iterable, List, Literal, Mapping, Optional, Set,
                     Tuple, TypedDict, Union)
 
+import numba
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -55,6 +57,7 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import MultiModalFieldConfig
+from vllm.numba_utils import numba_cdiv
 from vllm.platforms import _Backend
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.config import uses_mrope
@@ -63,6 +66,7 @@ from .interfaces import (MultiModalEmbeddings, SupportsLoRA,
                          SupportsMultiModal, SupportsPP)
 from .qwen2_vl import Qwen2VLDummyInputsBuilder as Qwen2_5_VLDummyInputsBuilder
 from .qwen2_vl import (Qwen2VLMultiModalProcessor, Qwen2VLProcessingInfo,
+                       Qwen2VLViTRotaryPosGenerator,
                        apply_rotary_pos_emb_vision)
 from .utils import (AutoWeightsLoader, WeightsMapper, cast_overflow_tensors,
                     init_vllm_registered_model, maybe_prefix,
@@ -483,6 +487,303 @@ class Qwen2_5_VisionRotaryEmbedding(nn.Module):
         return self._freqs_cached[:seqlen]
 
 
+class Qwen2_5_VisionAttentionScheduler:
+    spatial_merge_size: int
+    spatial_merge_unit: int
+    window_size: int
+    patch_size: int
+    device: torch.device
+
+    def __init__(
+        self,
+        spatial_merge_size: int,
+        window_size: int,
+        patch_size: int,
+        max_position_embeddings: int,
+        device: torch.device,
+    ):
+        self.spatial_merge_size = spatial_merge_size
+        self.spatial_merge_unit = spatial_merge_size * spatial_merge_size
+        self.window_size = window_size
+        self.patch_size = patch_size
+        self.device = device
+
+        self.position_seq = torch.arange(
+            max_position_embeddings,
+            dtype=torch.int64,
+            device=device,
+        )
+
+    def generate_by_torch(
+        self,
+        grid_thw: torch.Tensor,
+    ) -> tuple[
+            torch.Tensor,  # window_indices
+            torch.Tensor,  # reverse_indices
+            torch.Tensor,  # full_seqlens
+            torch.Tensor,  # window_seqlens
+            torch.Tensor,  # cu_full_seqlens
+            torch.Tensor,  # cu_window_seqlens
+    ]:
+        grid_thw = grid_thw.to(self.device)
+
+        full_seqlens = torch.repeat_interleave(grid_thw[:, 1] * grid_thw[:, 2],
+                                               grid_thw[:, 0])
+        cu_full_seqlens = full_seqlens.cumsum(dim=0, dtype=torch.int32)
+        cu_full_seqlens = F.pad(cu_full_seqlens, (1, 0), "constant", 0)
+
+        window_index: list = []
+        cu_window_seqlens_list: list = [0]
+        window_index_id = 0
+        vit_merger_window_size = (self.window_size //
+                                  self.spatial_merge_size // self.patch_size)
+
+        for grid_t, grid_h, grid_w in grid_thw:
+            llm_grid_h = grid_h // self.spatial_merge_size
+            llm_grid_w = grid_w // self.spatial_merge_size
+            index = torch.arange(grid_t * llm_grid_h * llm_grid_w).reshape(
+                grid_t, llm_grid_h, llm_grid_w)
+            pad_h = vit_merger_window_size - llm_grid_h % vit_merger_window_size
+            pad_w = vit_merger_window_size - llm_grid_w % vit_merger_window_size
+            num_windows_h = (llm_grid_h + pad_h) // vit_merger_window_size
+            num_windows_w = (llm_grid_w + pad_w) // vit_merger_window_size
+            index_padded = F.pad(index, (0, pad_w, 0, pad_h), 'constant', -100)
+            index_padded = index_padded.reshape(grid_t, num_windows_h,
+                                                vit_merger_window_size,
+                                                num_windows_w,
+                                                vit_merger_window_size)
+            index_padded = index_padded.permute(0, 1, 3, 2, 4).reshape(
+                grid_t, num_windows_h * num_windows_w, vit_merger_window_size,
+                vit_merger_window_size)
+            seqlens = (index_padded != -100).sum([2, 3]).reshape(-1)
+            index_padded = index_padded.reshape(-1)
+            index_new = index_padded[index_padded != -100]
+            window_index.append(index_new + window_index_id)
+            cu_seqlens_tmp = seqlens.cumsum(
+                0) * self.spatial_merge_unit + cu_window_seqlens_list[-1]
+            cu_window_seqlens_list.extend(cu_seqlens_tmp.tolist())
+            window_index_id += (grid_t * llm_grid_h * llm_grid_w).item()
+        window_index = torch.cat(window_index, dim=0)
+
+        cu_window_seqlens = torch.tensor(
+            cu_window_seqlens_list,
+            dtype=torch.int64,
+        )
+        cu_window_seqlens = torch.unique_consecutive(cu_window_seqlens)
+        window_seqlens = cu_window_seqlens[1:] - cu_window_seqlens[:-1]
+        cu_window_seqlens = cu_window_seqlens.to(self.device,
+                                                 dtype=torch.int32)
+
+        reverse_indices = torch.argsort(window_index)
+
+        return (
+            window_index,
+            reverse_indices,
+            full_seqlens,
+            window_seqlens,
+            cu_full_seqlens,
+            cu_window_seqlens,
+        )
+
+    @staticmethod
+    @numba.jit(nopython=True)
+    def _numba_kernel(
+        grid_thw: np.ndarray,
+        window_size: int,
+        merge_size: int,
+        patch_size: int,
+    ) -> tuple[
+            np.ndarray,  # output_buffer (concatenated:
+            #   window_indices,
+            #   cu_full_seqlens,
+            #   cu_window_seqlens,
+            # )
+            np.ndarray,  # full_seqlens
+            np.ndarray,  # window_seqlens
+            int,  # length of window_indices
+            int,  # length of cu_full_seqlens
+            int,  # length of cu_window_seqlens
+    ]:
+        merge_area = merge_size * merge_size
+        win_size_merged = window_size // merge_size // patch_size
+
+        # --- first pass: calculate sizes for allocation ---
+        total_merged_cells = 0
+        total_windows = 0
+        total_frames = 0
+
+        for grid_idx in range(grid_thw.shape[0]):
+            t_dim = grid_thw[grid_idx, 0]
+            h_dim = grid_thw[grid_idx, 1]
+            w_dim = grid_thw[grid_idx, 2]
+
+            merged_h = h_dim // merge_size
+            merged_w = w_dim // merge_size
+
+            total_merged_cells += t_dim * merged_h * merged_w
+
+            num_blocks_h = numba_cdiv(merged_h, win_size_merged)
+            num_blocks_w = numba_cdiv(merged_w, win_size_merged)
+
+            total_windows += t_dim * num_blocks_h * num_blocks_w
+
+            total_frames += t_dim
+
+        # --- allocate buffers ---
+        # single buffer to hold concatenated results
+        # size: [merged cell indices] + [cumulative full seq lens] +
+        #       [cumulative window seq lens]
+        output_buffer = np.empty(total_merged_cells + total_frames + 1 +
+                                 total_windows + 1,
+                                 dtype=np.int64)
+
+        full_seqlens = np.empty(total_frames, dtype=np.int64)
+        window_seqlens = np.empty(total_windows, dtype=np.int64)
+
+        # --- create views & initialize cumulative sum ---
+        window_indices = output_buffer[:total_merged_cells]
+        cu_full_seqlens = output_buffer[total_merged_cells:total_merged_cells +
+                                        total_frames + 1]
+        cu_window_seqlens = output_buffer[total_merged_cells + total_frames +
+                                          1:]
+
+        cu_full_seqlens[0] = 0
+        cu_window_seqlens[0] = 0
+
+        # --- second pass: fill arrays ---
+        cell_offset = 0
+        win_idx_ptr = 0
+        win_seqlen_ptr = 0
+        full_seqlen_ptr = 0
+
+        for grid_idx in range(grid_thw.shape[0]):
+            t_dim = grid_thw[grid_idx, 0]
+            h_dim = grid_thw[grid_idx, 1]
+            w_dim = grid_thw[grid_idx, 2]
+
+            merged_h = h_dim // merge_size
+            merged_w = w_dim // merge_size
+
+            num_blocks_h = numba_cdiv(merged_h, win_size_merged)
+            num_blocks_w = numba_cdiv(merged_w, win_size_merged)
+
+            merged_area_frame = merged_h * merged_w
+            frame_len = h_dim * w_dim
+
+            for _ in range(t_dim):
+                full_seqlens[full_seqlen_ptr] = frame_len
+                cu_full_seqlens[full_seqlen_ptr + 1] = \
+                    cu_full_seqlens[full_seqlen_ptr] + frame_len
+                full_seqlen_ptr += 1
+
+            for t_offset in range(t_dim):
+                merged_t_offset = t_offset * merged_area_frame
+
+                for block_y in range(0, merged_h, win_size_merged):
+                    for block_x in range(0, merged_w, win_size_merged):
+                        cells_in_wnd = 0
+
+                        for merged_y in range(
+                                block_y,
+                                min(block_y + win_size_merged, merged_h),
+                        ):
+                            merged_row_offset = merged_t_offset + \
+                                merged_y * merged_w
+
+                            for merged_x in range(
+                                    block_x,
+                                    min(block_x + win_size_merged, merged_w),
+                            ):
+                                global_merged_cell_idx = \
+                                    cell_offset + merged_row_offset + merged_x
+
+                                window_indices[win_idx_ptr + cells_in_wnd] = \
+                                    global_merged_cell_idx
+                                cells_in_wnd += 1
+
+                        win_idx_ptr += cells_in_wnd
+
+                        current_window_len = cells_in_wnd * merge_area
+                        window_seqlens[win_seqlen_ptr] = current_window_len
+
+                        cu_window_seqlens[win_seqlen_ptr + 1] = \
+                            cu_window_seqlens[win_seqlen_ptr] + \
+                                current_window_len
+                        win_seqlen_ptr += 1
+
+            cell_offset += t_dim * merged_h * merged_w
+
+        return (
+            output_buffer,
+            full_seqlens,
+            window_seqlens,
+            window_indices.shape[0],
+            cu_full_seqlens.shape[0],
+            cu_window_seqlens.shape[0],
+        )
+
+    def generate_by_numba(
+        self,
+        grid_thw: torch.Tensor,
+    ) -> tuple[
+            torch.Tensor,  # window_indices
+            torch.Tensor,  # reverse_indices
+            torch.Tensor,  # full_seqlens
+            torch.Tensor,  # window_seqlens
+            torch.Tensor,  # cu_full_seqlens
+            torch.Tensor,  # cu_window_seqlens
+    ]:
+        """
+        numba optimized version of generate_by_torch
+
+        NOTE:
+        - it prevents zero in `window_seqlens`, so there is no need to call 
+            `torch.unique_consecutive` on `cu_window_seqlens`
+        """
+
+        # step 1: run numba kernel
+        (
+            output_buffer,
+            full_seqlens,
+            window_seqlens,
+            indices_length,
+            cu_full_seqlens_length,
+            cu_window_seqlens_length,
+        ) = self._numba_kernel(
+            grid_thw.numpy(),
+            self.window_size,
+            self.spatial_merge_size,
+            self.patch_size,
+        )
+
+        output_buffer = torch.from_numpy(output_buffer)
+        full_seqlens = torch.from_numpy(full_seqlens)
+        window_seqlens = torch.from_numpy(window_seqlens)
+
+        # step 2: move necessary data to device (all tensors share a buffer)
+        output_buffer = output_buffer.to(device=self.device, non_blocking=True)
+
+        # step 3: post-processing
+
+        # - create views from buffer tensor
+        window_indices, cu_seqlens_buffer = output_buffer.split([
+            indices_length, cu_full_seqlens_length + cu_window_seqlens_length
+        ])
+        cu_seqlens_buffer = cu_seqlens_buffer.to(torch.int32)
+        cu_full_seqlens, cu_window_seqlens = cu_seqlens_buffer.split(
+            [cu_full_seqlens_length, cu_window_seqlens_length])
+
+        # - build reverse_indices
+        reverse_indices = torch.empty(indices_length,
+                                      dtype=torch.int64,
+                                      device=self.device)
+        reverse_indices.index_put_((window_indices, ),
+                                   self.position_seq[:indices_length])
+
+        return (window_indices, reverse_indices, full_seqlens, window_seqlens,
+                cu_full_seqlens, cu_window_seqlens)
+
+
 class Qwen2_5_VisionTransformer(nn.Module):
 
     def __init__(
@@ -491,6 +792,7 @@ class Qwen2_5_VisionTransformer(nn.Module):
         norm_eps: float = 1e-6,
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
+        max_position_embeddings: int = 32768,
     ) -> None:
         super().__init__()
 
@@ -540,6 +842,19 @@ class Qwen2_5_VisionTransformer(nn.Module):
         )
         self.attn_backend: _Backend = get_vit_attn_backend(support_fa=True)
 
+        self.rot_pos_generator = Qwen2VLViTRotaryPosGenerator(
+            spatial_merge_size=self.spatial_merge_size,
+            max_position_embeddings=max_position_embeddings,
+            device=self.device,
+        )
+        self.vision_attn_scheduler = Qwen2_5_VisionAttentionScheduler(
+            spatial_merge_size=self.spatial_merge_size,
+            window_size=self.window_size,
+            patch_size=self.patch_size,
+            max_position_embeddings=max_position_embeddings,
+            device=self.device,
+        )
+
     @property
     def dtype(self) -> torch.dtype:
         return self.patch_embed.proj.weight.dtype
@@ -549,75 +864,23 @@ class Qwen2_5_VisionTransformer(nn.Module):
         return self.patch_embed.proj.weight.device
 
     def rot_pos_emb(self, grid_thw: torch.Tensor) -> torch.Tensor:
-        pos_ids = []
-        for t, h, w in grid_thw:
-            hpos_ids = torch.arange(h).unsqueeze(1).expand(-1, w)
-            wpos_ids = torch.arange(w).unsqueeze(0).expand(h, -1)
-            hpos_ids = hpos_ids.reshape(
-                h // self.spatial_merge_size,
-                self.spatial_merge_size,
-                w // self.spatial_merge_size,
-                self.spatial_merge_size,
-            ).permute(0, 2, 1, 3).flatten()
-            wpos_ids = wpos_ids.reshape(
-                h // self.spatial_merge_size,
-                self.spatial_merge_size,
-                w // self.spatial_merge_size,
-                self.spatial_merge_size,
-            ).permute(0, 2, 1, 3).flatten()
-            pos_ids.append(
-                torch.stack([hpos_ids, wpos_ids], dim=-1).repeat(t, 1))
-        pos_ids = torch.cat(pos_ids, dim=0)
-        max_grid_size = grid_thw[:, 1:].max()
+        pos_ids = self.rot_pos_generator.generate(grid_thw)
+
+        max_grid_size = grid_thw[:, 1:].max().item()
         rotary_pos_emb_full = self.rotary_pos_emb(max_grid_size)
+
         rotary_pos_emb = rotary_pos_emb_full[pos_ids].flatten(1)
         return rotary_pos_emb
 
-    def get_window_index(self, grid_thw):
-        window_index: list = []
-        cu_window_seqlens: list = [0]
-        window_index_id = 0
-        vit_merger_window_size = (self.window_size //
-                                  self.spatial_merge_size // self.patch_size)
-
-        for grid_t, grid_h, grid_w in grid_thw:
-            llm_grid_h = grid_h // self.spatial_merge_size
-            llm_grid_w = grid_w // self.spatial_merge_size
-            index = torch.arange(grid_t * llm_grid_h * llm_grid_w).reshape(
-                grid_t, llm_grid_h, llm_grid_w)
-            pad_h = vit_merger_window_size - llm_grid_h % vit_merger_window_size
-            pad_w = vit_merger_window_size - llm_grid_w % vit_merger_window_size
-            num_windows_h = (llm_grid_h + pad_h) // vit_merger_window_size
-            num_windows_w = (llm_grid_w + pad_w) // vit_merger_window_size
-            index_padded = F.pad(index, (0, pad_w, 0, pad_h), 'constant', -100)
-            index_padded = index_padded.reshape(grid_t, num_windows_h,
-                                                vit_merger_window_size,
-                                                num_windows_w,
-                                                vit_merger_window_size)
-            index_padded = index_padded.permute(0, 1, 3, 2, 4).reshape(
-                grid_t, num_windows_h * num_windows_w, vit_merger_window_size,
-                vit_merger_window_size)
-            seqlens = (index_padded != -100).sum([2, 3]).reshape(-1)
-            index_padded = index_padded.reshape(-1)
-            index_new = index_padded[index_padded != -100]
-            window_index.append(index_new + window_index_id)
-            cu_seqlens_tmp = seqlens.cumsum(
-                0) * self.spatial_merge_unit + cu_window_seqlens[-1]
-            cu_window_seqlens.extend(cu_seqlens_tmp.tolist())
-            window_index_id += (grid_t * llm_grid_h * llm_grid_w).item()
-        window_index = torch.cat(window_index, dim=0)
-        return window_index, cu_window_seqlens
-
     def compute_attn_mask_seqlen(
-        self,
-        cu_seqlens: torch.Tensor,
+            self, seqlens: torch.Tensor
     ) -> tuple[Optional[int], Optional[list[int]]]:
-        max_seqlen, seqlens = None, None
+        max_seqlen, seqlens_list = None, None
         if self.attn_backend == _Backend.FLASH_ATTN:
-            max_seqlen = (cu_seqlens[1:] - cu_seqlens[:-1]).max().item()
+            max_seqlen = seqlens.max().item()
         elif self.attn_backend == _Backend.XFORMERS:
-            seqlens = (cu_seqlens[1:] - cu_seqlens[:-1]).tolist()
-        return max_seqlen, seqlens
+            seqlens_list = seqlens.tolist()
+        return max_seqlen, seqlens_list
 
     def forward(
         self,
@@ -631,45 +894,45 @@ class Qwen2_5_VisionTransformer(nn.Module):
         # compute position embedding
         rotary_pos_emb = self.rot_pos_emb(grid_thw)
 
-        # windows attention
-        window_index, cu_window_seqlens = self.get_window_index(grid_thw)
-        cu_window_seqlens = torch.tensor(
-            cu_window_seqlens,
-            device=hidden_states.device,
-            dtype=grid_thw.dtype if torch.jit.is_tracing() else torch.int32)
-        cu_window_seqlens = torch.unique_consecutive(cu_window_seqlens)
+        # full / window attention parameters
+        (
+            window_indices,
+            reverse_indices,
+            seqlens_full,
+            seqlens_window,
+            cu_seqlens_full,
+            cu_seqlens_window,
+        ) = self.vision_attn_scheduler.generate_by_numba(grid_thw)
+
+        # reshape
         seq_len, _ = hidden_states.size()
         hidden_states = hidden_states.reshape(
             seq_len // self.spatial_merge_unit, self.spatial_merge_unit, -1)
-        hidden_states = hidden_states[window_index, :, :]
+        hidden_states = hidden_states[window_indices, :, :]
         hidden_states = hidden_states.reshape(seq_len, -1)
         rotary_pos_emb = rotary_pos_emb.reshape(
             seq_len // self.spatial_merge_unit, self.spatial_merge_unit, -1)
-        rotary_pos_emb = rotary_pos_emb[window_index, :, :]
+        rotary_pos_emb = rotary_pos_emb[window_indices, :, :]
         rotary_pos_emb = rotary_pos_emb.reshape(seq_len, -1)
-        # compute cu_seqlens
-        cu_seqlens = torch.repeat_interleave(grid_thw[:, 1] * grid_thw[:, 2],
-                                             grid_thw[:, 0]).cumsum(
-                                                 dim=0, dtype=torch.int32)
-        cu_seqlens = F.pad(cu_seqlens, (1, 0), "constant", 0)
 
         # transformers
         hidden_states = hidden_states.unsqueeze(1)
 
         # pre-compute seqlens for window/full attn to reduce cuMemcpy operations
-        max_seqlen_full, seqlens_full = self.compute_attn_mask_seqlen(
-            cu_seqlens)
-        max_seqlen_window, seqlens_window = self.compute_attn_mask_seqlen(
-            cu_window_seqlens)
+        max_seqlen_full, seqlens_list_full = self.compute_attn_mask_seqlen(
+            seqlens_full)
+        max_seqlen_window, seqlens_list_window = self.compute_attn_mask_seqlen(
+            seqlens_window)
+
         for layer_num, blk in enumerate(self.blocks):
             if layer_num in self.fullatt_block_indexes:
-                cu_seqlens_now = cu_seqlens
+                cu_seqlens_now = cu_seqlens_full
                 max_seqlen_now = max_seqlen_full
-                seqlens_now = seqlens_full
+                seqlens_now = seqlens_list_full
             else:
-                cu_seqlens_now = cu_window_seqlens
+                cu_seqlens_now = cu_seqlens_window
                 max_seqlen_now = max_seqlen_window
-                seqlens_now = seqlens_window
+                seqlens_now = seqlens_list_window
 
             hidden_states = blk(
                 hidden_states,
@@ -686,7 +949,6 @@ class Qwen2_5_VisionTransformer(nn.Module):
 
         # adapter
         hidden_states = self.merger(hidden_states)
-        reverse_indices = torch.argsort(window_index)
         hidden_states = hidden_states[reverse_indices, :]
         return hidden_states
 
@@ -797,6 +1059,8 @@ class Qwen2_5_VLForConditionalGeneration(nn.Module, SupportsMultiModal,
             norm_eps=getattr(config, "rms_norm_eps", 1e-6),
             quant_config=self._maybe_ignore_quant_config(quant_config),
             prefix=maybe_prefix(prefix, "visual"),
+            max_position_embeddings=getattr(config, "max_position_embeddings",
+                                            32768),
         )
 
         self.language_model = init_vllm_registered_model(

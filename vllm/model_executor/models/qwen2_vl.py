@@ -28,6 +28,8 @@ from functools import cached_property, partial
 from typing import (Any, Callable, Literal, Optional, Set, Tuple, TypedDict,
                     Union)
 
+import numba
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -65,6 +67,7 @@ from vllm.multimodal.processing import (BaseMultiModalProcessor,
                                         BaseProcessingInfo, PromptReplacement,
                                         PromptUpdate)
 from vllm.multimodal.profiling import BaseDummyInputsBuilder
+from vllm.numba_utils import numba_array_memcpy
 from vllm.platforms import _Backend
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.config import uses_mrope
@@ -530,6 +533,241 @@ class Qwen2VisionRotaryEmbedding(nn.Module):
         return self._freqs_cached[:seqlen]
 
 
+class Qwen2VLViTRotaryPosGenerator:
+    "Generating rotary position ids for Qwen2/2.5-VL's ViT"
+
+    spatial_merge_size: int
+    device: torch.device
+    embedding_position_seq: torch.Tensor
+    merge_unit_delta: torch.Tensor
+
+    def __init__(
+        self,
+        spatial_merge_size: int,
+        max_position_embeddings: int,
+        device: torch.device,
+    ):
+        self.spatial_merge_size = spatial_merge_size
+        self.device = device
+
+        if device.type != "cpu":
+            # preallocated constant seq
+            # - example: tensor([0, 1, 2, ..., 32767])
+            self.embedding_position_seq = torch.arange(
+                start=0,
+                end=max_position_embeddings,
+                step=spatial_merge_size,
+                dtype=torch.int64,
+                device=device,
+            )
+
+            merge_seq = torch.arange(
+                spatial_merge_size,
+                dtype=torch.int64,
+            )
+            merge_unit_delta_h = merge_seq.unsqueeze(1) \
+                .repeat(1, spatial_merge_size) \
+                .view(-1)
+            merge_unit_delta_w = merge_seq.repeat(spatial_merge_size)
+
+            # shape: (spatial_merge_size * spatial_merge_size, 2)
+            # - h / w delta inside a merge unit
+            # - fixed for a specific `spatial_merge_size`
+            # - example: tensor([[0, 0],
+            #                    [0, 1],
+            #                    [1, 0],
+            #                    [1, 1]])
+            self.merge_unit_delta = torch.stack(
+                [merge_unit_delta_h, merge_unit_delta_w], dim=1).to(device)
+
+    def generate_by_torch(self, grid_thw: torch.Tensor) -> torch.Tensor:
+        pos_ids = []
+        for t, h, w in grid_thw:
+            hpos_ids = torch.arange(h).unsqueeze(1).expand(-1, w)
+            wpos_ids = torch.arange(w).unsqueeze(0).expand(h, -1)
+            hpos_ids = hpos_ids.reshape(
+                h // self.spatial_merge_size,
+                self.spatial_merge_size,
+                w // self.spatial_merge_size,
+                self.spatial_merge_size,
+            ).permute(0, 2, 1, 3).flatten()
+            wpos_ids = wpos_ids.reshape(
+                h // self.spatial_merge_size,
+                self.spatial_merge_size,
+                w // self.spatial_merge_size,
+                self.spatial_merge_size,
+            ).permute(0, 2, 1, 3).flatten()
+            pos_ids.append(
+                torch.stack([hpos_ids, wpos_ids], dim=-1).repeat(t, 1))
+
+        # avoid copy when there is only one tensor
+        if len(pos_ids) == 1:
+            return pos_ids[0]
+
+        return torch.cat(pos_ids, dim=0)
+
+    def generate_by_torch_fused(self, grid_thw: torch.Tensor) -> torch.Tensor:
+        """
+        optimized version of `generate_torch`
+
+        suitable for running on device
+
+        NOTE: actual impl is a staticmethod to make it `torch.jit` compilable
+        """
+        return self._torch_kernel(
+            self._compute_grid_thw_total_seqlen(grid_thw.numpy()),
+            grid_thw,
+            self.spatial_merge_size,
+            self.device,
+            self.embedding_position_seq,
+            self.merge_unit_delta,
+        )
+
+    @staticmethod
+    @numba.jit(nopython=True)
+    def _compute_grid_thw_total_seqlen(grid_thw: np.ndarray) -> int:
+        out_len = 0
+        for t, h, w in grid_thw:
+            out_len += t * h * w
+        return out_len
+
+    @staticmethod
+    @torch.jit.script
+    def _torch_kernel(
+        out_len: int,
+        grid_thw: torch.Tensor,
+        spatial_merge_size: int,
+        device: torch.device,
+        embedding_position_seq: torch.Tensor,
+        merge_unit_delta: torch.Tensor,
+    ) -> torch.Tensor:
+        """
+        optimized version of `generate_torch`
+
+        suitable for running on device
+        """
+        out = torch.empty(
+            (out_len, 2),
+            dtype=torch.int64,
+            device=device,
+        )
+
+        merge_unit = spatial_merge_size * spatial_merge_size
+
+        start_pos = 0
+        grid_thw_list: list[list[int]] = grid_thw.tolist()
+        for i, (t, h, w) in enumerate(grid_thw_list):
+            # fuse [[A, h, w], [B, h, w]] into [[A + B, h, w]]
+            # (to make full use of device parallelism)
+            if i < len(grid_thw_list) - 1:
+                next_item = grid_thw_list[i + 1]
+                if next_item[1] == h and next_item[2] == w:
+                    next_item[0] += t
+                    continue
+
+            seqlen = t * h * w
+
+            merged_h = h // spatial_merge_size
+            merged_w = w // spatial_merge_size
+
+            block_hpos = embedding_position_seq[:merged_h] \
+                .view(merged_h, 1, 1) \
+                .expand(merged_h, merged_w, merge_unit)
+            block_wpos = embedding_position_seq[:merged_w] \
+                .view(1, merged_w, 1) \
+                .expand(merged_h, merged_w, merge_unit)
+
+            narrowed_out = out.narrow(0, start_pos, seqlen)
+            narrowed_out = narrowed_out.view(t, merged_h, merged_w, merge_unit,
+                                             2)
+
+            narrowed_out.select(dim=4, index=0).copy_(block_hpos)
+            narrowed_out.select(dim=4, index=1).copy_(block_wpos)
+
+            start_pos += seqlen
+
+        out_merged = out.view(-1, merge_unit, 2)
+        out_merged += merge_unit_delta
+
+        return out
+
+    @staticmethod
+    @numba.jit(nopython=True)
+    def _numba_kernel(
+        grid_thw: np.ndarray,
+        spatial_merge_size: int,
+    ) -> np.ndarray:
+        """
+        numba optimized version of `generate_torch`
+
+        suitable for running on cpu
+        """
+        total_seqlen = 0
+        for t, h, w in grid_thw:
+            total_seqlen += t * h * w
+
+        arr = np.empty((total_seqlen, 2), dtype=np.int64)
+        arr_ptr = arr.ctypes
+
+        fused_t = 0
+        pos = 0
+        for i in range(grid_thw.shape[0]):
+            num_t = grid_thw[i, 0]
+            num_h = grid_thw[i, 1]
+            num_w = grid_thw[i, 2]
+
+            # fuse [[A, h, w], [B, h, w]] into [[A + B, h, w]]
+            if i < grid_thw.shape[0] - 1 and grid_thw[
+                    i + 1, 1] == num_h and grid_thw[i + 1, 2] == num_w:
+                fused_t += num_t
+                continue
+
+            num_t += fused_t
+            fused_t = 0
+
+            hw = num_h * num_w
+
+            if spatial_merge_size == 2:
+                # unrolling for spatial_merge_size == 2
+                for h in range(0, num_h, 2):
+                    for w in range(0, num_w, 2):
+                        arr[pos, 0] = h
+                        arr[pos, 1] = w
+                        arr[pos + 1, 0] = h
+                        arr[pos + 1, 1] = w + 1
+                        arr[pos + 2, 0] = h + 1
+                        arr[pos + 2, 1] = w
+                        arr[pos + 3, 0] = h + 1
+                        arr[pos + 3, 1] = w + 1
+                        pos += 4
+            else:
+                for h in range(0, num_h, spatial_merge_size):
+                    for w in range(0, num_w, spatial_merge_size):
+                        for m_x in range(spatial_merge_size):
+                            for m_y in range(spatial_merge_size):
+                                arr[pos, 0] = h + m_x
+                                arr[pos, 1] = w + m_y
+                                pos += 1
+
+            if num_t > 1:
+                for _ in range(num_t - 1):
+                    numba_array_memcpy(arr_ptr, pos * 2, arr_ptr,
+                                       (pos - hw) * 2, hw * 2)
+                    pos += hw
+
+        return arr
+
+    def generate_by_numba(self, grid_thw: torch.Tensor) -> torch.Tensor:
+        return torch.from_numpy(
+            self._numba_kernel(grid_thw.numpy(), self.spatial_merge_size))
+
+    def generate(self, grid_thw: torch.Tensor) -> torch.Tensor:
+        if self.device.type == "cpu":
+            return self.generate_by_numba(grid_thw)
+
+        return self.generate_by_torch_fused(grid_thw)
+
+
 class Qwen2VisionTransformer(nn.Module):
 
     def __init__(
@@ -538,6 +776,7 @@ class Qwen2VisionTransformer(nn.Module):
         norm_eps: float = 1e-6,
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
+        max_position_embeddings: int = 32768,
     ) -> None:
         super().__init__()
 
@@ -584,6 +823,12 @@ class Qwen2VisionTransformer(nn.Module):
         )
         self.attn_backend: _Backend = get_vit_attn_backend(support_fa=True)
 
+        self.rot_pos_generator = Qwen2VLViTRotaryPosGenerator(
+            spatial_merge_size=spatial_merge_size,
+            max_position_embeddings=max_position_embeddings,  # TODO
+            device=self.device,
+        )
+
     @property
     def dtype(self) -> torch.dtype:
         return self.patch_embed.proj.weight.dtype
@@ -593,39 +838,23 @@ class Qwen2VisionTransformer(nn.Module):
         return self.patch_embed.proj.weight.device
 
     def rot_pos_emb(self, grid_thw: torch.Tensor) -> torch.Tensor:
-        pos_ids = []
-        for t, h, w in grid_thw:
-            hpos_ids = torch.arange(h).unsqueeze(1).expand(-1, w)
-            wpos_ids = torch.arange(w).unsqueeze(0).expand(h, -1)
-            hpos_ids = hpos_ids.reshape(
-                h // self.spatial_merge_size,
-                self.spatial_merge_size,
-                w // self.spatial_merge_size,
-                self.spatial_merge_size,
-            ).permute(0, 2, 1, 3).flatten()
-            wpos_ids = wpos_ids.reshape(
-                h // self.spatial_merge_size,
-                self.spatial_merge_size,
-                w // self.spatial_merge_size,
-                self.spatial_merge_size,
-            ).permute(0, 2, 1, 3).flatten()
-            pos_ids.append(
-                torch.stack([hpos_ids, wpos_ids], dim=-1).repeat(t, 1))
-        pos_ids = torch.cat(pos_ids, dim=0)
-        max_grid_size = grid_thw[:, 1:].max()
+        pos_ids = self.rot_pos_generator.generate(grid_thw)
+
+        max_grid_size = grid_thw[:, 1:].max().item()
         rotary_pos_emb_full = self.rotary_pos_emb(max_grid_size)
+
         rotary_pos_emb = rotary_pos_emb_full[pos_ids].flatten(1)
         return rotary_pos_emb
 
     def compute_attn_mask_seqlen(
-            self, cu_seqlens: torch.Tensor
+            self, seqlens: torch.Tensor
     ) -> tuple[Optional[int], Optional[list[int]]]:
-        max_seqlen, seqlens = None, None
+        max_seqlen, seqlens_list = None, None
         if self.attn_backend == _Backend.FLASH_ATTN:
-            max_seqlen = (cu_seqlens[1:] - cu_seqlens[:-1]).max().item()
+            max_seqlen = seqlens.max().item()
         elif self.attn_backend == _Backend.XFORMERS:
-            seqlens = (cu_seqlens[1:] - cu_seqlens[:-1]).tolist()
-        return max_seqlen, seqlens
+            seqlens_list = seqlens.tolist()
+        return max_seqlen, seqlens_list
 
     def forward(
         self,
@@ -640,23 +869,27 @@ class Qwen2VisionTransformer(nn.Module):
         rotary_pos_emb = self.rot_pos_emb(grid_thw)
 
         # compute cu_seqlens
-        cu_seqlens = torch.repeat_interleave(grid_thw[:, 1] * grid_thw[:, 2],
-                                             grid_thw[:, 0]).cumsum(
-                                                 dim=0, dtype=torch.int32)
-        cu_seqlens = F.pad(cu_seqlens, (1, 0), "constant", 0)
+        seqlens = torch.repeat_interleave(grid_thw[:, 1] * grid_thw[:, 2],
+                                          grid_thw[:, 0])
+        cu_seqlens = seqlens.cumsum(dim=0, dtype=torch.int32)
+        cu_seqlens = F.pad(cu_seqlens, (1, 0), "constant", 0).to(
+            device=self.device,
+            non_blocking=True,
+        )
 
         # transformers
         x = x.unsqueeze(1)
 
         # pre-compute seqlens for attn mask to reduce cuMemcpy operations
-        max_seqlen, seqlens = self.compute_attn_mask_seqlen(cu_seqlens)
+        max_seqlen, seqlens_list = self.compute_attn_mask_seqlen(seqlens)
+
         for blk in self.blocks:
             x = blk(
                 x,
                 cu_seqlens=cu_seqlens,
                 rotary_pos_emb=rotary_pos_emb,
                 max_seqlen=max_seqlen,
-                seqlens=seqlens,
+                seqlens=seqlens_list,
             )
 
         # adapter
@@ -842,7 +1075,7 @@ class Qwen2VLProcessingInfo(BaseProcessingInfo):
                 width=image_width,
                 factor=patch_size * merge_size,
                 min_pixels=image_processor.min_pixels,
-                max_pixels=image_processor.max_pixels,
+                max_pixels=4096 * 28 * 28,
             )
             preprocessed_size = ImageSize(width=resized_width,
                                           height=resized_height)
@@ -1101,6 +1334,8 @@ class Qwen2VLForConditionalGeneration(nn.Module, SupportsMultiModal,
             norm_eps=getattr(config, "rms_norm_eps", 1e-6),
             quant_config=self._maybe_ignore_quant_config(quant_config),
             prefix=maybe_prefix(prefix, "visual"),
+            max_position_embeddings=getattr(config, "max_position_embeddings",
+                                            32768),
         )
 
         self.language_model = init_vllm_registered_model(
