@@ -703,14 +703,10 @@ class GteEmbeddingModel(BertEmbeddingModel):
                           embedding_class=BertEmbedding)
 
         # GteModel only gate_up_proj does not have bias.
+        # Hack method learned from vllm/model_executor/models/glm.py
         for layer in model.encoder.layer:
-            layer.intermediate.gate_up_proj = MergedColumnParallelLinear(
-                config.hidden_size,
-                [config.intermediate_size] * 2,
-                bias=False,
-                quant_config=vllm_config.quant_config,
-                prefix=f"{prefix}.gate_up_proj",
-            )
+            layer.intermediate.gate_up_proj.bias = None
+            layer.intermediate.skip_bias_add = True
         return model
 
     def split_up_gate_proj(self, weights: Iterable[Tuple[str, torch.Tensor]]):
