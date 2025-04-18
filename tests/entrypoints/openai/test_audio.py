@@ -27,7 +27,7 @@ def server():
         "--enforce-eager",
         "--trust-remote-code",
         "--limit-mm-per-prompt",
-        f"audio={MAXIMUM_AUDIOS}",
+        str({"audio": MAXIMUM_AUDIOS}),
     ]
 
     with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
