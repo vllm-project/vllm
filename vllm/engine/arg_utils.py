@@ -155,7 +155,7 @@ class EngineArgs:
     max_parallel_loading_workers: Optional[
         int] = ParallelConfig.max_parallel_loading_workers
     block_size: Optional[BlockSize] = CacheConfig.block_size
-    enable_prefix_caching: bool = CacheConfig.enable_prefix_caching
+    enable_prefix_caching: Optional[bool] = CacheConfig.enable_prefix_caching
     prefix_caching_hash_algo: PrefixCachingHashAlgo = \
         CacheConfig.prefix_caching_hash_algo
     disable_sliding_window: bool = False
@@ -1593,6 +1593,10 @@ class EngineArgs:
 
         # V1 always uses chunked prefills.
         self.enable_chunked_prefill = True
+
+        # V1 enables prefix caching by default.
+        if self.enable_prefix_caching is None:
+            self.enable_prefix_caching = True
 
         # V1 should use the new scheduler by default.
         # Swap it only if this arg is set to the original V0 default

@@ -1283,8 +1283,9 @@ class CacheConfig:
     sliding_window: Optional[int] = None
     """Sliding window size for the KV cache. This is primarily set in
     `ModelConfig` and that value should be manually duplicated here."""
-    enable_prefix_caching: bool = envs.VLLM_USE_V1
-    """Whether to enable prefix caching."""
+    enable_prefix_caching: Optional[bool] = None
+    """Whether to enable prefix caching. Disabled by default for V0. Enabled by
+    default for V1."""
     prefix_caching_hash_algo: PrefixCachingHashAlgo = "builtin"
     """Set the hash algorithm for prefix caching:\n
     - "builtin" is Python's built-in hash.\n
