@@ -7,8 +7,8 @@ import json
 import re
 import threading
 from dataclasses import MISSING, dataclass, fields
-from typing import (Any, Callable, Dict, List, Literal, Mapping, Optional,
-                    Tuple, Type, TypeVar, Union, cast, get_args, get_origin)
+from typing import (Any, Callable, Dict, List, Literal, Optional, Tuple, Type,
+                    TypeVar, Union, cast, get_args, get_origin)
 
 import torch
 from typing_extensions import TypeIs
@@ -107,14 +107,14 @@ def nullable_kvs(val: str) -> Optional[dict[str, int]]:
 
 
 def optional_dict(val: str) -> Optional[dict[str, int]]:
-    try:
+    if re.match("^{.*}$", val):
         return optional_arg(val, json.loads)
-    except ValueError:
-        logger.warning(
-            "Failed to parse JSON string. Attempting to parse as "
-            "comma-separated key=value pairs. This will be deprecated in a "
-            "future release.")
-        return nullable_kvs(val)
+
+    logger.warning(
+        "Failed to parse JSON string. Attempting to parse as "
+        "comma-separated key=value pairs. This will be deprecated in a "
+        "future release.")
+    return nullable_kvs(val)
 
 
 @dataclass
@@ -178,7 +178,7 @@ class EngineArgs:
     enforce_eager: Optional[bool] = None
     max_seq_len_to_capture: int = 8192
     disable_custom_all_reduce: bool = ParallelConfig.disable_custom_all_reduce
-    limit_mm_per_prompt: Mapping[str, int] = \
+    limit_mm_per_prompt: dict[str, int] = \
         get_field(MultiModalConfig, "limit_per_prompt")
     mm_processor_kwargs: Optional[Dict[str, Any]] = None
     disable_mm_preprocessor_cache: bool = False
