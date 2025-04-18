@@ -121,8 +121,8 @@ def test_multimodal_kwargs():
 
 
 def test_multimodal_items_by_modality():
-    e1 = MultiModalFieldElem("audio", "a0", torch.zeros(1000,
-                                                        dtype=torch.bfloat16),
+    e1 = MultiModalFieldElem("audio", "a0",
+                             torch.zeros(1000, dtype=torch.bfloat16),
                              MultiModalBatchedField())
     e2 = MultiModalFieldElem(
         "video",
