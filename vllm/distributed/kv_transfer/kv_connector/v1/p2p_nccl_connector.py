@@ -276,13 +276,15 @@ class P2pNcclConnector(KVConnectorBase_V1):
         total_need_load = 0
         for new_req in scheduler_output.scheduled_new_reqs:
             if new_req.req_id in self._requests_need_load:
-                meta.add_request(token_ids=new_req.prompt_token_ids,
+                meta.add_request(request_id=new_req.req_id,
+                                 token_ids=new_req.prompt_token_ids,
                                  block_ids=new_req.block_ids,
                                  block_size=self._block_size,
                                  is_store=False)
                 total_need_load += 1
             else:
-                meta.add_request(token_ids=new_req.prompt_token_ids,
+                meta.add_request(request_id=new_req.req_id,
+                                 token_ids=new_req.prompt_token_ids,
                                  block_ids=new_req.block_ids,
                                  block_size=self._block_size,
                                  is_store=True)
@@ -305,7 +307,8 @@ class P2pNcclConnector(KVConnectorBase_V1):
                 # of the block_ids for the request.
                 block_ids = cached_req.new_block_ids
 
-                meta.add_request(token_ids=token_ids,
+                meta.add_request(request_id=cached_req.req_id,
+                                 token_ids=token_ids,
                                  block_ids=block_ids,
                                  block_size=self._block_size,
                                  is_store=False)
