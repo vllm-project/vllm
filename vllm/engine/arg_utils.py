@@ -7,7 +7,7 @@ import json
 import re
 import threading
 from dataclasses import MISSING, dataclass, fields
-from typing import (TYPE_CHECKING, Any, Callable, Dict, List, Literal, Mapping,
+from typing import (TYPE_CHECKING, Any, Callable, Dict, List, Literal,
                     Optional, Tuple, Type, TypeVar, Union, cast, get_args,
                     get_origin)
 
@@ -191,7 +191,7 @@ class EngineArgs:
         TokenizerPoolConfig.pool_type
     tokenizer_pool_extra_config: dict[str, Any] = \
         get_field(TokenizerPoolConfig, "extra_config")
-    limit_mm_per_prompt: Mapping[str, int] = \
+    limit_mm_per_prompt: dict[str, int] = \
         get_field(MultiModalConfig, "limit_per_prompt")
     mm_processor_kwargs: Optional[Dict[str, Any]] = None
     disable_mm_preprocessor_cache: bool = False
