@@ -2,8 +2,11 @@
 
 from typing import Dict, List, Type
 
+from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
+
+logger = init_logger(__name__)
 
 QUANTIZATION_METHODS: List[str] = [
     "aqlm",
@@ -62,14 +65,15 @@ def register_quantization_config(quantization: str):
     """  # noqa: E501
 
     def _wrapper(quant_config_cls):
-        if quantization in QUANTIZATION_METHODS:
-            raise ValueError(
-                f"The quantization method `{quantization}` is already exists.")
         if not issubclass(quant_config_cls, QuantizationConfig):
             raise ValueError("The quantization config must be a subclass of "
                              "`QuantizationConfig`.")
+        if quantization in QUANTIZATION_METHODS:
+            logger.warning("The quantization config {} will be rewritten", 
+                           quantization)
+        else:
+            QUANTIZATION_METHODS.append(quantization)
         _CUSTOMIZED_METHOD_TO_QUANT_CONFIG[quantization] = quant_config_cls
-        QUANTIZATION_METHODS.append(quantization)
         return quant_config_cls
 
     return _wrapper
