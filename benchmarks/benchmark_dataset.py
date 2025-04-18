@@ -82,7 +82,8 @@ class BenchmarkDataset(ABC):
         self.dataset_path = dataset_path
         # Set the random seed, ensuring that a None value is replaced with the
         # default seed.
-        self.random_seed = random_seed if random_seed is not None else self.DEFAULT_SEED
+        self.random_seed = (random_seed
+                            if random_seed is not None else self.DEFAULT_SEED)
         self.data = None
 
     def apply_multimodal_chat_transformation(
@@ -309,9 +310,9 @@ class RandomDataset(BenchmarkDataset):
         **kwargs,
     ) -> list[SampleRequest]:
         # Enforce range_ratio < 1
-        assert (
-            range_ratio < 1.0
-        ), "random_range_ratio must be < 1.0 to ensure a valid sampling range"
+        assert range_ratio < 1.0, (
+            "random_range_ratio must be < 1.0 to ensure a valid sampling range"
+        )
 
         vocab_size = tokenizer.vocab_size
 
@@ -406,8 +407,8 @@ class ShareGPTDataset(BenchmarkDataset):
             prompt_ids = tokenizer(prompt).input_ids
             completion_ids = tokenizer(completion).input_ids
             prompt_len = len(prompt_ids)
-            new_output_len = len(
-                completion_ids) if output_len is None else output_len
+            new_output_len = (len(completion_ids)
+                              if output_len is None else output_len)
             if not is_valid_sequence(
                     prompt_len,
                     new_output_len,
@@ -655,8 +656,8 @@ class ConversationDataset(HuggingFaceDataset):
             if dynamic_output and not is_valid_sequence(
                     prompt_len, completion_len):
                 continue
-            mm_content = process_image(
-                item["image"]) if "image" in item else None
+            mm_content = (process_image(item["image"])
+                          if "image" in item else None)
             if enable_multimodal_chat:
                 # Note: when chat is enabled the request prompt_len is no longer
                 # accurate and we will be using request output to count the
@@ -701,8 +702,14 @@ class VisionArenaDataset(HuggingFaceDataset):
         enable_multimodal_chat: bool = False,
         **kwargs,
     ) -> list:
-        output_len = output_len if output_len is not None else self.DEFAULT_OUTPUT_LEN
+        output_len = (output_len
+                      if output_len is not None else self.DEFAULT_OUTPUT_LEN)
         sampled_requests = []
+        logger.info(\
+            "Sampling %d requests from %s dataset",
+            num_requests,
+            self.dataset_path,
+        )
         for item in self.data:
             if len(sampled_requests) >= num_requests:
                 break
@@ -758,7 +765,8 @@ class InstructCoderDataset(HuggingFaceDataset):
         enable_multimodal_chat: bool = False,
         **kwargs,
     ) -> list:
-        output_len = output_len if output_len is not None else self.DEFAULT_OUTPUT_LEN
+        output_len = (output_len
+                      if output_len is not None else self.DEFAULT_OUTPUT_LEN)
         sampled_requests = []
         for item in self.data:
             if len(sampled_requests) >= num_requests:
@@ -812,10 +820,12 @@ class AIMODataset(HuggingFaceDataset):
             completion_len = len(completion_ids)
             output_len = completion_len if dynamic_output else output_len
             assert isinstance(output_len, int) and output_len > 0
-            if dynamic_output and not is_valid_sequence(prompt_len,
-                                                        completion_len,
-                                                        max_prompt_len=2048,
-                                                        max_total_len=32000):
+            if dynamic_output and not is_valid_sequence(
+                    prompt_len,
+                    completion_len,
+                    max_prompt_len=2048,
+                    max_total_len=32000,
+            ):
                 continue
             sampled_requests.append(
                 SampleRequest(
@@ -844,18 +854,31 @@ You are a code completion assistant and your task is to analyze user edits and t
 
 ### Response:
 
-"""
+""" # noqa: E501
 
-def _format_zeta_prompt(examples: dict, original_start_marker = "<|editable_region_start|>") -> dict:
-    """
-    Format the zeta prompt for the Next Edit Prediction (NEP) dataset.
-    This could be further extended to support more NEP datasets.
+
+def _format_zeta_prompt(
+        examples: dict,
+        original_start_marker: str = "<|editable_region_start|>") -> dict:
+    """Format the zeta prompt for the Next Edit Prediction (NEP) dataset.
     
-    :param examples: The dataset examples.
-    :param original_start_marker: The original start marker for the editable region.
-    :return: A dictionary with the prompt and expected output.
+    This function formats examples from the NEP dataset 
+    into prompts and expected outputs. It could be 
+    further extended to support more NEP datasets.
+    
+    Args:
+        examples: The dataset examples containing events, 
+            inputs, and outputs.
+        original_start_marker: The marker indicating the 
+            start of the editable region. Defaults to 
+            "<|editable_region_start|>".
+            
+    Returns:
+        A dictionary with the formatted prompts and expected outputs.
     """
-    events, inputs, outputs = examples["events"], examples["input"], examples["output"]
+    events = examples["events"]
+    inputs = examples["input"]
+    outputs = examples["output"]
     prompts, expected_outputs = [], []
     for event, input, output in zip(events, inputs, outputs):
         # create the final prompt
@@ -867,8 +890,9 @@ def _format_zeta_prompt(examples: dict, original_start_marker = "<|editable_regi
         output_focused_region = output[output_start_index:]
         output = output_focused_region
         expected_outputs.append(output)
-        
+
     return {"prompt": prompts, "expected_output": expected_outputs}
+
 
 class NextEditPredictionDataset(HuggingFaceDataset):
     """
@@ -881,7 +905,7 @@ class NextEditPredictionDataset(HuggingFaceDataset):
     MAPPING_PROMPT_FUNCS = {
         "zed-industries/zeta": _format_zeta_prompt,
     }
-    
+
     def load_data(self) -> None:
         """Load data from HuggingFace datasets."""
         self.data = load_dataset(
@@ -890,20 +914,21 @@ class NextEditPredictionDataset(HuggingFaceDataset):
             split=self.dataset_split,
             streaming=True,
         )
-        formatting_prompt_func = self.MAPPING_PROMPT_FUNCS.get(self.dataset_path)
+        formatting_prompt_func = self.MAPPING_PROMPT_FUNCS.get(
+            self.dataset_path)
         if formatting_prompt_func is None:
             raise ValueError(f"Unsupported dataset path: {self.dataset_path}")
         self.data = self.data.map(formatting_prompt_func, batched=True)
         self.data = self.data.shuffle(seed=self.random_seed)
-    
 
-    def sample(
-        self,
-        tokenizer: PreTrainedTokenizerBase,
-        num_requests: int,
-        **kwargs):
+    def sample(self, tokenizer: PreTrainedTokenizerBase, num_requests: int,
+               **kwargs):
         samples = []
-        logger.info(f"Sampling {num_requests} requests from {self.dataset_path} dataset")
+        logger.info(\
+            "Sampling %d requests from %s dataset",
+            num_requests,
+            self.dataset_path,
+        )
         for item in self.data:
             if len(samples) >= num_requests:
                 break
@@ -911,9 +936,19 @@ class NextEditPredictionDataset(HuggingFaceDataset):
             expected_output = item["expected_output"]
             prompt_len = len(tokenizer(prompt).input_ids)
             expected_output_len = len(tokenizer(expected_output).input_ids)
-            samples.append(SampleRequest(prompt=prompt, prompt_len=prompt_len, expected_output_len=expected_output_len))
+            samples.append(
+                SampleRequest(
+                    prompt=prompt,
+                    prompt_len=prompt_len,
+                    expected_output_len=expected_output_len,
+                ))
         if len(samples) < num_requests:
-            logger.info(f"Requested {num_requests} samples, but the dataset {self.dataset_path} only has {len(samples)}")
+            logger.info(
+                "Requested %d samples, but the dataset %s only has %d",
+                num_requests,
+                self.dataset_path,
+                len(samples),
+            )
         return samples
 
 
