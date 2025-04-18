@@ -22,6 +22,7 @@ from vllm.distributed.utils import divide
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                LinearBase,
                                                MergedColumnParallelLinear,
+                                               QKVCrossParallelLinear,
                                                QKVParallelLinear,
                                                ReplicatedLinear,
                                                RowParallelLinear)
@@ -866,9 +867,87 @@ class MergedQKVParallelLinearWithLoRA(MergedColumnParallelLinearWithLoRA):
                 and len(packed_modules_list) == 3)
 
 
-#TODO: Implement this
 class QKVCrossParallelLinearWithLoRA(BaseLayerWithLoRA):
-    pass
+
+    def __init__(self, base_layer: QKVCrossParallelLinear) -> None:
+        super().__init__()
+        self.base_layer = base_layer
+        self.q_proj_decoder_lora_layer = ColumnParallelLinearWithLoRA(
+            self.base_layer.proj["q_proj_decoder"])
+        self.kv_proj_encoder_lora_layer = QKVParallelLinearWithLoRA(
+            self.base_layer.proj["kv_proj_encoder"])
+
+    def create_lora_weights(
+        self,
+        max_loras: int,
+        lora_config: LoRAConfig,
+        model_config: Optional[PretrainedConfig] = None,
+    ) -> None:
+        self.q_proj_decoder_lora_layer.create_lora_weights(
+            max_loras, lora_config, model_config)
+        self.kv_proj_encoder_lora_layer.create_lora_weights(
+            max_loras, lora_config, model_config)
+
+    def reset_lora(self, index: int):
+        self.q_proj_decoder_lora_layer.reset_lora(index)
+        self.kv_proj_encoder_lora_layer.reset_lora(index)
+
+    def set_lora(
+        self,
+        index: int,
+        lora_a: torch.Tensor,
+        lora_b: torch.Tensor,
+        embeddings_tensor: Optional[torch.Tensor],
+        bias: Optional[torch.Tensor] = None,
+    ):
+        """Overwrites lora tensors at index."""
+        self.q_proj_decoder_lora_layer.set_lora(index, lora_a, lora_b,
+                                                embeddings_tensor, bias)
+        self.kv_proj_encoder_lora_layer.set_lora(index, lora_a, lora_b,
+                                                 embeddings_tensor, bias)
+
+    def forward(  # type: ignore[override]
+        self,
+        decoder_hidden_states: torch.Tensor,
+        encoder_hidden_states: torch.Tensor,
+    ) -> tuple[torch.Tensor, ...]:
+        q, _ = self.q_proj_decoder_lora_layer(decoder_hidden_states)
+        if encoder_hidden_states is None:
+            # Encoder KV already cached.
+            k = None
+            v = None
+        else:
+            # Prefill phase, encoder KV cached here.
+            kv_enc, _ = self.kv_proj_encoder_lora_layer(encoder_hidden_states)
+            # Split kv in half
+            k, v = kv_enc.split(self.kv_size, dim=-1)
+        return q, k, v
+
+    def set_mapping(self, punica_wrapper):
+        self.q_proj_decoder_lora_layer.punica_wrapper = punica_wrapper
+        self.kv_proj_encoder_lora_layer.punica_wrapper = punica_wrapper
+
+    def slice_bias(self, bias: torch.Tensor) -> torch.Tensor:
+        raise NotImplementedError
+
+    @property
+    def weight(self) -> torch.Tensor:
+        raise NotImplementedError
+
+    @property
+    def bias(self) -> Optional[torch.Tensor]:
+        raise NotImplementedError
+
+    @classmethod
+    @_not_fully_sharded_can_replace
+    def can_replace_layer(
+        cls,
+        source_layer: nn.Module,
+        lora_config: LoRAConfig,
+        packed_modules_list: List,
+        model_config: Optional[PretrainedConfig],
+    ) -> bool:
+        return type(source_layer) is QKVCrossParallelLinear
 
 
 class RowParallelLinearWithLoRA(BaseLinearLayerWithLoRA):

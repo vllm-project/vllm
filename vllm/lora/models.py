@@ -534,6 +534,9 @@ class LoRAModelManager(AdapterModelManager):
         """Create zero-initialized LoRAModel for warmup."""
         model = LoRAModel(lora_id, rank, {}, scaling_factor)
         for module_name, module in self.model.named_modules():
+            # FIXME(jeejeelee): Implement this
+            if module.__class__.__name__ == "QKVCrossParallelLinearWithLoRA":
+                continue
             bias_enabled = self.lora_config.bias_enabled
             if (not self._match_target_modules(module_name)
                     or not isinstance(module, BaseLayerWithLoRA)
