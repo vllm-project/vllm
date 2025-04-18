@@ -20,6 +20,7 @@ from vllm.config import VllmConfig
 from vllm.forward_context import set_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader import get_model
+from vllm.model_executor.models.utils import _merge_multimodal_embeddings
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import MultiModalKwargs, PlaceholderRange
 from vllm.multimodal.utils import group_mm_inputs_by_modality
@@ -702,11 +703,18 @@ class TPUModelRunner:
             # NOTE(woosuk): To unify token ids and soft tokens (vision
             # embeddings), we always use embeddings (rather than token ids)
             # as input to the multimodal model, even when the input is text.
+            language_model = self.model.get_language_model()
+            inputs_embeds = language_model.get_input_embeddings(self.input_ids)
+
             if mm_embeds:
-                inputs_embeds = self.model.get_input_embeddings(
-                    self.input_ids, mm_embeds)
-            else:
-                inputs_embeds = self.model.get_input_embeddings(self.input_ids)
+                is_mm_embeds: torch.Tensor = ...  # TODO
+
+                _merge_multimodal_embeddings(
+                    inputs_embeds,
+                    is_mm_embeds,
+                    mm_embeds,
+                )
+
             input_ids = None
         else:
             # For text-only models, we use token ids as input.
