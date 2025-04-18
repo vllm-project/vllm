@@ -72,7 +72,7 @@ function cpu_tests() {
     set -e
     export VLLM_CPU_KVCACHE_SPACE=10 
     export VLLM_CPU_OMP_THREADS_BIND=$1
-    python3 -m vllm.entrypoints.openai.api_server --model facebook/opt-125m --dtype half & 
+    python3 -m vllm.entrypoints.openai.api_server --model facebook/opt-125m --dtype half -O3 & 
     timeout 600 bash -c 'until curl localhost:8000/v1/models; do sleep 1; done' || exit 1
     python3 benchmarks/benchmark_serving.py \
       --backend vllm \

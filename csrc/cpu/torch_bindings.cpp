@@ -123,6 +123,8 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
 
   // Quantization
 #ifdef __AVX512F__
+  // Note: see https://github.com/vllm-project/vllm/pull/14306
+  at::Tag stride_tag = at::Tag::needs_fixed_stride_order;
   // Compute int8 quantized tensor for given scaling factor.
   ops.def(
       "static_scaled_int8_quant(Tensor! out, Tensor input, Tensor scale,"
@@ -140,7 +142,8 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   ops.def(
       "cutlass_scaled_mm(Tensor! out, Tensor a,"
       "                  Tensor b, Tensor a_scales,"
-      "                  Tensor b_scales, Tensor? bias) -> ()");
+      "                  Tensor b_scales, Tensor? bias) -> ()",
+      {stride_tag});
   ops.impl("cutlass_scaled_mm", torch::kCPU, &int8_scaled_mm);
   // w8a8 GEMM, supporting asymmetric per-tensor or per-row/column
   // quantization.
@@ -148,7 +151,8 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "cutlass_scaled_mm_azp(Tensor! out, Tensor a,"
       "                  Tensor b, Tensor a_scales,"
       "                  Tensor b_scales, Tensor azp_adj,"
-      "                  Tensor? azp, Tensor? bias) -> ()");
+      "                  Tensor? azp, Tensor? bias) -> ()",
+      {stride_tag});
   ops.impl("cutlass_scaled_mm_azp", torch::kCPU, &int8_scaled_mm_azp);
 #endif
 

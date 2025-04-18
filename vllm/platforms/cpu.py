@@ -129,6 +129,25 @@ class CpuPlatform(Platform):
             else:
                 parallel_config.worker_cls = "vllm.worker.cpu_worker.CPUWorker"
 
+        from vllm.config import CompilationLevel
+        compilation_config = vllm_config.compilation_config
+        if compilation_config.level == CompilationLevel.DYNAMO_ONCE:
+            # O2 level
+            compilation_config.backend = "eager"
+        elif compilation_config.level == CompilationLevel.PIECEWISE:
+            # O3 level
+            compilation_config.level = CompilationLevel.DYNAMO_ONCE
+            compilation_config.backend = "inductor"
+            compilation_config.custom_ops += ["none"]
+            compilation_config.inductor_compile_config = {
+                "dce": True,
+                "size_asserts": False,
+                "nan_asserts": False,
+                "memory_planning": True,
+                "max_autotune": True,
+                "epilogue_fusion": True,
+            }
+
         assert vllm_config.device_config.device_type == "cpu"
 
         #
