@@ -171,7 +171,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip install pandas pythran pybind11 /hf_wheels/*.whl && \
     # sentencepiece.pc is in some pkgconfig inside uv cache
     export PKG_CONFIG_PATH=$(find / -type d -name "pkgconfig" 2>/dev/null | tr '\n' ':') && \
-    uv pip install -r /src/requirements/common.txt -r /src/requirements/cpu.txt -r /src/requirements/build.txt --no-build-isolation && \
+    uv pip install -r /src/requirements/common.txt -r /src/requirements/cpu.txt --no-build-isolation && \
     cd /src/ && \
     uv build --wheel --out-dir /vllmwheel/ --no-build-isolation && \
     uv pip install /vllmwheel/*.whl
