@@ -76,7 +76,7 @@ def optional_float(val: str) -> Optional[float]:
 def nullable_kvs(val: str) -> Optional[dict[str, int]]:
     """NOTE: This function is deprecated, args should be passed as JSON
     strings instead.
-    
+
     Parses a string containing comma separate key [str] to value [int]
     pairs into a dictionary.
 
@@ -256,6 +256,7 @@ class EngineArgs:
     enable_reasoning: Optional[bool] = None
     reasoning_parser: Optional[str] = DecodingConfig.reasoning_backend
     use_tqdm_on_load: bool = LoadConfig.use_tqdm_on_load
+    pt_load_map_location: str = LoadConfig.pt_load_map_location
 
     def __post_init__(self):
         if not self.tokenizer:
@@ -440,6 +441,8 @@ class EngineArgs:
                                 **load_kwargs["model_loader_extra_config"])
         load_group.add_argument('--use-tqdm-on-load',
                                 **load_kwargs["use_tqdm_on_load"])
+        load_group.add_argument('--pt-load-map-location',
+                                **load_kwargs["pt_load_map_location"])
 
         parser.add_argument(
             '--config-format',
@@ -802,7 +805,6 @@ class EngineArgs:
                             default=1,
                             help=('Maximum number of forward steps per '
                                   'scheduler call.'))
-
         parser.add_argument('--speculative-config',
                             type=json.loads,
                             default=None,
@@ -1109,6 +1111,7 @@ class EngineArgs:
             model_loader_extra_config=self.model_loader_extra_config,
             ignore_patterns=self.ignore_patterns,
             use_tqdm_on_load=self.use_tqdm_on_load,
+            pt_load_map_location=self.pt_load_map_location,
         )
 
     def create_speculative_config(
@@ -1754,7 +1757,7 @@ def _warn_or_fallback(feature_name: str) -> bool:
 def human_readable_int(value):
     """Parse human-readable integers like '1k', '2M', etc.
     Including decimal values with decimal multipliers.
-    
+
     Examples:
     - '1k' -> 1,000
     - '1K' -> 1,024

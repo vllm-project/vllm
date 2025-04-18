@@ -120,7 +120,7 @@ def get_attr_docs(cls: type[Any]) -> dict[str, str]:
     def pairwise(iterable):
         """
         Manually implement https://docs.python.org/3/library/itertools.html#itertools.pairwise
-        
+
         Can be removed when Python 3.9 support is dropped.
         """
         iterator = iter(iterable)
@@ -266,7 +266,7 @@ class ModelConfig:
         config_format: The config format which shall be loaded.
             Defaults to 'auto' which defaults to 'hf'.
         hf_token: The token to use as HTTP bearer authorization for remote files
-            . If `True`, will use the token generated when running 
+            . If `True`, will use the token generated when running
             `huggingface-cli login` (stored in `~/.huggingface`).
         hf_overrides: If a dictionary, contains arguments to be forwarded to the
             HuggingFace config. If a callable, it is called to update the
@@ -1515,6 +1515,11 @@ class LoadConfig:
     use_tqdm_on_load: bool = True
     """Whether to enable tqdm for showing progress bar when loading model
     weights."""
+    pt_load_map_location: str = "cpu"
+    """
+    pt_load_map_location: the map location for loading pytorch checkpoint, to
+    support loading checkpoints can only be loaded on certain devices like cuda.
+    Default to cpu."""
 
     def compute_hash(self) -> str:
         """
@@ -1606,7 +1611,7 @@ class ParallelConfig:
     """The full name of the worker class to use. If "auto", the worker class
     will be determined based on the platform."""
     sd_worker_cls: str = "auto"
-    """The full name of the worker class to use for speculative decofing. 
+    """The full name of the worker class to use for speculative decofing.
     If "auto", the worker class will be determined based on the platform."""
     worker_extension_cls: str = ""
     """The full name of the worker extension class to use. The worker extension
@@ -1797,13 +1802,13 @@ class SchedulerConfig:
 
     max_num_batched_tokens: int = None  # type: ignore
     """Maximum number of tokens to be processed in a single iteration.
-    
+
     This config has no static default. If left unspecified by the user, it will
     be set in `EngineArgs.create_engine_config` based on the usage context."""
 
     max_num_seqs: int = None  # type: ignore
     """Maximum number of sequences to be processed in a single iteration.
-    
+
     This config has no static default. If left unspecified by the user, it will
     be set in `EngineArgs.create_engine_config` based on the usage context."""
 
@@ -1849,7 +1854,7 @@ class SchedulerConfig:
     # TODO (ywang96): Make this configurable.
     max_num_encoder_input_tokens: int = field(init=False)
     """Multimodal encoder compute budget, only used in V1.
-    
+
     NOTE: This is not currently configurable. It will be overridden by
     max_num_batched_tokens in case max multimodal embedding size is larger."""
 
