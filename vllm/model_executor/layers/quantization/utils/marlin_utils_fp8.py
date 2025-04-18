@@ -103,8 +103,6 @@ def prepare_fp8_layer_for_marlin(layer: torch.nn.Module,
     elif "weight_scale_inv" in dir(layer):
         scales = layer.weight_scale_inv.to(layer.orig_dtype)
         del layer.weight_scale_inv
-    else:
-        assert False
 
     if layer.weight_block_size is None:
         group_size = -1
@@ -172,9 +170,8 @@ def prepare_moe_fp8_layer_for_marlin(layer: torch.nn.Module,
                                                     num_bits=8)
             tensor_list.append(marlin_qweight)
 
-        weight = torch.nn.Parameter(torch.cat(
-            [x.unsqueeze(0) for x in tensor_list], 0),
-                                    requires_grad=False)
+        weight = torch.cat([x.unsqueeze(0) for x in tensor_list], 0)
+        weight = torch.nn.Parameter(weight, requires_grad=False)
 
         setattr(layer, name, weight)
 
@@ -194,8 +191,6 @@ def prepare_moe_fp8_layer_for_marlin(layer: torch.nn.Module,
             new_name = name + "_weight_scale_inv"
             scales = getattr(layer, new_name).to(layer.orig_dtype)
             delattr(layer, new_name)
-        else:
-            assert False
 
         tensor_list = []
         if "w13" in name:
@@ -217,9 +212,8 @@ def prepare_moe_fp8_layer_for_marlin(layer: torch.nn.Module,
                                                   group_size=group_size)
             tensor_list.append(marlin_scales)
 
-        scales = torch.nn.Parameter(torch.cat(
-            [x.unsqueeze(0) for x in tensor_list], 0),
-                                    requires_grad=False)
+        scales = torch.cat([x.unsqueeze(0) for x in tensor_list], 0)
+        scales = torch.nn.Parameter(scales, requires_grad=False)
 
         setattr(layer, name + "_weight_scale", scales)
 
