@@ -219,7 +219,7 @@ class MsgpackDecoder:
         dtype, shape, data = arr
         # Copy from inline representation, to decouple the memory storage
         # of the message from the original buffer. Not needed in the
-        # auxillary buffers case.
+        # auxiliary buffers case.
         buffer = self.aux_buffers[data] if isinstance(data, int) \
             else bytearray(data)
         return np.ndarray(buffer=buffer, dtype=np.dtype(dtype), shape=shape)
