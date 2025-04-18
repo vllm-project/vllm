@@ -403,6 +403,8 @@ async def async_request_openai_chat_completions(
 
                             if choices := data.get("choices"):
                                 content = choices[0]["delta"].get("content")
+                                reasoning_content = choices[0]["delta"].get(
+                                    "reasoning_content")
                                 # First token
                                 if ttft == 0.0:
                                     ttft = timestamp - st
@@ -413,7 +415,8 @@ async def async_request_openai_chat_completions(
                                     output.itl.append(timestamp -
                                                       most_recent_timestamp)
 
-                                generated_text += content or ""
+                                generated_text += reasoning_content \
+                                    or content or ""
                             elif usage := data.get("usage"):
                                 output.output_tokens = usage.get(
                                     "completion_tokens")
