@@ -151,6 +151,19 @@ def check_marlin_supports_layer(layer: LinearBase, group_size: int) \
         group_size=group_size)[0]
 
 
+def check_moe_marlin_supports_layer(layer: LinearBase, group_size: int) \
+                                    -> bool:
+    hidden_size = layer.hidden_size
+    intermediate_size_per_partition = layer.intermediate_size_per_partition
+
+    # gate-up: (n, k) = (intermediate_size_per_partition * 2, hidden_size)
+    # down: (n, k) = (hidden_size, intermediate_size_per_partition)
+    # moe marlin requires n % 128 == 0 and k % 64 == 0
+    return hidden_size % 128 == 0 and \
+        intermediate_size_per_partition % max(64, group_size) == 0 and \
+        group_size in [-1, 32, 64, 128]
+
+
 def marlin_make_workspace(output_size_per_partition: int,
                           device: torch.device) -> torch.Tensor:
     max_workspace_size = (output_size_per_partition //
@@ -319,6 +332,7 @@ def apply_gptq_marlin_linear(
         wtype: ScalarType,
         output_size_per_partition: int,
         input_size_per_partition: int,
+        has_zp: bool,
         is_k_full: bool,
         bias: Optional[torch.Tensor] = None,
         use_fp32_reduce: bool = USE_FP32_REDUCE_DEFAULT) -> torch.Tensor:
@@ -343,8 +357,8 @@ def apply_gptq_marlin_linear(
                                   size_n=output_size_per_partition,
                                   size_k=input_size_per_partition,
                                   is_k_full=is_k_full,
-                                  has_zp=False,
                                   use_atomic_add=use_atomic_add,
+                                  has_zp=has_zp,
                                   use_fp32_reduce=use_fp32_reduce,
                                   is_zp_float=False)
 
