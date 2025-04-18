@@ -13,10 +13,11 @@ from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     all_close_1d, normalize_e4m3fn_to_e4m3fnuz, per_tensor_dequantize)
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
+from vllm.model_executor.layers.quantization.utils.mxfp4_utils import OCP_MX_BLOCK_SIZE
 
 logger = init_logger(__name__)
 
-__all__ = ["QuarkMoEMethod", "QuarkW8A8Fp8MoEMethod"]
+__all__ = ["QuarkMoEMethod", "QuarkW8A8Fp8MoEMethod", "QuarkW4A4MXFp4MoEMethod"]
 
 
 class QuarkMoEMethod(FusedMoEMethodBase):
@@ -39,6 +40,8 @@ class QuarkMoEMethod(FusedMoEMethodBase):
 
         if quant_config._is_fp8_w8a8(weight_config, input_config):
             return QuarkW8A8Fp8MoEMethod(weight_config, input_config)
+        elif quant_config._is_mx_fp4(weight_config, input_config):
+            return QuarkW4A4MXFp4MoEMethod(weight_config, input_config)
         else:
             raise RuntimeError("Unsupported FusedMoe scheme")
 
@@ -234,3 +237,186 @@ class QuarkW8A8Fp8MoEMethod(QuarkMoEMethod):
             w2_scale=layer.w2_weight_scale,
             a1_scale=layer.w13_input_scale,
             a2_scale=layer.w2_input_scale)
+
+
+class QuarkW4A4MXFp4MoEMethod(QuarkMoEMethod):
+
+    def __init__(self, weight_config: Dict[str, Any], input_config: Dict[str,
+                                                                         Any]):
+        self.weight_quant = weight_config
+        self.input_quant = input_config
+
+        weight_qscheme = self.weight_quant.get("qscheme")
+        input_qscheme = self.input_quant.get("qscheme")
+        if not (weight_qscheme == "per_group"
+                and input_qscheme == "per_group"):
+            raise ValueError(
+                "For MX(FP4) Fused MoE layers, only per-group scales "
+                "for weights and activations are supported. Found "
+                f"{weight_qscheme}, {input_qscheme}")  # noqa E501
+
+        self.static_input_scales = not self.input_quant.get("is_dynamic")
+
+    def create_weights(self, layer: torch.nn.Module, num_experts: int,
+                       hidden_size: int, intermediate_size_per_partition: int,
+                       params_dtype: torch.dtype, **extra_weight_attrs):
+
+        # Add the quantization method used (per tensor/grouped/channel)
+        # to ensure the weight scales are loaded in properly
+        extra_weight_attrs.update({"quant_method": FusedMoeWeightScaleSupported.BLOCK.value})
+
+        params_dtype = torch.uint8
+
+        # WEIGHTS
+        w13_weight = torch.nn.Parameter(torch.empty(
+            num_experts,
+            2 * intermediate_size_per_partition,
+            hidden_size // 2,
+            dtype=params_dtype),
+                                        requires_grad=False)
+        layer.register_parameter("w13_weight", w13_weight)
+
+        print("set w13_weight", w13_weight.shape, w13_weight.dtype)
+
+        set_weight_attrs(w13_weight, extra_weight_attrs)
+
+        w2_weight = torch.nn.Parameter(torch.empty(
+            num_experts,
+            hidden_size,
+            intermediate_size_per_partition // 2,
+            dtype=params_dtype),
+                                       requires_grad=False)
+        layer.register_parameter("w2_weight", w2_weight)
+
+        print("set w2_weight", w2_weight.shape, w2_weight.dtype)
+
+        set_weight_attrs(w2_weight, extra_weight_attrs)
+
+        # WEIGHT_SCALES
+        w13_weight_scale = torch.nn.Parameter(
+            torch.ones(
+                num_experts,
+                2 * intermediate_size_per_partition,
+                hidden_size // OCP_MX_BLOCK_SIZE,
+                dtype=params_dtype,
+            ),
+            requires_grad=False,
+        )
+        w2_weight_scale = torch.nn.Parameter(
+            torch.ones(
+                num_experts,
+                hidden_size,
+                intermediate_size_per_partition // OCP_MX_BLOCK_SIZE,
+                dtype=params_dtype,
+            ),
+            requires_grad=False,
+        )
+        set_weight_attrs(w2_weight_scale, extra_weight_attrs)
+        set_weight_attrs(w13_weight_scale, extra_weight_attrs)
+
+        print("set w2_weight_scale", w2_weight_scale.shape)
+        print("set w13_weight_scale", w13_weight_scale.shape)
+        layer.register_parameter("w13_weight_scale", w13_weight_scale)
+        layer.register_parameter("w2_weight_scale", w2_weight_scale)
+
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        float_dtype = torch.get_default_dtype()
+
+        try:
+            from quark.torch.export.nn.modules import realquantizer
+            from quark.torch.quantization.config.config import (
+                QuantizationSpec)
+        except ImportError as err:
+            raise ImportError(
+                "The package `amd-quark` is required to use AMD Quark "
+                "MX-FP4 models. Please install it with `pip install "
+                "amd-quark`.") from err
+
+        weight_quant_spec = QuantizationSpec.from_dict(self.weight_quant)
+
+        # Unpack and dequantize the weights (the operators are in high-precision, with simulated quantization).
+        w13_quantizer = realquantizer.get_real_quantizer(
+            qspec=weight_quant_spec,
+            quantizer=None,
+            real_quantized=True,
+            reorder=False,  # TODO: load from config
+            float_dtype=float_dtype,
+            scale_shape=layer.w13_weight_scale.shape,
+            zero_point_shape=None,
+        )
+        w13_quantizer.scale.data = layer.w13_weight_scale.data
+
+        layer.w13_weight = torch.nn.Parameter(
+            w13_quantizer(layer.w13_weight.data).to(float_dtype),
+            requires_grad=False,
+        )
+        layer.w13_weight_scale = None
+
+        w2_quantizer = realquantizer.get_real_quantizer(
+            qspec=weight_quant_spec,
+            quantizer=None,
+            real_quantized=True,
+            reorder=False,  # TODO: load from config
+            float_dtype=float_dtype,
+            scale_shape=layer.w2_weight_scale.shape,
+            zero_point_shape=None,
+        )
+        w2_quantizer.scale.data = layer.w2_weight_scale.data
+
+        layer.w2_weight = torch.nn.Parameter(
+            w2_quantizer(layer.w2_weight.data).to(float_dtype),
+            requires_grad=False,
+        )
+        layer.w2_weight_scale = None
+
+        # This call is necessary to release the scales memory.
+        torch.cuda.empty_cache()
+
+    def apply(
+        self,
+        layer: torch.nn.Module,
+        x: torch.Tensor,
+        router_logits: torch.Tensor,
+        top_k: int,
+        renormalize: bool,
+        use_grouped_topk: bool = False,
+        topk_group: Optional[int] = None,
+        num_expert_group: Optional[int] = None,
+        global_num_experts: int = -1,
+        expert_map: Optional[torch.Tensor] = None,
+        custom_routing_function: Optional[Callable] = None,
+        scoring_func: str = "softmax",
+        e_score_correction_bias: Optional[torch.Tensor] = None,
+        apply_router_weight_on_input: bool = False,
+        activation: str = "silu",
+    ) -> torch.Tensor:
+        from vllm.model_executor.layers.fused_moe import fused_experts
+
+        topk_weights, topk_ids = FusedMoE.select_experts(
+            hidden_states=x,
+            router_logits=router_logits,
+            use_grouped_topk=use_grouped_topk,
+            top_k=top_k,
+            renormalize=renormalize,
+            topk_group=topk_group,
+            num_expert_group=num_expert_group,
+            custom_routing_function=custom_routing_function,
+            scoring_func=scoring_func,
+            e_score_correction_bias=e_score_correction_bias)
+
+        return fused_experts(
+            x,
+            layer.w13_weight,
+            layer.w2_weight,
+            topk_weights=topk_weights,
+            topk_ids=topk_ids,
+            inplace=True,
+            use_mxfp4_w4a4=True,
+            global_num_experts=global_num_experts,
+            apply_router_weight_on_input=apply_router_weight_on_input,
+            expert_map=expert_map,
+            w1_scale=None,
+            w2_scale=None,
+            a1_scale=None,
+            a2_scale=None,
+            block_shape=None)
