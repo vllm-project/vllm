@@ -961,21 +961,18 @@ class MllamaTextCrossAttention(CustomOp):
         kv_range_for_decode: Optional[List[Tuple[int, int]]],
         cross_attention_states: Optional[torch.Tensor],
     ) -> torch.Tensor:
-        kv_cache = self.attn.kv_cache[self.pipeline_parallel_rank]
-        attn_metadata: AttentionMetadata = get_forward_context().attn_metadata
         q, k, v = self.qkv_proj(hidden_states, cross_attention_states)
         if cross_attention_states is not None:
             k = k.view(-1, self.num_local_key_value_heads, self.head_dim)
             v = v.view(-1, self.num_local_key_value_heads, self.head_dim)
             k = self.k_norm(k)
+
         q = q.view(-1, self.num_local_heads, self.head_dim)
         q = self.q_norm(q)
 
         if attention_mask is not None:
-            output = self._attention_with_mask_hpu(q, k, v, kv_cache,
-                                                   attention_mask,
-                                                   kv_range_for_decode,
-                                                   attn_metadata)
+            output = self._attention_with_mask_hpu(q, k, v, attention_mask,
+                                                   kv_range_for_decode)
         else:
             output = self.attn(
                 q.view(-1, self.num_local_heads * self.head_dim), k, v)
@@ -1065,11 +1062,11 @@ class MllamaTextCrossAttention(CustomOp):
         q: torch.Tensor,
         k: torch.Tensor,
         v: torch.Tensor,
-        kv_cache: torch.Tensor,
         attention_mask: torch.Tensor,
         kv_range_for_decode: List[Tuple[int, int]],
-        attn_metadata: AttentionMetadata,
     ) -> torch.Tensor:
+        kv_cache = self.attn.kv_cache[self.pipeline_parallel_rank]
+        attn_metadata: AttentionMetadata = get_forward_context().attn_metadata
         # Skip writing kv-cache for the initial profiling run.
         if kv_cache is not None and isinstance(kv_cache, tuple):
             assert self.attn.backend == _Backend.HPU_ATTN
