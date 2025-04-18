@@ -106,11 +106,14 @@ def parse_singleton_prompt(
         elif "prompt_embeds" in prompt:
             return ParsedEmbedsPrompt(type="embeds", content=prompt)
 
-    raise TypeError("inputs must be a string, TextPrompt, or TokensPrompt")
+    raise TypeError(
+        "inputs must be a string, TextPrompt, TokensPrompt, or EmbedsPrompt")
 
 
 def is_token_prompt(prompt: PromptType) -> TypeIs[TokensPrompt]:
-    return isinstance(prompt, dict) and "prompt_token_ids" in prompt
+    return isinstance(
+        prompt, dict
+    ) and "prompt_token_ids" in prompt and "prompt_embeds" not in prompt
 
 
 def is_explicit_encoder_decoder_prompt(

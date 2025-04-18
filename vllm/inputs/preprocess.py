@@ -391,7 +391,7 @@ class InputPreprocessor:
             prompt_embeds_content = parsed["content"]
 
             prompt_embeds = prompt_embeds_content["prompt_embeds"]
-            prompt = prompt_embeds_content.get("prompt")
+            prompt_text = prompt_embeds_content.get("prompt")
             prompt_token_ids = prompt_embeds_content.get("prompt_token_ids")
 
             # prompt_embeds must be (seq_len, hidden_size), but if the user
@@ -407,7 +407,7 @@ class InputPreprocessor:
 
             return token_inputs(
                 prompt_token_ids=prompt_token_ids,
-                prompt=prompt,
+                prompt=prompt_text,
                 prompt_embeds=prompt_embeds,
             )
 
