@@ -1831,6 +1831,8 @@ class BatchedExperts(mk.FusedMoEPermuteExpertsUnpermute):
 
     def __init__(
         self,
+        max_num_tokens: Optional[int] = None,
+        rank: int = 0,
         use_fp8_w8a8: bool = False,
         use_int8_w8a16: bool = False,
         use_int4_w4a16: bool = False,
@@ -1843,6 +1845,8 @@ class BatchedExperts(mk.FusedMoEPermuteExpertsUnpermute):
         assert not use_int8_w8a16
         assert block_shape is None
         assert block_m is None
+        self.max_num_tokens = max_num_tokens
+        self.rank = rank
 
     def workspace_shapes(
         self,
@@ -1854,7 +1858,8 @@ class BatchedExperts(mk.FusedMoEPermuteExpertsUnpermute):
         num_experts: int,
         a: torch.Tensor,
     ) -> Tuple[int, int, torch.dtype]:
-        max_num_tokens = a.shape[1]
+        #assert self.max_num_tokens >= a.shape[1]
+        max_num_tokens = a.shape[1] if self.max_num_tokens is None else self.max_num_tokens
         workspace13 = num_experts * max_num_tokens * K * topk * 2 # TODO: *2 is a hack
         workspace2 = max_num_tokens * N
         return (workspace13, workspace2, a_dtype)
@@ -1882,13 +1887,20 @@ class BatchedExperts(mk.FusedMoEPermuteExpertsUnpermute):
         assert hidden_states.dim() == 3
         assert expert_num_tokens is not None
         num_tokens, topk = topk_ids.shape
-        _, max_num_tokens, K = hidden_states.shape
+        _, tmp_max_num_tokens, K = hidden_states.shape
+        max_num_tokens = tmp_max_num_tokens if self.max_num_tokens is None else self.max_num_tokens
         print(f"global_num_experts = {global_num_experts}")
         num_experts = global_num_experts
         out = _resize_cache(workspace13, (num_experts, max_num_tokens, w2.shape[1]))
         num_local_experts = expert_num_tokens.numel()
+        #assert num_local_experts >= topk_ids.view(-1).max()
+        #print(f"apply a={hidden_states}")
+        #print(f"apply topk={topk_ids}")
+        #print(f"apply num_tokens={expert_num_tokens}")
+
         for expert in range(num_local_experts):  # num_experts
             num = expert_num_tokens[expert]
+            assert num <= max_num_tokens
             if num > 0:
                 tmp = _resize_cache(workspace2, (num, w1.shape[1] // 2))
                 self.activation(activation, tmp, hidden_states[expert,:num,:] @ w1[expert].transpose(0, 1))
@@ -1900,6 +1912,8 @@ class BatchedExperts(mk.FusedMoEPermuteExpertsUnpermute):
                 pass
 
         #print("END EXPERTS")
+
+        #print(f"apply out={out}")
 
         return out
 
