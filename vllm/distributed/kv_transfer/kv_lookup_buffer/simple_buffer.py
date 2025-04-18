@@ -6,7 +6,7 @@
     - Distributed KV cache transmission using PyNccl pipes.
     - Non-blocking `insert`, blocking `drop_select`.
     - Use CPU signal pipe to avoid racing condition
-    - Handles buffer size constraints and provide backpressure mechanism to 
+    - Handles buffer size constraints and provide backpressure mechanism to
       stop the prefill instance when the decode instance is slow.
 """
 import threading

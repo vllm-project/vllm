@@ -1,11 +1,1 @@
-# Common dependencies
--r requirements-common.txt
-
-# Dependencies for HPU code
-ray
-triton==3.1.0
-pandas
-tabulate
-setuptools>=61
-setuptools-scm>=8
-vllm-hpu-extension @ git+https://github.com/HabanaAI/vllm-hpu-extension.git@f7209791be3d6ead39cfcf57b9f46515c82693da
+-r requirements/hpu.txt

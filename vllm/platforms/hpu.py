@@ -11,8 +11,9 @@ from vllm.logger import init_logger
 from .interface import Platform, PlatformEnum, _Backend
 
 if TYPE_CHECKING:
-    from vllm.config import VllmConfig
+    from vllm.config import ModelConfig, VllmConfig
 else:
+    ModelConfig = None
     VllmConfig = None
 
 logger = init_logger(__name__)
@@ -101,3 +102,16 @@ class HpuPlatform(Platform):
     @classmethod
     def get_punica_wrapper(cls) -> str:
         return "vllm.lora.punica_wrapper.punica_hpu.PunicaWrapperHPU"
+
+    @classmethod
+    def get_device_communicator_cls(cls) -> str:
+        return "vllm.distributed.device_communicators.hpu_communicator.HpuCommunicator"  # noqa
+
+    @classmethod
+    def supports_structured_output(cls) -> bool:
+        return True
+
+    @classmethod
+    def supports_v1(cls, model_config: ModelConfig) -> bool:
+        # V1 support on HPU is experimental
+        return True

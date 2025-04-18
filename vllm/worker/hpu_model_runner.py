@@ -28,6 +28,7 @@ from vllm_hpu_extension.ops import LoraMask as LoraMask
 from vllm_hpu_extension.profiler import (HabanaHighLevelProfiler,
                                          HabanaMemoryProfiler, format_bytes)
 
+import vllm.envs as envs
 from vllm.attention import AttentionMetadata, get_attn_backend
 from vllm.attention.backends.abstract import AttentionType
 from vllm.attention.backends.hpu_attn import HPUAttentionImpl
@@ -402,6 +403,7 @@ class HpuModelAdapter(torch.nn.Module):
         selected_token_indices = kwargs.pop('selected_token_indices')
         if 'warmup_mode' in kwargs:
             kwargs.pop('warmup_mode')
+
         virtual_engine = 0
         if 'virtual_engine' in kwargs:
             virtual_engine = kwargs.pop('virtual_engine')
@@ -415,9 +417,10 @@ class HpuModelAdapter(torch.nn.Module):
         model_is_mrope = uses_mrope(model_config)
         if self.layer_names is not None and not model_is_mrope:
             self._prepare_cos_sin(kwargs['positions'])
-
-        with set_forward_context(kwargs['attn_metadata'], self.vllm_config,
-                                 virtual_engine):
+        attn_meta = kwargs.pop('attn_metadata')
+        if 'kv_caches' in kwargs:
+            kwargs.pop('kv_caches')
+        with set_forward_context(attn_meta, self.vllm_config, virtual_engine):
             hidden_states = self.model(*args, **kwargs)
             if not get_pp_group().is_last_rank:
                 return hidden_states
@@ -444,6 +447,12 @@ class HpuModelAdapter(torch.nn.Module):
     @property
     def sampler(self):
         return self.model.sampler
+
+    # lm_head property will be used by spec_decode_worker
+    # don't rename
+    @property
+    def lm_head(self):
+        return self.model.lm_head
 
 
 class PreparePromptMetadata(NamedTuple):
@@ -694,6 +703,8 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
                 "").lower() != "true", "Contiguous PA doesn't support APC"
         self.use_contiguous_pa = os.environ.get('VLLM_CONTIGUOUS_PA',
                                                 'true').lower() == 'true'
+        if self.use_contiguous_pa != 'true':
+            self.use_contiguous_pa = envs.VLLM_USE_HPU_CONTIGUOUS_CACHE_FETCH
         if vllm_config.speculative_config is not None \
             and self.use_contiguous_pa:
             raise ValueError(
@@ -759,9 +770,6 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
             logger.info(msg)
             self.is_pooler = hasattr(self.model, "_pooler")
             if self.lora_config:
-                assert hasattr(self.model, "supported_lora_modules"
-                               ) and self.model.supported_lora_modules, (
-                                   "Model does not support LoRA")
                 assert hasattr(self.model, "embedding_modules"
                                ), "Model does not have embedding_modules"
                 assert hasattr(
@@ -2237,8 +2245,7 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
             graphs = graph == 't'
             if graphs:
                 self.graphed_buckets.add((int(bs), int(seq_len), is_prompt))
-            self.warmup_scenario(int(bs), int(seq_len), is_prompt, kv_caches,
-                                 True)
+            self.warmup_scenario(int(bs), int(seq_len), is_prompt, True)
             raise AssertionError("Finished profiling")
         if not htorch.utils.internal.is_lazy() and not self.enforce_eager:
             multiplier = 3 if os.getenv('VLLM_REGIONAL_COMPILATION',

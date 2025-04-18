@@ -10,7 +10,7 @@ from vllm_hpu_extension.scales import ConvertScaleToHwAligned
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
     CompressedTensorsScheme)
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
-    apply_fp8_linear, cutlass_fp8_supported, normalize_e4m3fn_to_e4m3fnuz,
+    Fp8LinearOp, maybe_create_device_identity, normalize_e4m3fn_to_e4m3fnuz,
     requantize_with_max_scale)
 from vllm.model_executor.parameter import (ChannelQuantScaleParameter,
                                            ModelWeightParameter,
@@ -24,9 +24,9 @@ class CompressedTensorsW8A8Fp8(CompressedTensorsScheme):
 
     def __init__(self, strategy: str, is_static_input_scheme: bool):
         self.strategy = strategy
+        self.out_dtype = torch.get_default_dtype()
         self.is_static_input_scheme = is_static_input_scheme
-        self.cutlass_fp8_supported = not current_platform.is_hpu() and \
-                                     cutlass_fp8_supported()
+        self.fp8_linear = Fp8LinearOp(use_per_token_if_dynamic=True)
 
     @classmethod
     def get_min_capability(cls) -> int:
@@ -44,7 +44,7 @@ class CompressedTensorsW8A8Fp8(CompressedTensorsScheme):
                 logical_widths=layer.logical_widths,
             )
 
-            if current_platform.is_rocm():
+            if current_platform.is_fp8_fnuz():
                 input_scale = getattr(layer, 'input_scale', None)
 
                 weight, max_w_scale, input_scale = normalize_e4m3fn_to_e4m3fnuz(
@@ -62,7 +62,7 @@ class CompressedTensorsW8A8Fp8(CompressedTensorsScheme):
         elif self.strategy == QuantizationStrategy.CHANNEL:
             weight = layer.weight
 
-            if current_platform.is_rocm():
+            if current_platform.is_fp8_fnuz():
                 input_scale = getattr(layer, 'input_scale', None)
 
                 weight, weight_scale, input_scale = \
@@ -97,6 +97,8 @@ class CompressedTensorsW8A8Fp8(CompressedTensorsScheme):
                        input_size_per_partition: int,
                        params_dtype: torch.dtype, weight_loader: Callable,
                        **kwargs):
+        maybe_create_device_identity()
+
         output_size_per_partition = sum(output_partition_sizes)
         layer.logical_widths = output_partition_sizes
 
@@ -142,11 +144,9 @@ class CompressedTensorsW8A8Fp8(CompressedTensorsScheme):
                       x: torch.Tensor,
                       bias: Optional[torch.Tensor] = None) -> torch.Tensor:
 
-        return apply_fp8_linear(
-            input=x,
-            weight=layer.weight,
-            weight_scale=layer.weight_scale,
-            input_scale=layer.input_scale,
-            bias=bias,
-            cutlass_fp8_supported=self.cutlass_fp8_supported,
-            use_per_token_if_dynamic=True)
+        return self.fp8_linear.apply(input=x,
+                                     weight=layer.weight,
+                                     weight_scale=layer.weight_scale,
+                                     out_dtype=self.out_dtype,
+                                     input_scale=layer.input_scale,
+                                     bias=bias)

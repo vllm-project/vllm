@@ -18,7 +18,7 @@ from vllm.model_executor.sampling_metadata import SequenceGroupToSample
 from vllm.sampling_params import SamplingParams
 from vllm.sequence import (CompletionSequenceGroupOutput, IntermediateTensors,
                            Logprob, SequenceGroupMetadata, SequenceOutput)
-from vllm.utils import is_fake_hpu
+from vllm.utils import bind_kv_cache, is_fake_hpu
 from vllm.worker.hpu_model_runner import (HpuModelAdapter, HPUModelRunnerBase,
                                           ModelInputForHPUWithSamplingMetadata,
                                           setup_profiler, subtuple)
@@ -143,7 +143,10 @@ class HpuModelAdapterEncoderDecoder(HpuModelAdapter):
         virtual_engine = 0
         if 'virtual_engine' in kwargs:
             virtual_engine = kwargs.pop('virtual_engine')
-        with set_forward_context(kwargs['attn_metadata'], self.vllm_config,
+        attn_metadata = kwargs.pop('attn_metadata')
+        if 'kv_caches' in kwargs:
+            kwargs.pop('kv_caches')
+        with set_forward_context(attn_metadata, self.vllm_config,
                                  virtual_engine):
             hidden_states = self.model(*args, **kwargs)
             hidden_states = hidden_states.view(-1, hidden_states.shape[-1])
@@ -349,6 +352,9 @@ class HPUEncoderDecoderModelRunner(
             torch.tensor([], dtype=self.model_config.dtype, device=self.device)
             for _ in range(num_layers)
         ]
+        bind_kv_cache(
+            self.vllm_config.compilation_config.static_forward_context,
+            [kv_caches] * self.parallel_config.pipeline_parallel_size)
         max_batch_size = self.max_num_prefill_seqs
         _, max_seq_len = self.bucketing_ctx.get_max_prompt_shape()
         max_seq_len = min(self.max_num_batched_tokens // max_batch_size,

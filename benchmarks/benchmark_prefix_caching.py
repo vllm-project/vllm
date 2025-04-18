@@ -31,7 +31,7 @@ import dataclasses
 import json
 import random
 import time
-from typing import List, Optional, Tuple
+from typing import Optional
 
 from transformers import PreTrainedTokenizerBase
 
@@ -77,9 +77,9 @@ def sample_requests_from_dataset(
     dataset_path: str,
     num_requests: int,
     tokenizer: PreTrainedTokenizerBase,
-    input_length_range: Tuple[int, int],
+    input_length_range: tuple[int, int],
     fixed_output_len: Optional[int],
-) -> List[Request]:
+) -> list[Request]:
     if fixed_output_len is not None and fixed_output_len < 4:
         raise ValueError("output_len too small")
 
@@ -99,7 +99,7 @@ def sample_requests_from_dataset(
     assert min_len >= 0 and max_len >= min_len, "input_length_range too small"
 
     # Filter out sequences that are too long or too short
-    filtered_requests: List[Request] = []
+    filtered_requests: list[Request] = []
 
     for i in range(len(dataset)):
         if len(filtered_requests) == num_requests:
@@ -122,10 +122,10 @@ def sample_requests_from_dataset(
 def sample_requests_from_random(
     num_requests: int,
     tokenizer: PreTrainedTokenizerBase,
-    input_length_range: Tuple[int, int],
+    input_length_range: tuple[int, int],
     fixed_output_len: Optional[int],
     prefix_len: int,
-) -> List[Request]:
+) -> list[Request]:
 
     requests = []
     prefix_token_ids = sample_tokens(tokenizer, prefix_len)
@@ -144,9 +144,9 @@ def sample_requests_from_random(
     return requests
 
 
-def repeat_and_sort_requests(requests: List[Request],
+def repeat_and_sort_requests(requests: list[Request],
                              repeat_count: int,
-                             sort: bool = False) -> List[str]:
+                             sort: bool = False) -> list[str]:
     repeated_requests = requests * repeat_count
     if sort:
         repeated_requests.sort(key=lambda x: x[1])
@@ -194,7 +194,9 @@ def main(args):
 
     llm = LLM(**dataclasses.asdict(engine_args))
 
-    sampling_params = SamplingParams(temperature=0, max_tokens=args.output_len)
+    sampling_params = SamplingParams(temperature=0,
+                                     max_tokens=args.output_len,
+                                     detokenize=not args.disable_detokenize)
 
     print("Testing filtered requests")
     prompts = repeat_and_sort_requests(filtered_requests,
@@ -242,6 +244,12 @@ if __name__ == "__main__":
         "added to the input prompt. The input-length-range will "
         "subtract this length when filtering prompts. Only used "
         "when dataset-path is not provided.",
+    )
+    parser.add_argument(
+        '--disable-detokenize',
+        action='store_true',
+        help=("Do not detokenize responses (i.e. do not include "
+              "detokenization time in the latency measurement)"),
     )
 
     parser = EngineArgs.add_cli_args(parser)

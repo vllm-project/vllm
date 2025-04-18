@@ -1,18 +1,24 @@
 # SPDX-License-Identifier: Apache-2.0
 
+import copy
+import threading
 import time
 import uuid
+from concurrent.futures import Future
 
 import pytest
 from transformers import AutoTokenizer
 
-from tests.utils import fork_new_process_for_each_test
 from vllm import SamplingParams
 from vllm.engine.arg_utils import EngineArgs
 from vllm.platforms import current_platform
 from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.engine.core import EngineCore
-from vllm.v1.executor.abstract import Executor
+from vllm.v1.executor.abstract import Executor, UniProcExecutor
+from vllm.v1.kv_cache_interface import KVCacheConfig
+from vllm.v1.outputs import ModelRunnerOutput
+
+from ...utils import create_new_process_for_each_test
 
 if not current_platform.is_cuda():
     pytest.skip(reason="V1 currently only supported on CUDA.",
@@ -39,8 +45,8 @@ def make_request() -> EngineCoreRequest:
     )
 
 
-@fork_new_process_for_each_test
-def test_engine_core(monkeypatch):
+@create_new_process_for_each_test()
+def test_engine_core(monkeypatch: pytest.MonkeyPatch):
 
     with monkeypatch.context() as m:
         m.setenv("VLLM_USE_V1", "1")
@@ -97,14 +103,24 @@ def test_engine_core(monkeypatch):
         engine_core.add_request(req)
         assert len(engine_core.scheduler.waiting) == 1
         assert len(engine_core.scheduler.running) == 0
+        assert engine_core.scheduler.has_unfinished_requests()
+        assert not engine_core.scheduler.has_finished_requests()
 
         _ = engine_core.step()
         assert len(engine_core.scheduler.waiting) == 0
         assert len(engine_core.scheduler.running) == 1
+        assert engine_core.scheduler.has_unfinished_requests()
+        assert not engine_core.scheduler.has_finished_requests()
 
         engine_core.abort_requests([request_id])
         assert len(engine_core.scheduler.waiting) == 0
         assert len(engine_core.scheduler.running) == 0
+        assert not engine_core.scheduler.has_unfinished_requests()
+        assert engine_core.scheduler.has_finished_requests()
+
+        _ = engine_core.step()
+        assert not engine_core.scheduler.has_unfinished_requests()
+        assert not engine_core.scheduler.has_finished_requests()
 
         # Add, step, abort 1 of the 3.
         req0 = make_request()
@@ -142,12 +158,28 @@ def test_engine_core(monkeypatch):
         assert len(engine_core.scheduler.waiting) == 0
         assert len(engine_core.scheduler.running) == 0
 
+        # Sending duplicate requests with same request_id
+        req0 = make_request()
+        req1 = make_request()
+        req0.request_id = req1.request_id = "test"
+        engine_core.add_request(req0)
 
-@fork_new_process_for_each_test
-def test_engine_core_advanced_sampling(monkeypatch):
+        while len(engine_core.step().outputs) > 0:
+            pass
+
+        engine_core.add_request(req1)
+        while len(engine_core.step().outputs) > 0:
+            pass
+
+        assert len(engine_core.scheduler.waiting) == 0
+        assert len(engine_core.scheduler.running) == 0
+
+
+@create_new_process_for_each_test()
+def test_engine_core_advanced_sampling(monkeypatch: pytest.MonkeyPatch):
     """
-    A basic end-to-end test to verify that the engine functions correctly 
-    when additional sampling parameters, such as top_p, min_tokens, and 
+    A basic end-to-end test to verify that the engine functions correctly
+    when additional sampling parameters, such as top_p, min_tokens, and
     presence_penalty, are set.
     """
     with monkeypatch.context() as m:
@@ -191,3 +223,90 @@ def test_engine_core_advanced_sampling(monkeypatch):
         )
         engine_core.add_request(request2)
         _check_engine_state()
+
+
+@create_new_process_for_each_test()
+def test_engine_core_concurrent_batches(monkeypatch: pytest.MonkeyPatch):
+    """
+    Test that the engine can handle multiple concurrent batches.
+    """
+
+    def make_request_with_max_tokens(req_id: int,
+                                     max_tokens: int) -> EngineCoreRequest:
+        request = make_request()
+        request.request_id = req_id
+        request.sampling_params.max_tokens = max_tokens
+        return request
+
+    class DummyExecutor(UniProcExecutor):
+
+        def initialize_from_config(
+                self, kv_cache_configs: list[KVCacheConfig]) -> None:
+            super().initialize_from_config(kv_cache_configs)
+
+            # This executor actually can only run 1 batch at a time
+            self.semaphore = threading.Semaphore(1)
+
+        def execute_model(
+            self,
+            scheduler_output,
+        ) -> Future[ModelRunnerOutput]:
+            """Make execute_model non-blocking."""
+            future: Future[ModelRunnerOutput] = Future()
+
+            def _thread_wrapper(scheduler_output, future):
+                with self.semaphore:
+                    output = self.collective_rpc("execute_model",
+                                                 args=(scheduler_output, ))
+                    # Make a copy because output[0] may be reused
+                    # by the next batch.
+                    output = copy.deepcopy(output[0])
+                    future.set_result(output)
+
+            threading.Thread(target=_thread_wrapper,
+                             args=(scheduler_output, future)).start()
+            return future
+
+        @property
+        def max_concurrent_batches(self) -> int:
+            return 2
+
+    with monkeypatch.context() as m:
+        m.setenv("VLLM_USE_V1", "1")
+
+        engine_args = EngineArgs(
+            model=MODEL_NAME,
+            # To test concurrent batches.
+            max_num_seqs=2,
+            # Avoid all requests being scheduled once.
+            enable_prefix_caching=False,
+            max_num_batched_tokens=10,
+            # Reduce startup time.
+            enforce_eager=True,
+        )
+        vllm_config = engine_args.create_engine_config()
+        engine_core = EngineCore(vllm_config=vllm_config,
+                                 log_stats=False,
+                                 executor_class=DummyExecutor)
+        assert engine_core.batch_queue is not None
+
+        # Add two requests in a row. Each request have 12 prompt tokens.
+        req0 = make_request_with_max_tokens(0, 5)
+        engine_core.add_request(req0)
+        req1 = make_request_with_max_tokens(1, 5)
+        engine_core.add_request(req1)
+
+        # Schedule Batch 1: (10, req0)
+        assert engine_core.step_with_batch_queue() is None
+        assert engine_core.batch_queue.qsize() == 1
+        assert engine_core.step_with_batch_queue() is None
+        assert engine_core.batch_queue.qsize() == 2
+        assert engine_core.scheduler.get_num_unfinished_requests() == 2
+
+        # Loop through both requests.
+        while engine_core.scheduler.get_num_unfinished_requests() == 2:
+            engine_core.step_with_batch_queue()
+
+        # Reaching here when got the result of the first request.
+        while engine_core.scheduler.get_num_unfinished_requests() == 1:
+            engine_core.step_with_batch_queue()

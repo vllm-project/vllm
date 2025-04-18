@@ -31,10 +31,10 @@ set(ignoreMe "${VLLM_PYTHON_PATH}")
 set(PYTHON_SUPPORTED_VERSIONS "3.9" "3.10" "3.11" "3.12")
 
 # Supported NVIDIA architectures.
-set(CUDA_SUPPORTED_ARCHS "7.0;7.2;7.5;8.0;8.6;8.7;8.9;9.0")
+set(CUDA_SUPPORTED_ARCHS "7.0;7.2;7.5;8.0;8.6;8.7;8.9;9.0;10.0;10.1;12.0")
 
 # Supported AMD GPU architectures.
-set(HIP_SUPPORTED_ARCHS "gfx906;gfx908;gfx90a;gfx940;gfx941;gfx942;gfx1030;gfx1100;gfx1101")
+set(HIP_SUPPORTED_ARCHS "gfx906;gfx908;gfx90a;gfx942;gfx950;gfx1030;gfx1100;gfx1101;gfx1200;gfx1201")
 
 #
 # Supported/expected torch versions for CUDA/ROCm.
@@ -44,10 +44,10 @@ set(HIP_SUPPORTED_ARCHS "gfx906;gfx908;gfx90a;gfx940;gfx941;gfx942;gfx1030;gfx11
 #
 # Note: the CUDA torch version is derived from pyproject.toml and various
 # requirements.txt files and should be kept consistent.  The ROCm torch
-# versions are derived from Dockerfile.rocm
+# versions are derived from docker/Dockerfile.rocm
 #
-set(TORCH_SUPPORTED_VERSION_CUDA "2.5.1")
-set(TORCH_SUPPORTED_VERSION_ROCM "2.5.1")
+set(TORCH_SUPPORTED_VERSION_CUDA "2.6.0")
+set(TORCH_SUPPORTED_VERSION_ROCM "2.6.0")
 
 #
 # Try to find python package with an executable that exactly matches
@@ -175,6 +175,25 @@ file(MAKE_DIRECTORY ${FETCHCONTENT_BASE_DIR}) # Ensure the directory exists
 message(STATUS "FetchContent base directory: ${FETCHCONTENT_BASE_DIR}")
 
 #
+# Set rocm version dev int.
+#
+if(VLLM_GPU_LANG STREQUAL "HIP")
+  #
+  # Overriding the default -O set up by cmake, adding ggdb3 for the most verbose devug info
+  #
+  set(CMAKE_${VLLM_GPU_LANG}_FLAGS_DEBUG "${CMAKE_${VLLM_GPU_LANG}_FLAGS_DEBUG} -O0 -ggdb3")
+  set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} -O0 -ggdb3")
+
+
+  #
+  # Certain HIP functions are marked as [[nodiscard]], yet vllm ignores the result which generates
+  # a lot of warnings that always mask real issues. Suppressing until this is properly addressed.
+  #
+  set(CMAKE_${VLLM_GPU_LANG}_FLAGS "${CMAKE_${VLLM_GPU_LANG}_FLAGS} -Wno-unused-result")
+  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wno-unused-result")
+endif()
+
+#
 # Define other extension targets
 #
 
@@ -215,6 +234,7 @@ set(VLLM_EXT_SRC
   "csrc/activation_kernels.cu"
   "csrc/layernorm_kernels.cu"
   "csrc/layernorm_quant_kernels.cu"
+  "csrc/cuda_view.cu"
   "csrc/quantization/gptq/q_gemm.cu"
   "csrc/quantization/compressed_tensors/int8_quant_kernels.cu"
   "csrc/quantization/fp8/common.cu"
@@ -222,6 +242,7 @@ set(VLLM_EXT_SRC
   "csrc/quantization/gguf/gguf_kernel.cu"
   "csrc/cuda_utils_kernels.cu"
   "csrc/prepare_inputs/advance_step.cu"
+  "csrc/custom_all_reduce.cu"
   "csrc/torch_bindings.cpp")
 
 if(VLLM_GPU_LANG STREQUAL "CUDA")
@@ -229,7 +250,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
 
   # Set CUTLASS_REVISION manually -- its revision detection doesn't work in this case.
   # Please keep this in sync with FetchContent_Declare line below.
-  set(CUTLASS_REVISION "v3.7.0" CACHE STRING "CUTLASS revision to use")
+  set(CUTLASS_REVISION "v3.8.0" CACHE STRING "CUTLASS revision to use")
 
   # Use the specified CUTLASS source directory for compilation if VLLM_CUTLASS_SRC_DIR is provided
   if (DEFINED ENV{VLLM_CUTLASS_SRC_DIR})
@@ -247,7 +268,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
         cutlass
         GIT_REPOSITORY https://github.com/nvidia/cutlass.git
         # Please keep this in sync with CUTLASS_REVISION line above.
-        GIT_TAG v3.7.0
+        GIT_TAG v3.8.0
         GIT_PROGRESS TRUE
 
         # Speed up CUTLASS download by retrieving only the specified GIT_TAG instead of the history.
@@ -263,10 +284,10 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
     "csrc/mamba/causal_conv1d/causal_conv1d.cu"
     "csrc/quantization/aqlm/gemm_kernels.cu"
     "csrc/quantization/awq/gemm_kernels.cu"
-    "csrc/custom_all_reduce.cu"
     "csrc/permute_cols.cu"
     "csrc/quantization/cutlass_w8a8/scaled_mm_entry.cu"
     "csrc/quantization/fp4/nvfp4_quant_entry.cu"
+    "csrc/quantization/fp4/nvfp4_scaled_mm_entry.cu"
     "csrc/sparse/cutlass/sparse_scaled_mm_entry.cu"
     "csrc/cutlass_extensions/common.cpp")
 
@@ -277,7 +298,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
   # Only build Marlin kernels if we are building for at least some compatible archs.
   # Keep building Marlin for 9.0 as there are some group sizes and shapes that
   # are not supported by Machete yet.
-  cuda_archs_loose_intersection(MARLIN_ARCHS "8.0;8.6;8.7;8.9;9.0" "${CUDA_ARCHS}")
+  cuda_archs_loose_intersection(MARLIN_ARCHS "8.0;8.6;8.7;8.9;9.0;10.0;10.1;12.0" "${CUDA_ARCHS}")
   if (MARLIN_ARCHS)
     set(MARLIN_SRCS
        "csrc/quantization/fp8/fp8_marlin.cu"
@@ -297,43 +318,87 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
                    " in CUDA target architectures")
   endif()
 
+  # Only build AllSpark kernels if we are building for at least some compatible archs.
+  cuda_archs_loose_intersection(ALLSPARK_ARCHS "8.0;8.6;8.7;8.9" "${CUDA_ARCHS}")
+  if (ALLSPARK_ARCHS)
+    set(ALLSPARK_SRCS
+       "csrc/quantization/gptq_allspark/allspark_repack.cu"
+       "csrc/quantization/gptq_allspark/allspark_qgemm_w8a16.cu")
+    set_gencode_flags_for_srcs(
+      SRCS "${ALLSPARK_SRCS}"
+      CUDA_ARCHS "${ALLSPARK_ARCHS}")
+    list(APPEND VLLM_EXT_SRC "${ALLSPARK_SRCS}")
+    message(STATUS "Building AllSpark kernels for archs: ${ALLSPARK_ARCHS}")
+  else()
+    message(STATUS "Not building AllSpark kernels as no compatible archs found"
+                   " in CUDA target architectures")
+  endif()
+
+
+  set(SCALED_MM_3X_ARCHS)
   # The cutlass_scaled_mm kernels for Hopper (c3x, i.e. CUTLASS 3.x) require
-  # CUDA 12.0 or later (and only work on Hopper, 9.0a for now).
-  cuda_archs_loose_intersection(SCALED_MM_3X_ARCHS "9.0a" "${CUDA_ARCHS}")
-  if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER 12.0 AND SCALED_MM_3X_ARCHS)
-    set(SRCS 
-       "csrc/quantization/cutlass_w8a8/scaled_mm_c3x.cu"
+  # CUDA 12.0 or later
+  cuda_archs_loose_intersection(SCALED_MM_ARCHS "9.0a;" "${CUDA_ARCHS}")
+  if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER 12.0 AND SCALED_MM_ARCHS)
+    set(SRCS
+       "csrc/quantization/cutlass_w8a8/scaled_mm_c3x_sm90.cu"
        "csrc/quantization/cutlass_w8a8/c3x/scaled_mm_sm90_fp8.cu"
        "csrc/quantization/cutlass_w8a8/c3x/scaled_mm_sm90_int8.cu"
        "csrc/quantization/cutlass_w8a8/c3x/scaled_mm_azp_sm90_int8.cu"
        "csrc/quantization/cutlass_w8a8/c3x/scaled_mm_blockwise_sm90_fp8.cu")
     set_gencode_flags_for_srcs(
       SRCS "${SRCS}"
-      CUDA_ARCHS "${SCALED_MM_3X_ARCHS}")
+      CUDA_ARCHS "${SCALED_MM_ARCHS}")
     list(APPEND VLLM_EXT_SRC "${SRCS}")
-    list(APPEND VLLM_GPU_FLAGS "-DENABLE_SCALED_MM_C3X=1")
-    message(STATUS "Building scaled_mm_c3x for archs: ${SCALED_MM_3X_ARCHS}")
+    list(APPEND VLLM_GPU_FLAGS "-DENABLE_SCALED_MM_SM90=1")
+    # Let scaled_mm_c2x know it doesn't need to build these arches
+    list(APPEND SCALED_MM_3X_ARCHS "${SCALED_MM_ARCHS}")
+    message(STATUS "Building scaled_mm_c3x_sm90 for archs: ${SCALED_MM_ARCHS}")
   else()
-    if (NOT ${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER 12.0 AND SCALED_MM_3X_ARCHS)
-      message(STATUS "Not building scaled_mm_c3x as CUDA Compiler version is "
+    if (NOT ${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER 12.0 AND SCALED_MM_ARCHS)
+      message(STATUS "Not building scaled_mm_c3x_sm90 as CUDA Compiler version is "
                      "not >= 12.0, we recommend upgrading to CUDA 12.0 or "
                      "later if you intend on running FP8 quantized models on "
                      "Hopper.")
     else()
-      message(STATUS "Not building scaled_mm_c3x as no compatible archs found "
+      message(STATUS "Not building scaled_mm_c3x_sm90 as no compatible archs found "
                      "in CUDA target architectures")
     endif()
+  endif()
 
-    # clear SCALED_MM_3X_ARCHS so the scaled_mm_c2x kernels know we didn't
-    # build any 3x kernels
-    set(SCALED_MM_3X_ARCHS)
+  # The cutlass_scaled_mm kernels for Blackwell (c3x, i.e. CUTLASS 3.x) require
+  # CUDA 12.8 or later
+  cuda_archs_loose_intersection(SCALED_MM_ARCHS "10.0a;10.1a;12.0a" "${CUDA_ARCHS}")
+  if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER 12.8 AND SCALED_MM_ARCHS)
+    set(SRCS
+      "csrc/quantization/cutlass_w8a8/scaled_mm_c3x_sm100.cu"
+      "csrc/quantization/cutlass_w8a8/c3x/scaled_mm_sm100_fp8.cu"
+    )
+    set_gencode_flags_for_srcs(
+      SRCS "${SRCS}"
+      CUDA_ARCHS "${SCALED_MM_ARCHS}")
+    list(APPEND VLLM_EXT_SRC "${SRCS}")
+    list(APPEND VLLM_GPU_FLAGS "-DENABLE_SCALED_MM_SM100=1")
+    # Let scaled_mm_c2x know it doesn't need to build these arches
+    list(APPEND SCALED_MM_3X_ARCHS "${SCALED_MM_ARCHS}")
+    message(STATUS "Building scaled_mm_c3x_sm100 for archs: ${SCALED_MM_ARCHS}")
+  else()
+    if (NOT ${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER 12.8 AND SCALED_MM_ARCHS)
+      message(STATUS "Not building scaled_mm_c3x_sm100 as CUDA Compiler version is "
+                     "not >= 12.8, we recommend upgrading to CUDA 12.8 or "
+                     "later if you intend on running FP8 quantized models on "
+                     "Blackwell.")
+    else()
+      message(STATUS "Not building scaled_mm_c3x_100 as no compatible archs found "
+                     "in CUDA target architectures")
+    endif()
   endif()
 
   #
   # For the cutlass_scaled_mm kernels we want to build the c2x (CUTLASS 2.x)
   # kernels for the remaining archs that are not already built for 3x.
   cuda_archs_loose_intersection(SCALED_MM_2X_ARCHS
-    "7.5;8.0;8.6;8.7;8.9;9.0" "${CUDA_ARCHS}")
+    "7.5;8.0;8.6;8.7;8.9;9.0;10.0;10.1;12.0" "${CUDA_ARCHS}")
   # subtract out the archs that are already built for 3x
   list(REMOVE_ITEM SCALED_MM_2X_ARCHS ${SCALED_MM_3X_ARCHS})
   if (SCALED_MM_2X_ARCHS)
@@ -358,17 +423,18 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
   # 2:4 Sparse Kernels
 
   # The 2:4 sparse kernels cutlass_scaled_sparse_mm and cutlass_compressor
-  # require CUDA 12.2 or later (and only work on Hopper, 9.0a for now).
-  if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER 12.2 AND SCALED_MM_3X_ARCHS)
+  # require CUDA 12.2 or later (and only work on Hopper).
+  cuda_archs_loose_intersection(SCALED_MM_ARCHS "9.0a;" "${CUDA_ARCHS}")
+  if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER 12.2 AND SCALED_MM_ARCHS)
     set(SRCS "csrc/sparse/cutlass/sparse_scaled_mm_c3x.cu")
     set_gencode_flags_for_srcs(
       SRCS "${SRCS}"
-      CUDA_ARCHS "${SCALED_MM_3X_ARCHS}")
+      CUDA_ARCHS "${SCALED_MM_ARCHS}")
     list(APPEND VLLM_EXT_SRC "${SRCS}")
     list(APPEND VLLM_GPU_FLAGS "-DENABLE_SPARSE_SCALED_MM_C3X=1")
-    message(STATUS "Building sparse_scaled_mm_c3x for archs: ${SCALED_MM_3X_ARCHS}")
+    message(STATUS "Building sparse_scaled_mm_c3x for archs: ${SCALED_MM_ARCHS}")
   else()
-    if (NOT ${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER 12.2 AND SCALED_MM_3X_ARCHS)
+    if (NOT ${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER 12.2 AND SCALED_MM_ARCHS)
       message(STATUS "Not building sparse_scaled_mm_c3x kernels as CUDA Compiler version is "
                      "not >= 12.2, we recommend upgrading to CUDA 12.2 or later "
                      "if you intend on running FP8 sparse quantized models on Hopper.")
@@ -381,9 +447,9 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
   # FP4 Archs and flags
   cuda_archs_loose_intersection(FP4_ARCHS "10.0a" "${CUDA_ARCHS}")
   if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER 12.8 AND FP4_ARCHS)
-    set(SRCS 
+    set(SRCS
       "csrc/quantization/fp4/nvfp4_quant_kernels.cu"
-    )
+      "csrc/quantization/fp4/nvfp4_scaled_mm_kernels.cu")
     set_gencode_flags_for_srcs(
       SRCS "${SRCS}"
       CUDA_ARCHS "${FP4_ARCHS}")
@@ -394,6 +460,33 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
     message(STATUS "Not building NVFP4 as no compatible archs were found.")
     # clear FP4_ARCHS
     set(FP4_ARCHS)
+  endif()
+
+  #
+  # CUTLASS MoE kernels
+
+  # The MoE kernel cutlass_moe_mm requires CUDA 12.3 or later (and only works
+  # on Hopper). get_cutlass_moe_mm_data should only be compiled if it's possible
+  # to compile MoE kernels that use its output.
+  cuda_archs_loose_intersection(SCALED_MM_ARCHS "9.0a;" "${CUDA_ARCHS}")
+  if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.3 AND SCALED_MM_ARCHS)
+    set(SRCS "csrc/quantization/cutlass_w8a8/moe/grouped_mm_c3x.cu"
+             "csrc/quantization/cutlass_w8a8/moe/moe_data.cu")
+    set_gencode_flags_for_srcs(
+      SRCS "${SRCS}"
+      CUDA_ARCHS "${SCALED_MM_ARCHS}")
+    list(APPEND VLLM_EXT_SRC "${SRCS}")
+    list(APPEND VLLM_GPU_FLAGS "-DENABLE_CUTLASS_MOE_SM90=1")
+    message(STATUS "Building grouped_mm_c3x for archs: ${SCALED_MM_ARCHS}")
+  else()
+    if (NOT ${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.3 AND SCALED_MM_ARCHS)
+      message(STATUS "Not building grouped_mm_c3x kernels as CUDA Compiler version is "
+                     "not >= 12.3, we recommend upgrading to CUDA 12.3 or later "
+                     "if you intend on running FP8 quantized MoE models on Hopper.")
+    else()
+      message(STATUS "Not building grouped_mm_c3x as no compatible archs found "
+                     "in CUDA target architectures")
+    endif()
   endif()
 
   #
@@ -477,6 +570,7 @@ define_gpu_extension_target(
   COMPILE_FLAGS ${VLLM_GPU_FLAGS}
   ARCHITECTURES ${VLLM_GPU_ARCHES}
   INCLUDE_DIRECTORIES ${CUTLASS_INCLUDE_DIR}
+  INCLUDE_DIRECTORIES ${CUTLASS_TOOLS_UTIL_INCLUDE_DIR}
   USE_SABI 3
   WITH_SOABI)
 
@@ -495,12 +589,24 @@ set(VLLM_MOE_EXT_SRC
   "csrc/moe/moe_align_sum_kernels.cu"
   "csrc/moe/topk_softmax_kernels.cu")
 
+if(VLLM_GPU_LANG STREQUAL "CUDA")
+  list(APPEND VLLM_MOE_EXT_SRC "csrc/moe/moe_wna16.cu")
+endif()
+
 set_gencode_flags_for_srcs(
   SRCS "${VLLM_MOE_EXT_SRC}"
   CUDA_ARCHS "${CUDA_ARCHS}")
 
 if(VLLM_GPU_LANG STREQUAL "CUDA")
-  cuda_archs_loose_intersection(MARLIN_MOE_ARCHS "8.0;8.6;8.7;8.9;9.0" "${CUDA_ARCHS}")
+  set(VLLM_MOE_WNA16_SRC
+    "csrc/moe/moe_wna16.cu")
+
+  set_gencode_flags_for_srcs(
+    SRCS "${VLLM_MOE_WNA16_SRC}"
+    CUDA_ARCHS "${CUDA_ARCHS}")
+
+  list(APPEND VLLM_MOE_EXT_SRC "${VLLM_MOE_WNA16_SRC}")
+  cuda_archs_loose_intersection(MARLIN_MOE_ARCHS "8.0;8.6;8.7;8.9;9.0;10.0;10.1;12.0" "${CUDA_ARCHS}")
   if (MARLIN_MOE_ARCHS)
     set(MARLIN_MOE_SRC
         "csrc/moe/marlin_kernels/marlin_moe_kernel.h"
@@ -554,77 +660,8 @@ if(VLLM_GPU_LANG STREQUAL "HIP")
     WITH_SOABI)
 endif()
 
-# vllm-flash-attn currently only supported on CUDA
-if (NOT VLLM_GPU_LANG STREQUAL "CUDA")
-  return()
+# For CUDA we also build and ship some external projects.
+if (VLLM_GPU_LANG STREQUAL "CUDA")
+    include(cmake/external_projects/flashmla.cmake)
+    include(cmake/external_projects/vllm_flash_attn.cmake)
 endif ()
-
-# vLLM flash attention requires VLLM_GPU_ARCHES to contain the set of target
-# arches in the CMake syntax (75-real, 89-virtual, etc), since we clear the
-# arches in the CUDA case (and instead set the gencodes on a per file basis)
-# we need to manually set VLLM_GPU_ARCHES here.
-if(VLLM_GPU_LANG STREQUAL "CUDA")
-  foreach(_ARCH ${CUDA_ARCHS})
-    string(REPLACE "." "" _ARCH "${_ARCH}")
-    list(APPEND VLLM_GPU_ARCHES "${_ARCH}-real")
-  endforeach()
-endif()
-
-#
-# Build vLLM flash attention from source
-#
-# IMPORTANT: This has to be the last thing we do, because vllm-flash-attn uses the same macros/functions as vLLM.
-# Because functions all belong to the global scope, vllm-flash-attn's functions overwrite vLLMs.
-# They should be identical but if they aren't, this is a massive footgun.
-#
-# The vllm-flash-attn install rules are nested under vllm to make sure the library gets installed in the correct place.
-# To only install vllm-flash-attn, use --component _vllm_fa2_C (for FA2) or --component _vllm_fa3_C (for FA3).
-# If no component is specified, vllm-flash-attn is still installed.
-
-# If VLLM_FLASH_ATTN_SRC_DIR is set, vllm-flash-attn is installed from that directory instead of downloading.
-# This is to enable local development of vllm-flash-attn within vLLM.
-# It can be set as an environment variable or passed as a cmake argument.
-# The environment variable takes precedence.
-if (DEFINED ENV{VLLM_FLASH_ATTN_SRC_DIR})
-  set(VLLM_FLASH_ATTN_SRC_DIR $ENV{VLLM_FLASH_ATTN_SRC_DIR})
-endif()
-
-if(VLLM_FLASH_ATTN_SRC_DIR)
-  FetchContent_Declare(
-          vllm-flash-attn SOURCE_DIR 
-          ${VLLM_FLASH_ATTN_SRC_DIR}
-          BINARY_DIR ${CMAKE_BINARY_DIR}/vllm-flash-attn
-  )
-else()
-  FetchContent_Declare(
-          vllm-flash-attn
-          GIT_REPOSITORY https://github.com/vllm-project/flash-attention.git
-          GIT_TAG 720c94869cf2e0ff5a706e9c7f1dce0939686ade
-          GIT_PROGRESS TRUE
-          # Don't share the vllm-flash-attn build between build types
-          BINARY_DIR ${CMAKE_BINARY_DIR}/vllm-flash-attn
-  )
-endif()
-
-
-# Fetch the vllm-flash-attn library
-FetchContent_MakeAvailable(vllm-flash-attn)
-message(STATUS "vllm-flash-attn is available at ${vllm-flash-attn_SOURCE_DIR}")
-
-# Copy over the vllm-flash-attn python files (duplicated for fa2 and fa3, in
-# case only one is built, in the case both are built redundant work is done)
-install(
-  DIRECTORY ${vllm-flash-attn_SOURCE_DIR}/vllm_flash_attn/
-  DESTINATION vllm_flash_attn
-  COMPONENT _vllm_fa2_C
-  FILES_MATCHING PATTERN "*.py"
-)
-
-install(
-  DIRECTORY ${vllm-flash-attn_SOURCE_DIR}/vllm_flash_attn/
-  DESTINATION vllm_flash_attn
-  COMPONENT _vllm_fa3_C
-  FILES_MATCHING PATTERN "*.py"
-)
-
-# Nothing after vllm-flash-attn, see comment about macros above

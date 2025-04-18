@@ -2,6 +2,7 @@
 
 import ctypes
 import importlib.util
+import json
 import logging
 import os
 import re
@@ -9,11 +10,10 @@ import subprocess
 import sys
 from pathlib import Path
 from shutil import which
-from typing import Dict, List
 
 import torch
 from packaging.version import Version, parse
-from setuptools import Extension, find_packages, setup
+from setuptools import Extension, setup
 from setuptools.command.build_ext import build_ext
 from setuptools_scm import get_version
 from torch.utils.cpp_extension import CUDA_HOME, ROCM_HOME
@@ -27,7 +27,7 @@ def load_module_from_path(module_name, path):
     return module
 
 
-ROOT_DIR = os.path.dirname(__file__)
+ROOT_DIR = Path(__file__).parent
 logger = logging.getLogger(__name__)
 
 # cannot import envs directly because it depends on vllm,
@@ -54,7 +54,7 @@ elif (sys.platform.startswith("linux") and torch.version.cuda is None
     # fallback to cpu
     VLLM_TARGET_DEVICE = "empty"
 
-MAIN_CUDA_VERSION = "12.1"
+MAIN_CUDA_VERSION = "12.4"
 
 
 def is_sccache_available() -> bool:
@@ -69,6 +69,18 @@ def is_ninja_available() -> bool:
     return which("ninja") is not None
 
 
+def is_url_available(url: str) -> bool:
+    from urllib.request import urlopen
+
+    status = None
+    try:
+        with urlopen(url) as f:
+            status = f.status
+    except Exception:
+        return False
+    return status == 200
+
+
 class CMakeExtension(Extension):
 
     def __init__(self, name: str, cmake_lists_dir: str = '.', **kwa) -> None:
@@ -78,7 +90,7 @@ class CMakeExtension(Extension):
 
 class cmake_build_ext(build_ext):
     # A dict of extension directories that have been configured.
-    did_config: Dict[str, bool] = {}
+    did_config: dict[str, bool] = {}
 
     #
     # Determine number of compilation jobs and optionally nvcc compile threads.
@@ -189,6 +201,9 @@ class cmake_build_ext(build_ext):
         else:
             # Default build tool to whatever cmake picks.
             build_tool = []
+        # Make sure we use the nvcc from CUDA_HOME
+        if _is_cuda():
+            cmake_args += [f'-DCMAKE_CUDA_COMPILER={CUDA_HOME}/bin/nvcc']
         subprocess.check_call(
             ['cmake', ext.cmake_lists_dir, *build_tool, *cmake_args],
             cwd=self.build_temp)
@@ -270,16 +285,43 @@ class repackage_wheel(build_ext):
     """Extracts libraries and other files from an existing wheel."""
 
     def get_base_commit_in_main_branch(self) -> str:
-        import subprocess
+        # Force to use the nightly wheel. This is mainly used for CI testing.
+        if envs.VLLM_TEST_USE_PRECOMPILED_NIGHTLY_WHEEL:
+            return "nightly"
 
         try:
+            # Get the latest commit hash of the upstream main branch.
+            resp_json = subprocess.check_output([
+                "curl", "-s",
+                "https://api.github.com/repos/vllm-project/vllm/commits/main"
+            ]).decode("utf-8")
+            upstream_main_commit = json.loads(resp_json)["sha"]
+
+            # Check if the upstream_main_commit exists in the local repo
+            try:
+                subprocess.check_output(
+                    ["git", "cat-file", "-e", f"{upstream_main_commit}"])
+            except subprocess.CalledProcessError:
+                # If not present, fetch it from the remote repository.
+                # Note that this does not update any local branches,
+                # but ensures that this commit ref and its history are
+                # available in our local repo.
+                subprocess.check_call([
+                    "git", "fetch", "https://github.com/vllm-project/vllm",
+                    "main"
+                ])
+
+            # Then get the commit hash of the current branch that is the same as
+            # the upstream main commit.
             current_branch = subprocess.check_output(
                 ["git", "branch", "--show-current"]).decode("utf-8").strip()
 
-            base_commit = subprocess.check_output(
-                ["git", "merge-base", "main",
-                 current_branch]).decode("utf-8").strip()
+            base_commit = subprocess.check_output([
+                "git", "merge-base", f"{upstream_main_commit}", current_branch
+            ]).decode("utf-8").strip()
             return base_commit
+        except ValueError as err:
+            raise ValueError(err) from None
         except Exception as err:
             logger.warning(
                 "Failed to get the base commit in the main branch. "
@@ -295,6 +337,10 @@ class repackage_wheel(build_ext):
         if wheel_location is None:
             base_commit = self.get_base_commit_in_main_branch()
             wheel_location = f"https://wheels.vllm.ai/{base_commit}/vllm-1.0.0.dev-cp38-abi3-manylinux1_x86_64.whl"
+            # Fallback to nightly wheel if latest commit wheel is unavailable,
+            # in this rare case, the nightly release CI hasn't finished on main.
+            if not is_url_available(wheel_location):
+                wheel_location = "https://wheels.vllm.ai/nightly/vllm-1.0.0.dev-cp38-abi3-manylinux1_x86_64.whl"
 
         import zipfile
 
@@ -328,6 +374,7 @@ class repackage_wheel(build_ext):
             files_to_copy = [
                 "vllm/_C.abi3.so",
                 "vllm/_moe_C.abi3.so",
+                "vllm/_flashmla_C.abi3.so",
                 "vllm/vllm_flash_attn/_vllm_fa2_C.abi3.so",
                 "vllm/vllm_flash_attn/_vllm_fa3_C.abi3.so",
                 "vllm/vllm_flash_attn/flash_attn_interface.py",
@@ -405,10 +452,6 @@ def _is_cpu() -> bool:
     return VLLM_TARGET_DEVICE == "cpu"
 
 
-def _is_openvino() -> bool:
-    return VLLM_TARGET_DEVICE == "openvino"
-
-
 def _is_xpu() -> bool:
     return VLLM_TARGET_DEVICE == "xpu"
 
@@ -478,10 +521,6 @@ def get_nvcc_cuda_version() -> Version:
     return nvcc_cuda_version
 
 
-def get_path(*filepath) -> str:
-    return os.path.join(ROOT_DIR, *filepath)
-
-
 def get_gaudi_sw_version():
     """
     Returns the driver version.
@@ -499,9 +538,7 @@ def get_gaudi_sw_version():
 
 
 def get_vllm_version() -> str:
-    version = get_version(
-        write_to="vllm/_version.py",  # TODO: move this to pyproject.toml
-    )
+    version = get_version(write_to="vllm/_version.py")
     sep = "+" if "+" not in version else "."  # dev versions might contain +
 
     if _no_device():
@@ -534,8 +571,6 @@ def get_vllm_version() -> str:
         if gaudi_sw_version != MAIN_CUDA_VERSION:
             gaudi_sw_version = gaudi_sw_version.replace(".", "")[:3]
             version += f"{sep}gaudi{gaudi_sw_version}"
-    elif _is_openvino():
-        version += f"{sep}openvino"
     elif _is_tpu():
         version += f"{sep}tpu"
     elif _is_cpu():
@@ -549,64 +584,51 @@ def get_vllm_version() -> str:
     return version
 
 
-def read_readme() -> str:
-    """Read the README file if present."""
-    p = get_path("README.md")
-    if os.path.isfile(p):
-        with open(get_path("README.md"), encoding="utf-8") as f:
-            return f.read()
-    else:
-        return ""
-
-
-def get_requirements() -> List[str]:
+def get_requirements() -> list[str]:
     """Get Python package dependencies from requirements.txt."""
+    requirements_dir = ROOT_DIR / "requirements"
 
-    def _read_requirements(filename: str) -> List[str]:
-        with open(get_path(filename)) as f:
+    def _read_requirements(filename: str) -> list[str]:
+        with open(requirements_dir / filename) as f:
             requirements = f.read().strip().split("\n")
         resolved_requirements = []
         for line in requirements:
             if line.startswith("-r "):
                 resolved_requirements += _read_requirements(line.split()[1])
-            elif line.startswith("--"):
-                continue
-            else:
+            elif not line.startswith("--") and not line.startswith(
+                    "#") and line.strip() != "":
                 resolved_requirements.append(line)
         return resolved_requirements
 
     if _no_device():
-        requirements = _read_requirements("requirements-common.txt")
+        requirements = _read_requirements("common.txt")
     elif _is_cuda():
-        requirements = _read_requirements("requirements-cuda.txt")
+        requirements = _read_requirements("cuda.txt")
         cuda_major, cuda_minor = torch.version.cuda.split(".")
         modified_requirements = []
         for req in requirements:
-            if ("vllm-flash-attn" in req
-                    and not (cuda_major == "12" and cuda_minor == "1")):
-                # vllm-flash-attn is built only for CUDA 12.1.
+            if ("vllm-flash-attn" in req and cuda_major != "12"):
+                # vllm-flash-attn is built only for CUDA 12.x.
                 # Skip for other versions.
                 continue
             modified_requirements.append(req)
         requirements = modified_requirements
     elif _is_hip():
-        requirements = _read_requirements("requirements-rocm.txt")
+        requirements = _read_requirements("rocm.txt")
     elif _is_neuron():
-        requirements = _read_requirements("requirements-neuron.txt")
+        requirements = _read_requirements("neuron.txt")
     elif _is_hpu():
-        requirements = _read_requirements("requirements-hpu.txt")
-    elif _is_openvino():
-        requirements = _read_requirements("requirements-openvino.txt")
+        requirements = _read_requirements("hpu.txt")
     elif _is_tpu():
-        requirements = _read_requirements("requirements-tpu.txt")
+        requirements = _read_requirements("tpu.txt")
     elif _is_cpu():
-        requirements = _read_requirements("requirements-cpu.txt")
+        requirements = _read_requirements("cpu.txt")
     elif _is_xpu():
-        requirements = _read_requirements("requirements-xpu.txt")
+        requirements = _read_requirements("xpu.txt")
     else:
         raise ValueError(
             "Unsupported platform, please use CUDA, ROCm, Neuron, HPU, "
-            "OpenVINO, or CPU.")
+            "or CPU.")
     return requirements
 
 
@@ -620,10 +642,14 @@ if _is_hip():
 
 if _is_cuda():
     ext_modules.append(CMakeExtension(name="vllm.vllm_flash_attn._vllm_fa2_C"))
-    if envs.VLLM_USE_PRECOMPILED or get_nvcc_cuda_version() >= Version("12.0"):
-        # FA3 requires CUDA 12.0 or later
+    if envs.VLLM_USE_PRECOMPILED or get_nvcc_cuda_version() >= Version("12.3"):
+        # FA3 requires CUDA 12.3 or later
         ext_modules.append(
             CMakeExtension(name="vllm.vllm_flash_attn._vllm_fa3_C"))
+        # Optional since this doesn't get built (produce an .so file) when
+        # not targeting a hopper system
+        ext_modules.append(
+            CMakeExtension(name="vllm._flashmla_C", optional=True))
     ext_modules.append(CMakeExtension(name="vllm.cumem_allocator"))
 
 if _build_custom_ops():
@@ -649,47 +675,17 @@ else:
     }
 
 setup(
-    name="vllm",
+    # static metadata should rather go in pyproject.toml
     version=get_vllm_version(),
-    author="vLLM Team",
-    license="Apache 2.0",
-    description=("A high-throughput and memory-efficient inference and "
-                 "serving engine for LLMs"),
-    long_description=read_readme(),
-    long_description_content_type="text/markdown",
-    url="https://github.com/vllm-project/vllm",
-    project_urls={
-        "Homepage": "https://github.com/vllm-project/vllm",
-        "Documentation": "https://vllm.readthedocs.io/en/latest/",
-    },
-    classifiers=[
-        "Programming Language :: Python :: 3.9",
-        "Programming Language :: Python :: 3.10",
-        "Programming Language :: Python :: 3.11",
-        "Programming Language :: Python :: 3.12",
-        "License :: OSI Approved :: Apache Software License",
-        "Intended Audience :: Developers",
-        "Intended Audience :: Information Technology",
-        "Intended Audience :: Science/Research",
-        "Topic :: Scientific/Engineering :: Artificial Intelligence",
-        "Topic :: Scientific/Engineering :: Information Analysis",
-    ],
-    packages=find_packages(exclude=("benchmarks", "csrc", "docs", "examples",
-                                    "tests*")),
-    python_requires=">=3.9",
-    install_requires=get_requirements(),
     ext_modules=ext_modules,
+    install_requires=get_requirements(),
     extras_require={
         "tensorizer": ["tensorizer>=2.9.0"],
+        "fastsafetensors": ["fastsafetensors >= 0.1.10"],
         "runai": ["runai-model-streamer", "runai-model-streamer-s3", "boto3"],
         "audio": ["librosa", "soundfile"],  # Required for audio processing
-        "video": ["decord"]  # Required for video processing
+        "video": []  # Kept for backwards compatibility
     },
     cmdclass=cmdclass,
     package_data=package_data,
-    entry_points={
-        "console_scripts": [
-            "vllm=vllm.entrypoints.cli.main:main",
-        ],
-    },
 )

@@ -9,13 +9,8 @@ from vllm.model_executor.layers.fused_moe.layer import (
     FusedMoE, FusedMoEMethodBase, FusedMoeWeightScaleSupported)
 from vllm.model_executor.layers.linear import (LinearBase,
                                                UnquantizedLinearMethod)
-from vllm.model_executor.layers.quantization.awq import AWQConfig
-from vllm.model_executor.layers.quantization.awq_marlin import AWQMarlinConfig
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig, QuantizeMethodBase)
-from vllm.model_executor.layers.quantization.gptq import GPTQConfig
-from vllm.model_executor.layers.quantization.gptq_marlin import (
-    GPTQMarlinConfig)
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     check_marlin_supports_layer)
 from vllm.model_executor.utils import set_weight_attrs
@@ -29,6 +24,7 @@ class MoeWNA16Config(QuantizationConfig):
                  group_size: int, has_zp: bool, lm_head_quantized: bool,
                  modules_to_not_convert: Optional[List[str]],
                  full_config: Dict[str, Any]) -> None:
+        super().__init__()
         self.weight_bits = weight_bits
         self.group_size = group_size
         self.has_zp = has_zp
@@ -37,6 +33,12 @@ class MoeWNA16Config(QuantizationConfig):
         self.linear_quant_method = linear_quant_method
         self.full_config = full_config
         self.use_marlin = False
+        # Avoid circular import
+        from vllm.model_executor.layers.quantization.awq import AWQConfig
+        from vllm.model_executor.layers.quantization.awq_marlin import (
+            AWQMarlinConfig)
+        from vllm.model_executor.layers.quantization.gptq_marlin import (
+            GPTQMarlinConfig)
         if self.linear_quant_method == "gptq":
             self.use_marlin = GPTQMarlinConfig.is_gptq_marlin_compatible(
                 full_config)
@@ -115,6 +117,8 @@ class MoeWNA16Config(QuantizationConfig):
         capability_tuple = current_platform.get_device_capability()
         device_capability = (-1 if capability_tuple is None else
                              capability_tuple.to_int())
+        # Avoid circular import
+        from vllm.model_executor.layers.quantization.awq import AWQConfig
         awq_min_capability = AWQConfig.get_min_capability()
 
         gptq_compatible = quant_method == "gptq" and \
@@ -129,6 +133,13 @@ class MoeWNA16Config(QuantizationConfig):
         if is_layer_skipped_quant(prefix, self.modules_to_not_convert):
             return UnquantizedLinearMethod()
         elif isinstance(layer, LinearBase):
+            # Avoid circular import
+            from vllm.model_executor.layers.quantization.awq import AWQConfig
+            from vllm.model_executor.layers.quantization.awq_marlin import (
+                AWQMarlinConfig)
+            from vllm.model_executor.layers.quantization.gptq import GPTQConfig
+            from vllm.model_executor.layers.quantization.gptq_marlin import (
+                GPTQMarlinConfig)
             if self.linear_quant_method == "gptq":
                 if self.use_marlin:
                     return GPTQMarlinConfig.from_config(
@@ -277,12 +288,15 @@ class MoeWNA16Method(FusedMoEMethodBase):
         use_grouped_topk: bool = False,
         topk_group: Optional[int] = None,
         num_expert_group: Optional[int] = None,
+        global_num_experts: int = -1,
+        expert_map: Optional[torch.Tensor] = None,
         custom_routing_function: Optional[Callable] = None,
         scoring_func: str = "softmax",
         e_score_correction_bias: Optional[torch.Tensor] = None,
+        activation: str = "silu",
     ) -> torch.Tensor:
         from vllm.model_executor.layers.fused_moe import fused_experts
-
+        assert activation == "silu", "Only SiLU activation is supported."
         topk_weights, topk_ids = FusedMoE.select_experts(
             hidden_states=x,
             router_logits=router_logits,
@@ -306,6 +320,8 @@ class MoeWNA16Method(FusedMoEMethodBase):
                              inplace=True,
                              use_int4_w4a16=weight_bits == 4,
                              use_int8_w8a16=weight_bits == 8,
+                             global_num_experts=global_num_experts,
+                             expert_map=expert_map,
                              w1_scale=layer.w13_scales,
                              w2_scale=layer.w2_scales,
                              w1_zp=layer.w13_qzeros if has_zp else None,

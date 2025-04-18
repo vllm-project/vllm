@@ -189,7 +189,7 @@ class DelegateWorkerBase(WorkerBase):
         return getattr(self.worker, attr)
 
 
-class LoraNotSupportedWorkerBase(WorkerBase):
+class LoRANotSupportedWorkerBase(WorkerBase):
     """Partial implementation of WorkerBase that raises exceptions when LoRA
     methods are invoked.
     """
@@ -397,6 +397,8 @@ class LocalOrDistributedWorkerBase(WorkerBase):
 
         model_input, worker_input, kwargs = inputs
         num_steps = worker_input.num_steps
+        if (execute_model_req is not None and execute_model_req.spec_step_idx):
+            kwargs["spec_step_idx"] = execute_model_req.spec_step_idx
 
         self.execute_worker(worker_input)
 
@@ -556,19 +558,58 @@ class WorkerWrapperBase:
             worker_class = resolve_obj_by_qualname(
                 self.vllm_config.parallel_config.worker_cls)
         else:
+            logger.warning(
+                "passing worker_cls as a class object is strongly deprecated,"
+                " as the serialization of class objects can be tricky and"
+                " error-prone. To be safe, please keep the class in a separate"
+                " module and pass the qualified name of the class as a string."
+            )
             assert isinstance(self.vllm_config.parallel_config.worker_cls,
                               bytes)
             worker_class = cloudpickle.loads(
                 self.vllm_config.parallel_config.worker_cls)
+        if self.vllm_config.parallel_config.worker_extension_cls:
+            worker_extension_cls = resolve_obj_by_qualname(
+                self.vllm_config.parallel_config.worker_extension_cls)
+            extended_calls = []
+            if worker_extension_cls not in worker_class.__bases__:
+                # check any conflicts between worker and worker_extension_cls
+                for attr in dir(worker_extension_cls):
+                    if attr.startswith("__"):
+                        continue
+                    assert not hasattr(worker_class, attr), (
+                        f"Worker class {worker_class} already has an attribute"
+                        f" {attr}, which conflicts with the worker"
+                        f" extension class {worker_extension_cls}.")
+                    if callable(getattr(worker_extension_cls, attr)):
+                        extended_calls.append(attr)
+                # dynamically inherit the worker extension class
+                worker_class.__bases__ = worker_class.__bases__ + (
+                    worker_extension_cls, )
+                logger.info(
+                    "Injected %s into %s for extended collective_rpc calls %s",
+                    worker_extension_cls, worker_class, extended_calls)
         with set_current_vllm_config(self.vllm_config):
             # To make vLLM config available during worker initialization
             self.worker = worker_class(**kwargs)
             assert self.worker is not None
 
+    def initialize_from_config(self, kv_cache_configs: List[Any]) -> None:
+        kv_cache_config = kv_cache_configs[self.rpc_rank]
+        self.worker.initialize_from_config(kv_cache_config)  # type: ignore
+
+    def init_device(self):
+        with set_current_vllm_config(self.vllm_config):
+            # To make vLLM config available during device initialization
+            self.worker.init_device()  # type: ignore
+
     def execute_method(self, method: Union[str, bytes], *args, **kwargs):
         try:
-            target = self if self.worker is None else self.worker
-            return run_method(target, method, args, kwargs)
+            # method resolution order:
+            # if a method is defined in this class, it will be called directly.
+            # otherwise, since we define `__getattr__` and redirect attribute
+            # query to `self.worker`, the method will be called on the worker.
+            return run_method(self, method, args, kwargs)
         except Exception as e:
             # if the driver worker also execute methods,
             # exceptions in the rest worker may cause deadlock in rpc like ray

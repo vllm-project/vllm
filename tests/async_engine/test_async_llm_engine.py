@@ -6,7 +6,7 @@ import uuid
 from asyncio import CancelledError
 from copy import copy
 from dataclasses import dataclass
-from typing import List, Optional
+from typing import Optional
 
 import pytest
 import pytest_asyncio
@@ -155,7 +155,12 @@ def uid() -> str:
                         }, {
                             "enforce_eager": True
                         }])
+@pytest_asyncio.fixture(scope="module")
 async def async_engine(request):
+    # We cannot use monkeypatch since this is a module
+    # scoped fixture and monkeypatch is function scoped.
+    previous_value = os.getenv("VLLM_USE_V1", None)
+    os.environ["VLLM_USE_V1"] = "0"
     engine = await asyncio.get_event_loop().run_in_executor(
         executor=None,
         func=lambda: start_engine(request.param["enforce_eager"]))
@@ -166,6 +171,11 @@ async def async_engine(request):
         del engine
         await asyncio.sleep(0.1)
         cleanup_dist_env_and_memory()
+
+        if previous_value:
+            os.environ["VLLM_USE_V1"] = previous_value
+        else:
+            del os.environ["VLLM_USE_V1"]
 
 
 @pytest.fixture()
@@ -260,7 +270,7 @@ async def test_output_kinds(async_engine, stop):
         params.output_kind = RequestOutputKind.DELTA
 
         prompt_tokens = None
-        output_tokens: List[int] = []
+        output_tokens: list[int] = []
         output_text = ""
         output_count = 0
         final_output = None

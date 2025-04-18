@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import unittest
-from typing import Tuple
 
 import pytest
 import torch
@@ -29,7 +28,7 @@ from vllm.utils import update_environment_variables
 def test_mixer2_gated_norm_multi_gpu(
     batch_size: int,
     seq_len: int,
-    hidden_size_n_groups: Tuple[int, int],
+    hidden_size_n_groups: tuple[int, int],
     dtype: torch.dtype,
     device: str = 'cuda',
 ):

@@ -13,16 +13,18 @@ import socket
 import tempfile
 import uuid
 from argparse import Namespace
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from functools import partial
 from http import HTTPStatus
-from typing import Annotated, AsyncIterator, Dict, Optional, Set, Tuple, Union
+from typing import Annotated, Optional, Union
 
 import uvloop
 from fastapi import APIRouter, Depends, FastAPI, Form, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response, StreamingResponse
+from starlette.concurrency import iterate_in_threadpool
 from starlette.datastructures import State
 from starlette.routing import Mount
 from typing_extensions import assert_never
@@ -34,7 +36,9 @@ from vllm.engine.async_llm_engine import AsyncLLMEngine  # type: ignore
 from vllm.engine.multiprocessing.client import MQLLMEngineClient
 from vllm.engine.multiprocessing.engine import run_mp_engine
 from vllm.engine.protocol import EngineClient
-from vllm.entrypoints.chat_utils import load_chat_template
+from vllm.entrypoints.chat_utils import (load_chat_template,
+                                         resolve_hf_chat_template,
+                                         resolve_mistral_chat_template)
 from vllm.entrypoints.launcher import serve_http
 from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.openai.cli_args import (make_arg_parser,
@@ -53,7 +57,7 @@ from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
                                               EmbeddingResponse,
                                               EmbeddingResponseData,
                                               ErrorResponse,
-                                              LoadLoraAdapterRequest,
+                                              LoadLoRAAdapterRequest,
                                               PoolingChatRequest,
                                               PoolingCompletionRequest,
                                               PoolingRequest, PoolingResponse,
@@ -63,8 +67,7 @@ from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
                                               TokenizeResponse,
                                               TranscriptionRequest,
                                               TranscriptionResponse,
-                                              UnloadLoraAdapterRequest)
-from vllm.entrypoints.openai.reasoning_parsers import ReasoningParserManager
+                                              UnloadLoRAAdapterRequest)
 # yapf: enable
 from vllm.entrypoints.openai.serving_chat import OpenAIServingChat
 from vllm.entrypoints.openai.serving_completion import OpenAIServingCompletion
@@ -73,17 +76,21 @@ from vllm.entrypoints.openai.serving_engine import OpenAIServing
 from vllm.entrypoints.openai.serving_models import (BaseModelPath,
                                                     OpenAIServingModels)
 from vllm.entrypoints.openai.serving_pooling import OpenAIServingPooling
-from vllm.entrypoints.openai.serving_rerank import JinaAIServingRerank
-from vllm.entrypoints.openai.serving_score import OpenAIServingScores
+from vllm.entrypoints.openai.serving_score import ServingScores
 from vllm.entrypoints.openai.serving_tokenization import (
     OpenAIServingTokenization)
 from vllm.entrypoints.openai.serving_transcription import (
     OpenAIServingTranscription)
 from vllm.entrypoints.openai.tool_parsers import ToolParserManager
-from vllm.entrypoints.utils import with_cancellation
+from vllm.entrypoints.utils import (cli_env_setup, load_aware_call,
+                                    with_cancellation)
 from vllm.logger import init_logger
+from vllm.reasoning import ReasoningParserManager
+from vllm.transformers_utils.config import (
+    maybe_register_config_serialize_by_value)
+from vllm.transformers_utils.tokenizer import MistralTokenizer
 from vllm.usage.usage_lib import UsageContext
-from vllm.utils import (FlexibleArgumentParser, get_open_zmq_ipc_path,
+from vllm.utils import (Device, FlexibleArgumentParser, get_open_zmq_ipc_path,
                         is_valid_ipv6_address, set_ulimit)
 from vllm.version import __version__ as VLLM_VERSION
 
@@ -94,7 +101,7 @@ prometheus_multiproc_dir: tempfile.TemporaryDirectory
 # Cannot use __name__ (https://github.com/vllm-project/vllm/pull/4765)
 logger = init_logger('vllm.entrypoints.openai.api_server')
 
-_running_tasks: Set[asyncio.Task] = set()
+_running_tasks: set[asyncio.Task] = set()
 
 
 @asynccontextmanager
@@ -154,21 +161,47 @@ async def build_async_engine_client_from_engine_args(
     Returns the Client or None if the creation failed.
     """
 
-    # AsyncLLMEngine.
-    if (MQLLMEngineClient.is_unsupported_config(engine_args)
-            or envs.VLLM_USE_V1 or disable_frontend_multiprocessing):
+    # Create the EngineConfig (determines if we can use V1).
+    usage_context = UsageContext.OPENAI_API_SERVER
+    vllm_config = engine_args.create_engine_config(usage_context=usage_context)
+
+    # V1 AsyncLLM.
+    if envs.VLLM_USE_V1:
+        if disable_frontend_multiprocessing:
+            logger.warning(
+                "V1 is enabled, but got --disable-frontend-multiprocessing. "
+                "To disable frontend multiprocessing, set VLLM_USE_V1=0.")
+
+        from vllm.v1.engine.async_llm import AsyncLLM
+        async_llm: Optional[AsyncLLM] = None
+        try:
+            async_llm = AsyncLLM.from_vllm_config(
+                vllm_config=vllm_config,
+                usage_context=usage_context,
+                disable_log_requests=engine_args.disable_log_requests,
+                disable_log_stats=engine_args.disable_log_stats)
+            yield async_llm
+        finally:
+            if async_llm:
+                async_llm.shutdown()
+
+    # V0 AsyncLLM.
+    elif (MQLLMEngineClient.is_unsupported_config(vllm_config)
+          or disable_frontend_multiprocessing):
 
         engine_client: Optional[EngineClient] = None
         try:
-            engine_client = AsyncLLMEngine.from_engine_args(
-                engine_args=engine_args,
-                usage_context=UsageContext.OPENAI_API_SERVER)
+            engine_client = AsyncLLMEngine.from_vllm_config(
+                vllm_config=vllm_config,
+                usage_context=usage_context,
+                disable_log_requests=engine_args.disable_log_requests,
+                disable_log_stats=engine_args.disable_log_stats)
             yield engine_client
         finally:
             if engine_client and hasattr(engine_client, "shutdown"):
                 engine_client.shutdown()
 
-    # MQLLMEngine.
+    # V0MQLLMEngine.
     else:
         if "PROMETHEUS_MULTIPROC_DIR" not in os.environ:
             # Make TemporaryDirectory for prometheus multiprocessing
@@ -195,14 +228,18 @@ async def build_async_engine_client_from_engine_args(
         # so we need to spawn a new process
         context = multiprocessing.get_context("spawn")
 
+        # Ensure we can serialize transformer config before spawning
+        maybe_register_config_serialize_by_value()
+
         # The Process can raise an exception during startup, which may
         # not actually result in an exitcode being reported. As a result
         # we use a shared variable to communicate the information.
         engine_alive = multiprocessing.Value('b', True, lock=False)
-        engine_process = context.Process(target=run_mp_engine,
-                                         args=(engine_args,
-                                               UsageContext.OPENAI_API_SERVER,
-                                               ipc_path, engine_alive))
+        engine_process = context.Process(
+            target=run_mp_engine,
+            args=(vllm_config, UsageContext.OPENAI_API_SERVER, ipc_path,
+                  engine_args.disable_log_stats,
+                  engine_args.disable_log_requests, engine_alive))
         engine_process.start()
         engine_pid = engine_process.pid
         assert engine_pid is not None, "Engine process failed to start."
@@ -217,8 +254,7 @@ async def build_async_engine_client_from_engine_args(
         atexit.register(_cleanup_ipc_path)
 
         # Build RPCClient, which conforms to EngineClient Protocol.
-        engine_config = engine_args.create_engine_config()
-        build_client = partial(MQLLMEngineClient, ipc_path, engine_config,
+        build_client = partial(MQLLMEngineClient, ipc_path, vllm_config,
                                engine_pid)
         mq_engine_client = await asyncio.get_running_loop().run_in_executor(
             None, build_client)
@@ -258,7 +294,8 @@ async def build_async_engine_client_from_engine_args(
 
 async def validate_json_request(raw_request: Request):
     content_type = raw_request.headers.get("content-type", "").lower()
-    if content_type != "application/json":
+    media_type = content_type.split(";", maxsplit=1)[0]
+    if media_type != "application/json":
         raise HTTPException(
             status_code=HTTPStatus.UNSUPPORTED_MEDIA_TYPE,
             detail="Unsupported Media Type: Only 'application/json' is allowed"
@@ -275,6 +312,7 @@ def mount_metrics(app: FastAPI):
     # See https://prometheus.github.io/client_python/multiprocess/
     from prometheus_client import (CollectorRegistry, make_asgi_app,
                                    multiprocess)
+    from prometheus_fastapi_instrumentator import Instrumentator
 
     prometheus_multiproc_dir_path = os.getenv("PROMETHEUS_MULTIPROC_DIR", None)
     if prometheus_multiproc_dir_path is not None:
@@ -282,6 +320,16 @@ def mount_metrics(app: FastAPI):
                      prometheus_multiproc_dir_path)
         registry = CollectorRegistry()
         multiprocess.MultiProcessCollector(registry)
+        Instrumentator(
+            excluded_handlers=[
+                "/metrics",
+                "/health",
+                "/load",
+                "/ping",
+                "/version",
+            ],
+            registry=registry,
+        ).add().instrument(app).expose(app)
 
         # Add prometheus asgi middleware to route /metrics requests
         metrics_route = Mount("/metrics", make_asgi_app(registry=registry))
@@ -319,12 +367,12 @@ def embedding(request: Request) -> Optional[OpenAIServingEmbedding]:
     return request.app.state.openai_serving_embedding
 
 
-def score(request: Request) -> Optional[OpenAIServingScores]:
+def score(request: Request) -> Optional[ServingScores]:
     return request.app.state.openai_serving_scores
 
 
-def rerank(request: Request) -> Optional[JinaAIServingRerank]:
-    return request.app.state.jinaai_serving_reranking
+def rerank(request: Request) -> Optional[ServingScores]:
+    return request.app.state.openai_serving_scores
 
 
 def tokenization(request: Request) -> OpenAIServingTokenization:
@@ -344,6 +392,24 @@ async def health(raw_request: Request) -> Response:
     """Health check."""
     await engine_client(raw_request).check_health()
     return Response(status_code=200)
+
+
+@router.get("/load")
+async def get_server_load_metrics(request: Request):
+    # This endpoint returns the current server load metrics.
+    # It tracks requests utilizing the GPU from the following routes:
+    # - /v1/chat/completions
+    # - /v1/completions
+    # - /v1/audio/transcriptions
+    # - /v1/embeddings
+    # - /pooling
+    # - /score
+    # - /v1/score
+    # - /rerank
+    # - /v1/rerank
+    # - /v2/rerank
+    return JSONResponse(
+        content={'server_load': request.app.state.server_load_metrics})
 
 
 @router.api_route("/ping", methods=["GET", "POST"])
@@ -399,6 +465,7 @@ async def show_version():
 @router.post("/v1/chat/completions",
              dependencies=[Depends(validate_json_request)])
 @with_cancellation
+@load_aware_call
 async def create_chat_completion(request: ChatCompletionRequest,
                                  raw_request: Request):
     handler = chat(raw_request)
@@ -420,6 +487,7 @@ async def create_chat_completion(request: ChatCompletionRequest,
 
 @router.post("/v1/completions", dependencies=[Depends(validate_json_request)])
 @with_cancellation
+@load_aware_call
 async def create_completion(request: CompletionRequest, raw_request: Request):
     handler = completion(raw_request)
     if handler is None:
@@ -438,6 +506,7 @@ async def create_completion(request: CompletionRequest, raw_request: Request):
 
 @router.post("/v1/embeddings", dependencies=[Depends(validate_json_request)])
 @with_cancellation
+@load_aware_call
 async def create_embedding(request: EmbeddingRequest, raw_request: Request):
     handler = embedding(raw_request)
     if handler is None:
@@ -484,6 +553,7 @@ async def create_embedding(request: EmbeddingRequest, raw_request: Request):
 
 @router.post("/pooling", dependencies=[Depends(validate_json_request)])
 @with_cancellation
+@load_aware_call
 async def create_pooling(request: PoolingRequest, raw_request: Request):
     handler = pooling(raw_request)
     if handler is None:
@@ -502,6 +572,7 @@ async def create_pooling(request: PoolingRequest, raw_request: Request):
 
 @router.post("/score", dependencies=[Depends(validate_json_request)])
 @with_cancellation
+@load_aware_call
 async def create_score(request: ScoreRequest, raw_request: Request):
     handler = score(raw_request)
     if handler is None:
@@ -520,6 +591,7 @@ async def create_score(request: ScoreRequest, raw_request: Request):
 
 @router.post("/v1/score", dependencies=[Depends(validate_json_request)])
 @with_cancellation
+@load_aware_call
 async def create_score_v1(request: ScoreRequest, raw_request: Request):
     logger.warning(
         "To indicate that Score API is not part of standard OpenAI API, we "
@@ -530,10 +602,10 @@ async def create_score_v1(request: ScoreRequest, raw_request: Request):
 
 @router.post("/v1/audio/transcriptions")
 @with_cancellation
+@load_aware_call
 async def create_transcriptions(request: Annotated[TranscriptionRequest,
                                                    Form()],
                                 raw_request: Request):
-
     handler = transcription(raw_request)
     if handler is None:
         return base(raw_request).create_error_response(
@@ -555,6 +627,7 @@ async def create_transcriptions(request: Annotated[TranscriptionRequest,
 
 @router.post("/rerank", dependencies=[Depends(validate_json_request)])
 @with_cancellation
+@load_aware_call
 async def do_rerank(request: RerankRequest, raw_request: Request):
     handler = rerank(raw_request)
     if handler is None:
@@ -575,7 +648,7 @@ async def do_rerank(request: RerankRequest, raw_request: Request):
 async def do_rerank_v1(request: RerankRequest, raw_request: Request):
     logger.warning_once(
         "To indicate that the rerank API is not part of the standard OpenAI"
-        " API, we have located it at `/rerank`. Please update your client"
+        " API, we have located it at `/rerank`. Please update your client "
         "accordingly. (Note: Conforms to JinaAI rerank API)")
 
     return await do_rerank(request, raw_request)
@@ -587,7 +660,7 @@ async def do_rerank_v2(request: RerankRequest, raw_request: Request):
     return await do_rerank(request, raw_request)
 
 
-TASK_HANDLERS: Dict[str, Dict[str, tuple]] = {
+TASK_HANDLERS: dict[str, dict[str, tuple]] = {
     "generate": {
         "messages": (ChatCompletionRequest, create_chat_completion),
         "default": (CompletionRequest, create_completion),
@@ -620,9 +693,40 @@ if envs.VLLM_SERVER_DEV_MODE:
         Reset the prefix cache. Note that we currently do not check if the
         prefix cache is successfully reset in the API server.
         """
-        logger.info("Resetting prefix cache...")
-        await engine_client(raw_request).reset_prefix_cache()
+        device = None
+        device_str = raw_request.query_params.get("device")
+        if device_str is not None:
+            device = Device[device_str.upper()]
+        logger.info("Resetting prefix cache with specific %s...", str(device))
+        await engine_client(raw_request).reset_prefix_cache(device)
         return Response(status_code=200)
+
+    @router.post("/sleep")
+    async def sleep(raw_request: Request):
+        # get POST params
+        level = raw_request.query_params.get("level", "1")
+        await engine_client(raw_request).sleep(int(level))
+        # FIXME: in v0 with frontend multiprocessing, the sleep command
+        # is sent but does not finish yet when we return a response.
+        return Response(status_code=200)
+
+    @router.post("/wake_up")
+    async def wake_up(raw_request: Request):
+        tags = raw_request.query_params.getlist("tags")
+        if tags == []:
+            # set to None to wake up all tags if no tags are provided
+            tags = None
+        logger.info("wake up the engine with tags: %s", tags)
+        await engine_client(raw_request).wake_up(tags)
+        # FIXME: in v0 with frontend multiprocessing, the wake-up command
+        # is sent but does not finish yet when we return a response.
+        return Response(status_code=200)
+
+    @router.get("/is_sleeping")
+    async def is_sleeping(raw_request: Request):
+        logger.info("check whether the engine is sleeping")
+        is_sleeping = await engine_client(raw_request).is_sleeping()
+        return JSONResponse(content={"is_sleeping": is_sleeping})
 
 
 @router.post("/invocations", dependencies=[Depends(validate_json_request)])
@@ -672,12 +776,12 @@ if envs.VLLM_TORCH_PROFILER_DIR:
 
 if envs.VLLM_ALLOW_RUNTIME_LORA_UPDATING:
     logger.warning(
-        "Lora dynamic loading & unloading is enabled in the API server. "
+        "LoRA dynamic loading & unloading is enabled in the API server. "
         "This should ONLY be used for local development!")
 
     @router.post("/v1/load_lora_adapter",
                  dependencies=[Depends(validate_json_request)])
-    async def load_lora_adapter(request: LoadLoraAdapterRequest,
+    async def load_lora_adapter(request: LoadLoRAAdapterRequest,
                                 raw_request: Request):
         handler = models(raw_request)
         response = await handler.load_lora_adapter(request)
@@ -689,7 +793,7 @@ if envs.VLLM_ALLOW_RUNTIME_LORA_UPDATING:
 
     @router.post("/v1/unload_lora_adapter",
                  dependencies=[Depends(validate_json_request)])
-    async def unload_lora_adapter(request: UnloadLoraAdapterRequest,
+    async def unload_lora_adapter(request: UnloadLoRAAdapterRequest,
                                   raw_request: Request):
         handler = models(raw_request)
         response = await handler.unload_lora_adapter(request)
@@ -729,7 +833,8 @@ def build_app(args: Namespace) -> FastAPI:
         return JSONResponse(err.model_dump(),
                             status_code=HTTPStatus.BAD_REQUEST)
 
-    if token := envs.VLLM_API_KEY or args.api_key:
+    # Ensure --api-key option from CLI takes precedence over VLLM_API_KEY
+    if token := args.api_key or envs.VLLM_API_KEY:
 
         @app.middleware("http")
         async def authentication(request: Request, call_next):
@@ -756,6 +861,21 @@ def build_app(args: Namespace) -> FastAPI:
                 "X-Request-Id") or uuid.uuid4().hex
             response = await call_next(request)
             response.headers["X-Request-Id"] = request_id
+            return response
+
+    if envs.VLLM_DEBUG_LOG_API_SERVER_RESPONSE:
+        logger.warning("CAUTION: Enabling log response in the API Server. "
+                       "This can include sensitive information and should be "
+                       "avoided in production.")
+
+        @app.middleware("http")
+        async def log_response(request: Request, call_next):
+            response = await call_next(request)
+            response_body = [
+                section async for section in response.body_iterator
+            ]
+            response.body_iterator = iterate_in_threadpool(iter(response_body))
+            logger.info("response_body={%s}", response_body[0].decode())
             return response
 
     for middleware in args.middleware:
@@ -797,7 +917,27 @@ async def init_app_state(
     state.log_stats = not args.disable_log_stats
 
     resolved_chat_template = load_chat_template(args.chat_template)
-    logger.info("Using supplied chat template:\n%s", resolved_chat_template)
+    if resolved_chat_template is not None:
+        # Get the tokenizer to check official template
+        tokenizer = await engine_client.get_tokenizer()
+
+        if isinstance(tokenizer, MistralTokenizer):
+            # The warning is logged in resolve_mistral_chat_template.
+            resolved_chat_template = resolve_mistral_chat_template(
+                chat_template=resolved_chat_template)
+        else:
+            hf_chat_template = resolve_hf_chat_template(
+                tokenizer,
+                chat_template=None,
+                tools=None,
+                trust_remote_code=model_config.trust_remote_code)
+
+            if hf_chat_template != resolved_chat_template:
+                logger.warning(
+                    "Using supplied chat template: %s\n"
+                    "It is different from official chat template '%s'. "
+                    "This discrepancy may lead to performance degradation.",
+                    resolved_chat_template, args.model)
 
     state.openai_serving_models = OpenAIServingModels(
         engine_client=engine_client,
@@ -845,13 +985,13 @@ async def init_app_state(
         chat_template=resolved_chat_template,
         chat_template_content_format=args.chat_template_content_format,
     ) if model_config.task == "embed" else None
-    state.openai_serving_scores = OpenAIServingScores(
+    state.openai_serving_scores = ServingScores(
         engine_client,
         model_config,
         state.openai_serving_models,
-        request_logger=request_logger
-    ) if model_config.task == "score" else None
-    state.jinaai_serving_reranking = JinaAIServingRerank(
+        request_logger=request_logger) if model_config.task in (
+            "score", "embed", "pooling") else None
+    state.jinaai_serving_reranking = ServingScores(
         engine_client,
         model_config,
         state.openai_serving_models,
@@ -873,8 +1013,11 @@ async def init_app_state(
     ) if model_config.runner_type == "transcription" else None
     state.task = model_config.task
 
+    state.enable_server_load_tracking = args.enable_server_load_tracking
+    state.server_load_metrics = 0
 
-def create_server_socket(addr: Tuple[str, int]) -> socket.socket:
+
+def create_server_socket(addr: tuple[str, int]) -> socket.socket:
     family = socket.AF_INET
     if is_valid_ipv6_address(addr[0]):
         family = socket.AF_INET6
@@ -934,15 +1077,21 @@ async def run_server(args, **uvicorn_kwargs) -> None:
                 return '[' + a + ']'
             return a or "0.0.0.0"
 
-        logger.info("Starting vLLM API server on http://%s:%d",
-                    _listen_addr(sock_addr[0]), sock_addr[1])
+        is_ssl = args.ssl_keyfile and args.ssl_certfile
+        logger.info("Starting vLLM API server on http%s://%s:%d",
+                    "s" if is_ssl else "", _listen_addr(sock_addr[0]),
+                    sock_addr[1])
 
         shutdown_task = await serve_http(
             app,
             sock=sock,
+            enable_ssl_refresh=args.enable_ssl_refresh,
             host=args.host,
             port=args.port,
             log_level=args.uvicorn_log_level,
+            # NOTE: When the 'disable_uvicorn_access_log' value is True,
+            # no access log will be output.
+            access_log=not args.disable_uvicorn_access_log,
             timeout_keep_alive=TIMEOUT_KEEP_ALIVE,
             ssl_keyfile=args.ssl_keyfile,
             ssl_certfile=args.ssl_certfile,
@@ -952,15 +1101,17 @@ async def run_server(args, **uvicorn_kwargs) -> None:
         )
 
     # NB: Await server shutdown only after the backend context is exited
-    await shutdown_task
-
-    sock.close()
+    try:
+        await shutdown_task
+    finally:
+        sock.close()
 
 
 if __name__ == "__main__":
     # NOTE(simon):
     # This section should be in sync with vllm/entrypoints/cli/main.py for CLI
     # entrypoints.
+    cli_env_setup()
     parser = FlexibleArgumentParser(
         description="vLLM OpenAI-Compatible RESTful API server.")
     parser = make_arg_parser(parser)

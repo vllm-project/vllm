@@ -4,7 +4,7 @@ import contextlib
 import gc
 import os
 from contextlib import contextmanager
-from typing import TYPE_CHECKING, Dict, List, Optional
+from typing import TYPE_CHECKING, Optional
 
 import torch
 import torch.distributed
@@ -97,8 +97,12 @@ class HPUWorker:
         set_random_seed(self.model_config.seed)
         self.model_runner = HPUModelRunner(self.vllm_config)
 
-    def get_kv_cache_spec(self) -> KVCacheSpec:
+    def get_kv_cache_spec(self) -> dict[str, KVCacheSpec]:
         return self.model_runner.get_kv_cache_spec()
+
+    def initialize_from_config(self, kv_cache_config: KVCacheConfig) -> None:
+        """Allocate GPU KV cache with the specified kv_cache_config."""
+        self.model_runner.initialize_kv_cache(kv_cache_config)
 
     def get_model(self) -> nn.Module:
         return self.model_runner.get_model()
@@ -124,7 +128,7 @@ class HPUWorker:
 
         # Execute a forward pass with dummy inputs to profile the memory usage
         # of the model.
-        kv_caches: Dict[str, torch.Tensor] = {}
+        kv_caches: dict[str, torch.Tensor] = {}
         kv_cache_spec = self.model_runner.get_kv_cache_spec()
         single_kv_block_size_bytes = 0
         for layer_name, layer_spec in kv_cache_spec.items():
@@ -143,7 +147,7 @@ class HPUWorker:
             else:
                 raise NotImplementedError
 
-        runner_kv_caches: List[torch.Tensor] = []
+        runner_kv_caches: list[torch.Tensor] = []
         bind_kv_cache(
             kv_caches,
             self.vllm_config.compilation_config.static_forward_context,
@@ -187,7 +191,7 @@ class HPUWorker:
         gc.collect()
         return cache_size_bytes - dummy_block_headroom
 
-    def initialize_cache(self, kv_cache_configs: List[KVCacheConfig]) -> None:
+    def initialize_cache(self, kv_cache_configs: list[KVCacheConfig]) -> None:
         """Allocate GPU KV cache with the specified kv_cache_config."""
         kv_cache_config = kv_cache_configs[self.rank]
 

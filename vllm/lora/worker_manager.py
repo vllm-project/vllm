@@ -84,9 +84,10 @@ class WorkerLoRAManager(AbstractWorkerManager):
 
     def _load_adapter(self, lora_request: LoRARequest) -> LoRAModel:
         try:
-            model = self._adapter_manager.model
-            supported_lora_modules = model.supported_lora_modules
-            packed_modules_mapping = model.packed_modules_mapping
+            supported_lora_modules = (
+                self._adapter_manager.supported_lora_modules)
+            packed_modules_mapping = (
+                self._adapter_manager.packed_modules_mapping)
             expected_lora_modules: List[str] = []
             for module in supported_lora_modules:
                 if module in packed_modules_mapping:
@@ -107,6 +108,7 @@ class WorkerLoRAManager(AbstractWorkerManager):
 
             # For some models like Qwen2VL, we need to use hf_to_vllm_mapper
             # to ensure correct loading of lora weights.
+            model = self._adapter_manager.model
             hf_to_vllm_mapper = None
             if (hasattr(model, "hf_to_vllm_mapper")
                     and model.hf_to_vllm_mapper is not None):
@@ -133,7 +135,7 @@ class WorkerLoRAManager(AbstractWorkerManager):
             # For NotFoundError
             raise ValueError(
                 f"Loading lora {lora_request.lora_name} failed: No adapter "
-                f"found for {lora_path}") from e
+                f"found for {lora_request.lora_path}") from e
         except Exception as e:
             # For BadRequestError
             raise e

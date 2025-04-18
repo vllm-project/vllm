@@ -8,22 +8,27 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Type
 import torch
 
 from vllm import _custom_ops as ops
+# yapf conflicts with isort for this block
+# yapf: disable
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionLayer,
                                               AttentionMetadata,
                                               AttentionMetadataBuilder,
-                                              AttentionType)
+                                              AttentionType,
+                                              is_quantized_kv_cache)
+# yapf: enable
 from vllm.attention.backends.utils import (
     PAD_SLOT_ID, CommonAttentionState, compute_slot_mapping,
-    compute_slot_mapping_start_idx, get_flash_attn_version,
-    get_num_prefill_decode_query_kv_tokens, get_seq_len_block_table_args,
-    is_all_cross_attn_metadata_set, is_all_encoder_attn_metadata_set,
-    is_block_tables_empty)
+    compute_slot_mapping_start_idx, get_num_prefill_decode_query_kv_tokens,
+    get_seq_len_block_table_args, is_all_cross_attn_metadata_set,
+    is_all_encoder_attn_metadata_set, is_block_tables_empty)
 from vllm.logger import init_logger
 from vllm.multimodal import MultiModalPlaceholderMap
 from vllm.utils import async_tensor_h2d, make_tensor_with_pad
 from vllm.vllm_flash_attn import (flash_attn_varlen_func,
                                   flash_attn_with_kvcache)
+from vllm.vllm_flash_attn.fa_utils import (flash_attn_supports_fp8,
+                                           get_flash_attn_version)
 
 if TYPE_CHECKING:
     from vllm.worker.model_runner import (ModelInputForGPUBuilder,
@@ -612,10 +617,15 @@ class FlashAttentionImpl(AttentionImpl):
         blocksparse_params: Optional[Dict[str, Any]] = None,
         logits_soft_cap: Optional[float] = None,
         attn_type: str = AttentionType.DECODER,
+        use_irope: bool = False,
     ) -> None:
         if blocksparse_params is not None:
             raise ValueError(
                 "FlashAttention does not support block-sparse attention.")
+        if use_irope:
+            logger.warning(
+                "Using irope in V0 is not supported yet, it will fall back "
+                "to global attention for long context.")
         self.num_heads = num_heads
         self.head_size = head_size
         self.scale = float(scale)
@@ -626,6 +636,15 @@ class FlashAttentionImpl(AttentionImpl):
         self.sliding_window = ((sliding_window - 1,
                                 0) if sliding_window is not None else (-1, -1))
         self.kv_cache_dtype = kv_cache_dtype
+        self.vllm_flash_attn_version = get_flash_attn_version(
+            requires_alibi=self.alibi_slopes is not None)
+        if is_quantized_kv_cache(self.kv_cache_dtype) and (
+                not self.kv_cache_dtype.startswith("fp8")
+                or not flash_attn_supports_fp8()):
+            raise NotImplementedError(
+                f"FlashAttention does not support {self.kv_cache_dtype} "
+                "kv-cache on this device "
+                f"(FA supports fp8 = {flash_attn_supports_fp8()}).")
         if logits_soft_cap is None:
             # In flash-attn, setting logits_soft_cap as 0 means no soft cap.
             logits_soft_cap = 0
@@ -640,7 +659,6 @@ class FlashAttentionImpl(AttentionImpl):
                 f"Head size {head_size} is not supported by FlashAttention. "
                 f"Supported head sizes are: {support_head_sizes}.")
         self.attn_type = attn_type
-        self.vllm_flash_attn_version = get_flash_attn_version()
 
     def forward(
         self,
@@ -664,12 +682,18 @@ class FlashAttentionImpl(AttentionImpl):
                 for profiling run.
             attn_metadata: Metadata for attention.
         NOTE: It in-place updates the output tensor.
+        NOTE: FP8 quantization, flash-attn expect the size of
+              {q,k,v}_descale to be (num_sequences, num_kv_heads).
+              We use torch's .expand() to avoid duplicating values
         """
-        # NOTE(woosuk): FlashAttention does not support FP8 KV cache.
-        assert layer._k_scale_float == 1.0 and layer._v_scale_float == 1.0, (
-            "key/v_scale is not supported in FlashAttention.")
-
         assert output is not None, "Output tensor must be provided."
+
+        # NOTE(woosuk): FlashAttention2 does not support FP8 KV cache.
+        if self.vllm_flash_attn_version < 3 or output.dtype != torch.bfloat16:
+            assert (
+                layer._k_scale_float == 1.0 and layer._v_scale_float == 1.0), (
+                    "key/v_scale is only supported in FlashAttention 3 with "
+                    "base dtype bfloat16")
 
         attn_type = self.attn_type
         if (attn_type == AttentionType.ENCODER
@@ -687,6 +711,11 @@ class FlashAttentionImpl(AttentionImpl):
         window_size = self.sliding_window
         alibi_slopes: Optional[torch.Tensor] = self.alibi_slopes
         logits_soft_cap: Optional[float] = self.logits_soft_cap
+        fp8_attention = kv_cache_dtype.startswith("fp8")
+
+        if fp8_attention and not flash_attn_supports_fp8():
+            raise NotImplementedError(
+                "FlashAttention does not support FP8 kv-cache on this device.")
 
         if kv_cache.numel() > 0:
             key_cache = kv_cache[0]
@@ -722,6 +751,19 @@ class FlashAttentionImpl(AttentionImpl):
                     layer._v_scale,
                 )
 
+                if fp8_attention:
+                    kv_cache = kv_cache.view(torch.float8_e4m3fn)
+                    key_cache = key_cache.view(torch.float8_e4m3fn)
+                    value_cache = value_cache.view(torch.float8_e4m3fn)
+
+        if fp8_attention:
+            num_tokens, num_heads, head_size = query.shape
+            query, _ = ops.scaled_fp8_quant(
+                query.reshape(
+                    (num_tokens, num_heads * head_size)).contiguous(),
+                layer._q_scale)
+            query = query.reshape((num_tokens, num_heads, head_size))
+
         (num_prefill_query_tokens, num_prefill_kv_tokens,
         num_decode_query_tokens) = \
             get_num_prefill_decode_query_kv_tokens(attn_metadata, attn_type)
@@ -746,6 +788,23 @@ class FlashAttentionImpl(AttentionImpl):
                 key = key[:num_prefill_kv_tokens]
                 value = value[:num_prefill_kv_tokens]
 
+                if fp8_attention:
+                    num_kv_tokens, num_kv_heads, head_size = key.shape
+
+                    key, _ = ops.scaled_fp8_quant(
+                        key.reshape((num_kv_tokens,
+                                     num_kv_heads * head_size)).contiguous(),
+                        layer._k_scale)
+                    key = key.reshape((num_kv_tokens, num_kv_heads, head_size))
+
+                    value, _ = ops.scaled_fp8_quant(
+                        value.reshape((num_kv_tokens,
+                                       num_kv_heads * head_size)).contiguous(),
+                        layer._v_scale)
+                    value = value.reshape(
+                        (num_kv_tokens, num_kv_heads, head_size))
+
+                descale_shape = (q_seq_start_loc.shape[0] - 1, key.shape[1])
                 flash_attn_varlen_func(
                     q=query,
                     k=key,
@@ -761,13 +820,19 @@ class FlashAttentionImpl(AttentionImpl):
                     softcap=logits_soft_cap,
                     out=prefill_output,
                     fa_version=self.vllm_flash_attn_version,
+                    q_descale=layer._q_scale.expand(descale_shape),
+                    k_descale=layer._k_scale.expand(descale_shape),
+                    v_descale=layer._v_scale.expand(descale_shape),
                 )
             else:
                 # prefix-enabled attention
                 assert attn_type == AttentionType.DECODER, (
                     "Only decoder-only models support prefix caching")
                 assert prefill_meta.seq_lens is not None
+                assert prefill_meta.query_start_loc is not None
                 max_seq_len = max(prefill_meta.seq_lens)
+                descale_shape = (prefill_meta.query_start_loc.shape[0] - 1,
+                                 key.shape[1])
                 flash_attn_varlen_func(  # noqa
                     q=query,
                     k=key_cache,
@@ -784,6 +849,9 @@ class FlashAttentionImpl(AttentionImpl):
                     softcap=logits_soft_cap,
                     out=prefill_output,
                     fa_version=self.vllm_flash_attn_version,
+                    q_descale=layer._q_scale.expand(descale_shape),
+                    k_descale=layer._k_scale.expand(descale_shape),
+                    v_descale=layer._v_scale.expand(descale_shape),
                 )
 
         if decode_meta := attn_metadata.decode_metadata:
@@ -797,6 +865,9 @@ class FlashAttentionImpl(AttentionImpl):
                 assert attn_type == AttentionType.DECODER, (
                     "Only decoder-only models support max_decode_query_len > 1"
                 )
+                assert decode_meta.query_start_loc is not None
+                descale_shape = (decode_meta.query_start_loc.shape[0] - 1,
+                                 key.shape[1])
                 flash_attn_varlen_func(
                     q=decode_query,
                     k=key_cache,
@@ -813,6 +884,9 @@ class FlashAttentionImpl(AttentionImpl):
                     block_table=decode_meta.block_tables,
                     out=decode_output,
                     fa_version=self.vllm_flash_attn_version,
+                    q_descale=layer._q_scale.expand(descale_shape),
+                    k_descale=layer._k_scale.expand(descale_shape),
+                    v_descale=layer._v_scale.expand(descale_shape),
                 )
             else:
                 # Use flash_attn_with_kvcache for normal decoding.
@@ -821,6 +895,7 @@ class FlashAttentionImpl(AttentionImpl):
                     _,
                     block_tables_arg,
                 ) = get_seq_len_block_table_args(decode_meta, False, attn_type)
+                descale_shape = (seq_lens_arg.shape[0], key_cache.shape[-2])
                 flash_attn_with_kvcache(
                     q=decode_query.unsqueeze(1),
                     k_cache=key_cache,
@@ -834,6 +909,9 @@ class FlashAttentionImpl(AttentionImpl):
                     softcap=logits_soft_cap,
                     out=decode_output.unsqueeze(1),
                     fa_version=self.vllm_flash_attn_version,
+                    q_descale=layer._q_scale.expand(descale_shape),
+                    k_descale=layer._k_scale.expand(descale_shape),
+                    v_descale=layer._v_scale.expand(descale_shape),
                 )
         return output
 

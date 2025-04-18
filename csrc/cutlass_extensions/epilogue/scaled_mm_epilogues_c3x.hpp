@@ -1,6 +1,7 @@
 #pragma once
 
 #include "cutlass_extensions/epilogue/broadcast_load_epilogue_c3x.hpp"
+#include "cutlass_extensions/epilogue/broadcast_load_epilogue_array_c3x.hpp"
 
 /*
    This file defines custom epilogues for fusing channel scales, token scales,
@@ -22,7 +23,7 @@ struct identity {
   T operator()(T lhs) const { return lhs; }
 };
 
-template <typename ElementAcc, typename ElementD, typename EpilogueDescriptor>
+template <typename ElementAcc, typename ElementD, typename TileShape>
 struct TrivialEpilogue {
  private:
   using Accum = cutlass::epilogue::fusion::Sm90AccFetch;
@@ -44,32 +45,40 @@ struct TrivialEpilogue {
  * This class provides the common load descriptors for the
  * ScaledEpilogue[...] classes
  */
-template <typename ElementAcc, typename ElementD, typename EpilogueDescriptor>
+template <typename ElementAcc, typename ElementD, typename TileShape>
 struct ScaledEpilogueBase {
  protected:
   using Accum = cutlass::epilogue::fusion::Sm90AccFetch;
 
   template <typename T>
   using ColOrScalarLoad = cutlass::epilogue::fusion::Sm90ColOrScalarBroadcast<
-      0 /*Stages*/, typename EpilogueDescriptor::TileShape, T,
-      Stride<Int<1>, Int<0>, Int<0>>>;
+      0 /*Stages*/, TileShape, T, Stride<Int<1>, Int<0>, Int<0>>>;
 
   template <typename T>
   using RowOrScalarLoad = cutlass::epilogue::fusion::Sm90RowOrScalarBroadcast<
-      0 /*Stages*/, typename EpilogueDescriptor::TileShape, T,
-      Stride<Int<0>, Int<1>, Int<0>>>;
+      0 /*Stages*/, TileShape, T, Stride<Int<0>, Int<1>, Int<0>>>;
 
   // Don't want to support nullptr by default
   template <typename T, bool EnableNullPtr = false>
   using ColLoad = cutlass::epilogue::fusion::Sm90ColBroadcast<
-      0 /*Stages*/, typename EpilogueDescriptor::TileShape, T, T,
-      Stride<Int<1>, Int<0>, Int<0>>, 128 / sizeof_bits_v<T>, EnableNullPtr>;
+      0 /*Stages*/, TileShape, T, T, Stride<Int<1>, Int<0>, Int<0>>,
+      128 / sizeof_bits_v<T>, EnableNullPtr>;
 
   // Don't want to support nullptr by default
   template <typename T, bool EnableNullPtr = false>
   using RowLoad = cutlass::epilogue::fusion::Sm90RowBroadcast<
-      0 /*Stages*/, typename EpilogueDescriptor::TileShape, T, T,
-      Stride<Int<0>, Int<1>, Int<0>>, 128 / sizeof_bits_v<T>, EnableNullPtr>;
+      0 /*Stages*/, TileShape, T, T, Stride<Int<0>, Int<1>, Int<0>>,
+      128 / sizeof_bits_v<T>, EnableNullPtr>;
+
+  template <typename T>
+  using ColOrScalarLoadArray =
+      cutlass::epilogue::fusion::Sm90ColOrScalarBroadcastArray<
+          0 /*Stages*/, TileShape, T, Stride<Int<1>, Int<0>, Int<0>>>;
+
+  template <typename T>
+  using RowOrScalarLoadArray =
+      cutlass::epilogue::fusion::Sm90RowOrScalarBroadcastArray<
+          0 /*Stages*/, TileShape, T, Stride<Int<0>, Int<1>, Int<0>>>;
 
   // This utility function constructs the arguments for the load descriptors
   // from a tensor. It can handle both row and column, as well as row/column or
@@ -98,6 +107,14 @@ struct ScaledEpilogueBase {
                   std::is_same_v<Descriptor, RowLoad<T, true>>);
     return Arguments{data_ptr};
   }
+
+  template <typename Descriptor, typename T>
+  static auto args_from_tensor(const T* const* data_ptr, bool do_broadcast) {
+    using Arguments = typename Descriptor::Arguments;
+    static_assert(std::is_same_v<Descriptor, ColOrScalarLoadArray<T>> ||
+                  std::is_same_v<Descriptor, RowOrScalarLoadArray<T>>);
+    return Arguments{data_ptr, do_broadcast};
+  }
 };
 
 /*
@@ -116,11 +133,11 @@ struct ScaledEpilogueBase {
    the A and B operands respectively. These scales may be either per-tensor or
    per row or column.
 */
-template <typename ElementAcc, typename ElementD, typename EpilogueDescriptor>
+template <typename ElementAcc, typename ElementD, typename TileShape>
 struct ScaledEpilogue
-    : private ScaledEpilogueBase<ElementAcc, ElementD, EpilogueDescriptor> {
+    : private ScaledEpilogueBase<ElementAcc, ElementD, TileShape> {
  private:
-  using SUPER = ScaledEpilogueBase<ElementAcc, ElementD, EpilogueDescriptor>;
+  using SUPER = ScaledEpilogueBase<ElementAcc, ElementD, TileShape>;
   using Accum = typename SUPER::Accum;
   using ScaleA = typename SUPER::template ColOrScalarLoad<float>;
   using ScaleB = typename SUPER::template RowOrScalarLoad<float>;
@@ -146,8 +163,8 @@ struct ScaledEpilogue
     auto a_args = SUPER::template args_from_tensor<ScaleA, float>(a_scales);
     auto b_args = SUPER::template args_from_tensor<ScaleB, float>(b_scales);
 
-    typename EVTCompute0::Arguments evt0_args{b_args};
-    return ArgumentType{a_args, evt0_args};
+    typename EVTCompute0::Arguments evt0_args{b_args, {}, {}};
+    return ArgumentType{a_args, evt0_args, {}};
   }
 };
 
@@ -160,11 +177,11 @@ struct ScaledEpilogue
  * The bias tensor must be per-output channel.
  * ScaleA and ScaleB can be per-tensor or per-token/per-channel.
  */
-template <typename ElementAcc, typename ElementD, typename EpilogueDescriptor>
+template <typename ElementAcc, typename ElementD, typename TileShape>
 struct ScaledEpilogueBias
-    : private ScaledEpilogueBase<ElementAcc, ElementD, EpilogueDescriptor> {
+    : private ScaledEpilogueBase<ElementAcc, ElementD, TileShape> {
  private:
-  using SUPER = ScaledEpilogueBase<ElementAcc, ElementD, EpilogueDescriptor>;
+  using SUPER = ScaledEpilogueBase<ElementAcc, ElementD, TileShape>;
   using Accum = typename SUPER::Accum;
   using ScaleA = typename SUPER::template ColOrScalarLoad<float>;
   using ScaleB = typename SUPER::template RowOrScalarLoad<float>;
@@ -193,8 +210,8 @@ struct ScaledEpilogueBias
     auto b_args = SUPER::template args_from_tensor<ScaleB, float>(b_scales);
     auto bias_args = SUPER::template args_from_tensor<Bias, ElementD>(bias);
 
-    typename EVTCompute0::Arguments evt0_args{b_args};
-    return ArgumentType{a_args, evt0_args, bias_args};
+    typename EVTCompute0::Arguments evt0_args{b_args, {}, {}};
+    return ArgumentType{a_args, evt0_args, bias_args, {}};
   }
 };
 
@@ -203,11 +220,11 @@ struct ScaledEpilogueBias
  * bias is a column vector instead of a row vector. Useful e.g. if we are
  * computing a GEMM via C^T += B^T A^T. This happens in the 2:4 sparse kernels.
  */
-template <typename ElementAcc, typename ElementD, typename EpilogueDescriptor>
+template <typename ElementAcc, typename ElementD, typename TileShape>
 struct ScaledEpilogueColumnBias
-    : private ScaledEpilogueBase<ElementAcc, ElementD, EpilogueDescriptor> {
+    : private ScaledEpilogueBase<ElementAcc, ElementD, TileShape> {
  private:
-  using SUPER = ScaledEpilogueBase<ElementAcc, ElementD, EpilogueDescriptor>;
+  using SUPER = ScaledEpilogueBase<ElementAcc, ElementD, TileShape>;
   using Accum = typename SUPER::Accum;
   using ScaleA = typename SUPER::template ColOrScalarLoad<float>;
   using ScaleB = typename SUPER::template RowOrScalarLoad<float>;
@@ -236,8 +253,8 @@ struct ScaledEpilogueColumnBias
     auto b_args = SUPER::template args_from_tensor<ScaleB, float>(b_scales);
     auto bias_args = SUPER::template args_from_tensor<Bias, ElementD>(bias);
 
-    typename EVTCompute0::Arguments evt0_args{b_args};
-    return ArgumentType{a_args, evt0_args, bias_args};
+    typename EVTCompute0::Arguments evt0_args{b_args, {}, {}};
+    return ArgumentType{a_args, evt0_args, bias_args, {}};
   }
 };
 
@@ -249,11 +266,11 @@ struct ScaledEpilogueColumnBias
  *
  * This epilogue also supports bias, which remains per-channel.
  */
-template <typename ElementAcc, typename ElementD, typename EpilogueDescriptor>
+template <typename ElementAcc, typename ElementD, typename TileShape>
 struct ScaledEpilogueBiasAzp
-    : private ScaledEpilogueBase<ElementAcc, ElementD, EpilogueDescriptor> {
+    : private ScaledEpilogueBase<ElementAcc, ElementD, TileShape> {
  private:
-  using SUPER = ScaledEpilogueBase<ElementAcc, ElementD, EpilogueDescriptor>;
+  using SUPER = ScaledEpilogueBase<ElementAcc, ElementD, TileShape>;
   using Accum = typename SUPER::Accum;
   using ScaleA = typename SUPER::template ColOrScalarLoad<float>;
   using ScaleB = typename SUPER::template RowOrScalarLoad<float>;
@@ -297,9 +314,10 @@ struct ScaledEpilogueBiasAzp
     auto azp_adj_args =
         SUPER::template args_from_tensor<AzpWithAdj, int32_t>(azp_adj);
 
-    typename EVTComputeAzp::Arguments evt_azp_args{{}, azp_adj_args};
-    typename EVTComputeScaleB::Arguments evt_scale_b_args{b_args, evt_azp_args};
-    return ArgumentType{a_args, evt_scale_b_args, bias_args};
+    typename EVTComputeAzp::Arguments evt_azp_args{{}, azp_adj_args, {}};
+    typename EVTComputeScaleB::Arguments evt_scale_b_args{
+        b_args, evt_azp_args, {}};
+    return ArgumentType{a_args, evt_scale_b_args, bias_args, {}};
   }
 };
 
@@ -313,11 +331,11 @@ struct ScaledEpilogueBiasAzp
  *
  * This epilogue also supports bias, which remains per-channel.
  */
-template <typename ElementAcc, typename ElementD, typename EpilogueDescriptor>
+template <typename ElementAcc, typename ElementD, typename TileShape>
 struct ScaledEpilogueBiasAzpToken
-    : private ScaledEpilogueBase<ElementAcc, ElementD, EpilogueDescriptor> {
+    : private ScaledEpilogueBase<ElementAcc, ElementD, TileShape> {
  private:
-  using SUPER = ScaledEpilogueBase<ElementAcc, ElementD, EpilogueDescriptor>;
+  using SUPER = ScaledEpilogueBase<ElementAcc, ElementD, TileShape>;
   using Accum = typename SUPER::Accum;
   using ScaleA = typename SUPER::template ColOrScalarLoad<float>;
   using ScaleB = typename SUPER::template RowOrScalarLoad<float>;
@@ -374,10 +392,58 @@ struct ScaledEpilogueBiasAzpToken
     auto azp_adj_args =
         SUPER::template args_from_tensor<AzpAdj, int32_t>(azp_adj);
 
-    typename EVTComputeAzp::Arguments evt_azp_args{azp_args, azp_adj_args};
-    typename EVTComputeAcc::Arguments evt_acc_args{{}, evt_azp_args};
-    typename EVTComputeScaleB::Arguments evt_scale_b_args{b_args, evt_acc_args};
-    return ArgumentType{a_args, evt_scale_b_args, bias_args};
+    typename EVTComputeAzp::Arguments evt_azp_args{azp_args, azp_adj_args, {}};
+    typename EVTComputeAcc::Arguments evt_acc_args{{}, evt_azp_args, {}};
+    typename EVTComputeScaleB::Arguments evt_scale_b_args{
+        b_args, evt_acc_args, {}};
+    return ArgumentType{a_args, evt_scale_b_args, bias_args, {}};
+  }
+};
+
+/*
+    This epilogue works like ScaledEpilogue, but ScaleA and ScaleB are pointers
+    to arrays containing different scales used in group gemm. The number of
+   pointers in ScaleA and the number of pointers in ScaleB are equal to the
+   group size.
+*/
+template <typename ElementAcc, typename ElementD, typename EpilogueDescriptor>
+struct ScaledEpilogueArray
+    : private ScaledEpilogueBase<ElementAcc, ElementD, EpilogueDescriptor> {
+ private:
+  using SUPER = ScaledEpilogueBase<ElementAcc, ElementD, EpilogueDescriptor>;
+  using Accum = typename SUPER::Accum;
+  using ScaleA = typename SUPER::template ColOrScalarLoadArray<float>;
+  using ScaleB = typename SUPER::template RowOrScalarLoadArray<float>;
+
+  using Compute0 = cutlass::epilogue::fusion::Sm90Compute<
+      cutlass::multiplies, float, float,
+      cutlass::FloatRoundStyle::round_to_nearest>;
+
+  using EVTCompute0 =
+      cutlass::epilogue::fusion::Sm90EVT<Compute0, ScaleB, Accum>;
+
+  using Compute1 = cutlass::epilogue::fusion::Sm90Compute<
+      cutlass::multiplies, ElementD, float,
+      cutlass::FloatRoundStyle::round_to_nearest>;
+
+ public:
+  using EVTCompute =
+      cutlass::epilogue::fusion::Sm90EVT<Compute1, ScaleA, EVTCompute0>;
+  using ArgumentType = typename EVTCompute::Arguments;
+
+  using ScaleAArray = typename SUPER::template ColOrScalarLoadArray<float>;
+  using ScaleBArray = typename SUPER::template RowOrScalarLoadArray<float>;
+
+  static ArgumentType prepare_args(float const* const* a_scales_ptr,
+                                   float const* const* b_scales_ptr,
+                                   bool a_col_broadcast, bool b_row_broadcast) {
+    auto a_args = SUPER::template args_from_tensor<ScaleAArray, float>(
+        a_scales_ptr, a_col_broadcast);
+    auto b_args = SUPER::template args_from_tensor<ScaleBArray, float>(
+        b_scales_ptr, b_row_broadcast);
+
+    typename EVTCompute0::Arguments evt0_args{b_args, {}, {}};
+    return ArgumentType{a_args, evt0_args, {}};
   }
 };
 

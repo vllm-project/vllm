@@ -11,6 +11,15 @@ We also believe in the power of community support; thus, answering queries, offe
 
 Finally, one of the most impactful ways to support us is by raising awareness about vLLM. Talk about it in your blog posts and highlight how it's driving your incredible projects. Express your support on social media if you're using vLLM, or simply offer your appreciation by starring our repository!
 
+## Job Board
+
+Unsure on where to start? Check out the following links for tasks to work on:
+
+- [Good first issues](https://github.com/vllm-project/vllm/issues?q=is%3Aissue%20state%3Aopen%20label%3A%22good%20first%20issue%22)
+  - [Selected onboarding tasks](gh-project:6)
+- [New model requests](https://github.com/vllm-project/vllm/issues?q=is%3Aissue%20state%3Aopen%20label%3A%22new%20model%22)
+  - [Models with multi-modal capabilities](gh-project:10)
+
 ## License
 
 See <gh-file:LICENSE>.
@@ -23,7 +32,7 @@ Check out the [building from source](#build-from-source) documentation for detai
 ## Testing
 
 ```bash
-pip install -r requirements-dev.txt
+pip install -r requirements/dev.txt
 
 # Linting, formatting and static type checking
 pre-commit install --hook-type pre-commit --hook-type commit-msg
@@ -34,6 +43,12 @@ pre-commit run --all-files
 # Unit tests
 pytest tests/
 ```
+
+:::{tip}
+Since the <gh-file:docker/Dockerfile> ships with Python 3.12, all tests in CI (except `mypy`) are run with Python 3.12.
+
+Therefore, we recommend developing with Python 3.12 to minimise the chance of your local environment clashing with our CI environment.
+:::
 
 :::{note}
 Currently, the repository is not fully checked by `mypy`.
@@ -145,6 +160,9 @@ review process:
 - Please respond to all comments within a reasonable time frame. If a comment
   isn't clear or you disagree with a suggestion, feel free to ask for
   clarification or discuss the suggestion.
+- Note that not all CI checks will be executed due to limited computational
+  resources. The reviewer will add `ready` label to the PR when the PR is
+  ready to merge or a full CI run is needed.
 
 ## Thank You
 

@@ -1260,7 +1260,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "edx8memhpd9tsa"
+            "uid": "${DS_PROMETHEUS}"
           },
           "disableTextWrap": false,
           "editorMode": "code",
@@ -1360,7 +1360,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "edx8memhpd9tsa"
+            "uid": "${DS_PROMETHEUS}"
           },
           "disableTextWrap": false,
           "editorMode": "code",
@@ -1473,7 +1473,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "edx8memhpd9tsa"
+            "uid": "${DS_PROMETHEUS}"
           },
           "disableTextWrap": false,
           "editorMode": "code",
@@ -1523,7 +1523,7 @@
         },
         "datasource": {
           "type": "prometheus",
-          "uid": "edx8memhpd9tsa"
+          "uid": "${DS_PROMETHEUS}"
         },
         "definition": "label_values(model_name)",
         "hide": 0,

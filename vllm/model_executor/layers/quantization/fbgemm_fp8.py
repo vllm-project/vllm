@@ -11,13 +11,12 @@ from vllm.model_executor.layers.linear import (LinearBase, LinearMethodBase,
                                                UnquantizedLinearMethod)
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig, QuantizeMethodBase)
-from vllm.model_executor.layers.quantization.fp8 import cutlass_fp8_supported
 from vllm.model_executor.layers.quantization.utils.marlin_utils_fp8 import (
     apply_fp8_marlin_linear, prepare_fp8_layer_for_marlin)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     is_layer_skipped)
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
-    apply_fp8_linear, normalize_e4m3fn_to_e4m3fnuz)
+    Fp8LinearOp, maybe_create_device_identity, normalize_e4m3fn_to_e4m3fnuz)
 from vllm.model_executor.parameter import (ChannelQuantScaleParameter,
                                            ModelWeightParameter)
 from vllm.platforms import current_platform
@@ -29,12 +28,14 @@ class FBGEMMFp8Config(QuantizationConfig):
     """Config class for FBGEMM Fp8."""
 
     def __init__(self, ignore_list: List[str], input_scale_ub: float):
+        super().__init__()
         self.ignore_list = ignore_list if ignore_list else []
         self.input_scale_ub = input_scale_ub
 
         # For GPUs that lack FP8 hardware support, we can leverage the Marlin
         # kernel for fast weight-only FP8 quantization
         self.use_marlin = not current_platform.has_device_capability(89)
+        self.fp8_linear = Fp8LinearOp()
 
     @classmethod
     def get_name(cls) -> str:
@@ -71,7 +72,8 @@ class FBGEMMFp8LinearMethod(LinearMethodBase):
 
     def __init__(self, quant_config: FBGEMMFp8Config):
         self.quant_config = quant_config
-        self.cutlass_fp8_supported = cutlass_fp8_supported()
+        self.fp8_linear = Fp8LinearOp(use_per_token_if_dynamic=True)
+        self.out_dtype = torch.get_default_dtype()
 
     def create_weights(
         self,
@@ -83,6 +85,7 @@ class FBGEMMFp8LinearMethod(LinearMethodBase):
         params_dtype: torch.dtype,
         **extra_weight_attrs,
     ):
+        maybe_create_device_identity()
         weight_loader = extra_weight_attrs.get("weight_loader")
         del input_size, output_size
         output_size_per_partition = sum(output_partition_sizes)
@@ -125,7 +128,7 @@ class FBGEMMFp8LinearMethod(LinearMethodBase):
 
         weight = layer.weight
 
-        if current_platform.is_rocm():
+        if current_platform.is_fp8_fnuz():
             weight, weight_scale, input_scale = \
                 normalize_e4m3fn_to_e4m3fnuz(
                     weight=weight,
@@ -156,12 +159,10 @@ class FBGEMMFp8LinearMethod(LinearMethodBase):
                 size_k=layer.input_size_per_partition,
                 bias=bias)
 
-        return apply_fp8_linear(
-            input=x,
-            weight=layer.weight,
-            weight_scale=layer.weight_scale,
-            input_scale=None,
-            input_scale_ub=layer.input_scale_ub,
-            bias=bias,
-            cutlass_fp8_supported=self.cutlass_fp8_supported,
-            use_per_token_if_dynamic=True)
+        return self.fp8_linear.apply(input=x,
+                                     weight=layer.weight,
+                                     weight_scale=layer.weight_scale,
+                                     out_dtype=self.out_dtype,
+                                     input_scale=None,
+                                     input_scale_ub=layer.input_scale_ub,
+                                     bias=bias)

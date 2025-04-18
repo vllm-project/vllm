@@ -8,17 +8,17 @@ from vllm.entrypoints.openai.protocol import RerankResponse
 from ...utils import RemoteOpenAIServer
 
 MODEL_NAME = "BAAI/bge-reranker-base"
+DTYPE = "bfloat16"
 
 
 @pytest.fixture(scope="module")
 def server():
-    args = ["--enforce-eager", "--max-model-len", "100"]
+    args = ["--enforce-eager", "--max-model-len", "100", "--dtype", DTYPE]
 
     with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
         yield remote_server
 
 
-@pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
 def test_rerank_texts(server: RemoteOpenAIServer, model_name: str):
     query = "What is the capital of France?"
@@ -42,7 +42,6 @@ def test_rerank_texts(server: RemoteOpenAIServer, model_name: str):
     assert rerank.results[1].relevance_score <= 0.01
 
 
-@pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
 def test_top_n(server: RemoteOpenAIServer, model_name: str):
     query = "What is the capital of France?"
@@ -68,7 +67,6 @@ def test_top_n(server: RemoteOpenAIServer, model_name: str):
     assert rerank.results[1].relevance_score <= 0.01
 
 
-@pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
 def test_rerank_max_model_len(server: RemoteOpenAIServer, model_name: str):
 

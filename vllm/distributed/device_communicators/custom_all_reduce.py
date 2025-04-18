@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 
-import ctypes
 from contextlib import contextmanager
 from typing import List, Optional, Union
 
@@ -10,7 +9,6 @@ from torch.distributed import ProcessGroup
 
 import vllm.envs as envs
 from vllm import _custom_ops as ops
-from vllm.distributed.device_communicators.cuda_wrapper import CudaRTLibrary
 from vllm.distributed.device_communicators.custom_all_reduce_utils import (
     gpu_p2p_access_check)
 from vllm.distributed.parallel_state import in_the_same_node_as
@@ -22,7 +20,7 @@ try:
     ops.meta_size()
     custom_ar = True
 except Exception:
-    # For AMD GPUs and CPUs
+    # For CPUs
     custom_ar = False
 
 logger = init_logger(__name__)
@@ -71,7 +69,9 @@ class CustomAllreduce:
 
         if not custom_ar:
             # disable because of missing custom allreduce library
-            # e.g. in a non-cuda environment
+            # e.g. in a non-GPU environment
+            logger.info("Custom allreduce is disabled because "
+                        "of missing custom allreduce library")
             return
 
         self.group = group
@@ -87,6 +87,7 @@ class CustomAllreduce:
             return
 
         rank = dist.get_rank(group=self.group)
+        self.rank = rank
         world_size = dist.get_world_size(group=self.group)
         if world_size == 1:
             # No need to initialize custom allreduce for single GPU case.
@@ -128,11 +129,10 @@ class CustomAllreduce:
         # test nvlink first, this will filter out most of the cases
         # where custom allreduce is not supported
         # this checks hardware and driver support for NVLink
-        assert current_platform.is_cuda()
-        from vllm.platforms.cuda import CudaPlatform
-        cuda_platform: CudaPlatform = current_platform
-        full_nvlink = cuda_platform.is_full_nvlink(physical_device_ids)
-        if world_size > 2 and not full_nvlink:
+        assert current_platform.is_cuda_alike()
+        fully_connected = current_platform.is_fully_connected(
+            physical_device_ids)
+        if world_size > 2 and not fully_connected:
             logger.warning(
                 "Custom allreduce is disabled because it's not supported on"
                 " more than two PCIe-only GPUs. To silence this warning, "
@@ -141,7 +141,8 @@ class CustomAllreduce:
         # test P2P capability, this checks software/cudaruntime support
         # this is expensive to compute at the first time
         # then we cache the result
-        if not _can_p2p(rank, world_size):
+        # On AMD GPU, p2p is always enabled between XGMI connected GPUs
+        if not current_platform.is_rocm() and not _can_p2p(rank, world_size):
             logger.warning(
                 "Custom allreduce is disabled because your platform lacks "
                 "GPU P2P capability or P2P test failed. To silence this "
@@ -153,7 +154,8 @@ class CustomAllreduce:
         # Meta data composes of two parts: meta data for synchronization and a
         # temporary buffer for storing intermediate allreduce results.
         self.meta_ptrs = self.create_shared_buffer(ops.meta_size() + max_size,
-                                                   group=group)
+                                                   group=group,
+                                                   uncached=True)
         # This is a pre-registered IPC buffer. In eager mode, input tensors
         # are first copied into this buffer before allreduce is performed
         self.buffer_ptrs = self.create_shared_buffer(max_size, group=group)
@@ -168,43 +170,10 @@ class CustomAllreduce:
         self.max_size = max_size
         self.rank = rank
         self.world_size = world_size
-        self.full_nvlink = full_nvlink
+        self.fully_connected = fully_connected
         self._ptr = ops.init_custom_ar(self.meta_ptrs, self.rank_data, rank,
-                                       self.full_nvlink)
+                                       self.fully_connected)
         ops.register_buffer(self._ptr, self.buffer_ptrs)
-
-    @staticmethod
-    def create_shared_buffer(
-            size_in_bytes: int,
-            group: Optional[ProcessGroup] = None) -> List[int]:
-        """
-        Creates a shared buffer and returns a list of pointers
-        representing the buffer on all processes in the group.
-        """
-        lib = CudaRTLibrary()
-        pointer = lib.cudaMalloc(size_in_bytes)
-        handle = lib.cudaIpcGetMemHandle(pointer)
-        world_size = dist.get_world_size(group=group)
-        rank = dist.get_rank(group=group)
-        handles = [None] * world_size
-        dist.all_gather_object(handles, handle, group=group)
-
-        pointers: List[int] = []
-        for i, h in enumerate(handles):
-            if i == rank:
-                pointers.append(pointer.value)  # type: ignore
-            else:
-                pointers.append(
-                    lib.cudaIpcOpenMemHandle(h).value)  # type: ignore
-
-        return pointers
-
-    @staticmethod
-    def free_shared_buffer(pointers: List[int],
-                           group: Optional[ProcessGroup] = None) -> None:
-        rank = dist.get_rank(group=group)
-        lib = CudaRTLibrary()
-        lib.cudaFree(ctypes.c_void_p(pointers[rank]))
 
     @contextmanager
     def capture(self):
@@ -252,7 +221,7 @@ class CustomAllreduce:
             return False
         # for 4 or more non NVLink-capable GPUs, custom allreduce provides
         # little performance improvement over NCCL.
-        if self.world_size == 2 or self.full_nvlink:
+        if self.world_size == 2 or self.fully_connected:
             return inp_size < self.max_size
         return False
 
@@ -298,8 +267,35 @@ class CustomAllreduce:
         if not self.disabled and self._ptr:
             ops.dispose(self._ptr)
             self._ptr = 0
-            self.free_shared_buffer(self.meta_ptrs)
-            self.free_shared_buffer(self.buffer_ptrs)
+            self.free_shared_buffer(self.meta_ptrs, rank=self.rank)
+            self.free_shared_buffer(self.buffer_ptrs, rank=self.rank)
 
     def __del__(self):
         self.close()
+
+    @staticmethod
+    def create_shared_buffer(size_in_bytes: int,
+                             group: Optional[ProcessGroup] = None,
+                             uncached: Optional[bool] = False) -> List[int]:
+        pointer, handle = ops.allocate_shared_buffer_and_handle(size_in_bytes)
+
+        world_size = dist.get_world_size(group=group)
+        rank = dist.get_rank(group=group)
+        handles = [None] * world_size
+        dist.all_gather_object(handles, handle, group=group)
+
+        pointers: List[int] = []
+        for i, h in enumerate(handles):
+            if i == rank:
+                pointers.append(pointer)  # type: ignore
+            else:
+                pointers.append(ops.open_mem_handle(h))
+        return pointers
+
+    @staticmethod
+    def free_shared_buffer(pointers: List[int],
+                           group: Optional[ProcessGroup] = None,
+                           rank: Optional[int] = 0) -> None:
+        if rank is None:
+            rank = dist.get_rank(group=group)
+        ops.free_shared_buffer(pointers[rank])

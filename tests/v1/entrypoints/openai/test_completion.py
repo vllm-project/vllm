@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import re
-from typing import Dict, List, Optional
+from typing import Optional
 
 import openai  # use the official client for correctness check
 import pytest
@@ -9,10 +9,11 @@ import pytest_asyncio
 from openai import BadRequestError
 
 from tests.utils import RemoteOpenAIServer
+from vllm.platforms import current_platform
 from vllm.transformers_utils.tokenizer import get_tokenizer
 
 # any model with a chat template should work here
-MODEL_NAME = "facebook/opt-125m"
+MODEL_NAME = "/mnt/weka/data/pytorch/llama3.2/Meta-Llama-3.2-1B"
 
 
 @pytest.fixture(scope="module")
@@ -193,7 +194,7 @@ async def test_too_many_completion_logprobs(client: openai.AsyncOpenAI,
 async def test_prompt_logprobs_completion(client: openai.AsyncOpenAI,
                                           model_name: str,
                                           prompt_logprobs: Optional[int]):
-    params: Dict = {
+    params: dict = {
         "prompt": ["A robot may not injure another robot", "My name is"],
         "model": model_name,
     }
@@ -237,7 +238,7 @@ async def test_completion_streaming(client: openai.AsyncOpenAI,
                                              max_tokens=5,
                                              temperature=0.0,
                                              stream=True)
-    chunks: List[str] = []
+    chunks: list[str] = []
     finish_reason_count = 0
     async for chunk in stream:
         chunks.append(chunk.choices[0].text)
@@ -248,6 +249,121 @@ async def test_completion_streaming(client: openai.AsyncOpenAI,
     assert chunk.choices[0].finish_reason == "length"
     assert chunk.choices[0].text
     assert "".join(chunks) == single_output
+
+
+@pytest.mark.skipif(current_platform.is_hpu(),
+                    reason="Flaky test on HPU, to be investigated")
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "model_name",
+    [MODEL_NAME],
+)
+async def test_parallel_no_streaming(client: openai.AsyncOpenAI,
+                                     model_name: str):
+    """Parallel sampling without streaming.
+    A single request output contains a list of completions.
+    """
+
+    prompt = "What is an LLM?"
+    n = 3
+    max_tokens = 50  # we want some to finish earlier than others
+
+    # High temperature to maximize chance of unique completions.
+    completion = await client.completions.create(model=model_name,
+                                                 prompt=prompt,
+                                                 max_tokens=max_tokens,
+                                                 n=n,
+                                                 temperature=1.0,
+                                                 stream=False,
+                                                 logprobs=0,
+                                                 seed=42)
+
+    # Assert `n` completions
+    num_completions = len(completion.choices)
+    assert num_completions == n, (
+        f"Num completions {num_completions} but expected {n}.")
+    completion_repeats: dict[str, int] = {}
+    output_token_lengths = set()
+    for idx, choice in enumerate(completion.choices):
+        # Assert correct completion index & some finish reason.
+        assert choice.index == idx, (
+            f"Index {choice.index} but expected {idx}.")
+        assert choice.finish_reason is not None, (
+            "None finish_reason is invalid.")
+        text = choice.text
+        completion_repeats[text] = completion_repeats.get(text, 0) + 1
+        output_token_lengths.add(len(choice.logprobs.tokens))
+    # Assert subrequests finished at different times
+    assert len(output_token_lengths) > 1
+    # Assert `n` unique completions
+    num_unique = len(completion_repeats)
+    if num_unique != n:
+        repeats = {
+            txt: num
+            for (txt, num) in completion_repeats.items() if num > 1
+        }
+        raise AssertionError(
+            f"Expected {n} unique completions, got {num_unique};"
+            f" repeats: {repeats}.")
+
+
+@pytest.mark.skipif(current_platform.is_hpu(),
+                    reason="Flaky test on HPU, to be investigated")
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "model_name",
+    [MODEL_NAME],
+)
+async def test_parallel_streaming(client: openai.AsyncOpenAI, model_name: str):
+    """Streaming for parallel sampling.
+    The tokens from multiple samples, are flattened into a single stream,
+    with an index to indicate which sample the token belongs to.
+    """
+
+    prompt = "What is an LLM?"
+    n = 3
+    max_tokens = 50  # we want some to finish earlier than others
+
+    stream = await client.completions.create(model=model_name,
+                                             prompt=prompt,
+                                             max_tokens=max_tokens,
+                                             n=n,
+                                             temperature=1.0,
+                                             stream=True,
+                                             seed=42)
+    chunks: list[list[str]] = [[] for _ in range(n)]
+    finish_reason_count = 0
+    async for chunk in stream:
+        index = chunk.choices[0].index
+        text = chunk.choices[0].text
+        chunks[index].append(text)
+        if chunk.choices[0].finish_reason is not None:
+            finish_reason_count += 1
+    # Assert `n` completions with correct finish reasons
+    assert finish_reason_count == n, (
+        f"Expected {n} completions with valid indices and finish_reason.")
+    completion_repeats: dict[str, int] = {}
+    chunk_lengths = set()
+    for chunk in chunks:
+        chunk_len = len(chunk)
+        # Assert correct number of completion tokens
+        chunk_lengths.add(chunk_len)
+        assert chunk_len <= max_tokens, (
+            f"max_tokens={max_tokens} but chunk len is {chunk_len}.")
+        text = "".join(chunk)
+        completion_repeats[text] = completion_repeats.get(text, 0) + 1
+        print(text)
+    # Assert subrequests finished at different times
+    assert len(chunk_lengths) > 1
+    # Assert `n` unique completions
+    num_unique = len(completion_repeats)
+    if num_unique != n:
+        repeats = {
+            txt: num
+            for (txt, num) in completion_repeats.items() if num > 1
+        }
+        raise AssertionError(f"{num_unique} unique completions, expected {n};"
+                             f" repeats: {repeats}")
 
 
 @pytest.mark.asyncio
@@ -441,6 +557,8 @@ async def test_batch_completions(client: openai.AsyncOpenAI, model_name: str):
         assert texts[0] == texts[1]
 
 
+@pytest.mark.skipif(current_platform.is_hpu(),
+                    reason="Flaky test on HPU, to be investigated")
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "model_name",

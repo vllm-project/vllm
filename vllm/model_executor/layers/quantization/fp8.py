@@ -1,8 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 
+import importlib.util
 from typing import Any, Callable, Dict, List, Optional
 
 import torch
+import torch.nn.functional as F
 from torch.nn import Module
 from torch.nn.parameter import Parameter
 
@@ -22,10 +24,10 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils_fp8 import (
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     is_layer_skipped)
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
-    all_close_1d, apply_fp8_linear, convert_to_channelwise,
+    Fp8LinearOp, all_close_1d, convert_to_channelwise,
     cutlass_block_fp8_supported, cutlass_fp8_supported,
-    normalize_e4m3fn_to_e4m3fnuz, per_tensor_dequantize,
-    requantize_with_max_scale)
+    maybe_create_device_identity, normalize_e4m3fn_to_e4m3fnuz,
+    per_tensor_dequantize, requantize_with_max_scale)
 from vllm.model_executor.parameter import (BlockQuantScaleParameter,
                                            ModelWeightParameter,
                                            PerTensorScaleParameter)
@@ -40,6 +42,14 @@ ACTIVATION_SCHEMES = ["static", "dynamic"]
 
 logger = init_logger(__name__)
 
+has_deep_gemm = importlib.util.find_spec("deep_gemm") is not None
+
+
+def _is_col_major(x: torch.Tensor) -> bool:
+    assert x.dim() == 3
+    b, m, n = x.shape
+    return x.stride(0) == m * n and x.stride(1) == 1 and x.stride(2) == m
+
 
 class Fp8Config(QuantizationConfig):
     """Config class for FP8."""
@@ -51,6 +61,7 @@ class Fp8Config(QuantizationConfig):
         ignored_layers: Optional[List[str]] = None,
         weight_block_size: Optional[List[int]] = None,
     ) -> None:
+        super().__init__()
         self.is_checkpoint_fp8_serialized = is_checkpoint_fp8_serialized
         if is_checkpoint_fp8_serialized:
             logger.warning("Detected fp8 checkpoint. Please note that the "
@@ -118,6 +129,21 @@ class Fp8Config(QuantizationConfig):
             return Fp8KVCacheMethod(self)
         return None
 
+    def get_cache_scale(self, name: str) -> Optional[str]:
+        """
+        Check whether the param name matches the format for k/v cache scales
+        in compressed-tensors. If this is the case, return its equivalent
+        param name expected by vLLM
+
+        :param name: param name
+        :return: matching param name for KV cache scale in vLLM
+        """
+        if name.endswith(".output_scale") and ".k_proj" in name:
+            return name.replace(".k_proj.output_scale", ".attn.k_scale")
+        if name.endswith(".output_scale") and ".v_proj" in name:
+            return name.replace(".v_proj.output_scale", ".attn.v_scale")
+        return None
+
 
 class Fp8LinearMethod(LinearMethodBase):
     """Linear method for FP8.
@@ -144,6 +170,7 @@ class Fp8LinearMethod(LinearMethodBase):
         if current_platform.is_cuda_alike():
             self.cutlass_fp8_supported = cutlass_fp8_supported()
             self.cutlass_block_fp8_supported = cutlass_block_fp8_supported()
+        self.out_dtype = torch.get_default_dtype()
 
         self.use_marlin = False
         if not current_platform.is_hpu():
@@ -160,6 +187,10 @@ class Fp8LinearMethod(LinearMethodBase):
             # Marlin doesn't support block-wise fp8
             self.use_marlin = False
 
+        self.fp8_linear = Fp8LinearOp(
+            # Default to using per_token quantization if cutlass is supported
+            use_per_token_if_dynamic=cutlass_fp8_supported())
+
     def create_weights(
         self,
         layer: torch.nn.Module,
@@ -170,6 +201,8 @@ class Fp8LinearMethod(LinearMethodBase):
         params_dtype: torch.dtype,
         **extra_weight_attrs,
     ):
+        maybe_create_device_identity()
+
         output_size_per_partition = sum(output_partition_sizes)
         weight_loader = extra_weight_attrs.get("weight_loader")
 
@@ -257,11 +290,22 @@ class Fp8LinearMethod(LinearMethodBase):
             else:
                 layer.register_parameter("input_scale", None)
 
+    def _maybe_pad_weight(self, weight: torch.Tensor) -> torch.Tensor:
+        # Pad the weight tensor. This is an optimization on ROCm platform, which
+        # can benefit from tensors located far enough from one another in memory
+        if (envs.VLLM_ROCM_FP8_PADDING and current_platform.is_rocm()
+                and weight.stride(-1) == 1
+                and (weight.stride(-2) * weight.element_size()) % 512 == 0):
+            num_pad = 256 // weight.element_size()
+            weight = F.pad(weight, (0, num_pad), "constant", 0)[..., :-num_pad]
+            torch.cuda.empty_cache()
+        return weight
+
     def process_weights_after_loading(self, layer: Module) -> None:
         # TODO(rob): refactor block quant into separate class.
         if self.block_quant:
             assert self.quant_config.activation_scheme == "dynamic"
-            if current_platform.is_rocm():
+            if current_platform.is_fp8_fnuz():
                 weight, weight_scale_inv, _ = \
                     normalize_e4m3fn_to_e4m3fnuz(
                         weight=layer.weight,
@@ -269,6 +313,8 @@ class Fp8LinearMethod(LinearMethodBase):
             else:
                 weight = layer.weight.data
                 weight_scale_inv = layer.weight_scale_inv.data
+
+            weight = self._maybe_pad_weight(weight)
 
             # Torch.compile cannot use Parameter subclasses.
             layer.weight = Parameter(weight, requires_grad=False)
@@ -316,8 +362,7 @@ class Fp8LinearMethod(LinearMethodBase):
                 weight = layer.weight
                 weight_scale = layer.weight_scale
 
-                # If rocm, use float8_e4m3fnuz.
-                if current_platform.is_rocm():
+                if current_platform.is_fp8_fnuz():
                     weight, weight_scale, input_scale = \
                         normalize_e4m3fn_to_e4m3fnuz(
                             weight=weight,
@@ -333,6 +378,7 @@ class Fp8LinearMethod(LinearMethodBase):
                     logical_widths=layer.logical_widths,
                 )
 
+            weight = self._maybe_pad_weight(weight)
             # Update layer with new values.
             layer.weight = Parameter(weight.t(), requires_grad=False)
             layer.weight_scale = Parameter(weight_scale, requires_grad=False)
@@ -360,12 +406,9 @@ class Fp8LinearMethod(LinearMethodBase):
                 size_k=layer.input_size_per_partition,
                 bias=bias)
 
-        # Note: lazy import to avoid triton import error.
-        from vllm.model_executor.layers.quantization.utils.fp8_utils import (
-            apply_w8a8_block_fp8_linear)
         if self.block_quant:
             assert self.quant_config.weight_block_size is not None
-            return apply_w8a8_block_fp8_linear(
+            return torch.ops.vllm.apply_w8a8_block_fp8_linear(
                 input=x,
                 weight=layer.weight,
                 block_size=self.quant_config.weight_block_size,
@@ -375,15 +418,12 @@ class Fp8LinearMethod(LinearMethodBase):
                 cutlass_block_fp8_supported=self.cutlass_block_fp8_supported,
             )
 
-        return apply_fp8_linear(
-            input=x,
-            weight=layer.weight,
-            weight_scale=layer.weight_scale,
-            input_scale=layer.input_scale,
-            bias=bias,
-            cutlass_fp8_supported=self.cutlass_fp8_supported,
-            # Default to using per_token quantization if cutlass is supported
-            use_per_token_if_dynamic=self.cutlass_fp8_supported)
+        return self.fp8_linear.apply(input=x,
+                                     weight=layer.weight,
+                                     weight_scale=layer.weight_scale,
+                                     out_dtype=self.out_dtype,
+                                     input_scale=layer.input_scale,
+                                     bias=bias)
 
 
 class Fp8MoEMethod(FusedMoEMethodBase):
@@ -402,6 +442,19 @@ class Fp8MoEMethod(FusedMoEMethodBase):
     def __init__(self, quant_config: Fp8Config):
         self.quant_config = quant_config
         self.block_quant = self.quant_config.weight_block_size is not None
+
+        # Check for DeepGemm support.
+        self.allow_deep_gemm = False
+        if envs.VLLM_USE_DEEP_GEMM:
+            if not has_deep_gemm:
+                logger.warning_once("Failed to import DeepGemm kernels.")
+            elif (current_platform.is_cuda()
+                  and current_platform.has_device_capability(90)):
+                logger.info_once("Using DeepGemm kernels for Fp8MoEMethod.")
+                self.allow_deep_gemm = True
+            else:
+                logger.warning_once(
+                    "DeepGemm not supported on the current platform.")
 
     def create_weights(self, layer: Module, num_experts: int, hidden_size: int,
                        intermediate_size_per_partition: int,
@@ -525,10 +578,15 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             layer.w2_input_scale = None
 
     def process_weights_after_loading(self, layer: Module) -> None:
+        # Lazy import to avoid importing triton too early.
+        from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
+            expand_weights, is_rocm_aiter_block_scaled_moe_enabled,
+            is_rocm_aiter_moe_enabled, shuffle_weights)
+
         # TODO (rob): refactor block quant into separate class.
         if self.block_quant:
             assert self.quant_config.activation_scheme == "dynamic"
-            if current_platform.is_rocm():
+            if current_platform.is_fp8_fnuz():
                 w13_weight, w13_weight_scale_inv, w13_input_scale = \
                     normalize_e4m3fn_to_e4m3fnuz(
                         layer.w13_weight, layer.w13_weight_scale_inv,
@@ -550,13 +608,33 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             layer.w2_weight = Parameter(w2_weight, requires_grad=False)
             layer.w2_weight_scale_inv = Parameter(w2_weight_scale_inv,
                                                   requires_grad=False)
+            if is_rocm_aiter_block_scaled_moe_enabled():
+                # reshaping weights is required for aiter moe kernel.
+                shuffled_w13, shuffled_w2 = shuffle_weights(
+                    layer.w13_weight.data, layer.w2_weight.data)
+
+                layer.w13_weight = torch.nn.Parameter(shuffled_w13,
+                                                      requires_grad=False)
+                layer.w2_weight = torch.nn.Parameter(shuffled_w2,
+                                                     requires_grad=False)
+
+            # DeepGemm scales need to be transposed and aligned.  We try to do
+            # it ahead of time for performance reasons.
+            if self.allow_deep_gemm:
+                # Lazy import to avoid CUDA initialization problems.
+                import deep_gemm as dg
+                if _is_col_major(layer.w13_weight_scale_inv):
+                    layer.w13_weight_scale_inv = \
+                        dg.get_col_major_tma_aligned_tensor(layer.w13_weight_scale_inv).contiguous()
+                if _is_col_major(layer.w2_weight_scale_inv):
+                    layer.w2_weight_scale_inv = \
+                        dg.get_col_major_tma_aligned_tensor(layer.w2_weight_scale_inv).contiguous()
+
             return
 
         # If checkpoint is fp16, quantize in place.
         if not self.quant_config.is_checkpoint_fp8_serialized:
-            # If rocm, use float8_e4m3fnuz as dtype
-            fp8_dtype = torch.float8_e4m3fnuz \
-                        if current_platform.is_rocm() else torch.float8_e4m3fn
+            fp8_dtype = current_platform.fp8_dtype()
             w13_weight = torch.empty_like(layer.w13_weight.data,
                                           dtype=fp8_dtype)
             w2_weight = torch.empty_like(layer.w2_weight.data, dtype=fp8_dtype)
@@ -564,11 +642,11 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             # Re-initialize w13_scale because we directly quantize
             # merged w13 weights and generate a single scaling factor.
             layer.w13_weight_scale = torch.nn.Parameter(torch.ones(
-                layer.num_experts,
+                layer.local_num_experts,
                 dtype=torch.float32,
                 device=w13_weight.device),
                                                         requires_grad=False)
-            for expert in range(layer.num_experts):
+            for expert in range(layer.local_num_experts):
                 w13_weight[expert, :, :], layer.w13_weight_scale[
                     expert] = ops.scaled_fp8_quant(
                         layer.w13_weight.data[expert, :, :])
@@ -579,6 +657,26 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                                                   requires_grad=False)
             layer.w2_weight = torch.nn.Parameter(w2_weight,
                                                  requires_grad=False)
+            if is_rocm_aiter_moe_enabled():
+                # reshaping weights is required for aiter moe kernel.
+                w13_scales, w2_scales = expand_weights(
+                    layer.w13_weight_scale.data,
+                    layer.w2_weight_scale.data,
+                    expansion_dims=[
+                        layer.w13_weight.shape[1], layer.w2_weight.shape[1]
+                    ])
+                layer.w13_weight_scale = torch.nn.Parameter(
+                    w13_scales.contiguous(), requires_grad=False)
+                layer.w2_weight_scale = torch.nn.Parameter(
+                    w2_scales.contiguous(), requires_grad=False)
+
+                shuffled_w13, shuffled_w2 = shuffle_weights(
+                    layer.w13_weight, layer.w2_weight)
+
+                layer.w13_weight = torch.nn.Parameter(shuffled_w13,
+                                                      requires_grad=False)
+                layer.w2_weight = torch.nn.Parameter(shuffled_w2,
+                                                     requires_grad=False)
             return
 
         # If checkpoint is fp8, we need to handle that the
@@ -603,8 +701,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                     layer.w13_input_scale.max(), requires_grad=False)
                 layer.w2_input_scale = torch.nn.Parameter(
                     layer.w2_input_scale.max(), requires_grad=False)
-            # If rocm, normalize the weights and scales to e4m3fnuz
-            if current_platform.is_rocm():
+            if current_platform.is_fp8_fnuz():
                 # Normalize the weights and scales
                 w13_weight, w13_weight_scale, w13_input_scale = \
                     normalize_e4m3fn_to_e4m3fnuz(
@@ -635,7 +732,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             assert layer.w13_weight_scale is not None
             shard_size = layer.intermediate_size_per_partition
             max_w13_scales = layer.w13_weight_scale.max(dim=1).values
-            for expert_id in range(layer.num_experts):
+            for expert_id in range(layer.local_num_experts):
                 start = 0
                 for shard_id in range(2):
                     dq_weight = per_tensor_dequantize(
@@ -646,6 +743,26 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                         start:start + shard_size, :], _ = ops.scaled_fp8_quant(
                             dq_weight, max_w13_scales[expert_id])
                     start += shard_size
+
+            if is_rocm_aiter_moe_enabled():
+                # reshaping weights is required for aiter moe kernel.
+                expansion_dims = [
+                    layer.w13_weight.shape[1], layer.w2_weight.shape[1]
+                ]
+                max_w13_scales, w2_scales = expand_weights(
+                    max_w13_scales,
+                    layer.w2_weight_scale.data,
+                    expansion_dims=expansion_dims)
+                layer.w2_weight_scale = torch.nn.Parameter(
+                    w2_scales.contiguous(), requires_grad=False)
+
+                shuffled_w13, shuffled_w2 = shuffle_weights(
+                    layer.w13_weight, layer.w2_weight)
+
+                layer.w13_weight = torch.nn.Parameter(shuffled_w13,
+                                                      requires_grad=False)
+                layer.w2_weight = torch.nn.Parameter(shuffled_w2,
+                                                     requires_grad=False)
 
             layer.w13_weight_scale = torch.nn.Parameter(max_w13_scales,
                                                         requires_grad=False)
@@ -661,9 +778,12 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         use_grouped_topk: bool = False,
         topk_group: Optional[int] = None,
         num_expert_group: Optional[int] = None,
+        global_num_experts: int = -1,
+        expert_map: Optional[torch.Tensor] = None,
         custom_routing_function: Optional[Callable] = None,
         scoring_func: str = "softmax",
         e_score_correction_bias: Optional[torch.Tensor] = None,
+        activation: str = "silu",
     ) -> torch.Tensor:
         from vllm.model_executor.layers.fused_moe import fused_experts
 
@@ -687,7 +807,10 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             topk_weights=topk_weights,
             topk_ids=topk_ids,
             inplace=True,
+            activation=activation,
             use_fp8_w8a8=True,
+            global_num_experts=global_num_experts,
+            expert_map=expert_map,
             w1_scale=(layer.w13_weight_scale_inv
                       if self.block_quant else layer.w13_weight_scale),
             w2_scale=(layer.w2_weight_scale_inv
@@ -695,6 +818,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             a1_scale=layer.w13_input_scale,
             a2_scale=layer.w2_input_scale,
             block_shape=self.quant_config.weight_block_size,
+            allow_deep_gemm=self.allow_deep_gemm,
         )
 
 
