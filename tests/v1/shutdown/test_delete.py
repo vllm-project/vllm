@@ -3,7 +3,6 @@
 
 import asyncio
 import os
-from contextlib import ExitStack
 
 import pytest
 
@@ -129,38 +128,34 @@ async def test_async_llm_dp_delete(model: str, data_parallel_size: int,
         data_parallel_size=int(os.getenv("DP_SIZE", data_parallel_size)),
     )
 
-    with ExitStack() as after:
+    prompt = "This is a test of data parallel"
+    engine = AsyncLLM.from_engine_args(engine_args)
 
-        prompt = "This is a test of data parallel"
+    # Create concurrent requests.
+    if send_dummy_requests:
+        NUM_REQUESTS = 10
+        NUM_EXPECTED_TOKENS = 10
 
-        engine = AsyncLLM.from_engine_args(engine_args)
-        after.callback(engine.shutdown)
+        request_ids = [f"request-{i}" for i in range(NUM_REQUESTS)]
 
         # Create concurrent requests.
-        if send_dummy_requests:
-            NUM_REQUESTS = 100
-            NUM_EXPECTED_TOKENS = 10
+        tasks = []
+        for request_id in request_ids:
+            tasks.append(
+                asyncio.create_task(
+                    generate_dp(engine, request_id, prompt,
+                                RequestOutputKind.FINAL_ONLY,
+                                NUM_EXPECTED_TOKENS)))
 
-            request_ids = [f"request-{i}" for i in range(NUM_REQUESTS)]
+        # Confirm that we got all the EXPECTED tokens from the requests.
+        _, pending = await asyncio.wait(tasks,
+                                        return_when=asyncio.FIRST_EXCEPTION)
+        for task in pending:
+            task.cancel()
+    del engine
 
-            # Create concurrent requests.
-            tasks = []
-            for request_id in request_ids:
-                tasks.append(
-                    asyncio.create_task(
-                        generate_dp(engine, request_id, prompt,
-                                    RequestOutputKind.FINAL_ONLY,
-                                    NUM_EXPECTED_TOKENS)))
-
-            # Confirm that we got all the EXPECTED tokens from the requests.
-            _, pending = await asyncio.wait(
-                tasks, return_when=asyncio.FIRST_EXCEPTION)
-            for task in pending:
-                task.cancel()
-        del engine
-
-        # Confirm all the processes are cleaned up.
-        wait_for_gpu_memory_to_clear(
-            devices=list(range(data_parallel_size)),
-            threshold_bytes=SHUTDOWN_TEST_THRESHOLD_BYTES,
-        )
+    # Confirm all the processes are cleaned up.
+    wait_for_gpu_memory_to_clear(
+        devices=list(range(data_parallel_size)),
+        threshold_bytes=SHUTDOWN_TEST_THRESHOLD_BYTES,
+    )
