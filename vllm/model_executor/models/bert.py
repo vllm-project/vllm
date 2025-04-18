@@ -11,8 +11,10 @@ from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, PoolerConfig, VllmConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.forward_context import get_forward_context
-from vllm.model_executor.layers.activation import get_act_fn
+from vllm.model_executor.layers.activation import (get_act_and_mul_fn,
+                                                   get_act_fn)
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
+                                               MergedColumnParallelLinear,
                                                QKVParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.pooler import (CrossEncodingPooler, Pooler,
@@ -108,6 +110,7 @@ class BertEncoder(nn.Module):
 
     def __init__(self,
                  vllm_config: VllmConfig,
+                 bias: bool = True,
                  rotary_kwargs: Optional[dict] = None,
                  prefix: str = ""):
         super().__init__()
@@ -118,6 +121,7 @@ class BertEncoder(nn.Module):
             BertLayer(config=config,
                       cache_config=cache_config,
                       quant_config=quant_config,
+                      bias=bias,
                       rotary_kwargs=rotary_kwargs,
                       prefix=f"{prefix}.layer.{layer_idx}")
             for layer_idx in range(config.num_hidden_layers)
@@ -139,6 +143,7 @@ class BertLayer(nn.Module):
                  config: BertConfig,
                  cache_config: Optional[CacheConfig] = None,
                  quant_config: Optional[QuantizationConfig] = None,
+                 bias: bool = True,
                  rotary_kwargs: Optional[dict] = None,
                  prefix: str = ""):
         super().__init__()
@@ -149,19 +154,31 @@ class BertLayer(nn.Module):
             layer_norm_eps=config.layer_norm_eps,
             cache_config=cache_config,
             quant_config=quant_config,
+            bias=bias,
             rotary_kwargs=rotary_kwargs,
             prefix=f"{prefix}.attention")
 
-        self.intermediate = BertIntermediate(
-            hidden_size=config.hidden_size,
-            intermediate_size=config.intermediate_size,
-            hidden_act=config.hidden_act,
-            quant_config=quant_config,
-            prefix=f"{prefix}.intermediate")
+        if config.hidden_act in ["silu", "gelu_and_mul"]:
+            self.intermediate = BertGatedIntermediate(
+                hidden_size=config.hidden_size,
+                intermediate_size=config.intermediate_size,
+                hidden_act=config.hidden_act,
+                bias=bias,
+                quant_config=quant_config,
+                prefix=f"{prefix}.intermediate")
+        else:
+            self.intermediate = BertIntermediate(
+                hidden_size=config.hidden_size,
+                intermediate_size=config.intermediate_size,
+                hidden_act=config.hidden_act,
+                bias=bias,
+                quant_config=quant_config,
+                prefix=f"{prefix}.intermediate")
 
         self.output = BertOutput(hidden_size=config.hidden_size,
                                  intermediate_size=config.intermediate_size,
                                  layer_norm_eps=config.layer_norm_eps,
+                                 bias=bias,
                                  quant_config=quant_config,
                                  prefix=f"{prefix}.output")
 
@@ -181,6 +198,7 @@ class BertAttention(nn.Module):
         layer_norm_eps: float,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
+        bias: bool = True,
         rotary_kwargs: Optional[dict] = None,
         prefix: str = "",
     ):
@@ -190,11 +208,13 @@ class BertAttention(nn.Module):
                                       num_attention_heads=num_attention_heads,
                                       cache_config=cache_config,
                                       quant_config=quant_config,
+                                      bias=bias,
                                       rotary_kwargs=rotary_kwargs,
                                       prefix=f"{prefix}.output")
 
         self.output = BertSelfOutput(hidden_size=hidden_size,
                                      layer_norm_eps=layer_norm_eps,
+                                     bias=bias,
                                      quant_config=quant_config,
                                      prefix=f"{prefix}.output")
 
@@ -215,6 +235,7 @@ class BertSelfAttention(nn.Module):
         num_attention_heads: int,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
+        bias: bool = True,
         rotary_kwargs: Optional[dict] = None,
         prefix: str = "",
     ):
@@ -240,7 +261,7 @@ class BertSelfAttention(nn.Module):
             head_size=self.head_dim,
             total_num_heads=self.total_num_heads,
             total_num_kv_heads=self.total_num_kv_heads,
-            bias=True,
+            bias=bias,
             quant_config=quant_config,
             prefix=f"{prefix}.qkv_proj")
 
@@ -278,12 +299,13 @@ class BertSelfOutput(nn.Module):
     def __init__(self,
                  hidden_size: int,
                  layer_norm_eps: float,
+                 bias: bool = True,
                  quant_config: Optional[QuantizationConfig] = None,
                  prefix: str = ""):
         super().__init__()
         self.dense = RowParallelLinear(input_size=hidden_size,
                                        output_size=hidden_size,
-                                       bias=True,
+                                       bias=bias,
                                        quant_config=quant_config,
                                        prefix=f"{prefix}.dense")
         self.LayerNorm = nn.LayerNorm(hidden_size, eps=layer_norm_eps)
@@ -301,12 +323,13 @@ class BertIntermediate(nn.Module):
                  hidden_size: int,
                  intermediate_size: int,
                  hidden_act: str,
+                 bias: bool = True,
                  quant_config: Optional[QuantizationConfig] = None,
                  prefix: str = ""):
         super().__init__()
         self.dense = ColumnParallelLinear(input_size=hidden_size,
                                           output_size=intermediate_size,
-                                          bias=True,
+                                          bias=bias,
                                           quant_config=quant_config,
                                           prefix=f"{prefix}.dense")
         self.intermediate_act_fn = get_act_fn(hidden_act)
@@ -317,19 +340,46 @@ class BertIntermediate(nn.Module):
         return hidden_states
 
 
+class BertGatedIntermediate(nn.Module):
+    # for NomciBert and GteModel
+
+    def __init__(self,
+                 hidden_size: int,
+                 intermediate_size: int,
+                 hidden_act: str,
+                 bias: bool = True,
+                 quant_config: Optional[QuantizationConfig] = None,
+                 prefix: str = ""):
+        super().__init__()
+        self.act_fn = get_act_and_mul_fn(hidden_act)
+        self.gate_up_proj = MergedColumnParallelLinear(
+            hidden_size,
+            [intermediate_size] * 2,
+            bias=bias,
+            quant_config=quant_config,
+            prefix=f"{prefix}.gate_up_proj",
+        )
+
+    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        gate_up, _ = self.gate_up_proj(hidden_states)
+        hidden_states = self.act_fn(gate_up)
+        return hidden_states
+
+
 class BertOutput(nn.Module):
 
     def __init__(self,
                  hidden_size: int,
                  intermediate_size: int,
                  layer_norm_eps: float,
+                 bias: bool = True,
                  quant_config: Optional[QuantizationConfig] = None,
                  prefix: str = ""):
         super().__init__()
 
         self.dense = RowParallelLinear(input_size=intermediate_size,
                                        output_size=hidden_size,
-                                       bias=True,
+                                       bias=bias,
                                        quant_config=quant_config,
                                        prefix=f"{prefix}.dense")
 
@@ -343,19 +393,32 @@ class BertOutput(nn.Module):
 
 
 class BertModel(nn.Module, SupportsQuant):
-    packed_modules_mapping = {"qkv_proj": ["query", "key", "value"]}
+    packed_modules_mapping = {
+        "qkv_proj": ["query", "key", "value"],
+        "gate_up_proj": [
+            "gate_proj",
+            "up_proj",
+        ],
+    }
 
     def __init__(self,
                  *,
                  vllm_config: VllmConfig,
                  prefix: str = "",
                  embedding_class: type = BertEmbedding,
+                 bias: bool = True,
                  rotary_kwargs: Optional[dict] = None,
                  add_pooling_layer: bool = False):
         super().__init__()
+        """
+        For BertModel, all linear layers have bias.
+        For NomicBertModel, all linear layers do not have bias.
+        """
+
         config = vllm_config.model_config.hf_config
         self.embeddings = embedding_class(config)
         self.encoder = BertEncoder(vllm_config=vllm_config,
+                                   bias=bias,
                                    rotary_kwargs=rotary_kwargs,
                                    prefix=f"{prefix}.encoder")
         self.pooler = BertPooler(config) if add_pooling_layer else None
@@ -387,6 +450,8 @@ class BertModel(nn.Module, SupportsQuant):
             ("qkv_proj", "query", "q"),
             ("qkv_proj", "key", "k"),
             ("qkv_proj", "value", "v"),
+            ("gate_up_proj", "gate_proj", 0),
+            ("gate_up_proj", "up_proj", 1),
         ]
 
         params_dict = dict(self.named_parameters())
@@ -546,3 +611,115 @@ class BertForSequenceClassification(nn.Module, SupportsCrossEncoding,
                          inputs_embeds=inputs_embeds,
                          intermediate_tensors=intermediate_tensors,
                          token_type_ids=token_type_ids)
+
+
+class NomicBertEmbeddingModel(BertEmbeddingModel):
+
+    hf_to_vllm_mapper = WeightsMapper(
+        orig_to_new_substr={
+            "emb_ln": "embeddings.LayerNorm",
+            "layers": "layer",
+            "attn.Wqkv": "attention.self.qkv_proj",
+            "attn.out_proj": "attention.output.dense",
+            'norm1': "attention.output.LayerNorm",
+            'mlp.fc11': "intermediate.up_proj",
+            'mlp.fc12': "intermediate.gate_proj",
+            'mlp.fc2': "output.dense",
+            'norm2': "output.LayerNorm",
+        })
+
+    def _build_model(self,
+                     vllm_config: VllmConfig,
+                     prefix: str = "") -> BertModel:
+        config = vllm_config.model_config.hf_config
+
+        assert config.__class__.__name__ == "NomicBertConfig"
+        assert config.activation_function == "swiglu"
+
+        # Assume NomicBertModel all linear layers do not have bias
+        assert not config.mlp_fc1_bias
+        assert not config.mlp_fc2_bias
+        assert not config.qkv_proj_bias
+
+        config.layer_norm_eps = config.layer_norm_epsilon
+        config.position_embedding_type = "rotary"
+        config.intermediate_size = config.n_inner
+        config.hidden_act = "silu"
+        config.hidden_size = config.n_embd
+        config.num_hidden_layers = config.n_layer
+
+        head_dim = config.hidden_size // config.num_attention_heads
+        rotary_kwargs = {
+            "head_size": head_dim,
+            "rotary_dim": getattr(config, "rotary_emb_dim", head_dim),
+            "max_position": config.max_trained_positions,
+            "base": config.rotary_emb_base,
+            "rope_scaling": {
+                "rope_type": "dynamic",
+                "factor": config.rotary_scaling_factor
+            }
+        }
+
+        return BertModel(vllm_config=vllm_config,
+                         prefix=prefix,
+                         bias=False,
+                         rotary_kwargs=rotary_kwargs,
+                         embedding_class=BertEmbedding)
+
+
+class GteEmbeddingModel(BertEmbeddingModel):
+    hf_to_vllm_mapper = WeightsMapper(
+        orig_to_new_substr={
+            "attention.qkv_proj": "attention.self.qkv_proj",
+            "attention.o_proj": "attention.output.dense",
+            'attn_ln': "attention.output.LayerNorm",
+            'mlp.down_proj': "output.dense",
+            'mlp_ln': "output.LayerNorm",
+        })
+
+    def _build_model(self,
+                     vllm_config: VllmConfig,
+                     prefix: str = "") -> BertModel:
+        config = vllm_config.model_config.hf_config
+
+        assert config.__class__.__name__ == "GteConfig"
+        assert config.position_embedding_type == "rope"
+        assert config.hidden_act == "gelu"
+
+        config.position_embedding_type = "rotary"
+        config.hidden_act = "gelu_and_mul"
+
+        head_dim = config.hidden_size // config.num_attention_heads
+        rotary_kwargs = {
+            "head_size": head_dim,
+            "rotary_dim": getattr(config, "rotary_emb_dim", head_dim),
+            "max_position": config.max_position_embeddings,
+            "base": config.rope_theta,
+        }
+
+        model = BertModel(vllm_config=vllm_config,
+                          prefix=prefix,
+                          rotary_kwargs=rotary_kwargs,
+                          embedding_class=BertEmbedding)
+
+        # GteModel only gate_up_proj does not have bias.
+        # Hack method learned from vllm/model_executor/models/glm.py
+        for layer in model.encoder.layer:
+            layer.intermediate.gate_up_proj.bias = None
+            layer.intermediate.skip_bias_add = True
+        return model
+
+    def split_up_gate_proj(self, weights: Iterable[Tuple[str, torch.Tensor]]):
+        n = "mlp.up_gate_proj"
+        for name, weight in weights:
+            if n in name:
+                up, gate = weight.chunk(2, dim=0)
+                yield name.replace(n, "intermediate.up_proj"), up
+                yield name.replace(n, "intermediate.gate_proj"), gate
+            else:
+                yield name, weight
+
+    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
+        weights = self.hf_to_vllm_mapper.apply(weights)
+        weights = self.split_up_gate_proj(weights)
+        self.model.load_weights(weights)
