@@ -242,6 +242,12 @@ class ChatCompletionRequest(OpenAIBaseModel):
         ChatCompletionNamedToolChoiceParam,
     ]] = "none"
 
+    # Custom args param
+    extra_args: Optional[dict[str, Any]] = Field(
+        default=None,
+        description=("Additional kwargs to pass to sampling."),
+    )
+
     # NOTE this will be ignored by vLLM -- the model determines the behavior
     parallel_tool_calls: Optional[bool] = False
     user: Optional[str] = None
@@ -514,7 +520,8 @@ class ChatCompletionRequest(OpenAIBaseModel):
             output_kind=RequestOutputKind.DELTA if self.stream \
                 else RequestOutputKind.FINAL_ONLY,
             guided_decoding=guided_decoding,
-            logit_bias=self.logit_bias)
+            logit_bias=self.logit_bias,
+            extra_args=self.extra_args)
 
     def _get_guided_json_from_tool(
             self) -> Optional[Union[str, dict, BaseModel]]:
@@ -717,6 +724,12 @@ class CompletionRequest(OpenAIBaseModel):
     temperature: Optional[float] = None
     top_p: Optional[float] = None
     user: Optional[str] = None
+
+    # Custom args param
+    extra_args: Optional[dict[str, Any]] = Field(
+        default=None,
+        description=("Additional kwargs to pass to sampling."),
+    )
 
     # doc: begin-completion-sampling-params
     use_beam_search: bool = False
@@ -932,7 +945,8 @@ class CompletionRequest(OpenAIBaseModel):
                 else RequestOutputKind.FINAL_ONLY,
             guided_decoding=guided_decoding,
             logit_bias=self.logit_bias,
-            allowed_token_ids=self.allowed_token_ids)
+            allowed_token_ids=self.allowed_token_ids,
+            extra_args=self.extra_args)
 
     @model_validator(mode="before")
     @classmethod
@@ -1586,6 +1600,12 @@ class TranscriptionRequest(OpenAIBaseModel):
     to automatically increase the temperature until certain thresholds are hit.
     """
 
+    # Custom args param
+    extra_args: Optional[dict[str, Any]] = Field(
+        default=None,
+        description=("Additional kwargs to pass to sampling."),
+    )
+
     timestamp_granularities: list[Literal["word", "segment"]] = Field(
         alias="timestamp_granularities[]", default=[])
     """The timestamp granularities to populate for this transcription.
@@ -1628,7 +1648,8 @@ class TranscriptionRequest(OpenAIBaseModel):
                                             max_tokens=max_tokens,
                                             output_kind=RequestOutputKind.DELTA
                                             if self.stream \
-                                            else RequestOutputKind.FINAL_ONLY)
+                                            else RequestOutputKind.FINAL_ONLY,
+                                            extra_args=self.extra_args)
 
     @model_validator(mode="before")
     @classmethod
