@@ -31,7 +31,7 @@ def server():
         "--enforce-eager",
         "--trust-remote-code",
         "--limit-mm-per-prompt",
-        f"video={MAXIMUM_VIDEOS}",
+        str({"video": MAXIMUM_VIDEOS}),
     ]
 
     with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:

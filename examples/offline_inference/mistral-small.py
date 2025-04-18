@@ -16,11 +16,11 @@ from vllm.sampling_params import SamplingParams
 # # Mistral format
 # vllm serve mistralai/Mistral-Small-3.1-24B-Instruct-2503 \
 #   --tokenizer-mode mistral --config-format mistral --load-format mistral \
-#   --limit-mm-per-prompt 'image=4' --max-model-len 16384
+#   --limit-mm-per-prompt '{"image":4}' --max-model-len 16384
 #
 # # HF format
 # vllm serve mistralai/Mistral-Small-3.1-24B-Instruct-2503 \
-#   --limit-mm-per-prompt 'image=4' --max-model-len 16384
+#   --limit-mm-per-prompt '{"image":4}' --max-model-len 16384
 # ```
 #
 # - Client:
