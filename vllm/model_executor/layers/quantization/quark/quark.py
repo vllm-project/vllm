@@ -15,7 +15,7 @@ from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
 from vllm.model_executor.layers.quantization.quark.quark_moe import (  # noqa: E501
     QuarkMoEMethod)
 from vllm.model_executor.layers.quantization.quark.schemes import (
-    QuarkScheme, QuarkW8A8Fp8, QuarkW8A8Int8)
+    QuarkScheme, QuarkW8A8Fp8, QuarkW8A8Int8, QuarkW4A4MXFP4)
 from vllm.model_executor.layers.quantization.quark.utils import (
     deep_compare, should_ignore_layer)
 from vllm.platforms import current_platform
@@ -262,6 +262,8 @@ class QuarkConfig(QuantizationConfig):
             return QuarkW8A8Int8(qscheme=weight_qscheme,
                                  is_static_input_scheme=True,
                                  input_symmetric=input_config.get("symmetric"))
+        elif self._is_mx_fp4(weight_config, input_config):
+            return QuarkW4A4MXFP4()
 
         raise NotImplementedError("No quark compatible scheme was found. "
                                   f"Weight config: {weight_config}, "
