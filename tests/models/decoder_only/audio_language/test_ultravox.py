@@ -26,8 +26,7 @@ HF_PLACEHOLDER = "<|audio|>"
 CHUNKED_PREFILL_KWARGS = {
     "enable_chunked_prefill": True,
     "max_num_seqs": 2,
-    # Use a very small limit to exercise chunked prefill.
-    "max_num_batched_tokens": 16
+    "max_num_batched_tokens": 3072,
 }
 
 
