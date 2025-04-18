@@ -331,7 +331,7 @@ def test_cutlass_moe_8_bit_EP(
     topk: int,
     per_act_token: bool,
     per_out_channel: bool,
-    ep_size: bool,
+    ep_size: int,
 ):
     current_platform.seed_everything(7)
     with set_current_vllm_config(
