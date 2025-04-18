@@ -99,6 +99,7 @@ _TEXT_GENERATION_MODELS = {
     "Phi3ForCausalLM": ("phi3", "Phi3ForCausalLM"),
     "Phi3SmallForCausalLM": ("phi3_small", "Phi3SmallForCausalLM"),
     "PhiMoEForCausalLM": ("phimoe", "PhiMoEForCausalLM"),
+    "Plamo2ForCausalLM": ("plamo2", "Plamo2ForCausalLM"),
     "QWenLMHeadModel": ("qwen", "QWenLMHeadModel"),
     "Qwen2ForCausalLM": ("qwen2", "Qwen2ForCausalLM"),
     "Qwen2MoeForCausalLM": ("qwen2_moe", "Qwen2MoeForCausalLM"),
@@ -163,6 +164,8 @@ _CROSS_ENCODER_MODELS = {
                                          "RobertaForSequenceClassification"),
     "XLMRobertaForSequenceClassification": ("roberta",
                                             "RobertaForSequenceClassification"),
+    "ModernBertForSequenceClassification": ("modernbert",
+                                            "ModernBertForSequenceClassification"),
 }
 
 _MULTIMODAL_MODELS = {
@@ -179,6 +182,7 @@ _MULTIMODAL_MODELS = {
     "InternVLChatModel": ("internvl", "InternVLChatModel"),
     "Idefics3ForConditionalGeneration":("idefics3","Idefics3ForConditionalGeneration"),
     "SmolVLMForConditionalGeneration": ("smolvlm","SmolVLMForConditionalGeneration"),  # noqa: E501
+    "KimiVLForConditionalGeneration": ("kimi_vl", "KimiVLForConditionalGeneration"),  # noqa: E501
     "LlavaForConditionalGeneration": ("llava", "LlavaForConditionalGeneration"),
     "LlavaNextForConditionalGeneration": ("llava_next", "LlavaNextForConditionalGeneration"),  # noqa: E501
     "LlavaNextVideoForConditionalGeneration": ("llava_next_video", "LlavaNextVideoForConditionalGeneration"),  # noqa: E501
