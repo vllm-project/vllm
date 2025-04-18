@@ -12,7 +12,7 @@ from vllm.entrypoints.openai.cli_args import (make_arg_parser,
                                               validate_parsed_serve_args)
 from vllm.logger import init_logger
 from vllm.usage.usage_lib import UsageContext
-from vllm.utils import FlexibleArgumentParser
+from vllm.utils import FlexibleArgumentParser, get_tcp_uri
 from vllm.v1.engine.core import EngineCoreProc
 from vllm.v1.engine.core_client import CoreEngineProcManager
 from vllm.v1.executor.abstract import Executor
@@ -98,7 +98,7 @@ def run_headless(args: argparse.Namespace):
     local_engine_count = parallel_config.data_parallel_size_local
     host = parallel_config.data_parallel_master_ip
     port = engine_args.data_parallel_rpc_port  # add to config too
-    input_address = f"tcp://{host}:{port}"
+    input_address = get_tcp_uri(host, port)
 
     if local_engine_count <= 0:
         raise RuntimeError("data_parallel_size_local must be > 0 in "
