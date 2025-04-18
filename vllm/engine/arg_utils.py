@@ -554,6 +554,7 @@ class EngineArgs:
             title="CacheConfig",
             description=CacheConfig.__doc__,
         )
+        cache_group.add_argument('--block-size', **cache_kwargs["block_size"])
         cache_group.add_argument('--gpu-memory-utilization',
                                  **cache_kwargs["gpu_memory_utilization"])
         cache_group.add_argument('--swap-space', **cache_kwargs["swap_space"])
