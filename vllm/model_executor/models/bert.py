@@ -111,7 +111,6 @@ class BertEncoder(nn.Module):
     def __init__(self,
                  vllm_config: VllmConfig,
                  bias: bool = True,
-                 gate_up_proj_bias: bool = True,
                  rotary_kwargs: Optional[dict] = None,
                  prefix: str = ""):
         super().__init__()
@@ -123,7 +122,6 @@ class BertEncoder(nn.Module):
                       cache_config=cache_config,
                       quant_config=quant_config,
                       bias=bias,
-                      gate_up_proj_bias=gate_up_proj_bias,
                       rotary_kwargs=rotary_kwargs,
                       prefix=f"{prefix}.layer.{layer_idx}")
             for layer_idx in range(config.num_hidden_layers)
@@ -146,7 +144,6 @@ class BertLayer(nn.Module):
                  cache_config: Optional[CacheConfig] = None,
                  quant_config: Optional[QuantizationConfig] = None,
                  bias: bool = True,
-                 gate_up_proj_bias: bool = True,
                  rotary_kwargs: Optional[dict] = None,
                  prefix: str = ""):
         super().__init__()
@@ -166,7 +163,7 @@ class BertLayer(nn.Module):
                 hidden_size=config.hidden_size,
                 intermediate_size=config.intermediate_size,
                 hidden_act=config.hidden_act,
-                gate_up_proj_bias=gate_up_proj_bias,
+                bias=bias,
                 quant_config=quant_config,
                 prefix=f"{prefix}.intermediate")
         else:
@@ -350,7 +347,7 @@ class BertGatedIntermediate(nn.Module):
                  hidden_size: int,
                  intermediate_size: int,
                  hidden_act: str,
-                 gate_up_proj_bias: bool = True,
+                 bias: bool = True,
                  quant_config: Optional[QuantizationConfig] = None,
                  prefix: str = ""):
         super().__init__()
@@ -358,7 +355,7 @@ class BertGatedIntermediate(nn.Module):
         self.gate_up_proj = MergedColumnParallelLinear(
             hidden_size,
             [intermediate_size] * 2,
-            bias=gate_up_proj_bias,
+            bias=bias,
             quant_config=quant_config,
             prefix=f"{prefix}.gate_up_proj",
         )
@@ -410,24 +407,18 @@ class BertModel(nn.Module, SupportsQuant):
                  prefix: str = "",
                  embedding_class: type = BertEmbedding,
                  bias: bool = True,
-                 gate_up_proj_bias: bool = True,
                  rotary_kwargs: Optional[dict] = None,
                  add_pooling_layer: bool = False):
         super().__init__()
         """
         For BertModel, all linear layers have bias.
-        For NomicBertModel, all linear layers do not have bias, 
-            the bias parameter intended to control all linear layers.
-        For GteModel, only up_gate_proj layer does not have bias, 
-            so the gate_up_proj_bias parameter must be added.
-        see #16649
+        For NomicBertModel, all linear layers do not have bias.
         """
 
         config = vllm_config.model_config.hf_config
         self.embeddings = embedding_class(config)
         self.encoder = BertEncoder(vllm_config=vllm_config,
                                    bias=bias,
-                                   gate_up_proj_bias=gate_up_proj_bias,
                                    rotary_kwargs=rotary_kwargs,
                                    prefix=f"{prefix}.encoder")
         self.pooler = BertPooler(config) if add_pooling_layer else None
@@ -672,7 +663,6 @@ class NomicBertEmbeddingModel(BertEmbeddingModel):
         return BertModel(vllm_config=vllm_config,
                          prefix=prefix,
                          bias=False,
-                         gate_up_proj_bias=False,
                          rotary_kwargs=rotary_kwargs,
                          embedding_class=BertEmbedding)
 
@@ -694,6 +684,7 @@ class GteEmbeddingModel(BertEmbeddingModel):
 
         assert config.__class__.__name__ == "GteConfig"
         assert config.position_embedding_type == "rope"
+        assert config.hidden_act == "gelu"
 
         config.position_embedding_type = "rotary"
         config.hidden_act = "gelu_and_mul"
@@ -706,11 +697,21 @@ class GteEmbeddingModel(BertEmbeddingModel):
             "base": config.rope_theta,
         }
 
-        return BertModel(vllm_config=vllm_config,
-                         prefix=prefix,
-                         gate_up_proj_bias=False,
-                         rotary_kwargs=rotary_kwargs,
-                         embedding_class=BertEmbedding)
+        model = BertModel(vllm_config=vllm_config,
+                          prefix=prefix,
+                          rotary_kwargs=rotary_kwargs,
+                          embedding_class=BertEmbedding)
+
+        # GteModel only gate_up_proj does not have bias.
+        for layer in model.encoder.layer:
+            layer.intermediate.gate_up_proj = MergedColumnParallelLinear(
+                config.hidden_size,
+                [config.intermediate_size] * 2,
+                bias=False,
+                quant_config=vllm_config.quant_config,
+                prefix=f"{prefix}.gate_up_proj",
+            )
+        return model
 
     def split_up_gate_proj(self, weights: Iterable[Tuple[str, torch.Tensor]]):
         n = "mlp.up_gate_proj"

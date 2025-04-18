@@ -44,4 +44,4 @@ class EmbedModelInfo(NamedTuple):
     name: str
     is_matryoshka: bool
     architecture: str = ""
-    enable_ci_test: bool = True
+    enable_test: bool = True

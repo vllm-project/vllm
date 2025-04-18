@@ -18,35 +18,35 @@ MODELS = [
     EmbedModelInfo("Snowflake/snowflake-arctic-embed-xs",
                    is_matryoshka=False,
                    architecture="BertModel",
-                   enable_ci_test=True),
+                   enable_test=True),
     EmbedModelInfo("Snowflake/snowflake-arctic-embed-s",
                    is_matryoshka=False,
                    architecture="BertModel",
-                   enable_ci_test=False),
+                   enable_test=False),
     EmbedModelInfo("Snowflake/snowflake-arctic-embed-m",
                    is_matryoshka=False,
                    architecture="BertModel",
-                   enable_ci_test=False),
+                   enable_test=False),
     EmbedModelInfo("Snowflake/snowflake-arctic-embed-m-long",
                    is_matryoshka=False,
                    architecture="NomicBertModel",
-                   enable_ci_test=True),
+                   enable_test=True),
     EmbedModelInfo("Snowflake/snowflake-arctic-embed-l",
                    is_matryoshka=False,
                    architecture="BertModel",
-                   enable_ci_test=False),
+                   enable_test=False),
     EmbedModelInfo("Snowflake/snowflake-arctic-embed-m-v1.5",
                    is_matryoshka=True,
                    architecture="BertModel",
-                   enable_ci_test=True),
+                   enable_test=True),
     EmbedModelInfo("Snowflake/snowflake-arctic-embed-l-v2.0",
                    is_matryoshka=True,
                    architecture="XLMRobertaModel",
-                   enable_ci_test=True),
+                   enable_test=True),
     EmbedModelInfo("Snowflake/snowflake-arctic-embed-m-v2.0",
                    is_matryoshka=True,
                    architecture="GteModel",
-                   enable_ci_test=True),
+                   enable_test=True),
 ]
 
 
@@ -60,10 +60,10 @@ def test_models(
     dtype: str,
     monkeypatch,
 ) -> None:
-    if not model_info.enable_ci_test:
+    if not model_info.enable_test:
         # A model family has many models with the same architecture,
         # and we don't need to test each one.
-        pytest.skip("Skipping CI test.")
+        pytest.skip("Skipping test.")
 
     example_prompts = example_prompts + EMBEDDING_PROMPTS
 
