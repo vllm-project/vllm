@@ -1,4 +1,17 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 """
 This file defines an interface `KVPipeBase`
 that provides an abstraction for sending and receiving tensors, or None, via
@@ -23,7 +36,7 @@ class KVPipeBase(ABC):
     """
 
     @abstractmethod
-    def send_tensor(self, tensor: Optional[torch.Tensor]) -> None:
+    def send_tensor(self, tensor: Optional[torch.Tensor], target_rank: int = 0) -> None:
         """Send a tensor, or None, via the pipe.
         
         Need to support sending None -- important for error handling.
@@ -41,7 +54,7 @@ class KVPipeBase(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def recv_tensor(self) -> Optional[torch.Tensor]:
+    def recv_tensor(self, src_rank: int) -> Optional[torch.Tensor]:
         """Receive a tensor (can be None) from the pipeline.
 
         Returns:

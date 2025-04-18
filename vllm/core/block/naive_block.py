@@ -1,8 +1,21 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 from collections import deque
 from typing import Deque, FrozenSet, Iterable, List, Optional, Tuple, Union
-
+import heapq
 from vllm.core.block.common import (BlockPool, CopyOnWriteTracker, RefCounter,
                                     get_all_blocks_recursively)
 from vllm.core.block.interfaces import Block, BlockAllocator, BlockId, Device
@@ -38,7 +51,7 @@ class NaiveBlockAllocator(BlockAllocator):
         if block_ids is None:
             block_ids = range(num_blocks)
 
-        self._free_block_indices: Deque[BlockId] = deque(block_ids)
+        self._free_block_indices: List[BlockId] = list(block_ids)
         self._all_block_indices = frozenset(block_ids)
         assert len(self._all_block_indices) == num_blocks
 
@@ -134,7 +147,8 @@ class NaiveBlockAllocator(BlockAllocator):
         if not self._free_block_indices:
             raise BlockAllocator.NoFreeBlocksError()
 
-        block_id = self._free_block_indices.popleft()
+        block_id = heapq.heappop(self._free_block_indices)
+        # TODO: figure out why sometime block_id is None
         self._refcounter.incr(block_id)
         return block_id
 
@@ -148,7 +162,7 @@ class NaiveBlockAllocator(BlockAllocator):
 
         refcount = self._refcounter.decr(block_id)
         if refcount == 0:
-            self._free_block_indices.appendleft(block_id)
+            heapq.heappush(self._free_block_indices, block_id)
 
     def free(self, block: Block, keep_block_object: bool = False) -> None:
         # Release the physical block id

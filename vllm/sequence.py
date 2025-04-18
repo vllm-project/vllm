@@ -1,4 +1,18 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 """Sequence and its related classes."""
 import copy
 import enum
@@ -20,6 +34,7 @@ from vllm.multimodal import MultiModalDataDict, MultiModalPlaceholderDict
 from vllm.pooling_params import PoolingParams
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import RequestOutputKind, SamplingParams
+from vllm.remote_prefill import RemotePrefillParams, MemoryTransferRequest
 
 VLLM_TOKEN_ID_ARRAY_TYPE = "l"
 
@@ -59,13 +74,14 @@ class SequenceStatus(enum.IntEnum):
     """Status of a sequence."""
     WAITING = 0
     RUNNING = 1
-    SWAPPED = 2
-    # Note: anything after SWAPPED (2) will be considered
+    REMOTE_PREFILLING = 2
+    SWAPPED = 3
+    # Note: anything after SWAPPED (3) will be considered
     # as a finished status.
-    FINISHED_STOPPED = 3
-    FINISHED_LENGTH_CAPPED = 4
-    FINISHED_ABORTED = 5
-    FINISHED_IGNORED = 6
+    FINISHED_STOPPED = 4
+    FINISHED_LENGTH_CAPPED = 5
+    FINISHED_ABORTED = 6
+    FINISHED_IGNORED = 7
 
     @staticmethod
     def is_finished(status: "SequenceStatus") -> bool:
@@ -417,6 +433,7 @@ class Sequence:
         eos_token_id: Optional[int] = None,
         lora_request: Optional[LoRARequest] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
+        remote_prefill_params: Optional[RemotePrefillParams] = None,
     ) -> None:
         self.seq_id = seq_id
         self.inputs = SingletonInputsAdapter(inputs)
@@ -424,7 +441,7 @@ class Sequence:
         self.eos_token_id = eos_token_id
         self.lora_request = lora_request
         self.prompt_adapter_request = prompt_adapter_request
-
+        self.remote_prefill_params = remote_prefill_params
         self.data = SequenceData.from_seqs(self.prompt_token_ids)
         self.output_logprobs: SampleLogprobs = []
         self.output_text = ""
@@ -651,6 +668,7 @@ class SequenceGroup:
                     model; equal to max number of tokens a step can generate
                     for single-draft speculative decoding but larger than 
                     that for multi-draft SD (currently not supported).
+        remote_prefill_params: Remote prefill parameters.
     """
 
     def __init__(self,
@@ -665,7 +683,8 @@ class SequenceGroup:
                  trace_headers: Optional[Mapping[str, str]] = None,
                  prompt_adapter_request: Optional[PromptAdapterRequest] = None,
                  priority: int = 0,
-                 draft_size: int = 1) -> None:
+                 draft_size: int = 1,
+                 remote_prefill_params: Optional[RemotePrefillParams] = None) -> None:
         self.request_id = request_id
         self.seqs = seqs
         self.first_seq = seqs[0]
@@ -691,7 +710,7 @@ class SequenceGroup:
         self.encoder_seq = encoder_seq
         self.trace_headers = trace_headers
         self.priority = priority
-
+        self.remote_prefill_params = remote_prefill_params
         self.cached_request_output = None
 
     @property
@@ -940,6 +959,9 @@ class SequenceGroupMetadata(
             query tokens for prefill, we don't need sampling.
         token_chunk_size: The number of tokens to be processed (per sequence).
             None if chunking is not required.
+        do_remote_prefill: True if remote prefill is required.
+        do_remote_decode: True if remote decode is required.
+        decode_memory_desc: The memory descriptor for the decoder blocks.
         lora_request: LoRA request.
         computed_block_nums: The block numbers that are already computed,
             used in prefix caching.
@@ -979,6 +1001,9 @@ class SequenceGroupMetadata(
     cross_block_table: Optional[list[int]] = None
     prompt_adapter_request: Optional[PromptAdapterRequest] = None
     token_chunk_size: Optional[int] = None
+    do_remote_prefill: bool = False
+    do_remote_decode: bool = False
+    decode_memory_desc: Optional[bytes] = None
 
     ### Stateful fields that are lazily defined. ###
     # The number of speculative tokens adopted in this request.
@@ -1329,6 +1354,8 @@ class ExecuteModelRequest(
     last_sampled_token_ids: Optional[torch.Tensor] = None
     # Async callback
     async_callback: Optional[Callable] = None
+    # The memory transfer requests.
+    memory_transfer_requests: Optional[list[MemoryTransferRequest]] = None
 
     @property
     def is_first_multi_step(self) -> bool:

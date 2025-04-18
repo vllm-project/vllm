@@ -1,4 +1,17 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 import hashlib
 import os
@@ -73,7 +86,7 @@ if TYPE_CHECKING:
     VLLM_ALLOW_RUNTIME_LORA_UPDATING: bool = False
     VLLM_SKIP_P2P_CHECK: bool = False
     VLLM_DISABLED_KERNELS: list[str] = []
-    VLLM_USE_V1: bool = True
+    VLLM_USE_V1: bool = False
     VLLM_ROCM_USE_AITER: bool = False
     VLLM_ROCM_USE_AITER_LINEAR: bool = True
     VLLM_ROCM_USE_AITER_MOE: bool = True
@@ -107,6 +120,10 @@ if TYPE_CHECKING:
     VLLM_TPU_BUCKET_PADDING_GAP: int = 0
     VLLM_USE_DEEP_GEMM: bool = False
     VLLM_XGRAMMAR_CACHE_MB: int = 0
+    VLLM_KV_CAPI_PATH: Optional[str] = None
+    VLLM_KV_NAMESPACE: Optional[str] = None
+    VLLM_KV_COMPONENT: Optional[str] = None
+    VLLM_WORKER_ID: Optional[int] = None
 
 
 def get_default_cache_root():
@@ -525,7 +542,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
 
     # If set, use the V1 code path.
     "VLLM_USE_V1":
-    lambda: bool(int(os.getenv("VLLM_USE_V1", "1"))),
+    lambda: bool(int(os.getenv("VLLM_USE_V1", "0"))),
 
     # Disable aiter ops unless specifically enabled.
     # Acts as a parent switch to enable the rest of the other operations.
@@ -704,6 +721,21 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # It can be changed with this variable if needed for some reason.
     "VLLM_XGRAMMAR_CACHE_MB":
     lambda: int(os.getenv("VLLM_XGRAMMAR_CACHE_MB", "512")),
+
+    # Path to the C API Library
+    "VLLM_KV_CAPI_PATH":
+    lambda: os.environ.get("VLLM_KV_CAPI_PATH", None),
+
+    # Identifiers to publish KV related information
+    "VLLM_KV_NAMESPACE":
+    lambda: os.environ.get("VLLM_KV_NAMESPACE", None),
+    "VLLM_KV_COMPONENT":
+    lambda: os.environ.get("VLLM_KV_COMPONENT", None),
+
+    # Worker ID used for identifying workers in distributed settings
+    "VLLM_WORKER_ID":
+    lambda: int(os.getenv("VLLM_WORKER_ID", "0"))
+    if "VLLM_WORKER_ID" in os.environ else None,
 }
 
 # end-env-vars-definition

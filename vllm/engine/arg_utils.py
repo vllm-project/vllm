@@ -1159,7 +1159,7 @@ class EngineArgs:
         #   features and raise error for unsupported features.
         # * If VLLM_USE_V1=0, we disable V1.
         use_v1 = False
-        try_v1 = envs.VLLM_USE_V1 or not envs.is_set("VLLM_USE_V1")
+        try_v1 = envs.VLLM_USE_V1
         if try_v1 and self._is_v1_supported_oracle(model_config):
             use_v1 = True
 
