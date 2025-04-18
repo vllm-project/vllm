@@ -690,7 +690,7 @@ class VisionArenaDataset(HuggingFaceDataset):
         "lmarena-ai/VisionArena-Chat":
         lambda x: x["conversation"][0][0]["content"],
         "lmarena-ai/vision-arena-bench-v0.1":
-        lambda x: x["turns"][0][0]["content"],
+        lambda x: x["turns"][0][0]["content"]
     }
     IS_MULTIMODAL = True
 
@@ -705,11 +705,6 @@ class VisionArenaDataset(HuggingFaceDataset):
         output_len = (output_len
                       if output_len is not None else self.DEFAULT_OUTPUT_LEN)
         sampled_requests = []
-        logger.info(\
-            "Sampling %d requests from %s dataset",
-            num_requests,
-            self.dataset_path,
-        )
         for item in self.data:
             if len(sampled_requests) >= num_requests:
                 break
@@ -908,39 +903,25 @@ class NextEditPredictionDataset(HuggingFaceDataset):
 
     def load_data(self) -> None:
         """Load data from HuggingFace datasets."""
-        self.data = load_dataset(
-            self.dataset_path,
-            name=self.dataset_subset,
-            split=self.dataset_split,
-            streaming=True,
-        )
+        super().load_data()
         formatting_prompt_func = self.MAPPING_PROMPT_FUNCS.get(
             self.dataset_path)
         if formatting_prompt_func is None:
             raise ValueError(f"Unsupported dataset path: {self.dataset_path}")
         self.data = self.data.map(formatting_prompt_func, batched=True)
-        self.data = self.data.shuffle(seed=self.random_seed)
 
     def sample(self, tokenizer: PreTrainedTokenizerBase, num_requests: int,
                **kwargs):
         samples = []
-        logger.info(\
-            "Sampling %d requests from %s dataset",
-            num_requests,
-            self.dataset_path,
-        )
         for item in self.data:
             if len(samples) >= num_requests:
                 break
-            prompt = item["prompt"]
-            expected_output = item["expected_output"]
-            prompt_len = len(tokenizer(prompt).input_ids)
-            expected_output_len = len(tokenizer(expected_output).input_ids)
             samples.append(
                 SampleRequest(
-                    prompt=prompt,
-                    prompt_len=prompt_len,
-                    expected_output_len=expected_output_len,
+                    prompt=item["prompt"],
+                    prompt_len=len(tokenizer(item["prompt"]).input_ids),
+                    expected_output_len=len(
+                        tokenizer(item["expected_output"]).input_ids),
                 ))
         if len(samples) < num_requests:
             logger.info(
