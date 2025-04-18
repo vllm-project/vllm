@@ -166,6 +166,9 @@ class TransformersModel(nn.Module):
         # Initialize buffers (e.g. rotary embedding inverse frequency)
         self.init_buffers(self.model)
 
+        # Initialize parameters
+        self.init_parameters(self.model)
+
         # Move remaining meta tensors to device (should happen last)
         self.meta_to_empty(self.model)
 
@@ -297,6 +300,27 @@ class TransformersModel(nn.Module):
                 setattr(module, name, new_buffer)
         for child in module.children():
             self.init_buffers(child)
+            
+    def init_parameters(self, module: nn.Module):
+        """
+        If a `parameter` is on the `meta` device, then its parent
+        `module` is the original module created by:
+
+        ```python
+        with torch.device("meta"):
+            self.model: PreTrainedModel = AutoModel.from_config(...)
+        ```
+
+        This means that:
+        - `type(module)` is a class from `transformers`
+        - This class is constructed using a `PretrainedConfig`
+        """
+        for name, param in module.named_parameters(recurse=False):
+            if param.device == torch.device("meta"):
+                new_param = getattr(type(module)(self.config), name)
+                setattr(module, name, new_param)
+        for child in module.children():
+            self.init_parameters(child)
 
     def meta_to_empty(self, module: nn.Module):
         tensors = list(chain(module.buffers(), module.parameters()))
@@ -342,6 +366,7 @@ class TransformersModel(nn.Module):
     def load_weights(self, weights: Iterable[tuple[str,
                                                    torch.Tensor]]) -> set[str]:
         params_dict = dict(self.named_parameters())
+
         loaded_params = set[str]()
         for name, loaded_weight in weights:
             # Use "model" instead of base_model_prefix because
