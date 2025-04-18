@@ -5,6 +5,7 @@ import signal
 import sys
 
 import vllm.entrypoints.cli.benchmark.main
+import vllm.entrypoints.cli.collect_env
 import vllm.entrypoints.cli.openai
 import vllm.entrypoints.cli.serve
 import vllm.version
@@ -15,6 +16,7 @@ CMD_MODULES = [
     vllm.entrypoints.cli.openai,
     vllm.entrypoints.cli.serve,
     vllm.entrypoints.cli.benchmark.main,
+    vllm.entrypoints.cli.collect_env,
 ]
 
 
