@@ -10,7 +10,7 @@ from vllm.utils import FlexibleArgumentParser
 
 
 @pytest.mark.parametrize(("arg", "expected"), [
-    (None, None),
+    (None, dict()),
     ("image=16", {
         "image": 16
     }),

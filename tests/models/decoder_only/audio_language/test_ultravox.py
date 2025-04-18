@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
+import json
 from typing import Optional
 
 import numpy as np
@@ -50,7 +51,7 @@ def server(request, audio_assets):
     args = [
         "--dtype", "bfloat16", "--max-model-len", "4096", "--enforce-eager",
         "--limit-mm-per-prompt",
-        str({"audio": len(audio_assets)}), "--trust-remote-code"
+        json.dumps({"audio": len(audio_assets)}), "--trust-remote-code"
     ] + [
         f"--{key.replace('_','-')}={value}"
         for key, value in request.param.items()
