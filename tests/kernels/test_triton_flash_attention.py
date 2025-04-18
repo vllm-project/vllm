@@ -111,15 +111,7 @@ class ReferenceAttention:
         return ref_out
 
 
-def quantize_input(q,
-                   k,
-                   v,
-                   input_metadata: MetaData,
-                   fp8_kv=False,
-                   use_o_scale=False):
-    is_supported_layout = input_metadata.layout in SUPPORTED_LAYOUTS
-    assert is_supported_layout, "Got unsupported layout."
-
+def quantize_input(q, k, v, fp8_kv=False, use_o_scale=False):
     q_descale = None
     if not fp8_kv:
         q, q_descale = scale_fp8(q)
@@ -128,29 +120,30 @@ def quantize_input(q,
 
     # In real world use case, the p scale would be a parameter trained by the
     # model.
-    p_scale = p_descale = None
+    p_scale = None
 
     o_scale = torch.rand(1, device="cuda") if use_o_scale else None
 
-    # We are not multiplying the scales together to get
-    # qk_desale / o_descale e.g.
-    # qk_desale = q_descale * k_descale
-    # o_desale = p_descale * v_descale
-    # it results in very small fp e.g. 0,0002, losing precision.
-    # They are applied on the run.
-    input_metadata.set_eight_bit_params(
-        q_descale=q_descale,
-        k_descale=k_descale,
-        v_descale=v_descale,
-        # By default p_scaling is not enabled
-        p_scale=p_scale,
-        p_descale=p_descale,
-        o_scale=o_scale)
-
-    return q, k, v
+    return q, k, v, q_descale, k_descale, v_descale, p_scale, o_scale
 
 
-def input_helper(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, dtype, layout):
+def input_helper(
+    Z,
+    HQ,
+    HK,
+    N_CTX_Q,
+    N_CTX_K,
+    D_HEAD,
+    dtype,
+    layout=None,
+    use_alibi=None,
+    causal=None,
+    persistent=None,
+    is_fp8=False,
+    fp8_kv=False,
+    use_o_scale=False,
+    use_bias=False,
+):
     assert layout in SUPPORTED_LAYOUTS, "Got unsupported layout."
 
     current_platform.seed_everything(0)
@@ -162,6 +155,23 @@ def input_helper(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, dtype, layout):
     elif layout == 'bshd':
         q_tensor_shape = (Z, N_CTX_Q, HQ, D_HEAD)
         k_tensor_shape = (Z, N_CTX_K, HK, D_HEAD)
+
+    if use_alibi:
+        # for n heads the set of slopes is the geometric sequence that starts
+        # 2^(-8/n)
+        alibi_slopes = torch.tensor(
+            [2**(-8 / HQ * i) for i in range(1, HQ + 1)],
+            dtype=torch.float32,
+            device="cuda").repeat(Z, 1)
+    else:
+        alibi_slopes = None
+
+    if use_bias:
+        bias = torch.randn((1, HQ, N_CTX_Q, N_CTX_K),
+                           dtype=dtype,
+                           device="cuda")
+    else:
+        bias = None
 
     q = torch.randn(q_tensor_shape,
                     dtype=dtype,
@@ -176,11 +186,32 @@ def input_helper(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, dtype, layout):
                     device="cuda",
                     requires_grad=False)
 
-    sm_scale = D_HEAD**-0.5
-    input_metadata = MetaData(sm_scale=sm_scale)
-    input_metadata.max_seqlens_q = N_CTX_Q
-    input_metadata.max_seqlens_k = N_CTX_K
-    input_metadata.layout = layout
+    if is_fp8:
+        (q, k, v, q_descale, k_descale, v_descale, p_scale,
+         o_scale) = quantize_input(q,
+                                   k,
+                                   v,
+                                   use_o_scale=use_o_scale,
+                                   fp8_kv=fp8_kv)
+    else:
+        q_descale = k_descale = v_descale = p_scale = o_scale = None
+
+    input_metadata = MetaData(sm_scale=D_HEAD**-0.5,
+                              max_seqlens_q=N_CTX_Q,
+                              max_seqlens_k=N_CTX_K,
+                              layout=layout,
+                              alibi_slopes=alibi_slopes,
+                              alibi_batch=Z,
+                              alibi_nheads=HQ,
+                              persistent=persistent,
+                              q_descale=q_descale,
+                              k_descale=k_descale,
+                              v_descale=v_descale,
+                              p_scale=p_scale,
+                              o_scale=o_scale,
+                              bias=bias,
+                              seqlen_q=N_CTX_Q,
+                              seqlen_k=N_CTX_K)
     return q, k, v, input_metadata
 
 
@@ -258,21 +289,7 @@ def test_op_fwd(Z,
                 dtype=torch.float16):
     current_platform.seed_everything(0)
     q, k, v, input_metadata = input_helper(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD,
-                                           dtype, layout)
-    input_metadata.eight_bit_dtype_torch = current_platform.fp8_dtype()
-    if causal:
-        input_metadata.need_causal()
-
-    if use_alibi:
-        # for n heads the set of slopes is the geometric sequence that starts
-        # 2^(-8/n)
-        alibi_slopes = torch.tensor(
-            [2**(-8 / HQ * i) for i in range(1, HQ + 1)],
-            dtype=torch.float32,
-            device="cuda").repeat(Z, 1)
-        input_metadata.need_alibi(alibi_slopes, Z, HQ)
-    else:
-        alibi_slopes = None
+                                           dtype, layout, use_alibi, causal)
 
     o = torch.empty_like(q)
 
@@ -327,23 +344,8 @@ def test_op_persistent_fwd(Z,
                            dtype=torch.float16):
     current_platform.seed_everything(0)
     q, k, v, input_metadata = input_helper(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD,
-                                           dtype, layout)
-    input_metadata.eight_bit_dtype_torch = current_platform.fp8_dtype()
-    if causal:
-        input_metadata.need_causal()
-
-    if use_alibi:
-        # for n heads the set of slopes is the geometric sequence that starts
-        # 2^(-8/n)
-        alibi_slopes = torch.tensor(
-            [2**(-8 / HQ * i) for i in range(1, HQ + 1)],
-            dtype=torch.float32,
-            device="cuda").repeat(Z, 1)
-        input_metadata.need_alibi(alibi_slopes, Z, HQ)
-    else:
-        alibi_slopes = None
-
-    input_metadata.set_persistent(persistent)
+                                           dtype, layout, use_alibi, causal,
+                                           persistent)
 
     o = torch.empty_like(q)
 
@@ -395,16 +397,23 @@ def test_op_fwd_fp8(Z,
     current_platform.seed_everything(0)
 
     # Disable grad to save memory it won't run into OOM on CI machine.
-    q, k, v, input_metadata = input_helper(Z, H, H, N_CTX_Q, N_CTX_K, D_HEAD,
-                                           dtype, layout)
-    input_metadata.eight_bit_dtype_torch = current_platform.fp8_dtype()
-    if causal:
-        input_metadata.need_causal()
+    # q, k, v, input_metadata = input_helper(Z, H, H, N_CTX_Q, N_CTX_K, D_HEAD,
+    # dtype, layout)
 
-    o = torch.empty_like(q) if not use_o_scale else None
+    q_quantized, k_quantized, v_quantized, input_metadata = input_helper(
+        Z,
+        H,
+        H,
+        N_CTX_Q,
+        N_CTX_K,
+        D_HEAD,
+        dtype,
+        causal=causal,
+        layout=layout,
+        is_fp8=True,
+        use_o_scale=use_o_scale)
 
-    q_quantized, k_quantized, v_quantized = quantize_input(
-        q, k, v, input_metadata, use_o_scale=use_o_scale)
+    o = torch.empty_like(q_quantized) if not use_o_scale else None
 
     tri_out, _ = triton_attention_rocm(q_quantized, k_quantized, v_quantized,
                                        o, input_metadata)
@@ -439,19 +448,19 @@ def test_op_fwd_fp8_kv(Z,
                        dtype=torch.float32):
     current_platform.seed_everything(0)
 
-    q, k, v, input_metadata = input_helper(Z, H, H, N_CTX_Q, N_CTX_K, D_HEAD,
-                                           dtype, layout)
-    input_metadata.eight_bit_dtype_torch = current_platform.fp8_dtype()
-    if causal:
-        input_metadata.need_causal()
+    q, k_quantized, v_quantized, input_metadata = input_helper(Z,
+                                                               H,
+                                                               H,
+                                                               N_CTX_Q,
+                                                               N_CTX_K,
+                                                               D_HEAD,
+                                                               dtype,
+                                                               causal=causal,
+                                                               layout=layout,
+                                                               is_fp8=True,
+                                                               fp8_kv=True)
 
     o = torch.empty_like(q)
-
-    _, k_quantized, v_quantized = quantize_input(q,
-                                                 k,
-                                                 v,
-                                                 input_metadata,
-                                                 fp8_kv=True)
 
     tri_out, _ = triton_attention_rocm(q, k_quantized, v_quantized, o,
                                        input_metadata)
@@ -474,8 +483,6 @@ def test_op_fwd_fp8_kv(Z,
 @pytest.mark.parametrize('dtype', [torch.bfloat16])
 def test_op_fwd_bias(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, use_bias, dtype):
     current_platform.seed_everything(0)
-    sm_scale = D_HEAD**-0.5
-    input_metadata = MetaData(sm_scale=sm_scale)
     q, k, v, input_metadata = input_helper(Z,
                                            H,
                                            H,
@@ -483,17 +490,9 @@ def test_op_fwd_bias(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, use_bias, dtype):
                                            N_CTX_K,
                                            D_HEAD,
                                            dtype,
-                                           layout='bhsd')
-    input_metadata.eight_bit_dtype_torch = current_platform.fp8_dtype()
-    if causal:
-        input_metadata.need_causal()
-    if use_bias:
-        bias = torch.randn((1, H, N_CTX_Q, N_CTX_K),
-                           dtype=dtype,
-                           device="cuda")
-        input_metadata.need_bias(bias, N_CTX_Q, N_CTX_K)
-    else:
-        bias = None
+                                           layout='bhsd',
+                                           causal=causal,
+                                           use_bias=use_bias)
     o = torch.empty_like(q)
 
     # triton implementation
@@ -543,7 +542,6 @@ def test_op_varlen_mqa_fwd(Z,
                            dtype=torch.float16):
     q, k, v, input_metadata = varlen_input_helper(Z, HQ, HK, N_CTX, N_CTX,
                                                   D_HEAD, dtype)
-    input_metadata.eight_bit_dtype_torch = current_platform.fp8_dtype()
 
     tri_out = torch.empty_like(q)
     triton_attention_rocm(q, k, v, tri_out, input_metadata)

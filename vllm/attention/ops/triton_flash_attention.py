@@ -65,8 +65,83 @@ class MetaData:
     eight_bit_dtype_torch = default_eight_bit_dtype_torch
     output_dtype = None
 
-    def __init__(self, sm_scale=1.0):
+    # Note about layouts:
+    #
+    # thd - [num_tokens, num_heads, head_size]
+    # bshd - [batch_size, seq_len, num_heads, head_size]
+    # bhsd - [batch_size, num_heads, seq_len, head_size]
+    #
+    # This is for each tensor, all tensors must have same layout.
+    # Q can have num_heads and seq_len differ from  from K and V,
+    # however K and V must agree on this.
+    #
+    # Notes about varlen and bias:
+    # Only one or the other is implemented, meaning can't combine
+    # both varlen and bias right now.
+    #
+    # Note about quantization:
+    # Only 8-bit quantization supported (for now) and specifically fp8.
+    # Scales must be tensors.
+    # o_scale: This is 'output scaling', but comes from parameter called
+    # 'input_scale', this is applied to the output from the kernel.
+    # o_scale should be None if none of the other quantization parameters
+    # are used.
+    #
+    # NOTE: Object is in a tentatively good state after initialized, however,
+    # to verify, call check_args(q,k,v,o) where o is the output tensor.
+    def __init__(
+        self,
+        sm_scale=1.0,
+        layout=None,  # layout can be 'bshd', 'bhsd', or 'thd'
+        output_dtype=None,
+        max_seqlens_q=0,
+        max_seqlens_k=0,
+        # varlen params
+        cu_seqlens_q=None,  # only 'thd' layout supported for varlen 
+        cu_seqlens_k=None,
+        # persistent
+        persistent=None,  # can be 'fixed' or 'dynamic'
+        # quant params
+        q_descale=None,
+        k_descale=None,
+        v_descale=None,
+        p_scale=None,
+        o_scale=None,
+        # bias params
+        bias=None,  # varlen not implemented for bias
+        seqlen_q=None,
+        seqlen_k=None,
+        # alibi params
+        alibi_slopes=None,
+        alibi_batch=None,
+        alibi_nheads=None,
+        # causal
+        causal=None,
+    ):
         self.sm_scale = sm_scale
+        self.output_dtype = output_dtype
+        self.max_seqlens_q = max_seqlens_q
+        self.max_seqlens_k = max_seqlens_k
+        self.layout = layout
+        if cu_seqlens_q is not None or cu_seqlens_k is not None:
+            assert cu_seqlens_q is not None and cu_seqlens_k is not None
+            assert layout is None or layout not in [
+                'bshd', 'bhsd'
+            ], "Varlen only implemented for thd layout"
+            self.set_varlen_params(cu_seqlens_q, cu_seqlens_k)
+        if persistent is not None:
+            self.set_persistent(persistent)
+        quant_params = [q_descale, k_descale, v_descale, p_scale, o_scale]
+        if any(x is not None for x in quant_params):
+            p_descale = 1.0 / p_scale if p_scale is not None else None
+            self.set_eight_bit_params(q_descale, k_descale, v_descale, p_scale,
+                                      p_descale, o_scale)
+        if bias is not None:
+            self.need_bias(bias, seqlen_q, seqlen_k)
+        if alibi_slopes is not None:
+            self.need_alibi(alibi_slopes, alibi_batch, alibi_nheads)
+        if causal is not None and causal:
+            self.need_causal()
 
     def set_varlen_params(self, cu_seqlens_q, cu_seqlens_k):
         self.varlen = True
@@ -101,6 +176,7 @@ class MetaData:
             p_descale is not None) and (v_descale is not None)
         self.eight_bit_kv = ((q_descale is None) and (k_descale is not None)
                              and (v_descale is not None))
+        self.eight_bit_dtype_torch = default_eight_bit_dtype_torch
 
     def need_bias(self, bias, seqlen_q, seqlen_k):
         assert bias is not None
@@ -1336,21 +1412,26 @@ def triton_attention(
     fp8_scales: Optional[tuple[float, ...]] = None,
     input_scale: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
-    attn_metadata = MetaData(sm_scale=sm_scale)
-    attn_metadata.max_seqlens_q = max_seqlens_q
-    attn_metadata.max_seqlens_k = max_seqlens_q
-    attn_metadata.causal = causal
-    attn_metadata.bias = bias
-    attn_metadata.output_dtype = q.dtype
-    attn_metadata.set_varlen_params(cu_seqlens_q, cu_seqlens_k)
+    if fp8_scales is not None:
+        q_descale, k_descale, v_descale, p_scale = fp8_scales
+    else:
+        q_descale = k_descale = v_descale = p_scale = None
+
+    attn_metadata = MetaData(sm_scale=sm_scale,
+                             max_seqlens_q=max_seqlens_q,
+                             max_seqlens_k=max_seqlens_k,
+                             causal=causal,
+                             bias=bias,
+                             output_dtype=q.dtype,
+                             cu_seqlens_q=cu_seqlens_q,
+                             cu_seqlens_k=cu_seqlens_k,
+                             q_descale=q_descale,
+                             k_descale=k_descale,
+                             v_descale=v_descale,
+                             p_scale=p_scale,
+                             o_scale=input_scale)
 
     if fp8_scales is not None:
         q, k, v = check_and_maybe_quantize_qkv(q, k, v, fp8_scales)
-
-        q_scale, k_scale, v_scale, p_scale = fp8_scales
-
-        attn_metadata.set_eight_bit_params(q_scale, k_scale, v_scale,
-                                           1.0 / p_scale, p_scale, input_scale)
-        attn_metadata.eight_bit_dtype_torch = default_eight_bit_dtype_torch
 
     return triton_attention_rocm(q, k, v, o, attn_metadata)
