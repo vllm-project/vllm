@@ -140,15 +140,15 @@ class MsgpackEncoder:
         # this creates a copy of the tensor
         obj = obj.contiguous() if not obj.is_contiguous() else obj
         #  view the tensor as a 1D array of bytes
-        arr = obj.view([obj.numel()]).view(torch.uint8).numpy()
+        arr = obj.view((obj.numel(),)).view(torch.uint8).numpy()
         if obj.nbytes < self.size_threshold:
             data = msgpack.Ext(CUSTOM_TYPE_RAW_VIEW, arr.data)
         else:
             # Otherwise encode index of backing buffer to avoid copy.
             data = len(self.aux_buffers)
             self.aux_buffers.append(arr.data)
-        dt = str(obj.dtype)[6:]  # remove 'torch.' prefix
-        return dt, obj.shape, data
+        dtype = str(obj.dtype)[6:]  # remove 'torch.' prefix
+        return dtype, obj.shape, data
 
     def _encode_nested_tensors(self, nt: NestedTensors) -> Any:
         if isinstance(nt, torch.Tensor):
@@ -228,8 +228,10 @@ class MsgpackDecoder:
         # the returned memory is non-writeable.
         buffer = self.aux_buffers[data] if isinstance(data, int) \
             else bytearray(data)
-        arr = np.ndarray(buffer=buffer, dtype=np.uint8, shape=[len(buffer)])
-        return torch.from_numpy(arr).view(getattr(torch, dtype)).view(shape)
+        arr = np.ndarray(buffer=buffer, dtype=np.uint8, shape=(len(buffer),))
+        torch_dtype = getattr(torch, dtype)
+        assert isinstance(torch_dtype, torch.dtype)
+        return torch.from_numpy(arr).view(torch_dtype).view(shape)
 
     def _decode_mm_items(self, obj: list) -> list[MultiModalKwargsItem]:
         decoded_items = []
