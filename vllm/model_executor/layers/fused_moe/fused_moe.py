@@ -1855,8 +1855,8 @@ class BatchedExperts(mk.FusedMoEPermuteExpertsUnpermute):
         a: torch.Tensor,
     ) -> Tuple[int, int, torch.dtype]:
         max_num_tokens = a.shape[1]
-        workspace13 = num_experts * max_num_tokens * K * 2 # *2 = HACK!!!!!
-        workspace2 = max_num_tokens * (N // 2)
+        workspace13 = num_experts * max_num_tokens * K * topk * 2 # TODO: *2 is a hack
+        workspace2 = max_num_tokens * N
         return (workspace13, workspace2, a_dtype)
 
     def apply(
