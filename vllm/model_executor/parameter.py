@@ -105,6 +105,9 @@ class _ColumnvLLMParameter(BasevLLMParameter):
         shard_size = self.data.shape[self.output_dim]
         loaded_weight = loaded_weight.narrow(self.output_dim,
                                              tp_rank * shard_size, shard_size)
+        
+        print("self.data.shape", self.data.shape)
+        print("loaded_weight.shape", loaded_weight.shape)
         assert self.data.shape == loaded_weight.shape
         self.data.copy_(loaded_weight)
 
@@ -180,6 +183,8 @@ class RowvLLMParameter(BasevLLMParameter):
         if len(loaded_weight.shape) == 0:
             loaded_weight = loaded_weight.reshape(1)
 
+        print("self.data.shape", self.data.shape, self.data.dtype)
+        print("loaded_weight.shape", loaded_weight.shape, loaded_weight.dtype)
         assert self.data.shape == loaded_weight.shape
         self.data.copy_(loaded_weight)
 

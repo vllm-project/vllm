@@ -54,6 +54,10 @@ from .utils import (AutoWeightsLoader, PPMissingLayer, extract_layer_index,
                     make_empty_intermediate_tensors_factory, make_layers,
                     maybe_prefix)
 
+from vllm.logger import init_logger
+
+logger = init_logger(__name__)
+
 
 class LlamaMLP(nn.Module):
 
@@ -380,7 +384,10 @@ class LlamaModel(nn.Module):
         ]
         params_dict = dict(self.named_parameters())
         loaded_params: Set[str] = set()
+
+        logger.info(f"self.quant_config {self.quant_config}")
         for name, loaded_weight in weights:
+            logger.info(f"--- iterate over: {name}")
             if "rotary_emb.inv_freq" in name:
                 continue
             if ("rotary_emb.cos_cached" in name
@@ -390,6 +397,8 @@ class LlamaModel(nn.Module):
                 continue
             if (self.quant_config is not None and
                 (scale_name := self.quant_config.get_cache_scale(name))):
+
+                logger.info(f"scale_name here {scale_name}")
                 # Loading kv cache quantization scales
                 param = params_dict[scale_name]
                 weight_loader = getattr(param, "weight_loader",
@@ -400,6 +409,7 @@ class LlamaModel(nn.Module):
                 loaded_params.add(scale_name)
                 continue
             if "scale" in name:
+                logger.info(f"scale in this path: {name}")
                 # Remapping the name of FP8 kv-scale.
                 name = maybe_remap_kv_scale_name(name, params_dict)
                 if name is None:

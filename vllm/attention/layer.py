@@ -64,6 +64,8 @@ class Attention(nn.Module):
             sliding_window = cache_config.sliding_window
         else:
             sliding_window = None
+        
+        print("cache_config when init Attention:", cache_config)
 
         if cache_config is not None:
             kv_cache_dtype = cache_config.cache_dtype
@@ -75,6 +77,9 @@ class Attention(nn.Module):
             block_size = 16
             is_attention_free = False
             calculate_kv_scales = False
+        print("calculate_kv_scales", calculate_kv_scales)
+        print("kv_cache_dtype", kv_cache_dtype)
+
         if num_kv_heads is None:
             num_kv_heads = num_heads
 
@@ -136,6 +141,8 @@ class Attention(nn.Module):
                              **extra_impl_args)
         self.backend = backend_name_to_enum(attn_backend.get_name())
         self.dtype = dtype
+
+        print("ATTENTION BACKEND:", self.impl.__class__.__name__)
 
         # For cuda-alike (CUDA and ROCM) and cpu platforms, we control how
         # torch.compile works by registering the attention as one giant

@@ -257,8 +257,13 @@ class AutoWeightsLoader:
     ) -> Set[str]:
         if mapper is not None:
             weights = mapper.apply(weights)
+        
+        for weight_name, weight_data in weights:
+            print(f"loading {weight_name}")
 
         autoloaded_weights = set(self._load_module("", self.module, weights))
+
+        print("autoloaded_weights", autoloaded_weights)
         return autoloaded_weights
 
 

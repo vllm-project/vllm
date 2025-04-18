@@ -44,6 +44,7 @@ class BaseKVCacheMethod(QuantizeMethodBase):
             f"{self.__class__.__name__}.apply should not be called.")
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        print("layer.k_scale here", layer.k_scale)
         # If the kv-cache dtype is auto, we enforce the k/v_scale to be 1.0
         # regardless whether the kv-scale is available in the checkpoint.
         # No need to process kv scales after loading if we are going to

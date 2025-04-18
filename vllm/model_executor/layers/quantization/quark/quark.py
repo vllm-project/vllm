@@ -19,9 +19,11 @@ from vllm.model_executor.layers.quantization.quark.schemes import (
 from vllm.model_executor.layers.quantization.quark.utils import (
     deep_compare, should_ignore_layer)
 from vllm.platforms import current_platform
+from vllm.logger import init_logger
 
 __all__ = ["QuarkLinearMethod"]
 
+logger = init_logger(__name__)
 
 class QuarkConfig(QuantizationConfig):
 
@@ -198,6 +200,46 @@ class QuarkConfig(QuantizationConfig):
         # Only symmetric weight quantization supported.
         return is_int8_dtype and is_tensor and is_weight_symmetric and is_static
 
+    def _is_mx_fp4(self, weight_quant: Optional[Dict[str, Any]],
+                               input_quant: Optional[Dict[str, Any]]) -> bool:
+        # Confirm weights and input quantized.
+        if weight_quant is None or input_quant is None:
+            logger.debug("Quark model is not in MX-FP4 format: weight_quant or input_quant not set")
+            return False
+
+        # Input and weight dtype needs to be fp4.
+        if weight_quant.get("dtype") != "fp4" or input_quant.get("dtype") != "fp4":
+            logger.debug("Quark model is not in MX-FP4 format: dtype not fp4")
+            return False
+
+        # Input and weight qscheme needs to be per group.
+        if weight_quant.get("qscheme") != "per_group" or input_quant.get("qscheme") != "per_group":
+            logger.debug("Quark model is not in MX-FP4 format: not per_group")
+            return False
+
+        # Input and weight group size needs to be 32.
+        if weight_quant.get("group_size") != 32 or input_quant.get("group_size") != 32:
+            logger.debug("Quark model is not in MX-FP4 format: not group_size=32")
+            return False
+
+        # Weights need to use static quantization.
+        if weight_quant.get("is_dynamic") is True:
+            logger.debug("Quark model is not in MX-FP4 format: not weight static")
+            return False
+
+        # Activations need to use dynamic quantization.
+        if input_quant.get("is_dynamic") is False:
+            logger.debug("Quark model is not in MX-FP4 format: not activation dynamic")
+            return False
+
+        # Activations and weight scales need to be in e8m0 format.
+        if weight_quant.get("scale_format") != "e8m0" or input_quant.get("scale_format") != "e8m0":
+            logger.debug("Quark model is not in MX-FP4 format: not scale_format e8m0")
+            return False
+
+        return True
+
+
     def _find_matched_config(self, layer_name: str,
                              module: torch.nn.Module) -> Dict[str, Any]:
 
@@ -263,7 +305,7 @@ class QuarkConfig(QuantizationConfig):
                                  is_static_input_scheme=True,
                                  input_symmetric=input_config.get("symmetric"))
         elif self._is_mx_fp4(weight_config, input_config):
-            return QuarkW4A4MXFP4()
+            return QuarkW4A4MXFP4(input_config)
 
         raise NotImplementedError("No quark compatible scheme was found. "
                                   f"Weight config: {weight_config}, "
@@ -291,12 +333,15 @@ class QuarkConfig(QuantizationConfig):
         :param name: param name
         :return: matching param name for KV cache scale in vLLM
         """
+        print("call get_cache_scale, name", name)
         if self.kv_cache_group is None or len(self.kv_cache_group) == 0:
             return None
 
         kv_proj_names = [
             re.split(r"[*.]", kv_cache)[-1] for kv_cache in self.kv_cache_group
         ]
+
+        print("kv_proj_names", kv_proj_names)
         if name.endswith(".output_scale"):
             if len(kv_proj_names) == 1 and kv_proj_names[0] in name:
                 kv_output_scale_name = "." + kv_proj_names[0] + ".output_scale"
