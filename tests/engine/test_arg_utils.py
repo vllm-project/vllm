@@ -24,6 +24,10 @@ from vllm.utils import FlexibleArgumentParser
     }),
 ])
 def test_limit_mm_per_prompt_parser(arg, expected):
+    """This functionality is deprecated and will be removed in the future.
+    This argument should be passed as JSON string instead.
+    
+    TODO: Remove with nullable_kvs."""
     parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
     if arg is None:
         args = parser.parse_args([])
