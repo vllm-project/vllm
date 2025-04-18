@@ -516,7 +516,7 @@ class Qwen2_5OmniThinkerMultiModalProcessor(
         enable_hf_prompt_update: bool,
     ) -> tuple[list[int], MultiModalKwargs, bool]:
         """
-        Qwen2.5-Omni reimplements this function to handle `use_audio_in_video`.
+        Qwen2.5-Omni reimplements this function to handle text only.
         """
         print(prompt)
         print(hf_processor_mm_kwargs)
