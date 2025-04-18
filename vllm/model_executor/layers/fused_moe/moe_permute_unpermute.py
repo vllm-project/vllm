@@ -1,6 +1,6 @@
 import torch
 from vllm import _custom_ops as ops
-from typing import Optional
+from typing import Optional,Tuple
 
 
 def moe_permute(
@@ -14,7 +14,7 @@ def moe_permute(
     expert_map: Optional[torch.Tensor] = None,
     align_block_size:Optional[int]=None,
     fill_invalid_expert:int = -1
-) -> list[torch.Tensor]:
+) -> Tuple[torch.Tensor,torch.Tensor,torch.Tensor,torch.Tensor]:
     """
     This function expands and permutes activation to gather uncontinuous tokens 
       for each expert.
@@ -30,7 +30,8 @@ def moe_permute(
         from the global expert space to the local expert space of the expert 
         parallel shard.
     - align_block_size (Optional[int]): align group gemm block size for deepgemm
-    - fill_invalid_expert(int): fill expert id in m_indices for invalid expert
+    - fill_invalid_expert(int): fill expert id in m_indices for invalid expert 
+      to workaround DeepGemm unsupport -1 in m_indices
     Returns:
     - permuted_hidden_states (torch.Tensor): permuted activation.
     - expert_first_token_offset (torch.Tensor): offset of the first token
@@ -41,6 +42,7 @@ def moe_permute(
     the group which the j-th row of the LHS belong to.`
     """
     n_token, n_hidden = hidden_states.shape
+    assert (n_hidden * hidden_states.element_size()) % 16 == 0, "permue kernel need hidden dim align to 16B"
     permuted_row_size = n_token * topk
     if align_block_size is not None:
        permuted_row_size = (permuted_row_size + n_expert * (align_block_size-1) + align_block_size - 1) // align_block_size * align_block_size
@@ -50,9 +52,8 @@ def moe_permute(
         dtype=hidden_states.dtype,
         device=hidden_states.device,
     )
-    m_indices = torch.empty(permuted_row_size,
-                            dtype=torch.int32,
-                            device=hidden_states.device,).fill_(fill_invalid_expert)
+    m_indices = torch.full((permuted_row_size,), fill_invalid_expert, dtype=torch.int32,
+                            device=hidden_states.device)
     expert_first_token_offset = torch.empty(
         n_local_expert + 1, dtype=torch.int64, device=hidden_states.device
     )
@@ -108,6 +109,7 @@ def moe_unpermute(permuted_hidden_states: torch.Tensor,
       tensor.  
     """   
     n_token, n_hidden = topk_weights.shape[0], permuted_hidden_states.shape[-1]
+    assert (n_hidden * permuted_hidden_states.element_size()) % 16 == 0, "unpermue kernel need hidden dim align to 16B"
     hidden_states = torch.empty((n_token, n_hidden), dtype=permuted_hidden_states.dtype, 
                                 device=permuted_hidden_states.device)
 

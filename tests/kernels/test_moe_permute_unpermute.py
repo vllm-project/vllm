@@ -13,7 +13,7 @@ from vllm.model_executor.layers.fused_moe.moe_permute_unpermute import (
 from vllm.model_executor.layers.fused_moe.fused_moe import fused_topk
 from vllm.model_executor.layers.fused_moe.layer import determine_expert_map
 from typing import Optional
-import numpy as np  # np sort is stable
+import numpy as np
 from vllm.platforms import current_platform
 
 NUM_EXPERTS = [16, 64]
@@ -33,19 +33,14 @@ def torch_permute(
     align_block_size: Optional[int]=None,
     fill_invalid_expert:int=-1
 ) -> list[torch.Tensor]:
-    # print(topk_ids)
     n_token, n_hidden  = hidden_states.shape[0], hidden_states.shape[1]
-    ## torch sort is unstable
-    # sorted_topk_ids, sorted_indices = torch.sort(topk_ids.flatten()) 
     if expert_map is not None :
         is_local_expert = (expert_map[topk_ids] != -1)
         not_local_expert = (expert_map[topk_ids] == -1)
         topk_ids = is_local_expert * (topk_ids - start_expert) + not_local_expert * (topk_ids + n_expert)
-        # print(topk_ids)
 
-    sorted_indices = np.argsort(topk_ids.flatten().cpu().numpy(), kind="stable") 
-    sorted_topk_ids = topk_ids.flatten()[sorted_indices]
 
+    sorted_topk_ids, sorted_indices = torch.sort(topk_ids.flatten(), stable=True) 
     dst_row_id2src_row_id_map = token_expert_indices.flatten()[sorted_indices]
 
 
@@ -60,7 +55,6 @@ def torch_permute(
 
     _, src2dst_idx = torch.sort(dst_row_id2src_row_id_map)
     valid_row_idx = []
-    # print(expert_first_token_offset)
     if align_block_size is None:
 
         permuted_hidden_states = hidden_states[dst_row_id2src_row_id_map % n_token, ...]
@@ -147,7 +141,6 @@ def test_moe_permute_unpermute(
 ):
     fill_invalid_expert = 0
     ep_rank= np.random.randint(0, ep_size)
-    # print(f"ep rank {ep_rank}")
     expert_map = None
     n_local_expert = n_expert
     if(ep_size != 1) :
@@ -160,7 +153,6 @@ def test_moe_permute_unpermute(
     topk_weights, topk_ids, token_expert_indices = fused_topk(
         hidden_states, gating_output, topk, False
     )
-    # print(topk_ids)
     gold0, gold1, gold2, gold3,valid_row_idx = torch_permute(hidden_states, 
                                         topk_ids, 
                                         token_expert_indices, 
@@ -175,14 +167,7 @@ def test_moe_permute_unpermute(
                                             topk, n_expert, n_local_expert, expert_map,
                                             align_block_size, fill_invalid_expert
                                             )
-    # valid_row = (gold3 != -1) 
-    # print(gold0, result0)
-    # print("expert_first_token_offset\n",gold1,"\n", result1)
-    # print("src_row_id2dst_row_id_map\n",gold2,"\n", result2)
-    # print("valid_row\n", valid_row)
-    # print("mindice\n", gold3.flatten(), "\n", result3.flatten())
-    # print(valid_row_idx)
-    # print(valid_row)
+
     # check expert_first_token_offset
     torch.testing.assert_close(gold1,
                                result1,
@@ -212,13 +197,9 @@ def test_moe_permute_unpermute(
     gold4 = torch_unpermute(result0, topk_weights, topk_ids, 
                             token_expert_indices, result2, valid_row_idx, topk,n_local_expert)
 
-    # print(result4)
-    # print(gold4)
     # check unpermuted hidden 
     torch.testing.assert_close(result4,
                             gold4,
                             atol=2e-2,
                             rtol=0)
 
-
-# test_moe_permute_unpermute(4, 2048, 2, 4, 2, torch.float16, 128)
