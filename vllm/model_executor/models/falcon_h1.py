@@ -89,7 +89,7 @@ class FalconH1MLP(nn.Module):
 
     def forward(self, x):
         x, _ = self.gate_up_proj(x)
-        x[:, : self.intermediate_size // self.tp_size] *= self.gate_multiplier
+        x[:, : self.intermediate_size // self.tp_size] *= self.gate_multiplier #TODO(ilyas): optimize slicing and mul
         x = self.act_fn(x)
         x, _ = self.down_proj(x)
         x = x * self.down_multiplier
@@ -218,7 +218,7 @@ class FalconH1AttentionDecoderLayer(nn.Module):
         prefix: str = "",
     ) -> None:
         super().__init__()
-        rope_theta = getattr(config, "rope_theta", 10000)
+        rope_theta = getattr(config, "rope_theta", 1e11)
         rope_scaling = getattr(config, "rope_scaling", None)
         max_position_embeddings = getattr(
             config, "max_position_embeddings", 8192
