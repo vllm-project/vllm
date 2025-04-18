@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 
-import math
 from typing import Optional
 
 import torch
@@ -21,15 +20,14 @@ def is_fp8_marlin_supported():
 
 
 def apply_fp8_marlin_linear(
-    input: torch.Tensor,
-    weight: torch.Tensor,
-    weight_scale: torch.Tensor,
-    workspace: torch.Tensor,
-    size_n: int,
-    size_k: int,
-    bias: Optional[torch.Tensor],
-    use_fp32_reduce: bool = USE_FP32_REDUCE_DEFAULT
-) -> torch.Tensor:
+        input: torch.Tensor,
+        weight: torch.Tensor,
+        weight_scale: torch.Tensor,
+        workspace: torch.Tensor,
+        size_n: int,
+        size_k: int,
+        bias: Optional[torch.Tensor],
+        use_fp32_reduce: bool = USE_FP32_REDUCE_DEFAULT) -> torch.Tensor:
     # For GPUs that lack FP8 hardware support, we can leverage the
     # Marlin kernel for fast weight-only FP8 quantization
 
