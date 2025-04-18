@@ -45,8 +45,10 @@ __device__ inline void dequant<half2, vllm::kU4B8.id()>(int q, half2* frag_b) {
   const int HI = 0x00f000f0;
   const int EX = 0x64006400;
   // Guarantee that the `(a & b) | c` operations are LOP3s.
+  // clang-format off
   int lo = lop3<(0xf0 & 0xcc) | 0xaa>(q, LO, EX);
   int hi = lop3<(0xf0 & 0xcc) | 0xaa>(q, HI, EX);
+  // clang-format on
   // We want signed int4 outputs, hence we fuse the `-8` symmetric zero point
   // directly into `SUB` and `ADD`.
   const int SUB = 0x64086408;
@@ -65,8 +67,10 @@ __device__ inline void dequant<half2, vllm::kU4.id()>(int q, half2* frag_b) {
   const int HI = 0x00f000f0;
   const int EX = 0x64006400;
   // Guarantee that the `(a & b) | c` operations are LOP3s.
+  // clang-format off
   int lo = lop3<(0xf0 & 0xcc) | 0xaa>(q, LO, EX);
   int hi = lop3<(0xf0 & 0xcc) | 0xaa>(q, HI, EX);
+  // clang-format on
   // We want signed int4 outputs, hence we fuse the `-8` symmetric zero point
   // directly into `SUB` and `ADD`.
   const int SUB = 0x64006400;
@@ -86,10 +90,11 @@ __device__ inline void dequant<nv_bfloat162, vllm::kU4B8.id()>(
   static constexpr uint32_t EX = 0x43004300;
 
   // Guarantee that the `(a & b) | c` operations are LOP3s.
-
+  // clang-format off
   int lo = lop3<(0xf0 & 0xcc) | 0xaa>(q, MASK, EX);
   q >>= 4;
   int hi = lop3<(0xf0 & 0xcc) | 0xaa>(q, MASK, EX);
+  // clang-format on
 
   static constexpr uint32_t MUL = 0x3F803F80;
   static constexpr uint32_t ADD = 0xC308C308;
