@@ -87,8 +87,12 @@ steps:
     env:
       DOCKER_BUILDKIT: "1"
 
-  - label: "Build and publish Neuron release image"
+  - block: "Build Neuron release image"
+    key: block-neuron-release-image-build
     depends_on: ~
+
+  - label: "Build and publish Neuron release image"
+    depends_on: block-neuron-release-image-build
     agents:
       queue: neuron-postmerge
     commands:
