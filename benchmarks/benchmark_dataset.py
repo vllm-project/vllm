@@ -846,23 +846,29 @@ You are a code completion assistant and your task is to analyze user edits and t
 
 """
 
-
-def _format_zeta_prompt(
-        examples: dict,
-        original_start_marker="<|editable_region_start|>") -> dict:
-    events, inputs, outputs = examples["events"], examples["input"], examples[
-        "output"]
+def _format_zeta_prompt(examples: dict, original_start_marker = "<|editable_region_start|>") -> dict:
+    """
+    Format the zeta prompt for the Next Edit Prediction (NEP) dataset.
+    This could be further extended to support more NEP datasets.
+    
+    :param examples: The dataset examples.
+    :param original_start_marker: The original start marker for the editable region.
+    :return: A dictionary with the prompt and expected output.
+    """
+    events, inputs, outputs = examples["events"], examples["input"], examples["output"]
     prompts, expected_outputs = [], []
     for event, input, output in zip(events, inputs, outputs):
+        # create the final prompt
         prompts.append(zeta_prompt.format(event, input))
 
+        # following the original implementation, extract the focused region
+        # from the raw output
         output_start_index = output.find(original_start_marker)
         output_focused_region = output[output_start_index:]
         output = output_focused_region
         expected_outputs.append(output)
-
+        
     return {"prompt": prompts, "expected_output": expected_outputs}
-
 
 class NextEditPredictionDataset(HuggingFaceDataset):
     """
@@ -875,7 +881,7 @@ class NextEditPredictionDataset(HuggingFaceDataset):
     MAPPING_PROMPT_FUNCS = {
         "zed-industries/zeta": _format_zeta_prompt,
     }
-
+    
     def load_data(self) -> None:
         """Load data from HuggingFace datasets."""
         self.data = load_dataset(
@@ -884,22 +890,20 @@ class NextEditPredictionDataset(HuggingFaceDataset):
             split=self.dataset_split,
             streaming=True,
         )
-        formatting_prompt_func = self.MAPPING_PROMPT_FUNCS.get(
-            self.dataset_path)
+        formatting_prompt_func = self.MAPPING_PROMPT_FUNCS.get(self.dataset_path)
         if formatting_prompt_func is None:
             raise ValueError(f"Unsupported dataset path: {self.dataset_path}")
         self.data = self.data.map(formatting_prompt_func, batched=True)
         self.data = self.data.shuffle(seed=self.random_seed)
+    
 
-    def sample(self,
-               tokenizer: PreTrainedTokenizerBase,
-               num_requests: int,
-               output_len: Optional[int] = None,
-               **kwargs):
+    def sample(
+        self,
+        tokenizer: PreTrainedTokenizerBase,
+        num_requests: int,
+        **kwargs):
         samples = []
-        logger.info(
-            f"Sampling {num_requests} requests from {self.dataset_path} dataset"
-        )
+        logger.info(f"Sampling {num_requests} requests from {self.dataset_path} dataset")
         for item in self.data:
             if len(samples) >= num_requests:
                 break
@@ -907,14 +911,9 @@ class NextEditPredictionDataset(HuggingFaceDataset):
             expected_output = item["expected_output"]
             prompt_len = len(tokenizer(prompt).input_ids)
             expected_output_len = len(tokenizer(expected_output).input_ids)
-            samples.append(
-                SampleRequest(prompt=prompt,
-                              prompt_len=prompt_len,
-                              expected_output_len=expected_output_len))
+            samples.append(SampleRequest(prompt=prompt, prompt_len=prompt_len, expected_output_len=expected_output_len))
         if len(samples) < num_requests:
-            logger.info(
-                f"Requested {num_requests} samples, but the dataset {self.dataset_path} only has {len(samples)}"
-            )
+            logger.info(f"Requested {num_requests} samples, but the dataset {self.dataset_path} only has {len(samples)}")
         return samples
 
 
