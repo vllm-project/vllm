@@ -36,6 +36,11 @@ MMF_CLASS_TO_FACTORY: dict[type[BaseMultiModalField], str] = {
 
 bytestr = Union[bytes, bytearray, memoryview, zmq.Frame]
 
+NP_FP16_STR = torch.tensor(0, dtype=torch.float16,
+                           device="cpu").numpy().dtype.str
+# Special dtype string for bf16 which numpy doesn't support.
+ENC_BF16_STR = "!bf16"
+
 
 class MsgpackEncoder:
     """Encoder with custom torch tensor and numpy array serialization.
@@ -80,7 +85,7 @@ class MsgpackEncoder:
 
     def enc_hook(self, obj: Any) -> Any:
         if isinstance(obj, torch.Tensor):
-            return self._encode_ndarray(obj.numpy())
+            return self._encode_tensor(obj)
 
         # Fall back to pickle for object or void kind ndarrays.
         if isinstance(obj, np.ndarray) and obj.dtype.kind not in ('O', 'V'):
@@ -113,6 +118,15 @@ class MsgpackEncoder:
         return msgpack.Ext(CUSTOM_TYPE_PICKLE,
                            pickle.dumps(obj, protocol=pickle.HIGHEST_PROTOCOL))
 
+    def _encode_tensor(
+        self, obj: torch.Tensor
+    ) -> tuple[str, tuple[int, ...], Union[int, memoryview]]:
+        if obj.dtype != torch.bfloat16:
+            return self._encode_ndarray(obj.numpy())
+        # Numpy doesn't support as bf16 so send as fp16 view.
+        _, shape, data = self._encode_ndarray(obj.view(torch.float16).numpy())
+        return ENC_BF16_STR, shape, data
+
     def _encode_ndarray(
         self, obj: np.ndarray
     ) -> tuple[str, tuple[int, ...], Union[int, memoryview]]:
@@ -135,7 +149,7 @@ class MsgpackEncoder:
 
     def _encode_nested_tensors(self, nt: NestedTensors) -> Any:
         if isinstance(nt, torch.Tensor):
-            return self._encode_ndarray(nt.numpy())
+            return self._encode_tensor(nt)
         if isinstance(nt, (int, float)):
             # Although it violates NestedTensors type, MultiModalKwargs
             # values are sometimes floats.
@@ -186,7 +200,7 @@ class MsgpackDecoder:
             if issubclass(t, np.ndarray):
                 return self._decode_ndarray(obj)
             if issubclass(t, torch.Tensor):
-                return torch.from_numpy(self._decode_ndarray(obj))
+                return self._decode_tensor(obj)
             if issubclass(t, MultiModalKwargs):
                 if isinstance(obj, list):
                     return MultiModalKwargs.from_items(
@@ -196,6 +210,15 @@ class MsgpackDecoder:
                     for k, v in obj.items()
                 })
         return obj
+
+    def _decode_tensor(self, arr: Any) -> torch.Tensor:
+        dtype, shape, data = arr
+        if dtype != ENC_BF16_STR:
+            return torch.from_numpy(self._decode_ndarray(arr))
+        # Numpy doesn't support as bf16 so convert from fp16 view.
+        arr = NP_FP16_STR, shape, data
+        tensor = torch.from_numpy(self._decode_ndarray(arr))
+        return tensor.view(torch.bfloat16)
 
     def _decode_ndarray(self, arr: Any) -> np.ndarray:
         dtype, shape, data = arr
@@ -228,7 +251,7 @@ class MsgpackDecoder:
         if not isinstance(obj, list):
             raise TypeError(f"Unexpected NestedTensors contents: {type(obj)}")
         if obj and isinstance(obj[0], str):
-            return torch.from_numpy(self._decode_ndarray(obj))
+            return self._decode_tensor(obj)
         return [self._decode_nested_tensors(x) for x in obj]
 
     def ext_hook(self, code: int, data: memoryview) -> Any:

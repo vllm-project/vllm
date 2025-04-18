@@ -46,6 +46,10 @@ def test_encode_decode():
         list_of_tensors=[
             torch.rand((1, 10), dtype=torch.float32),
             torch.rand((3, 5, 4000), dtype=torch.float64),
+            # Make sure to test bf16 which numpy doesn't support.
+            torch.rand((3, 5, 1000), dtype=torch.bfloat16),
+            torch.tensor([float("-inf"), float("inf")] * 1024,
+                         dtype=torch.bfloat16),
             torch.tensor(1984),  # test scalar too
         ],
         numpy_array=np.arange(512),
@@ -64,7 +68,7 @@ def test_encode_decode():
     # There should be the main buffer + 4 large tensor buffers
     # + 1 large numpy array. "large" is <= 512 bytes.
     # The two small tensors are encoded inline.
-    assert len(encoded) == 6
+    assert len(encoded) == 8
 
     decoded: MyType = decoder.decode(encoded)
 
@@ -76,7 +80,7 @@ def test_encode_decode():
 
     encoded2 = encoder.encode_into(obj, preallocated)
 
-    assert len(encoded2) == 6
+    assert len(encoded2) == 8
     assert encoded2[0] is preallocated
 
     decoded2: MyType = decoder.decode(encoded2)
