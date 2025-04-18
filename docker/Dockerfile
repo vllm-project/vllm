@@ -5,11 +5,11 @@
 # docs/source/contributing/dockerfile/dockerfile.md and
 # docs/source/assets/contributing/dockerfile-stages-dependency.png
 
-ARG CUDA_VERSION=12.4.1
+ARG CUDA_VERSION=12.8.1
 #################### BASE BUILD IMAGE ####################
 # prepare basic build environment
 FROM nvidia/cuda:${CUDA_VERSION}-devel-ubuntu20.04 AS base
-ARG CUDA_VERSION=12.4.1
+ARG CUDA_VERSION=12.8.1
 ARG PYTHON_VERSION=3.12
 ARG TARGETPLATFORM
 ENV DEBIAN_FRONTEND=noninteractive
@@ -170,7 +170,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 # image with vLLM installed
 # TODO: Restore to base image after FlashInfer AOT wheel fixed
 FROM nvidia/cuda:${CUDA_VERSION}-devel-ubuntu22.04 AS vllm-base
-ARG CUDA_VERSION=12.4.1
+ARG CUDA_VERSION=12.8.1
 ARG PYTHON_VERSION=3.12
 WORKDIR /vllm-workspace
 ENV DEBIAN_FRONTEND=noninteractive
