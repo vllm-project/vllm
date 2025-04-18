@@ -1568,17 +1568,22 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
             # memory usage of CUDA graph.
             for virtual_engine in range(
                     self.parallel_config.pipeline_parallel_size):
+                # We need to not only iterate over batch sizes, but also whether
+                # to use inputs_embeds or not, hence we use the cartesian
+                # product.
+                cudagraph_capture_sizes = self.vllm_config.compilation_config\
+                    .cudagraph_capture_sizes
+                cudagraph_inputs_embeds = (True, False)
+                compilation_cases = itertools.product(
+                    cudagraph_capture_sizes,
+                    cudagraph_inputs_embeds,
+                )
                 # Only rank 0 should print progress bar during capture
-                cudagraph_capture_sizes = (tqdm(
-                    list(
-                        itertools.product(
-                            self.vllm_config.compilation_config.
-                            cudagraph_capture_sizes, [True, False])),
-                    desc="Capturing CUDA graph shapes",
-                ) if get_tensor_model_parallel_rank() == 0 else
-                                           self.vllm_config.compilation_config.
-                                           cudagraph_capture_sizes)
-                for batch_size, use_inputs_embeds in cudagraph_capture_sizes:
+                if get_tensor_model_parallel_rank() == 0:
+                    compilation_cases = tqdm(
+                        list(compilation_cases),
+                        desc="Capturing CUDA graph shapes")
+                for batch_size, use_inputs_embeds in compilation_cases:
                     attn_metadata = (
                         self.attn_state.graph_capture_get_metadata_for_batch(
                             batch_size,
