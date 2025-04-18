@@ -11,13 +11,12 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1, KVConnectorMetadata, KVConnectorRole)
 from vllm.distributed.kv_transfer.kv_pipe.p2p_nccl_pipe import P2pNcclPipe
 from vllm.logger import init_logger
+from vllm.v1.attention.backends.mla.common import MLACommonMetadata
 from vllm.v1.core.sched.output import SchedulerOutput
 
 if TYPE_CHECKING:
     from vllm.attention.backends.abstract import AttentionMetadata
     from vllm.forward_context import ForwardContext
-    from vllm.v1.core.kv_cache_manager import KVCacheManager
-    from vllm.v1.core.kv_cache_utils import KVCacheBlock
     from vllm.v1.request import Request
 
 logger = init_logger(__name__)
@@ -34,24 +33,20 @@ class ReqMeta:
     # Is store or load
     is_store: bool
 
-    ## Blocks allocated by the scheduler (no-longer needed)
-    # block_ids: torch.Tensor
-
     @staticmethod
-    def from_request(request: "Request", block_size: int,
-                     is_store: bool) -> "ReqMeta":
-        valid_num_tokens = align_to_block_size(len(request.prompt_token_ids),
-                                               block_size)
-        token_ids = torch.tensor(request.prompt_token_ids)[:valid_num_tokens]
-        block_ids = torch.tensor(request.block_ids)
-        num_blocks = block_ids.shape[0]
+    def make_meta(request_id: srt, token_ids: list[int], block_ids: list[int],
+                  block_size: int, is_store: bool) -> "ReqMeta":
+        valid_num_tokens = align_to_block_size(len(token_ids), block_size)
+        token_ids_tensor = torch.tensor(token_ids)[:valid_num_tokens]
+        block_ids_tensor = torch.tensor(block_ids)
+        num_blocks = block_ids_tensor.shape[0]
         block_offsets = torch.arange(0, block_size)
         slot_mapping = block_offsets.reshape((1, block_size)) + \
-                       block_ids.reshape((num_blocks, 1)) * block_size
+                       block_ids_tensor.reshape((num_blocks, 1)) * block_size
         slot_mapping = slot_mapping.flatten()[:valid_num_tokens]
         return ReqMeta(
-            request_id=request.request_id,
-            token_ids=token_ids,
+            request_id=request_id,
+            token_ids=token_ids_tensor,
             slot_mapping=slot_mapping,
             is_store=is_store,
         )
@@ -65,28 +60,25 @@ class P2pNcclConnectorMetadata(KVConnectorMetadata):
         self.requests = []
 
     def add_request(
-        self,
-        request: "Request",
-        block_size: int,
-        is_store: bool,
+            self,
+            request_id: srt,
+            token_ids: list[int],
+            block_ids: list[int],
+            block_size: int,
+            is_store: bool,
     ) -> None:
         self.requests.append(
-            ReqMeta.from_request(request, block_size, is_store))
+            ReqMeta.make_meta(request_id, token_ids, block_ids, block_size, is_store))
 
 
 class P2pNcclConnector(KVConnectorBase_V1):
 
-    def __init__(self, rank: Optional[int], local_rank: Optional[int],
-                 config: "VllmConfig", role: KVConnectorRole):
-        super().__init__(
-            rank=rank,
-            local_rank=local_rank,
-            config=config,
-            role=role,
-        )
-        self._block_size = config.cache_config.block_size
-        self._requests_need_load: list[str] = []
-        logger.info(config.kv_transfer_config)
+    def __init__(self, vllm_config: "VllmConfig", role: KVConnectorRole,
+                 rank: Optional[int], local_rank: Optional[int]):
+        super().__init__(vllm_config=vllm_config, role=role)
+        self._block_size = vllm_config.cache_config.block_size
+        self._requests_need_load: dict[str, Request] = {}
+        self.config = vllm_config.kv_transfer_config
 
         self.p2p_nccl_pipe = P2pNcclPipe(
             local_rank=local_rank,  # type: ignore
@@ -108,34 +100,45 @@ class P2pNcclConnector(KVConnectorBase_V1):
             The number of elements in kv_caches and layer_names should be
             the same.
         """
+        attn_metadata = forward_context.attn_metadata
 
         def inject_kv_into_layer(
-            dst_kv_cache_layer: torch.Tensor,
-            src_kv_cache: torch.Tensor,
-            slot_mapping: torch.Tensor,
+                dst_kv_cache_layer: torch.Tensor,
+                src_kv_cache: torch.Tensor,
+                slot_mapping: torch.Tensor,
         ) -> None:
             """Inject the KV cache into the layer.
 
             Args:
                 dst_kv_cache_layer (torch.Tensor): the destination KV cache
-                    layer. In shape [2, num_pages, page_size, xxx].
+                    layer. In shape [2, num_pages, page_size, xxx] if not
+                    using MLA, [num_pages, page_size, xxx] otherwise.
                 src_kv_cache (torch.Tensor): the source KV cache. In shape
-                    [2, num_tokens, xxx].
+                    [2, num_tokens, xxx] if not using MLA, [num_tokens, xxx]
+                    otherwise.
                 slot_mapping (torch.Tensor): the slot mapping. In shape
                     [num_tokens].
             """
             dst_kv_cache_layer_shape = dst_kv_cache_layer.shape
-            num_pages = dst_kv_cache_layer_shape[1]
-            page_size = dst_kv_cache_layer_shape[2]
-            dst_kv_cache_layer = dst_kv_cache_layer.reshape(
-                2, num_pages * page_size, -1)
-            dst_kv_cache_layer[:, slot_mapping, ...] = src_kv_cache
-            dst_kv_cache_layer.reshape(dst_kv_cache_layer_shape)
+            if isinstance(attn_metadata, MLACommonMetadata):
+                num_pages = dst_kv_cache_layer_shape[0]
+                page_size = dst_kv_cache_layer_shape[1]
+                dst_kv_cache_layer = dst_kv_cache_layer.reshape(
+                    num_pages * page_size, -1)
+                dst_kv_cache_layer[slot_mapping, ...] = src_kv_cache
+                dst_kv_cache_layer.reshape(dst_kv_cache_layer_shape)
+            else:
+                num_pages = dst_kv_cache_layer_shape[1]
+                page_size = dst_kv_cache_layer_shape[2]
+                dst_kv_cache_layer = dst_kv_cache_layer.reshape(
+                    2, num_pages * page_size, -1)
+                dst_kv_cache_layer[:, slot_mapping, ...] = src_kv_cache
+                dst_kv_cache_layer.reshape(dst_kv_cache_layer_shape)
 
         # Get the metadata
         metadata: KVConnectorMetadata = \
             self._get_connector_metadata()
-        assert isinstance(metadata, P2pNcclConnectorMetadata)
+        assert isinstance(metadata, SharedStorageConnectorMetadata)
 
         if metadata is None:
             logger.warning(
@@ -179,7 +182,7 @@ class P2pNcclConnector(KVConnectorBase_V1):
 
     def save_kv_layer(self, layer_name: str, kv_layer: torch.Tensor,
                       attn_metadata: "AttentionMetadata", **kwargs) -> None:
-        """Start saving the a layer of KV cache from vLLM's paged buffer
+        """Start saving the KV cache of the layer from vLLM's paged buffer
         to the connector.
 
         Args:
@@ -191,19 +194,24 @@ class P2pNcclConnector(KVConnectorBase_V1):
         """
 
         def extract_kv_from_layer(
-            layer: torch.Tensor,
-            slot_mapping: torch.Tensor,
+                layer: torch.Tensor,
+                slot_mapping: torch.Tensor,
         ) -> torch.Tensor:
             """Extract the KV cache from the layer.
 
-            Assume the shape of the layer is (2, num_pages, page_size, xxx).
+            Assume the shape of the layer is (2, num_pages, page_size, xxx)
+            if MLA is not used, and (num_pages, page_size, xxx) otherwise.
             """
+            if isinstance(attn_metadata, MLACommonMetadata):
+                num_pages, page_size = layer.shape[0], layer.shape[1]
+                return layer.reshape(num_pages * page_size, -1)[slot_mapping,
+                ...]
             num_pages, page_size = layer.shape[1], layer.shape[2]
             return layer.reshape(2, num_pages * page_size, -1)[:, slot_mapping,
-                                                               ...]
+                   ...]
 
         connector_metadata = self._get_connector_metadata()
-        assert isinstance(connector_metadata, P2pNcclConnectorMetadata)
+        assert isinstance(connector_metadata, SharedStorageConnectorMetadata)
         for request in connector_metadata.requests:
             if request.is_store:
                 request_id = request.request_id
@@ -217,61 +225,93 @@ class P2pNcclConnector(KVConnectorBase_V1):
     def wait_for_save(self):
         return
 
-    def get_external_prefix_cache_blocks(
-        self,
-        request: "Request",
-        computed_blocks: list["KVCacheBlock"],
-        num_computed_tokens: int,
-        kv_cache_manager: "KVCacheManager",
-    ) -> list["KVCacheBlock"]:
+    def get_num_new_matched_tokens(
+            self,
+            request: "Request",
+            num_computed_tokens: int,
+    ) -> int:
         """
-        Get the external prefix cache blocks from the connector.
-
-        This function may change the state of the connector, which will
-        be used by `attach_connector_meta` later.
-
-        This function will also allocate/free the blocks dynamically when
-        there is remote cache hit.
+        Get number of new tokens that can be loaded from the
+        external KV cache beyond the num_computed_tokens.
 
         Args:
             request (Request): the request object.
-            computed_blocks (list[KVCacheBlock]): the 'local' computed blocks.
-            num_computed_tokens (int): the number of 'local' computed tokens.
-            kv_cache_manager (KVCacheManager): the KV cache manager to
-                allocate/free the blocks if needed.
+            num_computed_tokens (int): the number of locally
+                computed tokens for this request
 
         Returns:
-            The updated list of the computed blocks (appended with the remote
-            cached blocks)
+            the number of tokens that can be loaded from the
+            external KV cache beyond what is already computed.
         """
-        return computed_blocks
 
-    def attach_connector_meta(
-            self, scheduler_output: SchedulerOutput) -> SchedulerOutput:
-        """Attach the connector metadata to the request object.
+        return 0
 
-        This function should NOT modify other fields in the scheduler_output
-        except the `kv_connector_metadata` field.
+    def update_state_after_alloc(self, request: "Request",
+                                 num_external_tokens: int):
+        """
+        Update KVConnector state after block allocation.
+
+        If blocks were allocated, add to _requests_need_load,
+        such that we load the KVs in the next forward pass.
+        """
+        if num_external_tokens > 0:
+            self._requests_need_load[request.request_id] = request
+
+    def build_connector_meta(
+            self,
+            scheduler_output: SchedulerOutput,
+    ) -> KVConnectorMetadata:
+        """Build the connector metadata for this step.
+
+        This function should NOT modify any fields in the scheduler_output.
         Also, calling this function will reset the state of the connector.
 
         Args:
             scheduler_output (SchedulerOutput): the scheduler output object.
         """
-        meta = P2pNcclConnectorMetadata()
-        for request in scheduler_output.scheduled_new_reqs:
-            # T^T, why there is both req_id and request_id????
-            if request.req_id in self._requests_need_load:
-                meta.add_request(request, self._block_size, is_store=False)
-            else:
-                # NOTE: here, we set the store and load being exclusive,
-                # but in LMCache use case, a single request can have both
-                # store and load status
-                if not self.found_match_for_request(request):
-                    meta.add_request(request, self._block_size, is_store=True)
-        scheduler_output.kv_connector_metadata = meta
+        meta = SharedStorageConnectorMetadata()
 
+        total_need_load = 0
+        for new_req in scheduler_output.scheduled_new_reqs:
+            if new_req.req_id in self._requests_need_load:
+                meta.add_request(token_ids=new_req.prompt_token_ids,
+                                 block_ids=new_req.block_ids,
+                                 block_size=self._block_size,
+                                 is_store=False)
+                total_need_load += 1
+            else:
+                meta.add_request(token_ids=new_req.prompt_token_ids,
+                                 block_ids=new_req.block_ids,
+                                 block_size=self._block_size,
+                                 is_store=True)
+
+        for cached_req in scheduler_output.scheduled_cached_reqs:
+            # NOTE(rob): here we rely on the resumed requests being
+            # the first N requests in the list scheduled_cache_reqs.
+            if not cached_req.resumed_from_preemption:
+                break
+            if cached_req.req_id in self._requests_need_load:
+                # NOTE(rob): cached_req_data does not have the full
+                # list of token ids (only new tokens). So we look it
+                # up in the actual request object.
+                request = self._requests_need_load[cached_req.req_id]
+                total_tokens = (len(cached_req.new_token_ids) +
+                                cached_req.num_computed_tokens)
+                token_ids = request.all_token_ids[:total_tokens]
+
+                # NOTE(rob): For resumed req, new_block_ids is all
+                # of the block_ids for the request.
+                block_ids = cached_req.new_block_ids
+
+                meta.add_request(token_ids=token_ids,
+                                 block_ids=block_ids,
+                                 block_size=self._block_size,
+                                 is_store=False)
+                total_need_load += 1
+
+        assert total_need_load == len(self._requests_need_load)
         self._requests_need_load.clear()
-        return scheduler_output
+        return meta
 
     @staticmethod
     def parse_request_id(request_id: str, is_prefill=True) -> Tuple[str, int]:
