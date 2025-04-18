@@ -909,13 +909,13 @@ class ROCmFlashAttentionImpl(AttentionImpl):
                 assert _PARTITION_SIZE_ROCM % block_size == 0
                 tmp_output = torch.empty(
                     size=(num_seqs, num_heads, max_num_partitions, head_size),
-                    dtype=output.dtype,
-                    device=output.device,
+                    dtype=out_pa.dtype,
+                    device=out_pa.device,
                 )
                 exp_sums = torch.empty(
                     size=(num_seqs, num_heads, max_num_partitions),
                     dtype=torch.float32,
-                    device=output.device,
+                    device=out_pa.device,
                 )
                 max_logits = torch.empty_like(exp_sums)
 
