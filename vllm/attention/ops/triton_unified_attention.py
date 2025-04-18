@@ -11,27 +11,23 @@ import triton
 import triton.language as tl
 import triton_dejavu
 
-from vllm import _custom_ops as ops
-from vllm.platforms.rocm import use_rocm_custom_paged_attention
-
-from .prefix_prefill import context_attention_fwd
-
-
 @triton.jit
 def cdiv_fn(x, y):
     return (x + y - 1) // y
 
-
-import time
-t_prefix = 0.0
-t_paged = 0.0
+@triton.jit
+def apply_softcap(S, x):
+    Sdiv = S/x
+    p1 = tl.exp(Sdiv)
+    p2 = tl.exp(-Sdiv)
+    return x * (p1-p2)/(p1+p2)
 
 @triton_dejavu.jitcache(
-    check_keys=["USE_ALIBI_SLOPES", "SLIDING_WINDOW"],
+    check_keys=[],
     cache_launch_grid=False,
 )
 @triton.jit
-def kernel_paged_attention_2d(
+def kernel_unified_attention_2d(
         output_ptr,  # [num_tokens, num_query_heads, head_size]
         query_ptr,  # [num_tokens, num_query_heads, head_size]
         key_cache_ptr,  # [num_blks, num_kv_heads, head_size // x, blk_size, x]
@@ -42,9 +38,9 @@ def kernel_paged_attention_2d(
         scale,  # float32
         k_scale,  # float32
         v_scale,  # float32
+        softcap, # float32
         num_query_heads: tl.constexpr,  # int
         num_queries_per_kv: tl.constexpr,  # int
-        num_queries_per_kv_padded: tl.constexpr,  # int
         block_table_stride: tl.int64,  # int
         query_stride_0: tl.int64,  # int
         query_stride_1: tl.int64,  # int, should be equal to head_size
@@ -54,6 +50,7 @@ def kernel_paged_attention_2d(
         HEAD_SIZE: tl.constexpr,  # int
         HEAD_SIZE_PADDED: tl.constexpr,  # int, must be power of 2
         USE_ALIBI_SLOPES: tl.constexpr,  # bool
+        USE_SOFTCAP: tl.constexpr, # bool
         SLIDING_WINDOW: tl.constexpr,  # int
         stride_k_cache_0: tl.int64,  # int
         stride_k_cache_1: tl.int64,  # int
@@ -86,17 +83,11 @@ def kernel_paged_attention_2d(
 
     q_block_local_idx = q_block_global_idx - q_block_start_idx
 
-    #print("seq_idx: %d, q_block_idx: %d, kv_head_idx: %d" % (seq_idx, q_block_idx, kv_head_idx))
-
-    #tl.device_print("%d %d %d " % (max_num_q_blocks, seq_idx, q_block_idx))
-
     cur_batch_in_all_start_index = tl.load(query_start_len_ptr + seq_idx)
     cur_batch_in_all_stop_index = tl.load(query_start_len_ptr + seq_idx + 1)
 
     cur_batch_query_len = cur_batch_in_all_stop_index \
         - cur_batch_in_all_start_index
-
-    #print("q_block_idx*BLOCK_Q: %d, cur_batch_query_len: %d" % (q_block_idx*BLOCK_Q, cur_batch_query_len))
 
     if q_block_local_idx*BLOCK_Q >= cur_batch_query_len:
         return
@@ -104,16 +95,10 @@ def kernel_paged_attention_2d(
     offs_m = tl.arange(0, BLOCK_Q * num_queries_per_kv)
     offs_d = tl.arange(0, HEAD_SIZE_PADDED)
 
-    #print("offs_m: ", offs_m)
-    #print("offs_d: ", offs_d)
-
     query_pos = q_block_local_idx * BLOCK_Q + offs_m // num_queries_per_kv
 
     query_offset_0 = cur_batch_in_all_start_index + query_pos
     query_offset_1 = kv_head_idx * num_queries_per_kv + offs_m % num_queries_per_kv
-
-    #print("query_offset_0: ", query_offset_0)
-    #print("query_offset_1: ", query_offset_1)
 
     query_offset = (query_offset_0[:, None] * query_stride_0 +
                     query_offset_1[:, None] * query_stride_1 +
@@ -122,9 +107,6 @@ def kernel_paged_attention_2d(
     dim_mask = tl.where(offs_d < HEAD_SIZE, 1, 0).to(tl.int1)
     query_mask_0 = tl.where(query_pos < cur_batch_query_len, 1, 0).to(tl.int1)
     query_mask_1 = tl.where(query_offset_1 < num_query_heads, 1, 0).to(tl.int1)
-
-    #print("query_mask_0: ", query_mask_0)
-    #print("query_mask_1: ", query_mask_1)
 
     # Q : (BLOCK_Q * num_queries_per_kv, HEAD_SIZE,)
     Q = tl.load(
@@ -177,7 +159,10 @@ def kernel_paged_attention_2d(
                          other=0.0)
 
         if K_load.dtype.is_fp8():
-            K = (K_load.to(tl.float32) * tl.load(k_scale)).to(Q.dtype)
+            if Q.dtype.is_fp8():
+                K = K_load
+            else:
+                K = (K_load.to(tl.float32) * tl.load(k_scale)).to(Q.dtype)
         else:
             K = K_load
 
@@ -187,22 +172,27 @@ def kernel_paged_attention_2d(
                          other=0.0)
 
         if V_load.dtype.is_fp8():
-            V = (V_load.to(tl.float32) * tl.load(v_scale)).to(Q.dtype)
+            if Q.dtype.is_fp8():
+                V = V_load
+            else:
+                V = (V_load.to(tl.float32) * tl.load(v_scale)).to(Q.dtype)
         else:
             V = V_load
 
         seq_offset = j * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
 
-        #print("seq_offset: ", seq_offset)
-        #print("context_len: ", context_len + query_pos)
-
-        #boundary = tl.full([BLOCK_SIZE], context_len+query_lke, dtype=tl.int32)
         seq_mask = seq_offset[None, :] < context_len + query_pos[:, None] + 1
 
         # S : (BLOCK_Q * num_queries_per_kv, BLOCK_SIZE,)
-        S = tl.where(query_mask_1[:, None] & query_mask_0[:, None] & seq_mask, 0.0,
-                     float("-inf")).to(tl.float32)
+        S = tl.zeros(shape=(BLOCK_Q * num_queries_per_kv, BLOCK_SIZE), dtype=tl.float32)
+
         S += scale * tl.dot(Q, K)
+
+        if USE_SOFTCAP:
+            S = apply_softcap(S, softcap)
+
+        S = tl.where(query_mask_1[:, None] & query_mask_0[:, None] & seq_mask, S,
+                     float("-inf"))
 
         if SLIDING_WINDOW > 0:
             S = tl.where((context_len + query_pos[:, None] - seq_offset) < SLIDING_WINDOW, S,
@@ -248,7 +238,7 @@ def kernel_paged_attention_2d(
     )
 
 
-def chunked_prefill_paged_decode(
+def unified_attention(
     q,
     k,
     v,
@@ -270,13 +260,6 @@ def chunked_prefill_paged_decode(
 
     use_alibi_slopes = alibi_slopes is not None
 
-    #print("q.shape: ", q.shape)
-    #print("k.shape: ", k.shape)
-    #print("v.shape: ", v.shape)
-    #print("seqused_k: ", seqused_k)
-    #print("window_size: ", window_size)
-    #print("cu_seqlens_q: ", cu_seqlens_q)
-
     block_size = v.shape[1]
     num_seqs = len(seqused_k)
     num_query_heads = q.shape[1]
@@ -284,58 +267,12 @@ def chunked_prefill_paged_decode(
     num_queries_per_kv = num_query_heads // num_kv_heads
     head_size = q.shape[2]
 
-    num_queries_per_kv_padded = max(triton.next_power_of_2(num_queries_per_kv),
-                                    16)
-
-    #print("block_size: ", block_size)
-    #print("num_seqs: ", num_seqs)
-    #print("num_query_heads: ", num_query_heads)
-    #print("num_kv_heads: ", num_kv_heads)
-    #print("head_size: ", head_size)
-    #print("max_seqlen_q: ", max_seqlen_q)
-    #print("seqused_k: ", seqused_k)
-
     BLOCK_M = 16
     BLOCK_Q = BLOCK_M // num_queries_per_kv
 
-    '''
-    t0 = time.time()
-    torch.cuda.synchronize()
-
-    q_block_start_idx = torch.empty(size=(num_seqs+1,), device=q.device, dtype=torch.int32)
-    q_block_start_idx[0] = 0
-    for i in range(num_seqs):
-        this_q_len = cu_seqlens_q[i+1]-cu_seqlens_q[i]
-        this_n_q_blocks = triton.cdiv(this_q_len, BLOCK_Q)
-        q_block_start_idx[i+1] = q_block_start_idx[i] + this_n_q_blocks
-
-    tot_num_q_blocks = q_block_start_idx[num_seqs]
-
-    q_block_seq_idx = torch.empty(size=(tot_num_q_blocks,), device=q.device, dtype=torch.int32)
-    for i in range(num_seqs):
-        start_idx, stop_idx = q_block_start_idx[i], q_block_start_idx[i+1]
-        q_block_seq_idx[start_idx:stop_idx] = i
-
-    torch.cuda.synchronize()
-    global t_prefix
-    t_prefix += time.time()-t0
-    '''
-
-    #t0 = time.time()
-
-    #print("num_queries_per_kv: ", num_queries_per_kv)
-    #print("BLOCK_Q:            ", BLOCK_Q)
-    #print("num_query_blocks:   ", num_query_blocks)
-    #print("num_seqs:           ", num_seqs)
-    #print("max_num_query_blocks: ", max_num_query_blocks)
-
-    #torch.cuda.synchronize()
-    #print("q.shape[0]: ", q.shape[0])
-    #print("cu_seqlens_q[num_seqs]: ", cu_seqlens_q[num_seqs])
-
     total_num_q_blocks = q.shape[0] // BLOCK_Q + num_seqs
 
-    kernel_paged_attention_2d[(
+    kernel_unified_attention_2d[(
         total_num_q_blocks,
         num_kv_heads,
     )](
@@ -349,9 +286,9 @@ def chunked_prefill_paged_decode(
         scale=softmax_scale,
         k_scale=k_descale,
         v_scale=v_descale,
+        softcap=softcap,
         num_query_heads=num_query_heads,
         num_queries_per_kv=num_queries_per_kv,
-        num_queries_per_kv_padded=num_queries_per_kv_padded,
         block_table_stride=block_table.stride(0),
         query_stride_0=q.stride(0),
         query_stride_1=q.stride(1),
@@ -361,6 +298,7 @@ def chunked_prefill_paged_decode(
         HEAD_SIZE=head_size,
         HEAD_SIZE_PADDED=triton.next_power_of_2(head_size),
         USE_ALIBI_SLOPES=use_alibi_slopes,
+        USE_SOFTCAP=(softcap > 0),
         SLIDING_WINDOW=(1+window_size[0]),
         stride_k_cache_0=k.stride(0),
         stride_k_cache_1=k.stride(1),
@@ -374,9 +312,3 @@ def chunked_prefill_paged_decode(
         BLOCK_Q=BLOCK_Q,
         num_seqs=num_seqs,
     )
-
-    #torch.cuda.synchronize()
-    #global t_paged
-    #t_paged += time.time()-t0
-
-    #print("t_prefix: %.2f seconds, t_paged: %.2f seconds" % (t_prefix, t_paged))

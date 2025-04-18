@@ -6,15 +6,15 @@ import pytest
 import torch
 
 from vllm.platforms import current_platform
-from vllm.attention.ops.chunked_prefill_paged_decode import (
-    chunked_prefill_paged_decode)
+from vllm.attention.ops.triton_unified_attention import (
+    unified_attention)
 
 NUM_HEADS = [(4, 4), (8, 2), (16, 2)]
 HEAD_SIZES = [128, 256]
 BLOCK_SIZES = [16, 32]
 
 DTYPES = [torch.float16, torch.bfloat16]
-QDTYPES = [None]
+QDTYPES = [None, torch.float8_e4m3fn]
 # one value large enough to test overflow in index calculation.
 # one value small enough to test the schema op check
 NUM_BLOCKS = [32768, 2048]
@@ -63,7 +63,7 @@ def ref_paged_attn(
                                              (query_len + sliding_window) +
                                              1).bool().logical_not()
             mask |= sliding_window_mask
-        if soft_cap is not None:
+        if soft_cap is not None and soft_cap > 0:
             attn = soft_cap * torch.tanh(attn / soft_cap)
         attn.masked_fill_(mask, float("-inf"))
         attn = torch.softmax(attn, dim=-1).to(v.dtype)
@@ -78,20 +78,16 @@ def ref_paged_attn(
 @pytest.mark.parametrize("seq_lens",
                          [[(1, 1328), (5, 18),
                            (129, 463)], [(1, 523), (1, 37), (1, 2011)]])
-
-#@pytest.mark.parametrize("seq_lens", [[(1, 523), (1, 37), (1, 2011)]])
-
 @pytest.mark.parametrize("num_heads", NUM_HEADS)
 @pytest.mark.parametrize("head_size", HEAD_SIZES)
 @pytest.mark.parametrize("block_size", BLOCK_SIZES)
 @pytest.mark.parametrize("sliding_window", [None, 256])
 @pytest.mark.parametrize("dtype", DTYPES)
-#@pytest.mark.parametrize("soft_cap", [None, 10.0, 50.0])
-@pytest.mark.parametrize("soft_cap", [None])
+@pytest.mark.parametrize("soft_cap", [None, 10.0, 50.0])
 @pytest.mark.parametrize("num_blocks", NUM_BLOCKS)
 @pytest.mark.parametrize("q_dtype", QDTYPES)
 @torch.inference_mode()
-def test_varlen_with_paged_kv(
+def test_triton_unified_attn(
     seq_lens: list[tuple[int, int]],
     num_heads: tuple[int, int],
     head_size: int,
@@ -157,7 +153,7 @@ def test_varlen_with_paged_kv(
         k_descale = torch.ones(scale_shape, dtype=torch.float32)
         v_descale = torch.ones(scale_shape, dtype=torch.float32)
 
-    chunked_prefill_paged_decode(
+    unified_attention(
         q=maybe_quantized_query,
         k=maybe_quantized_key_cache,
         v=maybe_quantized_value_cache,

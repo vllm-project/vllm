@@ -6,9 +6,8 @@ import torch
 
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionMetadata, AttentionType)
-from vllm.attention.ops.chunked_prefill_paged_decode import (
-    chunked_prefill_paged_decode)
-from vllm.attention.ops.paged_attn import PagedAttention
+from vllm.attention.ops.triton_unified_attention import (
+    unified_attention)
 from vllm.logger import init_logger
 from vllm.v1.attention.backends.flash_attn import (
     FlashAttentionMetadata, FlashAttentionMetadataBuilder)
@@ -161,6 +160,16 @@ class TritonAttentionImpl(AttentionImpl):
             layer._v_scale,
         )
 
+        if self.kv_cache_dtype.startswith("fp8"):
+            key_cache = key_cache.view(torch.float8_e4m3fn)
+            value_cache = value_cache.view(torch.float8_e4m3fn)
+            num_tokens, num_heads, head_size = query.shape
+            query, _ = ops.scaled_fp8_quant(
+                query.reshape(
+                    (num_tokens, num_heads * head_size)).contiguous(),
+                layer._q_scale)
+            query = query.reshape((num_tokens, num_heads, head_size))
+
         use_local_attn = \
             (self.use_irope and attn_metadata.local_attn_metadata is not None)
 
@@ -181,12 +190,7 @@ class TritonAttentionImpl(AttentionImpl):
 
         descale_shape = (cu_seqlens_q.shape[0] - 1, key.shape[1])
 
-        #print("query.shape: ", query.shape)
-        #print("query.stride: ", query.stride())
-        #print("output.shape: ", output.shape)
-        #print("output.stride: ", output.stride())
-
-        chunked_prefill_paged_decode(
+        unified_attention(
             q=query[:num_actual_tokens],
             k=key_cache,
             v=value_cache,
