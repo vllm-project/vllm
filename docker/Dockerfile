@@ -66,7 +66,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 COPY requirements/common.txt requirements/common.txt
 COPY requirements/cuda.txt requirements/cuda.txt
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv pip install --system -r requirements/cuda.txt
+    uv pip install --system -r requirements/cuda.txt --index-strategy unsafe-best-match
 
 # TESTING: install xformers from source to test 2.7.0 final RC
 RUN --mount=type=cache,target=/root/.cache/uv \
