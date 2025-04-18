@@ -307,25 +307,24 @@ def test_empty_seq_group():
     seq_group_metadata_list: list[SequenceGroupMetadata] = []
     model_input = model_runner._prepare_model_input_tensors(
         seq_group_metadata_list)
-    input_tokens, input_positions, attn_metadata = (
-        model_input.input_tokens,
-        model_input.input_positions,
-        model_input.attn_metadata,
-    )
+
+    input_tokens = model_input.input_tokens,
+    input_positions = model_input.input_positions,
+    attn_metadata = model_input.attn_metadata,
+
     assert input_tokens is None
     assert input_positions is None
     assert attn_metadata is None
 
     model_input = model_runner._prepare_model_input_tensors(
         seq_group_metadata_list)
-    (input_tokens, input_positions, input_embeds, attn_metadata,
-     return_seq_lens) = (
-         model_input.input_tokens,
-         model_input.input_positions,
-         model_input.inputs_embeds,
-         model_input.attn_metadata,
-         model_input.seq_lens,
-     )
+
+    input_tokens = model_input.input_tokens
+    input_positions = model_input.input_positions
+    input_embeds = model_input.inputs_embeds
+    attn_metadata = model_input.attn_metadata
+    return_seq_lens = model_input.seq_lens
+
     assert input_tokens is None
     assert input_positions is None
     assert input_embeds is None
@@ -427,12 +426,11 @@ def test_hybrid_batches(batch_size, enforce_eager, use_prompt_embeds,
         decode_metadata_list.append(seq_group_metadata)
 
     model_input = model_runner.prepare_model_input(seq_group_metadata_list)
-    (input_tokens, input_positions, input_embeds, attn_metadata) = (
-        model_input.input_tokens,
-        model_input.input_positions,
-        model_input.inputs_embeds,
-        model_input.attn_metadata,
-    )
+
+    input_tokens = model_input.input_tokens
+    input_positions = model_input.input_positions
+    input_embeds = model_input.inputs_embeds
+    attn_metadata = model_input.attn_metadata
 
     prefill_meta_actual = attn_metadata.prefill_metadata
     decode_meta_actual = attn_metadata.decode_metadata
