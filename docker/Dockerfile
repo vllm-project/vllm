@@ -63,6 +63,10 @@ RUN --mount=type=cache,target=/root/.cache/uv \
         uv pip install --system --index-url https://download.pytorch.org/whl/nightly/cu128 --pre pytorch_triton==3.3.0+gitab727c40; \
     fi
 
+# TESTING: install xformers from source to test 2.7.0 final RC
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv pip install --system -v -U --no-build-isolation git+https://github.com/facebookresearch/xformers.git@main#egg=xformers
+
 COPY requirements/common.txt requirements/common.txt
 COPY requirements/cuda.txt requirements/cuda.txt
 RUN --mount=type=cache,target=/root/.cache/uv \
