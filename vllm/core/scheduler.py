@@ -1309,13 +1309,13 @@ class Scheduler:
         if num_prefill_groups > 0:
             scheduled_seq_groups = prefills.seq_groups
             scheduled_seq_groups.extend(running_scheduled.decode_seq_groups)
-            ignored_seq_groups_for_embeds = []
+            ignored_seq_groups_for_embeds.clear()
         else:
             scheduled_seq_groups = running_scheduled.decode_seq_groups
             if len(scheduled_seq_groups) > 0:
                 using_prompt_embeds = scheduled_seq_groups[
                     0].seq_group.uses_prompt_embeds()
-                ignored_seq_groups_for_embeds = []
+                ignored_seq_groups_for_embeds.clear()
                 indices_ignored = list[int]()
                 for i, schedule_seq_group in enumerate(scheduled_seq_groups):
                     if using_prompt_embeds !=\
@@ -1329,7 +1329,7 @@ class Scheduler:
                         if i not in indices_ignored
                     ]
             else:
-                ignored_seq_groups_for_embeds = []
+                ignored_seq_groups_for_embeds.clear()
 
         scheduled_seq_groups.extend(swapped_in.decode_seq_groups)
 
