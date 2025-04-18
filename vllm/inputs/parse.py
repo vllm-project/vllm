@@ -6,8 +6,9 @@ from typing_extensions import TypeIs
 
 from vllm.utils import is_list_of
 
-from .data import (ExplicitEncoderDecoderPrompt, ProcessorInputs, PromptType,
-                   SingletonInputs, SingletonPrompt, TextPrompt, TokensPrompt)
+from .data import (EmbedsPrompt, ExplicitEncoderDecoderPrompt, ProcessorInputs,
+                   PromptType, SingletonInputs, SingletonPrompt, TextPrompt,
+                   TokensPrompt)
 
 
 class ParsedText(TypedDict):
@@ -84,9 +85,15 @@ class ParsedTokensPrompt(TypedDict):
     content: TokensPrompt
 
 
+class ParsedEmbedsPrompt(TypedDict):
+    type: Literal['embeds']
+    content: EmbedsPrompt
+
+
 def parse_singleton_prompt(
     prompt: SingletonPrompt,
-) -> Union[ParsedStrPrompt, ParsedTextPrompt, ParsedTokensPrompt]:
+) -> Union[ParsedStrPrompt, ParsedTextPrompt, ParsedTokensPrompt,
+           ParsedEmbedsPrompt]:
     if isinstance(prompt, str):
         return ParsedStrPrompt(type="str", content=prompt)
     elif isinstance(prompt, dict):
@@ -97,7 +104,7 @@ def parse_singleton_prompt(
             return ParsedTextPrompt(type="text", content=prompt)
 
         elif "prompt_embeds" in prompt:
-            return ParsedTokensPrompt(type="tokens", content=prompt)
+            return ParsedEmbedsPrompt(type="embeds", content=prompt)
 
     raise TypeError("inputs must be a string, TextPrompt, or TokensPrompt")
 

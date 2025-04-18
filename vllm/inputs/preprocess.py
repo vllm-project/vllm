@@ -342,18 +342,6 @@ class InputPreprocessor:
             token_type_ids = tokens_content.get("token_type_ids")
             multi_modal_data = tokens_content.get("multi_modal_data")
             mm_processor_kwargs = tokens_content.get("mm_processor_kwargs")
-            prompt_embeds = tokens_content.get("prompt_embeds")
-
-            # prompt_embeds must be (seq_len, hidden_size), but if the user
-            # passes in a batch of size 1, i.e. (1, seq_len, hidden_size),
-            # we can unambiguously process the intent by squeezing the batch
-            # dimension.
-            if prompt_embeds.ndim() == 3 and prompt_embeds.shape[0] == 1:
-                prompt_embeds = prompt_embeds.squeeze(dim=0)
-
-            if prompt_embeds.ndim() != 2:
-                raise ValueError(
-                    "prompt_embeds must be of shape (seq_len, hidden_size).")
 
             if multi_modal_data is not None and self._can_process_multimodal():
                 return self._process_multimodal(
@@ -366,7 +354,6 @@ class InputPreprocessor:
 
             return token_inputs(
                 prompt_token_ids=prompt_token_ids,
-                prompt_embeds=prompt_embeds,
                 token_type_ids=token_type_ids,
                 multi_modal_data=multi_modal_data,
                 mm_processor_kwargs=mm_processor_kwargs,
@@ -396,9 +383,32 @@ class InputPreprocessor:
             return token_inputs(
                 prompt=prompt_text,
                 prompt_token_ids=prompt_token_ids,
-                prompt_embeds=text_content.get("prompt_embeds"),
                 multi_modal_data=multi_modal_data,
                 mm_processor_kwargs=mm_processor_kwargs,
+            )
+
+        if parsed["type"] == "embeds":
+            prompt_embeds_content = parsed["content"]
+
+            prompt_embeds = prompt_embeds_content["prompt_embeds"]
+            prompt = prompt_embeds_content.get("prompt")
+            prompt_token_ids = prompt_embeds_content.get("prompt_token_ids")
+
+            # prompt_embeds must be (seq_len, hidden_size), but if the user
+            # passes in a batch of size 1, i.e. (1, seq_len, hidden_size),
+            # we can unambiguously process the intent by squeezing the batch
+            # dimension.
+            if prompt_embeds.ndim() == 3 and prompt_embeds.shape[0] == 1:
+                prompt_embeds = prompt_embeds.squeeze(dim=0)
+
+            if prompt_embeds.ndim() != 2:
+                raise ValueError(
+                    "prompt_embeds must be of shape (seq_len, hidden_size).")
+
+            return token_inputs(
+                prompt_token_ids=prompt_token_ids,
+                prompt=prompt,
+                prompt_embeds=prompt_embeds,
             )
 
         assert_never(parsed)
@@ -442,7 +452,6 @@ class InputPreprocessor:
 
             return token_inputs(
                 prompt_token_ids=prompt_token_ids,
-                prompt_embeds=tokens_content.get("prompt_embeds"),
                 multi_modal_data=multi_modal_data,
                 mm_processor_kwargs=mm_processor_kwargs,
             )
@@ -471,9 +480,32 @@ class InputPreprocessor:
             return token_inputs(
                 prompt=prompt_text,
                 prompt_token_ids=prompt_token_ids,
-                prompt_embeds=tokens_content.get("prompt_embeds"),
                 multi_modal_data=multi_modal_data,
                 mm_processor_kwargs=mm_processor_kwargs,
+            )
+
+        if parsed["type"] == "embeds":
+            prompt_embeds_content = parsed["content"]
+
+            prompt_embeds = prompt_embeds_content["prompt_embeds"]
+            prompt = prompt_embeds_content.get("prompt")
+            prompt_token_ids = prompt_embeds_content.get("prompt_token_ids")
+
+            # prompt_embeds must be (seq_len, hidden_size), but if the user
+            # passes in a batch of size 1, i.e. (1, seq_len, hidden_size),
+            # we can unambiguously process the intent by squeezing the batch
+            # dimension.
+            if prompt_embeds.ndim() == 3 and prompt_embeds.shape[0] == 1:
+                prompt_embeds = prompt_embeds.squeeze(dim=0)
+
+            if prompt_embeds.ndim() != 2:
+                raise ValueError(
+                    "prompt_embeds must be of shape (seq_len, hidden_size).")
+
+            return token_inputs(
+                prompt_token_ids=prompt_token_ids,
+                prompt=prompt,
+                prompt_embeds=prompt_embeds,
             )
 
         assert_never(parsed)

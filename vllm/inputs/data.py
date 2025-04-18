@@ -20,9 +20,6 @@ class TextPrompt(TypedDict):
     prompt: str
     """The input text to be tokenized before passing to the model."""
 
-    prompt_embeds: NotRequired[torch.Tensor]
-    """The embeddings of the prompt, if available."""
-
     multi_modal_data: NotRequired["MultiModalDataDict"]
     """
     Optional multi-modal data to pass to the model,
@@ -44,9 +41,6 @@ class TokensPrompt(TypedDict):
     prompt_token_ids: list[int]
     """A list of token IDs to pass to the model."""
 
-    prompt_embeds: NotRequired[torch.Tensor]
-    """The embeddings of the prompt, if available."""
-
     token_type_ids: NotRequired[list[int]]
     """A list of token type IDs to pass to the cross encoder model."""
 
@@ -65,7 +59,18 @@ class TokensPrompt(TypedDict):
     """
 
 
-SingletonPrompt = Union[str, TextPrompt, TokensPrompt]
+class EmbedsPrompt(TypedDict):
+    """Schema for a prompt provided via token embeddings."""
+
+    prompt_embeds: torch.Tensor
+    """The embeddings of the prompt."""
+    prompt_token_ids: NotRequired[list[int]]
+    """A list of token IDs to pass to the model."""
+    prompt: NotRequired[str]
+    """The input text to be tokenized before passing to the model."""
+
+
+SingletonPrompt = Union[str, TextPrompt, TokensPrompt, EmbedsPrompt]
 """
 Set of possible schemas for a single prompt:
 
