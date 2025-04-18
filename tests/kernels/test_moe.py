@@ -16,15 +16,15 @@ from vllm.model_executor.layers.fused_moe import fused_moe
 from vllm.model_executor.layers.fused_moe.fused_moe import fused_topk
 from vllm.model_executor.layers.fused_moe.moe_torch_iterative import (
     fused_moe as iterative_moe)
+from vllm.model_executor.layers.quantization.utils.marlin_utils_fp8 import (
+    marlin_quant_fp8_torch)
 from vllm.model_executor.layers.quantization.utils.marlin_utils_test import (
     awq_marlin_quantize, marlin_quantize)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     quantize_weights)
-from vllm.model_executor.layers.quantization.utils.marlin_utils_fp8 import (
-    marlin_quant_fp8_torch)
 from vllm.model_executor.models.mixtral import MixtralMoE
 from vllm.platforms import current_platform
-from vllm.scalar_type import scalar_types, ScalarType
+from vllm.scalar_type import ScalarType, scalar_types
 
 NUM_EXPERTS = [8, 64]
 EP_SIZE = [1, 4]
@@ -369,7 +369,7 @@ def test_fused_marlin_moe(
         elif quant_type != scalar_types.float8_e4m3fn:
             test_perm = torch.randperm(k)
             w_ref1, qweight1, scales1, g_idx1, sort_indices1, _ = \
-                marlin_quantize(w1[i].transpose(1, 0), quant_type, 
+                marlin_quantize(w1[i].transpose(1, 0), quant_type,
                                 group_size, act_order, test_perm)
 
             w_ref1_l.append(w_ref1.T)

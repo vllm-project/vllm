@@ -319,13 +319,13 @@ if hasattr(torch.ops._C, "gptq_marlin_24_gemm"):
                                b_scales: torch.Tensor,
                                b_zeros: Optional[torch.Tensor],
                                g_idx: Optional[torch.Tensor],
-                               perm:Optional[torch.Tensor],
+                               perm: Optional[torch.Tensor],
                                workspace: torch.Tensor,
                                b_q_type_id: int,
                                size_m: torch.SymInt,
                                size_n: torch.SymInt,
                                size_k: torch.SymInt,
-                               is_k_full: bool,
+                               is_k_full: bool = True,
                                use_atomic_add: bool = False,
                                use_fp32_reduce: bool = False,
                                is_zp_float: bool = False) -> torch.Tensor:
@@ -807,15 +807,15 @@ def gptq_marlin_gemm(a: torch.Tensor,
                      size_m: int,
                      size_n: int,
                      size_k: int,
-                     is_k_full: bool,
+                     is_k_full: bool = True,
                      use_atomic_add: bool = False,
                      use_fp32_reduce: bool = False,
                      is_zp_float: bool = False) -> torch.Tensor:
     return torch.ops._C.gptq_marlin_gemm(a, c, b_q_weight, b_scales, b_zeros,
                                          g_idx, perm, workspace, b_q_type.id,
                                          size_m, size_n, size_k, is_k_full,
-                                         use_atomic_add,
-                                         use_fp32_reduce, is_zp_float)
+                                         use_atomic_add, use_fp32_reduce,
+                                         is_zp_float)
 
 
 # machete

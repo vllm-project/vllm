@@ -413,7 +413,6 @@ def apply_awq_marlin_linear(
                                   size_m=reshaped_x.shape[0],
                                   size_n=output_size_per_partition,
                                   size_k=input_size_per_partition,
-                                  is_k_full=True,
                                   use_atomic_add=use_atomic_add,
                                   use_fp32_reduce=use_fp32_reduce,
                                   is_zp_float=False)

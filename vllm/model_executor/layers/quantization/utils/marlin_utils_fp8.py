@@ -1,15 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
 
-from typing import Optional
 import math
+from typing import Optional
+
 import torch
 
 import vllm._custom_ops as ops
 from vllm.logger import init_logger
+from vllm.model_executor.layers.quantization.utils.marlin_utils import (
+    USE_FP32_REDUCE_DEFAULT, marlin_make_workspace_new, marlin_permute_scales,
+    should_use_atomic_add_reduce)
 from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
-
-from .marlin_utils import marlin_make_workspace_new, marlin_permute_scales
 
 logger = init_logger(__name__)
 
@@ -26,12 +28,19 @@ def apply_fp8_marlin_linear(
     size_n: int,
     size_k: int,
     bias: Optional[torch.Tensor],
+    use_fp32_reduce: bool = USE_FP32_REDUCE_DEFAULT
 ) -> torch.Tensor:
     # For GPUs that lack FP8 hardware support, we can leverage the
     # Marlin kernel for fast weight-only FP8 quantization
 
     reshaped_x = input.reshape(-1, input.shape[-1])
     out_shape = input.shape[:-1] + (size_n, )
+
+    use_atomic_add = should_use_atomic_add_reduce(m=reshaped_x.size(0),
+                                                  n=size_n,
+                                                  k=size_k,
+                                                  device=input.device,
+                                                  dtype=input.dtype)
 
     output = ops.gptq_marlin_gemm(a=reshaped_x,
                                   c=None,
@@ -45,7 +54,8 @@ def apply_fp8_marlin_linear(
                                   size_m=reshaped_x.size(0),
                                   size_n=size_n,
                                   size_k=size_k,
-                                  is_k_full=True)
+                                  use_atomic_add=use_atomic_add,
+                                  use_fp32_reduce=use_fp32_reduce)
 
     if bias is not None:
         output.add_(bias)  # In-place add

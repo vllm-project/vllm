@@ -114,10 +114,11 @@ __device__ inline void dequant<nv_bfloat162, vllm::kU4.id()>(
   static constexpr uint32_t EX = 0x43004300;
 
   // Guarantee that the `(a & b) | c` operations are LOP3s.
-
+  // clang-format off
   int lo = lop3<(0xf0 & 0xcc) | 0xaa>(q, MASK, EX);
   q >>= 4;
   int hi = lop3<(0xf0 & 0xcc) | 0xaa>(q, MASK, EX);
+  // clang-format on
 
   static constexpr uint32_t MUL = 0x3F803F80;
   static constexpr uint32_t ADD = 0xC300C300;
