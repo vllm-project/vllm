@@ -982,7 +982,7 @@ class EmbeddingCompletionRequest(OpenAIBaseModel):
     encoding_format: Literal["float", "base64"] = "float"
     dimensions: Optional[int] = None
     user: Optional[str] = None
-    truncate_prompt_tokens: Optional[Annotated[int, Field(ge=1)]] = None
+    truncate_prompt_tokens: Optional[Annotated[int, Field(ge=-1)]] = None
 
     # doc: begin-embedding-pooling-params
     additional_data: Optional[Any] = None
@@ -1017,7 +1017,7 @@ class EmbeddingChatRequest(OpenAIBaseModel):
     encoding_format: Literal["float", "base64"] = "float"
     dimensions: Optional[int] = None
     user: Optional[str] = None
-    truncate_prompt_tokens: Optional[Annotated[int, Field(ge=1)]] = None
+    truncate_prompt_tokens: Optional[Annotated[int, Field(ge=-1)]] = None
 
     # doc: begin-chat-embedding-pooling-params
     additional_data: Optional[Any] = None
@@ -1084,7 +1084,7 @@ class ScoreRequest(OpenAIBaseModel):
     model: Optional[str] = None
     text_1: Union[list[str], str]
     text_2: Union[list[str], str]
-    truncate_prompt_tokens: Optional[Annotated[int, Field(ge=1)]] = None
+    truncate_prompt_tokens: Optional[Annotated[int, Field(ge=-1)]] = None
 
     # doc: begin-score-pooling-params
     additional_data: Optional[Any] = None
@@ -1110,7 +1110,7 @@ class RerankRequest(OpenAIBaseModel):
     query: str
     documents: list[str]
     top_n: int = Field(default_factory=lambda: 0)
-    truncate_prompt_tokens: Optional[Annotated[int, Field(ge=1)]] = None
+    truncate_prompt_tokens: Optional[Annotated[int, Field(ge=-1)]] = None
 
     # doc: begin-rerank-pooling-params
     additional_data: Optional[Any] = None
