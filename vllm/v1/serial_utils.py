@@ -142,6 +142,7 @@ class MsgpackEncoder:
         #  view the tensor as a 1D array of bytes
         arr = obj.view((obj.numel(), )).view(torch.uint8).numpy()
         if obj.nbytes < self.size_threshold:
+            # Smaller tensors are encoded inline, just like ndarrays.
             data = msgpack.Ext(CUSTOM_TYPE_RAW_VIEW, arr.data)
         else:
             # Otherwise encode index of backing buffer to avoid copy.
@@ -216,21 +217,25 @@ class MsgpackDecoder:
 
     def _decode_ndarray(self, arr: Any) -> np.ndarray:
         dtype, shape, data = arr
-        # Copy from inline representation, otherwise Torch is unhappy since
-        # the returned memory is non-writeable.
+        # Copy from inline representation, to decouple the memory storage
+        # of the message from the original buffer. Not needed in the
+        # auxillary buffers case.
         buffer = self.aux_buffers[data] if isinstance(data, int) \
             else bytearray(data)
         return np.ndarray(buffer=buffer, dtype=np.dtype(dtype), shape=shape)
 
     def _decode_tensor(self, arr: Any) -> torch.Tensor:
         dtype, shape, data = arr
-        # Copy from inline representation, otherwise Torch is unhappy since
-        # the returned memory is non-writeable.
+        # Copy from inline representation, to decouple the memory storage
+        # of the message from the original buffer. And also make Torch
+        # not complain about a readonly memoryview.
         buffer = self.aux_buffers[data] if isinstance(data, int) \
             else bytearray(data)
+        # Create numpy wrapper around the bytes
         arr = np.ndarray(buffer=buffer, dtype=np.uint8, shape=(len(buffer), ))
         torch_dtype = getattr(torch, dtype)
         assert isinstance(torch_dtype, torch.dtype)
+        # Convert back to proper shape & type
         return torch.from_numpy(arr).view(torch_dtype).view(shape)
 
     def _decode_mm_items(self, obj: list) -> list[MultiModalKwargsItem]:
