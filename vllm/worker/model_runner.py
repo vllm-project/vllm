@@ -875,13 +875,9 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
         if len(inputs_embeds_lst) == 0:
             inputs_embeds = None
         else:
-            inputs_embeds = torch.cat([
-                x.squeeze(dim=0) if x.dim() == 3 else x
-                for x in inputs_embeds_lst
-            ],
-                                      dim=0).to(
-                                          dtype=self.runner.model_config.dtype,
-                                          device=self.runner.device)
+            inputs_embeds = torch.cat(inputs_embeds_lst, dim=0).to(
+                dtype=self.runner.model_config.dtype,
+                device=self.runner.device)
             assert len(inputs_embeds) == len(input_tokens)
 
         if not input_tokens and inputs_embeds is None:
