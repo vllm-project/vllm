@@ -219,10 +219,10 @@ class AsyncLLM(EngineClient):
         parent_request = ParentRequest(request_id, params)
         child_requests = []
         for idx in range(params.n):
-            cid, cparams = parent_request.get_child_info(idx)
+            request_id, params = parent_request.get_child_info(idx)
             child_request = request if idx == params.n - 1 else copy(request)
-            child_request.request_id = cid
-            child_request.sampling_params = cparams
+            child_request.request_id = request_id
+            child_request.sampling_params = params
             child_requests.append(child_request)
 
         await self._enqueue_requests(child_requests, parent_request, queue)
