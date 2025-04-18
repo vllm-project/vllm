@@ -35,7 +35,7 @@ def server():
         "--enforce-eager",
         "--trust-remote-code",
         "--limit-mm-per-prompt",
-        f"image={MAXIMUM_IMAGES}",
+        str({"image": MAXIMUM_IMAGES}),
     ]
 
     with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:

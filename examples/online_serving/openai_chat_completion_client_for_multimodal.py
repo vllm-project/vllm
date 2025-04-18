@@ -9,7 +9,7 @@ vllm serve llava-hf/llava-1.5-7b-hf --chat-template template_llava.jinja
 
 (multi-image inference with Phi-3.5-vision-instruct)
 vllm serve microsoft/Phi-3.5-vision-instruct --task generate \
-    --trust-remote-code --max-model-len 4096 --limit-mm-per-prompt image=2
+    --trust-remote-code --max-model-len 4096 --limit-mm-per-prompt '{"image":2}'
 
 (audio inference with Ultravox)
 vllm serve fixie-ai/ultravox-v0_5-llama-3_2-1b --max-model-len 4096

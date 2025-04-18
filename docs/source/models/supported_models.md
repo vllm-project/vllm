@@ -788,7 +788,7 @@ llm = LLM(
 Online serving:
 
 ```bash
-vllm serve Qwen/Qwen2-VL-7B-Instruct --limit-mm-per-prompt image=4
+vllm serve Qwen/Qwen2-VL-7B-Instruct --limit-mm-per-prompt '{"image":4}'
 ```
 
 **This is no longer required if you are using vLLM V1.**

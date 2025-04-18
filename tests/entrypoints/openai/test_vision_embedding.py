@@ -37,7 +37,7 @@ def server():
         "--enforce-eager",
         "--trust-remote-code",
         "--limit-mm-per-prompt",
-        f"image={MAXIMUM_IMAGES}",
+        str({"image": MAXIMUM_IMAGES}),
         "--chat-template",
         str(vlm2vec_jinja_path),
     ]
