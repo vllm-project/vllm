@@ -64,12 +64,23 @@ def optional_type(
     return _optional_type
 
 
-@deprecated(
-    "Passing a JSON argument as a string containing comma separated key=value "
-    "pairs is deprecated. This will be removed in v0.10.0. Please use a JSON "
-    "string instead.")
-def nullable_kvs(val: str) -> dict[str, int]:
-    """Parses a string containing comma separate key [str] to value [int]
+def optional_str(val: str) -> Optional[str]:
+    return optional_arg(val, str)
+
+
+def optional_int(val: str) -> Optional[int]:
+    return optional_arg(val, int)
+
+
+def optional_float(val: str) -> Optional[float]:
+    return optional_arg(val, float)
+
+
+def nullable_kvs(val: str) -> Optional[dict[str, int]]:
+    """NOTE: This function is deprecated, args should be passed as JSON
+    strings instead.
+
+    Parses a string containing comma separate key [str] to value [int]
     pairs into a dictionary.
 
     Args:
@@ -371,6 +382,7 @@ class EngineArgs:
     reasoning_parser: str = DecodingConfig.reasoning_backend
 
     use_tqdm_on_load: bool = LoadConfig.use_tqdm_on_load
+    pt_load_map_location: str = LoadConfig.pt_load_map_location
 
     def __post_init__(self):
         # support `EngineArgs(compilation_config={...})`
@@ -491,6 +503,8 @@ class EngineArgs:
                                 type=str,
                                 default=None,
                                 help='Name or path of the QLoRA adapter.')
+        load_group.add_argument('--pt-load-map-location',
+                                **load_kwargs["pt_load_map_location"])
 
         # Guided decoding arguments
         guided_decoding_kwargs = get_kwargs(DecodingConfig)
@@ -889,6 +903,7 @@ class EngineArgs:
             model_loader_extra_config=self.model_loader_extra_config,
             ignore_patterns=self.ignore_patterns,
             use_tqdm_on_load=self.use_tqdm_on_load,
+            pt_load_map_location=self.pt_load_map_location,
         )
 
     def create_speculative_config(
@@ -1513,7 +1528,7 @@ def _warn_or_fallback(feature_name: str) -> bool:
 def human_readable_int(value):
     """Parse human-readable integers like '1k', '2M', etc.
     Including decimal values with decimal multipliers.
-    
+
     Examples:
     - '1k' -> 1,000
     - '1K' -> 1,024
