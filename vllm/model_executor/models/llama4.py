@@ -51,8 +51,8 @@ class Llama4MoE(nn.Module):
         renormalize: bool,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         router_scores, router_indices = fast_topk(gating_output, topk, dim=-1)
-        router_scores = torch.sigmoid(router_scores.float()).to(
-            hidden_states.dtype)
+        # psuedo-standard is that the router scores are floats
+        router_scores = torch.sigmoid(router_scores.float())
         return (router_scores, router_indices.to(torch.int32))
 
     def __init__(self,
