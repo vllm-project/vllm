@@ -24,6 +24,7 @@ import argparse
 import asyncio
 import gc
 import json
+import math
 import os
 import random
 import time
@@ -88,6 +89,7 @@ class BenchmarkMetrics:
     median_e2el_ms: float
     std_e2el_ms: float
     percentiles_e2el_ms: list[tuple[float, float]]
+    pd_prefill_during: float = None
 
 
 async def get_request(
@@ -142,6 +144,7 @@ def calculate_metrics(
     selected_percentile_metrics: list[str],
     selected_percentiles: list[float],
     goodput_config_dict: dict[str, float],
+    enable_disagg_prefill: bool = False,
 ) -> tuple[BenchmarkMetrics, list[int]]:
     actual_output_lens: list[int] = []
     total_input = 0
@@ -151,7 +154,9 @@ def calculate_metrics(
     tpots: list[float] = []
     all_tpots: list[float] = []
     ttfts: list[float] = []
+    pd_prefill_durings: list[float] = []
     e2els: list[float] = []
+    pd_prefill_during = None
     for i in range(len(outputs)):
         if outputs[i].success:
             output_len = outputs[i].output_tokens
@@ -176,6 +181,8 @@ def calculate_metrics(
             all_tpots.append(tpot)
             itls += outputs[i].itl
             ttfts.append(outputs[i].ttft)
+            if enable_disagg_prefill:
+                pd_prefill_durings.append(outputs[i].pd_prefill_during)
             e2els.append(outputs[i].latency)
             completed += 1
         else:
@@ -189,6 +196,10 @@ def calculate_metrics(
             valid_metrics.append(ttfts)
             slo_values.append(goodput_config_dict["ttft"] /
                               MILLISECONDS_TO_SECONDS_CONVERSION)
+
+        if enable_disagg_prefill:
+            pd_prefill_during = max(pd_prefill_durings)
+
         if "tpot" in goodput_config_dict:
             valid_metrics.append(all_tpots)
             slo_values.append(goodput_config_dict["tpot"] /
@@ -208,6 +219,12 @@ def calculate_metrics(
             "All requests failed. This is likely due to a misconfiguration "
             "on the benchmark arguments.",
             stacklevel=2)
+
+    total_token_throughput = (total_input + sum(actual_output_lens)) / dur_s
+    if enable_disagg_prefill and not math.isclose(
+            pd_prefill_during, 0.0, abs_tol=1e-9):
+        total_token_throughput = (total_input / pd_prefill_during +
+                                  sum(actual_output_lens) / dur_s)
     metrics = BenchmarkMetrics(
         completed=completed,
         total_input=total_input,
@@ -215,7 +232,7 @@ def calculate_metrics(
         request_throughput=completed / dur_s,
         request_goodput=good_completed / dur_s,
         output_throughput=sum(actual_output_lens) / dur_s,
-        total_token_throughput=(total_input + sum(actual_output_lens)) / dur_s,
+        total_token_throughput=total_token_throughput,
         mean_ttft_ms=np.mean(ttfts or 0) *
         1000,  # ttfts is empty if streaming is not supported by backend
         std_ttft_ms=np.std(ttfts or 0) * 1000,
@@ -237,6 +254,7 @@ def calculate_metrics(
         median_e2el_ms=np.median(e2els or 0) * 1000,
         percentiles_e2el_ms=[(p, np.percentile(e2els or 0, p) * 1000)
                              for p in selected_percentiles],
+        pd_prefill_during=pd_prefill_during,
     )
 
     return metrics, actual_output_lens
@@ -262,6 +280,7 @@ async def benchmark(
     max_concurrency: Optional[int],
     lora_modules: Optional[Iterable[str]],
     extra_body: Optional[dict],
+    enable_disagg_prefill: bool = False,
 ):
     if backend in ASYNC_REQUEST_FUNCS:
         request_func = ASYNC_REQUEST_FUNCS[backend]
@@ -359,16 +378,18 @@ async def benchmark(
             req_lora_module = next(lora_modules)
             req_model_id, req_model_name = req_lora_module, req_lora_module
 
-        request_func_input = RequestFuncInput(model=req_model_id,
-                                              model_name=req_model_name,
-                                              prompt=prompt,
-                                              api_url=api_url,
-                                              prompt_len=prompt_len,
-                                              output_len=output_len,
-                                              logprobs=logprobs,
-                                              multi_modal_content=mm_content,
-                                              ignore_eos=ignore_eos,
-                                              extra_body=extra_body)
+        request_func_input = RequestFuncInput(
+            model=req_model_id,
+            model_name=req_model_name,
+            prompt=prompt,
+            api_url=api_url,
+            prompt_len=prompt_len,
+            output_len=output_len,
+            logprobs=logprobs,
+            multi_modal_content=mm_content,
+            ignore_eos=ignore_eos,
+            extra_body=extra_body,
+            benchmark_start_time=benchmark_start_time)
         tasks.append(
             asyncio.create_task(
                 limited_request_func(request_func_input=request_func_input,
@@ -402,12 +423,16 @@ async def benchmark(
         selected_percentile_metrics=selected_percentile_metrics,
         selected_percentiles=selected_percentiles,
         goodput_config_dict=goodput_config_dict,
+        enable_disagg_prefill=enable_disagg_prefill,
     )
 
     print("{s:{c}^{n}}".format(s=' Serving Benchmark Result ', n=50, c='='))
     print("{:<40} {:<10}".format("Successful requests:", metrics.completed))
     print("{:<40} {:<10.2f}".format("Benchmark duration (s):",
                                     benchmark_duration))
+    if enable_disagg_prefill:
+        print("{:<40} {:<10.2f}".format("Disagg PD prefill during (s):",
+                                        metrics.pd_prefill_during))
     print("{:<40} {:<10}".format("Total input tokens:", metrics.total_input))
     print("{:<40} {:<10}".format("Total generated tokens:",
                                  metrics.total_output))
@@ -704,6 +729,7 @@ def main(args: argparse.Namespace):
             max_concurrency=args.max_concurrency,
             lora_modules=args.lora_modules,
             extra_body=sampling_params,
+            enable_disagg_prefill=args.enable_disagg_prefill,
         ))
 
     # Save config and results to json
@@ -1077,6 +1103,11 @@ if __name__ == "__main__":
                         help="A subset of LoRA module names passed in when "
                         "launching the server. For each request, the "
                         "script chooses a LoRA module at random.")
+    parser.add_argument(
+        "--enable-disagg-prefill",
+        action="store_true",
+        help="Whether to enable the disagg PD benchmark.",
+    )
 
     args = parser.parse_args()
 

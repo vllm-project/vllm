@@ -32,6 +32,7 @@ class RequestFuncInput:
     extra_body: Optional[dict] = None
     multi_modal_content: Optional[dict] = None
     ignore_eos: bool = False
+    benchmark_start_time: float = 0.0
 
 
 @dataclass
@@ -46,6 +47,7 @@ class RequestFuncOutput:
     tpot: float = 0.0  # avg next-token latencies
     prompt_len: int = 0
     error: str = ""
+    pd_prefill_during: float = 0.0
 
 
 async def async_request_tgi(
@@ -305,8 +307,11 @@ async def async_request_openai_completions(
                                 # First token
                                 if not first_chunk_received:
                                     first_chunk_received = True
-                                    ttft = time.perf_counter() - st
+                                    ttft = timestamp - st
                                     output.ttft = ttft
+                                    pd_prefill_during = timestamp - \
+                                        request_func_input.benchmark_start_time
+                                    output.pd_prefill_during = pd_prefill_during
 
                                 # Decoding phase
                                 else:
@@ -407,6 +412,10 @@ async def async_request_openai_chat_completions(
                                 if ttft == 0.0:
                                     ttft = timestamp - st
                                     output.ttft = ttft
+
+                                    pd_prefill_during = timestamp - \
+                                        request_func_input.benchmark_start_time
+                                    output.pd_prefill_during = pd_prefill_during
 
                                 # Decoding phase
                                 else:
