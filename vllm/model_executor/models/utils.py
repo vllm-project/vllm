@@ -186,7 +186,6 @@ class AutoWeightsLoader:
     ) -> Iterable[str]:
         if isinstance(module, PPMissingLayer):
             return
-        
 
         # Avoid infinite recursion since this function is typically
         # called inside load_weights of the module itself
@@ -206,15 +205,6 @@ class AutoWeightsLoader:
 
         child_modules = dict(module.named_children())
         child_params = dict(module.named_parameters(recurse=False))
-        # print("===============================================")
-        # print(f"In base_prefix: {base_prefix}")
-        # if base_prefix == "model":
-        #     print(module)
-        # for module in child_modules.keys():
-        #     print(f"\tchild module: {module}")
-        # for param in child_params.keys():
-        #     print(f"\tchild param: {param}")
-        # print("===============================================")
 
         # Add missing tensors the weight loader needs to be able to load
         # that aren't registered as params, e.g., batchnorm statistics.
@@ -268,7 +258,6 @@ class AutoWeightsLoader:
         if mapper is not None:
             weights = mapper.apply(weights)
 
-        weights = list(weights)
         autoloaded_weights = set(self._load_module("", self.module, weights))
         return autoloaded_weights
 
