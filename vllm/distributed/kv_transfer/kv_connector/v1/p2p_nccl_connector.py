@@ -2,7 +2,7 @@
 
 import re
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Optional, Tuple
+from typing import TYPE_CHECKING, Tuple
 
 import torch
 
