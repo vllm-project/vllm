@@ -33,6 +33,10 @@ if [[ $1 == "prefiller" ]]; then
         --kv-transfer-config \
         '{"kv_connector":"LMCacheConnectorV1","kv_role":"kv_producer","kv_connector_extra_config": {"discard_partial_chunks": false, "lmcache_rpc_port": "producer1"}}'
 
+    # Potential Env vars and cmdline options
+    # LMCACHE_LOG_LEVEL=DEBUG -- Set log level to DEBUG
+    # --enforce-eager -- Enforce eager mode
+
 elif [[ $1 == "decoder" ]]; then
     # Decoder listens on port 8200
     decode_config_file=$SCRIPT_DIR/configs/lmcache-decoder-config.yaml
@@ -49,6 +53,10 @@ elif [[ $1 == "decoder" ]]; then
         --enforce-eager \
         --kv-transfer-config \
         '{"kv_connector":"LMCacheConnectorV1","kv_role":"kv_consumer","kv_connector_extra_config": {"discard_partial_chunks": false, "lmcache_rpc_port": "consumer1"}}'
+
+    # Potential Env vars and cmdline options
+    # LMCACHE_LOG_LEVEL=DEBUG -- Set log level to DEBUG
+    # --enforce-eager -- Enforce eager mode
 
 elif [[ $1 == "proxy" ]]; then
     # Proxy listens on port 9000
