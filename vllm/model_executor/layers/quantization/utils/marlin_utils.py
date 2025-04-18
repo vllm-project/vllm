@@ -45,9 +45,10 @@ def query_marlin_supported_quant_types(has_zp: bool,
         return [scalar_types.uint4, scalar_types.uint8]
     else:
         # GPTQ style, unsigned + symmetric bias
-        # TODO: once fp8_marlin is merged into "gptq_marlin" we should be able
-        #  to add `scalar_types.float8_e4m3fn` here
-        return [scalar_types.uint4b8, scalar_types.uint8b128]
+        return [
+            scalar_types.uint4b8, scalar_types.uint8b128,
+            scalar_types.float8_e4m3fn
+        ]
 
 
 def _check_marlin_supported(
@@ -170,6 +171,17 @@ def marlin_make_workspace(output_size_per_partition: int,
                           GPTQ_MARLIN_MIN_THREAD_N) * GPTQ_MARLIN_MAX_PARALLEL
 
     return torch.zeros(max_workspace_size,
+                       dtype=torch.int,
+                       device=device,
+                       requires_grad=False)
+
+
+def marlin_make_workspace_new(device: torch.device,
+                              max_blocks_per_sm: int = 1) -> torch.Tensor:
+    # In the new marlin kernel, we use the num of threadblocks as workspace
+    # size. The num of threadblocks is is sms_count * max_blocks_per_sm.
+    sms = torch.cuda.get_device_properties(device).multi_processor_count
+    return torch.zeros(sms * max_blocks_per_sm,
                        dtype=torch.int,
                        device=device,
                        requires_grad=False)
@@ -332,7 +344,6 @@ def apply_gptq_marlin_linear(
         wtype: ScalarType,
         output_size_per_partition: int,
         input_size_per_partition: int,
-        has_zp: bool,
         is_k_full: bool,
         bias: Optional[torch.Tensor] = None,
         use_fp32_reduce: bool = USE_FP32_REDUCE_DEFAULT) -> torch.Tensor:
@@ -346,6 +357,7 @@ def apply_gptq_marlin_linear(
                                                   dtype=input.dtype)
 
     output = ops.gptq_marlin_gemm(reshaped_x,
+                                  None,
                                   weight,
                                   weight_scale,
                                   weight_zp,
@@ -358,7 +370,6 @@ def apply_gptq_marlin_linear(
                                   size_k=input_size_per_partition,
                                   is_k_full=is_k_full,
                                   use_atomic_add=use_atomic_add,
-                                  has_zp=has_zp,
                                   use_fp32_reduce=use_fp32_reduce,
                                   is_zp_float=False)
 
@@ -391,6 +402,7 @@ def apply_awq_marlin_linear(
                                                   dtype=input.dtype)
 
     output = ops.gptq_marlin_gemm(reshaped_x,
+                                  None,
                                   weight,
                                   weight_scale,
                                   weight_zp,
@@ -402,7 +414,6 @@ def apply_awq_marlin_linear(
                                   size_n=output_size_per_partition,
                                   size_k=input_size_per_partition,
                                   is_k_full=True,
-                                  has_zp=True,
                                   use_atomic_add=use_atomic_add,
                                   use_fp32_reduce=use_fp32_reduce,
                                   is_zp_float=False)
