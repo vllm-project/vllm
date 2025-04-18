@@ -950,12 +950,9 @@ class MllamaTextCrossAttention(CustomOp):
         attention_mask: Optional[torch.Tensor],
         kv_range_for_decode: Optional[List[Tuple[int, int]]],
         cross_attention_states: Optional[torch.Tensor],
-        kv_cache: torch.Tensor,
-        attn_metadata: AttentionMetadata,
     ) -> torch.Tensor:
         return self.forward_native(hidden_states, attention_mask,
-                                   kv_range_for_decode, cross_attention_states,
-                                   kv_cache, attn_metadata)
+                                   kv_range_for_decode, cross_attention_states)
 
     def forward_hpu(
         self,
@@ -963,21 +960,11 @@ class MllamaTextCrossAttention(CustomOp):
         attention_mask: Optional[torch.Tensor],
         kv_range_for_decode: Optional[List[Tuple[int, int]]],
         cross_attention_states: Optional[torch.Tensor],
-        kv_cache: torch.Tensor,
-        attn_metadata: AttentionMetadata,
     ) -> torch.Tensor:
-        qkv_dec, _ = self.qkv_proj(hidden_states)
-        q, _, _ = qkv_dec.split(
-            [self.q_local_size, self.kv_local_size, self.kv_local_size],
-            dim=-1)
-        if cross_attention_states is None:
-            k = None
-            v = None
-        else:
-            qkv_enc, _ = self.qkv_proj(cross_attention_states)
-            _, k, v = qkv_enc.split(
-                [self.q_local_size, self.kv_local_size, self.kv_local_size],
-                dim=-1)
+        kv_cache = self.attn.kv_cache[self.pipeline_parallel_rank]
+        attn_metadata: AttentionMetadata = get_forward_context().attn_metadata
+        q, k, v = self.qkv_proj(hidden_states, cross_attention_states)
+        if cross_attention_states is not None:
             k = k.view(-1, self.num_local_key_value_heads, self.head_dim)
             v = v.view(-1, self.num_local_key_value_heads, self.head_dim)
             k = self.k_norm(k)
@@ -991,8 +978,7 @@ class MllamaTextCrossAttention(CustomOp):
                                                    attn_metadata)
         else:
             output = self.attn(
-                q.view(-1, self.num_local_heads * self.head_dim), k, v,
-                kv_cache, attn_metadata)
+                q.view(-1, self.num_local_heads * self.head_dim), k, v)
         out, _ = self.o_proj(output)
         return out
 
