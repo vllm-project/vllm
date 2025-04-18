@@ -317,7 +317,7 @@ class TransformersModel(nn.Module):
         """
         for name, param in module.named_parameters(recurse=False):
             if param.device == torch.device("meta"):
-                new_param = getattr(type(module)(self.config), name)
+                new_param = nn.Parameter(torch.empty_like(param.data, device=self.device_config.device))
                 setattr(module, name, new_param)
         for child in module.children():
             self.init_parameters(child)
