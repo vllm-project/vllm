@@ -42,6 +42,7 @@ class AttnFusionPass(VllmInductorPass):
         fake_tensor_updater = FakeTensorUpdater(graph)
         nodes_to_process = []
 
+        self.begin()
         self.dump_graph(graph, "before_attn_fusion")
         count = 0
         for node in graph.nodes:
@@ -140,11 +141,4 @@ class AttnFusionPass(VllmInductorPass):
 
         logger.debug("fused quantization onto %s attention nodes", count)
         self.dump_graph(graph, "after_attn_fusion")
-
-    def error_out(self, message: str):
-        # TODO(luka) this could be an error?
-        logger.warning(
-            "Unexpected fx.Graph state while fusing quant onto attention. "
-            "If you expect this to work, please submit a bug report to "
-            "https://github.com/vllm-project/vllm/issues/new/choose. "
-            "Reason: %s.", message)
+        self.end_and_log()
