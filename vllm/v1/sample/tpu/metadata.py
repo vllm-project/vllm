@@ -26,11 +26,9 @@ class TPUSupportedSamplingMetadata:
     temperature: torch.Tensor = None
 
     min_p: torch.Tensor = None
-    # Still too slow on forward_native!
     top_k: torch.Tensor = None
     top_p: torch.Tensor = None
 
-    # Greedy sampling flag for compiling single xla graph.
     all_greedy: bool = True
 
     # unsupported, you need to return an extra tensor of static size BxV
