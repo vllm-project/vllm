@@ -432,7 +432,6 @@ def test_stop_via_update_from_output():
         req.num_computed_tokens = req.num_tokens
         scheduler.requests[req.request_id] = req
         scheduler.running.append(req)
-        scheduler.scheduled_req_ids[req.request_id] = 1
 
     scheduler_output = SchedulerOutput(scheduled_new_reqs=[],
                                        scheduled_cached_reqs=[],
@@ -484,7 +483,6 @@ def test_stop_via_update_from_output():
         req.num_computed_tokens = req.num_tokens
         scheduler.requests[req.request_id] = req
         scheduler.running.append(req)
-        scheduler.scheduled_req_ids[req.request_id] = 1
 
     scheduler_output = SchedulerOutput(scheduled_new_reqs=[],
                                        scheduled_cached_reqs=[],
@@ -534,7 +532,6 @@ def test_stop_via_update_from_output():
         req.num_computed_tokens = req.num_tokens
         scheduler.requests[req.request_id] = req
         scheduler.running.append(req)
-        scheduler.scheduled_req_ids[req.request_id] = 1
 
     scheduler_output = SchedulerOutput(scheduled_new_reqs=[],
                                        scheduled_cached_reqs=[],
@@ -584,7 +581,6 @@ def test_stop_via_update_from_output():
     requests[0].num_computed_tokens = requests[0].num_tokens
     scheduler.requests[requests[0].request_id] = requests[0]
     scheduler.running.append(requests[0])
-    scheduler.scheduled_req_ids[requests[0].request_id] = 1
 
     scheduler_output = SchedulerOutput(
         scheduled_new_reqs=[],

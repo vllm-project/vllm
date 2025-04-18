@@ -89,12 +89,6 @@ class Scheduler(SchedulerInterface):
         self.waiting: deque[Request] = deque()
         self.running: list[Request] = []
 
-        # req_id -> Number of times the request has been scheduled.
-        # With PP, when the input prompt is divided into chunks, we can
-        # schedule a new chunk even before the previous chunk has completed
-        # the full pipeline stages. This helps reduce TTFT.
-        self.scheduled_req_ids: dict[str, int] = defaultdict(int)
-
         # The request IDs that are finished in between the previous and the
         # current steps. This is used to notify the workers about the finished
         # requests so that they can free the cached states for those requests.
@@ -238,7 +232,6 @@ class Scheduler(SchedulerInterface):
 
             # Schedule the request.
             scheduled_running_reqs.append(request)
-            self.scheduled_req_ids[request.request_id] += 1
             if request.use_structured_output:
                 # PERF: in case of chunked prefill,
                 # request might not include any new tokens.
@@ -374,7 +367,6 @@ class Scheduler(SchedulerInterface):
                         request.request_id] = req_index
                 req_index += 1
                 self.running.append(request)
-                self.scheduled_req_ids[request.request_id] += 1
                 if self.log_stats:
                     request.record_event(EngineCoreEventType.SCHEDULED,
                                          scheduled_timestamp)
@@ -726,9 +718,6 @@ class Scheduler(SchedulerInterface):
                 # Invariant: EngineCore returns no partial prefill outputs.
                 assert not prompt_logprobs_tensors
 
-            self.scheduled_req_ids[req_id] -= 1
-            if self.scheduled_req_ids[req_id] == 0:
-                del self.scheduled_req_ids[req_id]
             if not stopped:
                 new_running.append(request)
 
@@ -778,8 +767,6 @@ class Scheduler(SchedulerInterface):
 
             if request.status == RequestStatus.RUNNING:
                 self.running.remove(request)
-                if request.request_id in self.scheduled_req_ids:
-                    del self.scheduled_req_ids[request.request_id]
             else:
                 self.waiting.remove(request)
             request.status = finished_status
