@@ -112,14 +112,14 @@ def nullable_kvs(val: str) -> Optional[dict[str, int]]:
 
 
 def optional_dict(val: str) -> Optional[dict[str, int]]:
-    try:
+    if re.match("^{.*}$", val):
         return optional_arg(val, json.loads)
-    except ValueError:
-        logger.warning(
-            "Failed to parse JSON string. Attempting to parse as "
-            "comma-separated key=value pairs. This will be deprecated in a "
-            "future release.")
-        return nullable_kvs(val)
+
+    logger.warning(
+        "Failed to parse JSON string. Attempting to parse as "
+        "comma-separated key=value pairs. This will be deprecated in a "
+        "future release.")
+    return nullable_kvs(val)
 
 
 @dataclass
