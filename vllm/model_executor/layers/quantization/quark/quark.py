@@ -333,7 +333,6 @@ class QuarkConfig(QuantizationConfig):
         :param name: param name
         :return: matching param name for KV cache scale in vLLM
         """
-        print("call get_cache_scale, name", name)
         if self.kv_cache_group is None or len(self.kv_cache_group) == 0:
             return None
 
@@ -341,7 +340,6 @@ class QuarkConfig(QuantizationConfig):
             re.split(r"[*.]", kv_cache)[-1] for kv_cache in self.kv_cache_group
         ]
 
-        print("kv_proj_names", kv_proj_names)
         if name.endswith(".output_scale"):
             if len(kv_proj_names) == 1 and kv_proj_names[0] in name:
                 kv_output_scale_name = "." + kv_proj_names[0] + ".output_scale"

@@ -65,8 +65,6 @@ class Attention(nn.Module):
         else:
             sliding_window = None
         
-        print("cache_config when init Attention:", cache_config)
-
         if cache_config is not None:
             kv_cache_dtype = cache_config.cache_dtype
             block_size = cache_config.block_size
@@ -77,8 +75,6 @@ class Attention(nn.Module):
             block_size = 16
             is_attention_free = False
             calculate_kv_scales = False
-        print("calculate_kv_scales", calculate_kv_scales)
-        print("kv_cache_dtype", kv_cache_dtype)
 
         if num_kv_heads is None:
             num_kv_heads = num_heads
