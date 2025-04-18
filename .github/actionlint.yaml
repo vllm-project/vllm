@@ -6,5 +6,8 @@ paths:
   .github/workflows/trigger_jenkins.yml:
     ignore:
       - shellcheck reported issue in this script: SC2116:.+
-      - shellcheck reported issue in this script: SC2086:.+ 
-      - shellcheck reported issue in this script: SC2001:.+    
+      - shellcheck reported issue in this script: SC2086:.+
+      - shellcheck reported issue in this script: SC2001:.+
+  .github/workflows/skip_gaudi_tests.yml:
+    ignore:
+      - shellcheck reported issue in this script: SC2086:.+

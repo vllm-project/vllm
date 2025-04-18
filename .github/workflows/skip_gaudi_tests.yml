@@ -1,0 +1,79 @@
+name: Skip Gaudi Tests
+on:
+  issue_comment:
+    types: [created]
+
+permissions:
+    pull-requests: write
+    statuses: write
+    actions: read
+jobs:
+  read_codeowners:
+    name: Check Commenter
+    runs-on: generic-runner
+    if: ${{ contains(github.event.comment.body, '/skip-gaudi-tests') && github.event.issue.pull_request }}
+    outputs:
+      pr_sha: ${{ steps.extract_pr.outputs.pr_sha }}
+    steps:
+      - name: 'Checkout Repository'
+        uses: actions/checkout@v4
+        with:
+          ref: habana_main
+          fetch-depth: 0
+          token: ${{ secrets.GH_PAT }}
+      - name: Parse Comment
+        run: |
+          MAINTAINERS=$(grep -Eh '^[^#]' .github/CODEOWNERS | tr -d '@*' | tr '\n' ' ')
+          COMMENTER=${{ github.event.comment.user.login }}
+          echo "Maintainers are: ${MAINTAINERS}"
+          echo "Commenter Is: ${COMMENTER}"
+          if ! echo "$MAINTAINERS" | grep -q "$COMMENTER"; then
+            echo "❌ User $COMMENTER is not authorized to trigger tests."
+            exit 1
+          fi
+      - name: Extract PR Sha
+        id: extract_pr
+        run: |
+            pr_sha=$(curl -sH "Authorization: token ${{ secrets.GH_PAT }}" https://api.github.com/repos/${{github.repository}}/pulls/${{ github.event.issue.number }} | jq -r '.head.sha')
+            echo "pr_sha=$pr_sha" >> $GITHUB_OUTPUT
+  Summarize:
+      name: Summarize Test Results
+      runs-on: generic-runner
+      needs: [read_codeowners]
+      if: always() && !contains(fromJSON('["skipped","cancelled"]'), needs.read_codeowners.result)
+      steps:
+        - name: Checkout Repository
+          uses: actions/checkout@v4
+          with:
+            fetch-depth: 0
+            token: ${{ secrets.GH_PAT }}
+        - name: Create Commit Status(Success)
+          uses: actions/github-script@v7
+          if: success()
+          env:
+            GIT_SHA: ${{ needs.read_codeowners.outputs.pr_sha }}
+          with:
+            script: |
+              await github.rest.repos.createCommitStatus({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                sha:  process.env.GIT_SHA,
+                state: 'success',
+                description: 'Tests have been skipped!',
+                context: 'Summarize Test Results'
+              });
+        - name: Create Commit Status(Failure)
+          uses: actions/github-script@v7
+          if: failure()
+          env:
+            GIT_SHA: ${{ needs.read_codeowners.outputs.pr_sha }}
+          with:
+            script: |
+              await github.rest.repos.createCommitStatus({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                sha:  process.env.GIT_SHA,
+                state: 'failure',
+                description: 'Test Failure! Check Jobs To See Why',
+                context: 'Summarize Test Results'
+              });

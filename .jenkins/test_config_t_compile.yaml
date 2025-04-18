@@ -184,8 +184,13 @@ stages:
       command: export PT_HPU_LAZY_MODE=0 && export VLLM_USE_V1=1 && export VLLM_SKIP_WARMUP=true && pytest -v -s -vvv --log-cli-level=INFO tests/v1/core && pytest -v -s -vvv --log-cli-level=INFO tests/v1/engine && pytest -v -s -vvv --log-cli-level=INFO tests/v1/worker && pytest -v -s -vvv --log-cli-level=INFO tests/v1/entrypoints        
   - name: benchmarks
     steps:
-    - name: benchmark_llama_3_1_8b
+    - name: benchmark_llama_3_1_8b_bf16
       flavor: g3
       command: >
         export PT_HPU_LAZY_MODE=0 && export VLLM_T_COMPILE_FULLGRAPH=True &&
         bash .jenkins/benchmark/run-benchmark.sh 
+    - name: benchmark_llama_3_1_8b_fp8
+      flavor: g3
+      command: >
+        export PT_HPU_LAZY_MODE=0 && export VLLM_T_COMPILE_FULLGRAPH=True &&
+        bash .jenkins/benchmark/run-benchmark.sh -fp8
