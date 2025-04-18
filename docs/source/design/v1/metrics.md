@@ -66,8 +66,8 @@ vLLM also provides [a reference example](https://docs.vllm.ai/en/latest/getting_
 The subset of metrics exposed in the Grafana dashboard gives us an indication of which metrics are especially important:
 
 - `vllm:e2e_request_latency_seconds_bucket` - End to end request latency measured in seconds
-- `vllm:prompt_tokens_total` - Prompt Tokens/Sec
-- `vllm:generation_tokens_total` - Generation Tokens/Sec
+- `vllm:prompt_tokens_total` - Prompt Tokens
+- `vllm:generation_tokens_total` - Generation Tokens
 - `vllm:time_per_output_token_seconds` - Inter token latency (Time Per Output Token, TPOT) in second.
 - `vllm:time_to_first_token_seconds` - Time to First Token (TTFT) latency in seconds.
 - `vllm:num_requests_running` (also, `_swapped` and `_waiting`) - Number of requests in RUNNING, WAITING, and SWAPPED state
@@ -85,6 +85,17 @@ See [the PR which added this Dashboard](gh-pr:2316) for interesting and useful b
 ### Prometheus Client Library
 
 Prometheus support was initially added [using the aioprometheus library](gh-pr:1890), but a switch was made quickly to [prometheus_client](gh-pr:2730). The rationale is discussed in both linked PRs.
+
+With the switch to `aioprometheus`, we lost a `MetricsMiddleware` to track HTTP metrics, but this was reinstated [using prometheus_fastapi_instrumentator](gh-pr:15657):
+
+```bash
+$ curl http://0.0.0.0:8000/metrics 2>/dev/null  | grep -P '^http_(?!.*(_bucket|_created|_sum)).*'
+http_requests_total{handler="/v1/completions",method="POST",status="2xx"} 201.0
+http_request_size_bytes_count{handler="/v1/completions"} 201.0
+http_response_size_bytes_count{handler="/v1/completions"} 201.0
+http_request_duration_highr_seconds_count 201.0
+http_request_duration_seconds_count{handler="/v1/completions",method="POST"} 201.0
+```
 
 ### Multi-process Mode
 

@@ -36,11 +36,13 @@ llm = LLM(
 outputs = llm.generate(prompts, sampling_params)
 
 # all ranks will have the same outputs
+print("-" * 50)
 for output in outputs:
     prompt = output.prompt
     generated_text = output.outputs[0].text
-    print(f"Prompt: {prompt!r}, "
+    print(f"Prompt: {prompt!r}\n"
           f"Generated text: {generated_text!r}")
+    print("-" * 50)
 """
 Further tips:
 
