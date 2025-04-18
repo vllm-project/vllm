@@ -300,7 +300,7 @@ class TransformersModel(nn.Module):
                 setattr(module, name, new_buffer)
         for child in module.children():
             self.init_buffers(child)
-            
+
     def init_parameters(self, module: nn.Module):
         """
         If a `parameter` is on the `meta` device, then its parent
@@ -317,7 +317,9 @@ class TransformersModel(nn.Module):
         """
         for name, param in module.named_parameters(recurse=False):
             if param.device == torch.device("meta"):
-                new_param = nn.Parameter(torch.empty_like(param.data, device=self.device_config.device))
+                new_param = nn.Parameter(
+                    torch.empty_like(param.data,
+                                     device=self.device_config.device))
                 setattr(module, name, new_param)
         for child in module.children():
             self.init_parameters(child)
