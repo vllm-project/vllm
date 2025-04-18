@@ -131,9 +131,14 @@ def rocm_aiter_fused_experts(
         return out_asm
 
     elif per_channel_quant and apply_router_weight_on_input and use_fp8_w8a8:
+        # AITER tkw1 kernel for FP8 models with `apply_router_weight_on_input`
+        # This applies topk_weights on the GEMM output of the first FC layer
+        #  rather than the second FC.
         assert apply_router_weight_on_input, (
             "aiter's tkw1 MoE only supports models with"
             " apply_router_weight_on_input.")
+        assert (topk_weights.dim() == 2
+                ), "`topk_weights` should be in shape (num_tokens, topk)"
         assert topk_weights.shape[-1] == 1, (
             "Only support topk=1 when"
             " `apply_router_weight_on_input` is True")
@@ -167,6 +172,8 @@ def rocm_aiter_fused_experts(
                                            a16=False)
 
     if apply_router_weight_on_input:
+        assert (topk_weights.dim() == 2
+                ), "`topk_weights` should be in shape (num_tokens, topk)"
         _, topk = topk_weights.shape
         assert (
             topk == 1
