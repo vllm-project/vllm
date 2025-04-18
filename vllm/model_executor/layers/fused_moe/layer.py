@@ -114,10 +114,8 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         super().process_weights_after_loading(layer)
 
         # Padding the weight for better performance on ROCm
-        layer.w13_weight.data = self._maybe_pad_weight(
-            layer.w13_weight.data)
-        layer.w2_weight.data = self._maybe_pad_weight(
-            layer.w2_weight.data)
+        layer.w13_weight.data = self._maybe_pad_weight(layer.w13_weight.data)
+        layer.w2_weight.data = self._maybe_pad_weight(layer.w2_weight.data)
         # Lazy import to avoid importing triton.
         from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
             is_rocm_aiter_moe_enabled, shuffle_weights)
