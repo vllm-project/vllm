@@ -134,6 +134,6 @@ The cudagraphs are captured and managed by the compiler backend, and replayed wh
 
 By default, vLLM will try to determine a set of sizes to capture cudagraph. You can also override it using the config `cudagraph_capture_sizes`:
 
-`VLLM_USE_V1=1 vllm serve meta-llama/Llama-3.2-1B --compilation_config "{'cudagraph_capture_sizes': [1, 2, 4, 8]}"`
+`VLLM_USE_V1=1 vllm serve meta-llama/Llama-3.2-1B --compilation-config "{'cudagraph_capture_sizes': [1, 2, 4, 8]}"`
 
 Then it will only capture cudagraph for the specified sizes. It can be useful to have fine-grained control over the cudagraph capture.
