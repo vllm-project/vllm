@@ -306,12 +306,19 @@ class EngineArgs:
             cls_docs = get_attr_docs(cls)
             kwargs = {}
             for field in fields(cls):
-                name = field.name
+                # Get the default value of the field
                 default = field.default
-                # This will only be True if default is MISSING
                 if field.default_factory is not MISSING:
                     default = field.default_factory()
-                kwargs[name] = {"default": default, "help": cls_docs[name]}
+
+                # Get the help text for the field
+                name = field.name
+                help = cls_docs[name]
+                # Escape % for argparse
+                help = help.replace("%", "%%")
+
+                # Initialise the kwargs dictionary for the field
+                kwargs[name] = {"default": default, "help": help}
 
                 # Make note of if the field is optional and get the actual
                 # type of the field if it is
@@ -319,6 +326,8 @@ class EngineArgs:
                 field_type = get_args(
                     field.type)[0] if optional else field.type
 
+                # Set type, action and choices for the field depending on the
+                # type of the field
                 if can_be_type(field_type, bool):
                     # Creates --no-<name> and --<name> flags
                     kwargs[name]["action"] = argparse.BooleanOptionalAction
