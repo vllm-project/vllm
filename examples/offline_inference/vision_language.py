@@ -376,9 +376,9 @@ def run_kimi_vl(questions: list[str], modality: str) -> ModelRequestData:
 
     engine_args = EngineArgs(
         model="moonshotai/Kimi-VL-A3B-Instruct",
-        max_model_len=4096,
-        disable_mm_preprocessor_cache=args.disable_mm_preprocessor_cache,
         trust_remote_code=True,
+        max_model_len=4096,
+        limit_mm_per_prompt={"image": 1},
     )
 
     return ModelRequestData(
