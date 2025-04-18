@@ -244,19 +244,20 @@ class Proxy:
     async def create_completion(self, raw_request: Request):
         try:
             request = await raw_request.json()
+            
+            if len(self.prefill_instances) > 0:
+                kv_prepare_request = request.copy()
+                kv_prepare_request["max_tokens"] = 1
 
-            # kv_prepare_request = request.copy()
-            # kv_prepare_request["max_tokens"] = 1
-
-            # prefill_instance = self.schedule(self.prefill_cycler)
-            # try:
-            #     async for _ in self.forward_request(
-            #             f"http://{prefill_instance}/v1/completions",
-            #             kv_prepare_request):
-            #         continue
-            # except HTTPException as http_exc:
-            #     self.remove_instance_endpoint("prefill", prefill_instance)
-            #     raise http_exc
+                prefill_instance = self.schedule(self.prefill_cycler)
+                try:
+                    async for _ in self.forward_request(
+                            f"http://{prefill_instance}/v1/completions",
+                            kv_prepare_request):
+                        continue
+                except HTTPException as http_exc:
+                    self.remove_instance_endpoint("prefill", prefill_instance)
+                    raise http_exc
 
             # Perform kv recv and decoding stage
             decode_instance = self.schedule(self.decode_cycler)
@@ -363,13 +364,14 @@ class ProxyServer:
         )
 
     def validate_parsed_serve_args(self, args: argparse.Namespace):
-        if not args.prefill:
-            raise ValueError("Please specify at least one prefill node.")
+        # if not args.prefill:
+        #     raise ValueError("Please specify at least one prefill node.")
         if not args.decode:
             raise ValueError("Please specify at least one decode node.")
-        # self.validate_instances(args.prefill)
+        if args.prefill:
+            self.validate_instances(args.prefill)
+            self.verify_model_config(args.prefill, args.model)
         self.validate_instances(args.decode)
-        # self.verify_model_config(args.prefill, args.model)
         self.verify_model_config(args.decode, args.model)
 
     def validate_instances(self, instances: list):
