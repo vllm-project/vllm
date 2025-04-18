@@ -80,7 +80,7 @@ class MsgpackEncoder:
 
     def enc_hook(self, obj: Any) -> Any:
         if isinstance(obj, torch.Tensor):
-            return self._encode_ndarray(obj.numpy())
+            return self._encode_tensor(obj)
 
         # Fall back to pickle for object or void kind ndarrays.
         if isinstance(obj, np.ndarray) and obj.dtype.kind not in ('O', 'V'):
@@ -133,9 +133,26 @@ class MsgpackEncoder:
         # backing buffers that we've stashed in `aux_buffers`.
         return obj.dtype.str, obj.shape, data
 
+    def _encode_tensor(
+        self, obj: torch.Tensor
+    ) -> tuple[str, tuple[int, ...], Union[int, memoryview]]:
+        assert self.aux_buffers is not None
+        # this creates a copy of the tensor
+        obj = obj.contiguous() if not obj.is_contiguous() else obj
+        #  view the tensor as a 1D array of bytes
+        arr = obj.view([obj.numel()]).view(torch.uint8).numpy()
+        if obj.nbytes < self.size_threshold:
+            data = msgpack.Ext(CUSTOM_TYPE_RAW_VIEW, arr.data)
+        else:
+            # Otherwise encode index of backing buffer to avoid copy.
+            data = len(self.aux_buffers)
+            self.aux_buffers.append(arr.data)
+        dt = str(obj.dtype)[6:]  # remove 'torch.' prefix
+        return dt, obj.shape, data
+
     def _encode_nested_tensors(self, nt: NestedTensors) -> Any:
         if isinstance(nt, torch.Tensor):
-            return self._encode_ndarray(nt.numpy())
+            return self._encode_tensor(nt)
         if isinstance(nt, (int, float)):
             # Although it violates NestedTensors type, MultiModalKwargs
             # values are sometimes floats.
@@ -186,7 +203,7 @@ class MsgpackDecoder:
             if issubclass(t, np.ndarray):
                 return self._decode_ndarray(obj)
             if issubclass(t, torch.Tensor):
-                return torch.from_numpy(self._decode_ndarray(obj))
+                return self._decode_tensor(obj)
             if issubclass(t, MultiModalKwargs):
                 if isinstance(obj, list):
                     return MultiModalKwargs.from_items(
@@ -204,6 +221,15 @@ class MsgpackDecoder:
         buffer = self.aux_buffers[data] if isinstance(data, int) \
             else bytearray(data)
         return np.ndarray(buffer=buffer, dtype=np.dtype(dtype), shape=shape)
+
+    def _decode_tensor(self, arr: Any) -> torch.Tensor:
+        dtype, shape, data = arr
+        # Copy from inline representation, otherwise Torch is unhappy since
+        # the returned memory is non-writeable.
+        buffer = self.aux_buffers[data] if isinstance(data, int) \
+            else bytearray(data)
+        arr = np.ndarray(buffer=buffer, dtype=np.uint8, shape=[len(buffer)])
+        return torch.from_numpy(arr).view(getattr(torch, dtype)).view(shape)
 
     def _decode_mm_items(self, obj: list) -> list[MultiModalKwargsItem]:
         decoded_items = []
@@ -228,7 +254,7 @@ class MsgpackDecoder:
         if not isinstance(obj, list):
             raise TypeError(f"Unexpected NestedTensors contents: {type(obj)}")
         if obj and isinstance(obj[0], str):
-            return torch.from_numpy(self._decode_ndarray(obj))
+            return self._decode_tensor(obj)
         return [self._decode_nested_tensors(x) for x in obj]
 
     def ext_hook(self, code: int, data: memoryview) -> Any:

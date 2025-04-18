@@ -114,15 +114,15 @@ def test_multimodal_kwargs():
 
     total_len = sum(memoryview(x).cast("B").nbytes for x in encoded)
 
-    # expected total encoding length, should be 44536, +-20 for minor changes
-    assert total_len >= 44516 and total_len <= 44556
+    # expected total encoding length, should be 44559, +-20 for minor changes
+    assert total_len >= 44539 and total_len <= 44579
     decoded: MultiModalKwargs = decoder.decode(encoded).mm[0]
     assert all(nested_equal(d[k], decoded[k]) for k in d)
 
 
 def test_multimodal_items_by_modality():
     e1 = MultiModalFieldElem("audio", "a0", torch.zeros(1000,
-                                                        dtype=torch.int16),
+                                                        dtype=torch.bfloat16),
                              MultiModalBatchedField())
     e2 = MultiModalFieldElem(
         "video",
