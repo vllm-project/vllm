@@ -10,7 +10,6 @@ import sys
 import textwrap
 import warnings
 from collections import Counter
-from collections.abc import Mapping
 from contextlib import contextmanager
 from dataclasses import (MISSING, dataclass, field, fields, is_dataclass,
                          replace)
@@ -355,7 +354,7 @@ class ModelConfig:
         disable_cascade_attn: bool = False,
         skip_tokenizer_init: bool = False,
         served_model_name: Optional[Union[str, list[str]]] = None,
-        limit_mm_per_prompt: Optional[Mapping[str, int]] = None,
+        limit_mm_per_prompt: Optional[dict[str, int]] = None,
         use_async_output_proc: bool = True,
         config_format: ConfigFormat = ConfigFormat.AUTO,
         hf_token: Optional[Union[bool, str]] = None,
@@ -578,7 +577,7 @@ class ModelConfig:
                 self.tokenizer = s3_tokenizer.dir
 
     def _init_multimodal_config(
-        self, limit_mm_per_prompt: Optional[Mapping[str, int]]
+        self, limit_mm_per_prompt: Optional[dict[str, int]]
     ) -> Optional["MultiModalConfig"]:
         if self.registry.is_multimodal_model(self.architectures):
             return MultiModalConfig(limit_per_prompt=limit_mm_per_prompt or {})
@@ -2730,7 +2729,7 @@ class PromptAdapterConfig:
 class MultiModalConfig:
     """Controls the behavior of multimodal models."""
 
-    limit_per_prompt: Mapping[str, int] = field(default_factory=dict)
+    limit_per_prompt: dict[str, int] = field(default_factory=dict)
     """
     The maximum number of input items allowed per prompt for each modality.
     This should be a JSON string that will be parsed into a dictionary.
