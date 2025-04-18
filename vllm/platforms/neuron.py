@@ -1,19 +1,23 @@
 # SPDX-License-Identifier: Apache-2.0
 import os
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Optional, Union
 
 import torch
 
 import vllm.envs as envs
+from vllm.inputs import ProcessorInputs, PromptType
 from vllm.logger import init_logger
+from vllm.sampling_params import SamplingParams, SamplingType
 
 from .interface import Platform, PlatformEnum, _Backend
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig, VllmConfig
+    from vllm.pooling_params import PoolingParams
 else:
     ModelConfig = None
     VllmConfig = None
+    PoolingParams = None
 
 logger = init_logger(__name__)
 
