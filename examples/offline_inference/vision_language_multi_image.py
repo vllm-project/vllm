@@ -331,11 +331,10 @@ def load_kimi_vl(question: str, image_urls: list[str]) -> ModelRequestData:
 
     engine_args = EngineArgs(
         model=model_name,
+        trust_remote_code=True,
         max_model_len=4096,
         max_num_seqs=4,
-        tensor_parallel_size=1,
         limit_mm_per_prompt={"image": len(image_urls)},
-        trust_remote_code=True,
     )
 
     placeholders = [{"type": "image", "image": url} for url in image_urls]
