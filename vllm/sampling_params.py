@@ -79,6 +79,17 @@ class GuidedDecodingParams:
             return []
         return self.backend.split(":")[1].split(",")
 
+    def add_option(self, opt_name: str) -> None:
+        """Adds an option to the backend options."""
+        if not self.backend:
+            self.backend = f":{opt_name}"
+        elif ":" not in self.backend:
+            self.backend += f":{opt_name}"
+        else:
+            options = set(self.backend_options())
+            options.add(opt_name)
+            self.backend = f"{self.backend_name}:{','.join(sorted(options))}"
+
     def no_fallback(self) -> bool:
         """Returns True if the "no-fallback" option is supplied for the guided
         decoding backend"""
