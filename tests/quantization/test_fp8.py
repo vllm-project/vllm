@@ -27,7 +27,6 @@ MODELS = [
     "use_rocm_aiter", [True, False] if current_platform.is_rocm() else [False])
 def test_model_load_and_run(vllm_runner, model_id: str, force_marlin: bool,
                             use_rocm_aiter: bool, monkeypatch) -> None:
-
     if use_rocm_aiter:
         monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1")
 

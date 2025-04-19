@@ -2,13 +2,14 @@
 
 import itertools
 from abc import abstractmethod
-from typing import Any, Literal, Optional, Union
+from typing import Any, Callable, Literal, Optional, Union
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.nn.parameter import Parameter, UninitializedParameter
 
+from vllm._aiter_ops import aiter_ops
 from vllm.distributed import (divide, get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size,
                               split_tensor_along_last_dim,
@@ -48,6 +49,14 @@ WEIGHT_LOADER_V2_SUPPORTED = [
     "QuarkLinearMethod",
     "ModelOptNvFp4LinearMethod",
 ]
+
+
+def dispatch_unquantized_linear_func(
+) -> Callable[[torch.Tensor, torch.Tensor, torch.Tensor], torch.Tensor]:
+    from vllm._aiter_ops import is_rocm_aiter_linear_enabled
+    if is_rocm_aiter_linear_enabled():
+        return aiter_ops.rocm_aiter_tuned_gemm
+    return F.linear
 
 
 def adjust_marlin_shard(param, shard_size, shard_offset):
@@ -187,8 +196,7 @@ class UnquantizedLinearMethod(LinearMethodBase):
               layer: torch.nn.Module,
               x: torch.Tensor,
               bias: Optional[torch.Tensor] = None) -> torch.Tensor:
-
-        return F.linear(x, layer.weight, bias)
+        return dispatch_unquantized_linear_func()(x, layer.weight, bias)
 
 
 class LinearBase(torch.nn.Module):
