@@ -1719,8 +1719,8 @@ class ParallelConfig:
             backend: DistributedExecutorBackend = "mp"
             ray_found = ray_utils.ray_is_available()
             if current_platform.is_neuron():
-                # neuron uses single process to control multiple devices
-                backend = "uni"
+                # neuron V0 uses single process to control multiple devices
+                backend = "mp" if envs.VLLM_USE_V1 else "uni"
             elif (current_platform.is_cuda()
                   and cuda_device_count_stateless() < self.world_size):
                 if not ray_found:
