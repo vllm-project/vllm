@@ -344,7 +344,7 @@ class SharedStorageConnector(KVConnectorBase_V1):
 
         return KVTransferParams(
             request_id=request.request_id,
-            remote_instance_id=self.remote_instance_id,
+            remote_instance_id=self.instance_id,
             remote_block_ids=request.block_ids,
             do_remote_prefill=True,
         )
