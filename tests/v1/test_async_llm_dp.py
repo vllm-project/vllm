@@ -3,17 +3,16 @@
 import asyncio
 import os
 from contextlib import ExitStack
-from typing import Optional
 
 import pytest
 
-from vllm import SamplingParams
 from vllm.engine.arg_utils import AsyncEngineArgs
-from vllm.inputs import PromptType
 from vllm.platforms import current_platform
 from vllm.sampling_params import RequestOutputKind
 from vllm.v1.engine.async_llm import AsyncLLM
 from vllm.v1.engine.core_client import DPAsyncMPClient
+
+from .utils import generate_dp
 
 engine_args = AsyncEngineArgs(
     model="ibm-research/PowerMoE-3b",
@@ -26,36 +25,6 @@ engine_args = AsyncEngineArgs(
 if not current_platform.supports_v1(engine_args.create_model_config()):
     pytest.skip(reason="Requires V1-supporting platform.",
                 allow_module_level=True)
-
-
-async def generate(engine: AsyncLLM,
-                   request_id: str,
-                   prompt: PromptType,
-                   output_kind: RequestOutputKind,
-                   max_tokens: int,
-                   prompt_logprobs: Optional[int] = None) -> tuple[int, str]:
-    # Ensure generate doesn't complete too fast for cancellation test.
-    await asyncio.sleep(0.2)
-
-    count = 0
-    sampling_params = SamplingParams(max_tokens=max_tokens,
-                                     ignore_eos=True,
-                                     output_kind=output_kind,
-                                     temperature=0,
-                                     prompt_logprobs=prompt_logprobs)
-    async for out in engine.generate(request_id=request_id,
-                                     prompt=prompt,
-                                     sampling_params=sampling_params):
-
-        num_tokens = len(out.outputs[0].token_ids)
-        if output_kind == RequestOutputKind.DELTA:
-            count += num_tokens
-        else:
-            count = num_tokens
-
-        await asyncio.sleep(0.)
-
-    return count, request_id
 
 
 @pytest.mark.parametrize(
@@ -80,8 +49,8 @@ async def test_load(output_kind: RequestOutputKind):
         for request_id in request_ids:
             tasks.append(
                 asyncio.create_task(
-                    generate(engine, request_id, prompt, output_kind,
-                             NUM_EXPECTED_TOKENS)))
+                    generate_dp(engine, request_id, prompt, output_kind,
+                                NUM_EXPECTED_TOKENS)))
 
         # Confirm that we got all the EXPECTED tokens from the requests.
         done, pending = await asyncio.wait(tasks,
