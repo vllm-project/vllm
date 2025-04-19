@@ -94,7 +94,7 @@ class VLMTestInfo(NamedTuple):
     enforce_eager: bool = True
     max_model_len: int = 1024
     max_num_seqs: int = 256
-    max_num_batched_tokens: int = 12800
+    max_num_batched_tokens: int = 16384
     task: TaskOption = "auto"
     tensor_parallel_size: int = 1
     vllm_runner_kwargs: Optional[dict[str, Any]] = None

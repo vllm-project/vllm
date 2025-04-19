@@ -23,6 +23,7 @@ TEXT_ENGINE_ARGS = AsyncEngineArgs(model="meta-llama/Llama-3.2-1B-Instruct",
                                    disable_log_requests=True)
 
 VISION_ENGINE_ARGS = AsyncEngineArgs(model="Qwen/Qwen2-VL-2B-Instruct",
+                                     max_num_batched_tokens=16384,
                                      enforce_eager=True,
                                      disable_log_requests=True)
 
