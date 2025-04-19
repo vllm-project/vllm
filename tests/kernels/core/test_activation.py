@@ -5,14 +5,13 @@ import random
 import pytest
 import torch
 
+from tests.kernels.allclose_default import get_default_atol, get_default_rtol
 from tests.kernels.utils import opcheck
 from vllm.model_executor.layers.activation import (FastGELU, FatreluAndMul,
                                                    GeluAndMul, MulAndSilu,
                                                    NewGELU, QuickGELU,
                                                    SiluAndMul)
 from vllm.platforms import current_platform
-
-from .allclose_default import get_default_atol, get_default_rtol
 
 DTYPES = [torch.half, torch.bfloat16, torch.float]
 NUM_TOKENS = [7, 83, 2048]  # Arbitrary values for testing

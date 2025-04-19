@@ -17,8 +17,7 @@ from vllm.model_executor.layers.fused_moe.moe_align_block_size import (
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     per_token_group_quant_fp8, w8a8_block_fp8_matmul)
 from vllm.platforms import current_platform
-
-from .utils_block import native_w8a8_block_matmul
+from vllm.tests.kernels.utils_block import native_w8a8_block_matmul
 
 dg_available = False
 try:
