@@ -99,8 +99,9 @@ class Scheduler(SchedulerInterface):
         self.finished_req_ids: set[str] = set()
 
         # Requests in states for tracking KV transfers for P/D disagg
+        self.waiting_to_send_KV_req_ids: set[str] = set()
         self.sending_KV_req_ids: set[str] = set()
-        self.waiting_KV_req_ids: set[str] = set()
+        self.receiving_KV_req_ids: set[str] = set()
 
         # OPTIMIZATION: Cache the CachedRequestData objects to avoid creating
         # them at each scheduling step.
@@ -172,18 +173,25 @@ class Scheduler(SchedulerInterface):
         scheduled_timestamp = time.monotonic()
 
         # Check for new remote decode requests for P/D
+        new_KV_requests_to_send: list[Request] = []
         if self.connector is not None:
-            self.waiting_KV_req_ids.update(
-                self.connector.receive_remote_decode_requests())
+            # TODO: Receive request over ZMQ
+            #            self.receiving_KV_req_ids.update(
+            #                self.connector.receive_remote_decode_requests())
 
             # Check if any P/D requests have finished sending or receiving
+            for req_id in list(self.waiting_to_send_KV_req_ids):
+                self.sending_KV_req_ids.add(req_id)
+                self.waiting_to_send_KV_req_ids.remove(req_id)
+                new_KV_requests_to_send.append(self.requests[req_id])
+
             for req_id in list(self.sending_KV_req_ids):
-                if self.connector.done_sending_remote_decode_request(req_id):
+                if self.connector.is_request_done_sending(req_id):
                     self.sending_KV_req_ids.remove(req_id)
                     self.finished_req_ids.add(req_id)
-            for req_id in list(self.waiting_KV_req_ids):
-                if self.connector.done_waiting_remote_decode_request(req_id):
-                    self.waiting_KV_req_ids.remove(req_id)
+            for req_id in list(self.receiving_KV_req_ids):
+                if self.connector.is_request_done_receiving(req_id):
+                    self.receiving_KV_req_ids.remove(req_id)
                     self.waiting.append(self.requests[req_id])
 
         # First, schedule the RUNNING requests.
@@ -498,10 +506,18 @@ class Scheduler(SchedulerInterface):
         # 2. Wrap up all the KV cache load / save ops into an opaque object
         # 3. Clear the internal states of the connector
         if self.connector is not None:
-            meta = self.connector.build_connector_meta(scheduler_output,
-                                                       self.sending_KV_req_ids,
-                                                       self.waiting_KV_req_ids)
+            meta = self.connector.build_connector_meta(scheduler_output)
             scheduler_output.kv_connector_metadata = meta
+
+            # TODO: encapsulate these in the KV connector metadata
+            scheduler_output.sending_KV_req_ids = self.sending_KV_req_ids
+            scheduler_output.receiving_KV_req_ids = self.receiving_KV_req_ids
+            new_KV_to_send_reqs_data = [
+                NewRequestData.from_request(
+                    req, req_to_new_block_ids[req.request_id])
+                for req in new_KV_requests_to_send
+            ]
+            scheduler_output.new_KV_requests_to_send = new_KV_to_send_reqs_data
 
         # Advance the number of computed tokens for the request AFTER
         # the request is scheduled.
@@ -742,10 +758,10 @@ class Scheduler(SchedulerInterface):
 
             if self.connector is not None and request.do_remote_decode:
                 stopped = True
-
-                self.sending_KV_req_ids.add(req_id)
-                self.connector.send_remote_decode_request(
-                    self.kv_cache_manager.req_to_blocks[req_id])
+                self.waiting_to_send_KV_req_ids.add(req_id)
+                # TODO: Add ZMQ request
+                #self.connector.send_remote_decode_request(
+                #    self.kv_cache_manager.req_to_blocks[req_id])
 
             self.scheduled_req_ids.remove(req_id)
             if not stopped:

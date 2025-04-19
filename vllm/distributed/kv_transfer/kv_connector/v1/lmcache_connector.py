@@ -39,9 +39,9 @@ class LMCacheConnectorV1(KVConnectorBase_V1):
             **kwargs: additional arguments for the load operation
 
         Note:
-            The number of elements in kv_caches and layer_names should be 
+            The number of elements in kv_caches and layer_names should be
             the same.
-            
+
         """
         self._lmcache_engine.start_load_kv(forward_context, **kwargs)
 
@@ -50,7 +50,7 @@ class LMCacheConnectorV1(KVConnectorBase_V1):
         Block until the KV for a specific layer is loaded into vLLM's
         paged buffer. This is called from within attention layer to ensure
         async copying from start_load_kv is complete.
-        
+
         This interface will be useful for layer-by-layer pipelining.
 
         Args:
@@ -61,13 +61,13 @@ class LMCacheConnectorV1(KVConnectorBase_V1):
     def save_kv_layer(self, layer_name: str, kv_layer: torch.Tensor,
                       attn_metadata: "AttentionMetadata", **kwargs) -> None:
         """
-        Start saving the a layer of KV cache from vLLM's paged buffer 
+        Start saving the a layer of KV cache from vLLM's paged buffer
         to the connector. This is called from within attention layer to
         enable async copying during execution.
 
         Args:
             layer_name (str): the name of the layer.
-            kv_layer (torch.Tensor): the paged KV buffer of the current 
+            kv_layer (torch.Tensor): the paged KV buffer of the current
                 layer in vLLM.
             attn_metadata (AttentionMetadata): the attention metadata.
             **kwargs: additional arguments for the save operation.
@@ -96,14 +96,14 @@ class LMCacheConnectorV1(KVConnectorBase_V1):
         """
         Get number of new tokens that can be loaded from the
         external KV cache beyond the num_computed_tokens.
-        
+
         Args:
             request (Request): the request object.
             num_computed_tokens (int): the number of locally
                 computed tokens for this request
 
         Returns:
-            the number of tokens that can be loaded from the 
+            the number of tokens that can be loaded from the
             external KV cache beyond what is already computed.
         """
         return self._lmcache_engine.get_num_new_matched_tokens(
@@ -129,3 +129,10 @@ class LMCacheConnectorV1(KVConnectorBase_V1):
             scheduler_output (SchedulerOutput): the scheduler output object.
         """
         return self._lmcache_engine.build_connector_meta(scheduler_output)
+
+    # These return true for now since they are not async
+    def is_request_done_sending(self, req_id: str) -> bool:
+        return True
+
+    def is_request_done_receiving(self, req_id: str) -> bool:
+        return True

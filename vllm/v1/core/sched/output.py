@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Optional
 
 if TYPE_CHECKING:
@@ -126,3 +126,6 @@ class SchedulerOutput:
 
     # KV Cache Connector metadata.
     kv_connector_metadata: Optional[KVConnectorMetadata] = None
+    sending_KV_req_ids: set[str] = field(default_factory=set)
+    receiving_KV_req_ids: set[str] = field(default_factory=set)
+    new_KV_requests_to_send: list[NewRequestData] = field(default_factory=list)

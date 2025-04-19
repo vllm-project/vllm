@@ -85,7 +85,7 @@ class SharedStorageConnector(KVConnectorBase_V1):
 
     def start_load_kv(self, forward_context: "ForwardContext",
                       **kwargs) -> None:
-        """Start loading the KV cache from the connector buffer to vLLM's 
+        """Start loading the KV cache from the connector buffer to vLLM's
         paged KV buffer.
 
         Args:
@@ -93,7 +93,7 @@ class SharedStorageConnector(KVConnectorBase_V1):
             **kwargs: additional arguments for the load operation
 
         Note:
-            The number of elements in kv_caches and layer_names should be 
+            The number of elements in kv_caches and layer_names should be
             the same.
         """
         attn_metadata = forward_context.attn_metadata
@@ -106,13 +106,13 @@ class SharedStorageConnector(KVConnectorBase_V1):
             """Inject the KV cache into the layer.
 
             Args:
-                dst_kv_cache_layer (torch.Tensor): the destination KV cache 
-                    layer. In shape [2, num_pages, page_size, xxx] if not 
+                dst_kv_cache_layer (torch.Tensor): the destination KV cache
+                    layer. In shape [2, num_pages, page_size, xxx] if not
                     using MLA, [num_pages, page_size, xxx] otherwise.
                 src_kv_cache (torch.Tensor): the source KV cache. In shape
-                    [2, num_tokens, xxx] if not using MLA, [num_tokens, xxx] 
+                    [2, num_tokens, xxx] if not using MLA, [num_tokens, xxx]
                     otherwise.
-                slot_mapping (torch.Tensor): the slot mapping. In shape 
+                slot_mapping (torch.Tensor): the slot mapping. In shape
                     [num_tokens].
             """
             dst_kv_cache_layer_shape = dst_kv_cache_layer.shape
@@ -168,8 +168,8 @@ class SharedStorageConnector(KVConnectorBase_V1):
 
     def wait_for_layer_load(self, layer_name: str) -> None:
         """Blocking until the KV for a specific layer is loaded into vLLM's
-        paged buffer. 
-        
+        paged buffer.
+
         This interface will be useful for layer-by-layer pipelining.
 
         Args:
@@ -179,12 +179,12 @@ class SharedStorageConnector(KVConnectorBase_V1):
 
     def save_kv_layer(self, layer_name: str, kv_layer: torch.Tensor,
                       attn_metadata: "AttentionMetadata", **kwargs) -> None:
-        """Start saving the KV cache of the layer from vLLM's paged buffer 
+        """Start saving the KV cache of the layer from vLLM's paged buffer
         to the connector.
 
         Args:
             layer_name (str): the name of the layer.
-            kv_layer (torch.Tensor): the paged KV buffer of the current 
+            kv_layer (torch.Tensor): the paged KV buffer of the current
                 layer in vLLM.
             attn_metadata (AttentionMetadata): the attention metadata.
             **kwargs: additional arguments for the save operation.
@@ -229,14 +229,14 @@ class SharedStorageConnector(KVConnectorBase_V1):
         """
         Get number of new tokens that can be loaded from the
         external KV cache beyond the num_computed_tokens.
-        
+
         Args:
             request (Request): the request object.
             num_computed_tokens (int): the number of locally
                 computed tokens for this request
 
         Returns:
-            the number of tokens that can be loaded from the 
+            the number of tokens that can be loaded from the
             external KV cache beyond what is already computed.
         """
 
@@ -271,9 +271,7 @@ class SharedStorageConnector(KVConnectorBase_V1):
             self._requests_need_load[request.request_id] = request
 
     def build_connector_meta(
-            self, scheduler_output: SchedulerOutput,
-            sending_KV_req_ids: set[str],
-            waiting_KV_req_ids: set[str]) -> KVConnectorMetadata:
+            self, scheduler_output: SchedulerOutput) -> KVConnectorMetadata:
         """Build the connector metadata for this step.
 
         This function should NOT modify any fields in the scheduler_output.
@@ -281,8 +279,6 @@ class SharedStorageConnector(KVConnectorBase_V1):
 
         Args:
             scheduler_output (SchedulerOutput): the scheduler output object.
-            sending_KV_req_ids (set[str]): Request IDs to send
-            waiting_KV_req_ids (set[str]): Request IDs to receive
         """
         meta = SharedStorageConnectorMetadata()
 
@@ -333,6 +329,13 @@ class SharedStorageConnector(KVConnectorBase_V1):
         self._requests_need_load.clear()
         return meta
 
+    # These return true for now since they are not async
+    def is_request_done_sending(self, req_id: str) -> bool:
+        return True
+
+    def is_request_done_receiving(self, req_id: str) -> bool:
+        return True
+
     # ==============================
     # Helper functions
     # ==============================
@@ -355,7 +358,7 @@ class SharedStorageConnector(KVConnectorBase_V1):
         input_ids: torch.Tensor,
         create_folder=False,
     ) -> str:
-        """Generate a folder name based on the hash of the bytes of the input 
+        """Generate a folder name based on the hash of the bytes of the input
         ids.
         """
         input_ids_bytes = input_ids.numpy().tobytes()
@@ -370,7 +373,7 @@ class SharedStorageConnector(KVConnectorBase_V1):
         layer_name: str,
         input_ids: torch.Tensor,
     ) -> str:
-        """Generate a file name based on the layer name and the hash 
+        """Generate a file name based on the layer name and the hash
         of the bytes of the input ids.
         """
         foldername = self._generate_foldername_debug(input_ids,

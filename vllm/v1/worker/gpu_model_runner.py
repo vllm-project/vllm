@@ -15,8 +15,9 @@ from vllm.attention.layer import Attention
 from vllm.config import CompilationLevel, VllmConfig
 from vllm.distributed.kv_transfer import (get_kv_transfer_group,
                                           has_kv_transfer_group)
+from vllm.distributed.kv_transfer.kv_connector.v1 import KVConnectorBase_V1
 from vllm.distributed.parallel_state import get_pp_group, graph_capture
-from vllm.forward_context import set_forward_context
+from vllm.forward_context import get_forward_context, set_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.rotary_embedding import MRotaryEmbedding
@@ -998,14 +999,22 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         scheduler_output: "SchedulerOutput",
         intermediate_tensors: Optional[IntermediateTensors] = None,
     ) -> Union[ModelRunnerOutput, torch.Tensor]:
-        # Update KVConnector with the KVConnector metadata forward().
-        if has_kv_transfer_group():
-            # Background KV cache transfers can happen here,
-            # since kv_connector_metadata has the req_ids to send/receive.
-            # Not sure I like doing it here since this does not have to do
-            # with model execution but this way we don't do a separate rpc.
-            get_kv_transfer_group().bind_connector_metadata(
-                scheduler_output.kv_connector_metadata)
+
+        def maybe_setup_kv_connector():
+            # Update KVConnector with the KVConnector metadata forward().
+            if has_kv_transfer_group():
+                kv_connector = get_kv_transfer_group()
+                assert isinstance(kv_connector, KVConnectorBase_V1)
+                assert scheduler_output.kv_connector_metadata is not None
+                kv_connector.bind_connector_metadata(
+                    scheduler_output.kv_connector_metadata)
+
+                # Background KV cache transfers happen here.
+                # These transfers are designed to be async and the requests
+                # involved may be disjoint from the running requests.
+                # Do this here to save a collective_rpc.
+                if get_forward_context().attn_metadata is not None:
+                    kv_connector.start_load_kv(get_forward_context())
 
         self._update_states(scheduler_output)
         if not scheduler_output.total_num_scheduled_tokens:
@@ -1078,6 +1087,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # Run the decoder.
         # Use persistent buffers for CUDA graphs.
         with set_forward_context(attn_metadata, self.vllm_config):
+            maybe_setup_kv_connector()
             hidden_states = self.model(
                 input_ids=input_ids,
                 positions=positions,
