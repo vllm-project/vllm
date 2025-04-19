@@ -167,6 +167,7 @@ class PunicaWrapperBase(PunicaWrapperABC):
         self.batch_size: int = -1
         self.is_prefill = False
         self.no_lora = False
+        self.is_prompt_logprobs = False
 
     def _update_base_metadata(
         self,
@@ -338,6 +339,8 @@ class PunicaWrapperBase(PunicaWrapperABC):
             self.is_prefill = True
         else:
             self.is_prefill = False
+
+        self.is_prompt_logprobs = mapping.is_prompt_logprobs
 
     @abstractmethod
     def add_shrink(self, y: Union[Tuple[torch.Tensor, ...], torch.Tensor],

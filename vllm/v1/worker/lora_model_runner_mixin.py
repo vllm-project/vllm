@@ -83,6 +83,22 @@ class LoRAModelRunnerMixin:
         return self._set_active_loras(prompt_lora_mapping, token_lora_mapping,
                                       lora_requests)
 
+    def set_active_loras_for_prompt_logprobs(self, input_batch: InputBatch,
+                                             req_idx: int,
+                                             num_logits: int) -> None:
+        # set the active loras for prompt logprobs computing
+
+        if not self.lora_manager:
+            raise RuntimeError("LoRA is not enabled.")
+
+        prompt_lora_mapping, token_lora_mapping, lora_requests = \
+            input_batch.make_prompt_logprobs_lora_inputs(req_idx, num_logits)
+        lora_mapping = LoRAMapping(token_lora_mapping,
+                                   prompt_lora_mapping,
+                                   is_prefill=True,
+                                   is_prompt_logprobs=True)
+        self.lora_manager.set_active_adapters(lora_requests, lora_mapping)
+
     @contextmanager
     def maybe_dummy_run_with_lora(self, lora_config: LoRAConfig,
                                   num_scheduled_tokens: np.ndarray):
