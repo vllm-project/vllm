@@ -274,6 +274,7 @@ def _test_processing_correctness_mistral(
     "nvidia/NVLM-D-72B",
     "google/paligemma-3b-mix-224",
     "google/paligemma2-3b-ft-docci-448",
+    "microsoft/Phi-4-multimodal-instruct",
     "mistralai/Pixtral-12B-2409",
     "mistral-community/pixtral-12b",
     "Qwen/Qwen-VL-Chat",
