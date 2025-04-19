@@ -4,6 +4,7 @@
 Run `pytest tests/models/test_models.py`.
 """
 import os
+from typing import Optional
 
 import pytest
 import torch
@@ -114,7 +115,8 @@ def test_models(hf_runner, vllm_runner, example_prompts, model: str,
         hf_outputs = hf_model.generate_greedy_logprobs_limit(
             example_prompts, max_tokens, num_logprobs)
 
-        prompt_embeds = [] if os.getenv("VLLM_USE_V1") == "0" else None
+        prompt_embeds: Optional[list[torch.Tensor]] = [] if os.getenv(
+            "VLLM_USE_V1") == "0" else None
         prompt_token_ids = []
         for prompt in example_prompts:
             token_ids = hf_model.tokenizer(prompt,
