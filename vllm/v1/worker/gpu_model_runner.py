@@ -13,6 +13,8 @@ import torch.nn as nn
 from vllm.attention import AttentionType, get_attn_backend
 from vllm.attention.layer import Attention
 from vllm.config import CompilationLevel, VllmConfig
+from vllm.distributed.kv_transfer import (get_kv_transfer_group,
+                                          has_kv_transfer_group)
 from vllm.distributed.parallel_state import get_pp_group, graph_capture
 from vllm.forward_context import set_forward_context
 from vllm.logger import init_logger
@@ -353,6 +355,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 image_grid_thw = []
                 video_grid_thw = []
                 second_per_grid_ts = []
+                audio_feature_lengths = []
+                use_audio_in_video = False
                 for mm_input in self.requests[req_id].mm_inputs:
                     if mm_input.get("image_grid_thw") is not None:
                         image_grid_thw.extend(
@@ -363,6 +367,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     if mm_input.get("second_per_grid_ts") is not None:
                         second_per_grid_ts.extend(
                             mm_input["second_per_grid_ts"])
+                    if mm_input.get("audio_feature_lengths") is not None:
+                        audio_feature_lengths.extend(
+                            mm_input["audio_feature_lengths"])
+                    if mm_input.get("use_audio_in_video") is True:
+                        use_audio_in_video = True
 
                 hf_config = self.model_config.hf_config
 
@@ -374,6 +383,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                         image_grid_thw=image_grid_thw,
                         video_grid_thw=video_grid_thw,
                         second_per_grid_ts=second_per_grid_ts,
+                        audio_feature_lengths=audio_feature_lengths,
+                        use_audio_in_video=use_audio_in_video,
                     )
 
             req_ids_to_add.append(req_id)
@@ -458,7 +469,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         if removed_req_indices:
             self.input_batch.condense(removed_req_indices)
 
-        if batch_changed:
+        # Some attention backends (namely MLA) may want to separate requests
+        # based on if the attention computation will be compute-bound or
+        # memory-bound. This gives them a hook to do that.
+        batch_reordered = self.attn_metadata_builder.reorder_batch(
+            self.input_batch, scheduler_output)
+
+        if batch_changed or batch_reordered:
             self.input_batch.refresh_sampling_metadata()
 
     def _prepare_inputs(
@@ -470,14 +487,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         assert total_num_scheduled_tokens > 0
         num_reqs = self.input_batch.num_reqs
         assert num_reqs > 0
-
-        # Some attention backends (namely MLA) may want to separate requests
-        # based on if the attention computation will be compute-bound or
-        # memory-bound. This gives them a hook to do that.
-        modified_batch = self.attn_metadata_builder.reorder_batch(
-            self.input_batch, scheduler_output)
-        if modified_batch:
-            self.input_batch.refresh_sampling_metadata()
 
         # OPTIMIZATION: Start copying the block table first.
         # This way, we can overlap the copy with the following CPU operations.
@@ -540,9 +549,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # because M (max_model_len) is not necessarily divisible by block_size.
         block_table_indices = (req_indices * self.max_num_blocks_per_req +
                                positions_np // self.block_size)
-        # NOTE(woosuk): We use torch.index_select instead of np.take here
-        # because torch.index_select is much faster than np.take for large
-        # tensors.
         block_table_cpu = self.input_batch.block_table.get_cpu_tensor()
         block_numbers = block_table_cpu.flatten()[block_table_indices].numpy()
         block_offsets = positions_np % self.block_size
@@ -992,6 +998,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         scheduler_output: "SchedulerOutput",
         intermediate_tensors: Optional[IntermediateTensors] = None,
     ) -> Union[ModelRunnerOutput, torch.Tensor]:
+        # Update KVConnector with the KVConnector metadata forward().
+        if has_kv_transfer_group():
+            get_kv_transfer_group().bind_connector_metadata(
+                scheduler_output.kv_connector_metadata)
+
         self._update_states(scheduler_output)
         if not scheduler_output.total_num_scheduled_tokens:
             # Return empty ModelRunnerOutput if there's no work to do.
@@ -1232,6 +1243,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # TODO(woosuk): Cache draft_probs and use it for rejection sampling
             # in the next step.
             del draft_probs
+
+        # Clear KVConnector state after all KVs are generated.
+        if has_kv_transfer_group():
+            get_kv_transfer_group().clear_connector_metadata()
 
         return ModelRunnerOutput(
             req_ids=self.input_batch.req_ids,

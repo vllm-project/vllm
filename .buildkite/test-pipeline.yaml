@@ -118,7 +118,7 @@ steps:
   - pytest -v -s entrypoints/llm/test_generate.py # it needs a clean process
   - pytest -v -s entrypoints/llm/test_generate_multiple_loras.py # it needs a clean process
   - VLLM_USE_V1=0 pytest -v -s entrypoints/llm/test_guided_generate.py # it needs a clean process
-  - pytest -v -s entrypoints/openai --ignore=entrypoints/openai/test_oot_registration.py  --ignore=entrypoints/openai/test_chat_with_tool_reasoning.py --ignore=entrypoints/openai/correctness/
+  - pytest -v -s entrypoints/openai --ignore=entrypoints/openai/test_oot_registration.py  --ignore=entrypoints/openai/test_chat_with_tool_reasoning.py --ignore=entrypoints/openai/correctness/ --ignore=entrypoints/openai/test_openai_schema.py
   - pytest -v -s entrypoints/test_chat_utils.py
   - VLLM_USE_V1=0 pytest -v -s entrypoints/offline_mode # Needs to avoid interference with other tests
 
@@ -341,6 +341,13 @@ steps:
   commands:
   - bash scripts/run-benchmarks.sh
 
+- label: Benchmarks CLI Test # 10min
+  source_file_dependencies:
+  - vllm/
+  - tests/benchmarks/
+  commands:
+  - pytest -v -s benchmarks/
+
 - label: Quantization Test # 33min
   source_file_dependencies:
   - csrc/
@@ -393,8 +400,9 @@ steps:
     - pytest -v -s models/test_transformers.py
     - pytest -v -s models/test_registry.py
     # V1 Test: https://github.com/vllm-project/vllm/issues/14531
-    - VLLM_USE_V1=0 pytest -v -s models/test_initialization.py -k 'not llama4'
+    - VLLM_USE_V1=0 pytest -v -s models/test_initialization.py -k 'not llama4 and not plamo2'
     - VLLM_USE_V1=0 pytest -v -s models/test_initialization.py -k 'llama4'
+    - VLLM_USE_V1=0 pytest -v -s models/test_initialization.py -k 'plamo2'
 
 - label: Language Models Test (Standard) # 32min
   #mirror_hardwares: [amd]
@@ -404,6 +412,8 @@ steps:
   - tests/models/embedding/language
   - tests/models/encoder_decoder/language
   commands:
+    # Install causal-conv1d for plamo2 models here, as it is not compatible with pip-compile.
+    - pip install causal-conv1d
     - pytest -v -s models/decoder_only/language -m 'core_model or quant_model'
     - pytest -v -s models/embedding/language -m core_model
 
@@ -415,6 +425,8 @@ steps:
   - tests/models/embedding/language
   - tests/models/encoder_decoder/language
   commands:
+    # Install causal-conv1d for plamo2 models here, as it is not compatible with pip-compile.
+    - pip install causal-conv1d
     - pytest -v -s models/decoder_only/language -m 'not core_model and not quant_model'
     - pytest -v -s models/embedding/language -m 'not core_model'
 
@@ -540,6 +552,7 @@ steps:
   # - pytest -v -s spec_decode/e2e/test_integration_dist_tp2.py
   - VLLM_USE_V1=0 CUDA_VISIBLE_DEVICES=0,1 pytest -v -s test_sharded_state_loader.py
   - VLLM_USE_V1=0 CUDA_VISIBLE_DEVICES=0,1 pytest -v -s kv_transfer/test_disagg.py
+  - CUDA_VISIBLE_DEVICES=0,1 pytest -v -s v1/shutdown
 
 - label: Plugin Tests (2 GPUs) # 40min
   working_dir: "/vllm-workspace/tests"

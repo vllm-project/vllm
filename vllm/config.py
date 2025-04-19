@@ -10,14 +10,13 @@ import sys
 import textwrap
 import warnings
 from collections import Counter
-from collections.abc import Mapping
 from contextlib import contextmanager
 from dataclasses import (MISSING, dataclass, field, fields, is_dataclass,
                          replace)
 from importlib.util import find_spec
 from pathlib import Path
 from typing import (TYPE_CHECKING, Any, Callable, ClassVar, Final, Literal,
-                    Optional, Protocol, TypeVar, Union)
+                    Optional, Protocol, TypeVar, Union, get_args)
 
 import torch
 from pydantic import BaseModel, Field, PrivateAttr
@@ -182,6 +181,23 @@ def config(cls: type[Config]) -> type[Config]:
     return cls
 
 
+def get_field(cls: type[Config], name: str) -> Field:
+    """Get the default factory field of a dataclass by name. Used for getting
+    default factory fields in `EngineArgs`."""
+    if not is_dataclass(cls):
+        raise TypeError("The given class is not a dataclass.")
+    cls_fields = {f.name: f for f in fields(cls)}
+    if name not in cls_fields:
+        raise ValueError(f"Field '{name}' not found in {cls.__name__}.")
+    named_field: Field = cls_fields.get(name)
+    if (default_factory := named_field.default_factory) is not MISSING:
+        return field(default_factory=default_factory)
+    if (default := named_field.default) is not MISSING:
+        return field(default=default)
+    raise ValueError(
+        f"{cls.__name__}.{name} must have a default value or default factory.")
+
+
 class ModelConfig:
     """Configuration for the model.
 
@@ -298,12 +314,18 @@ class ModelConfig:
         factors.append(self.quantization)
         factors.append(self.revision)
         factors.append(self.code_revision)
+        factors.append(self.max_model_len)
+        factors.append(self.max_logprobs)
+        factors.append(self.disable_sliding_window)
         factors.append(self.trust_remote_code)
+        factors.append(self.mm_processor_kwargs)
+        factors.append(self.generation_config)
+        factors.append(self.model_impl)
+        factors.append(self.override_generation_config)
         factors.append(self.rope_scaling)
         factors.append(self.rope_theta)
-        # rope cos/sin cache depends on the max_position_embeddings
-        factors.append(
-            getattr(self.hf_config, "max_position_embeddings", "None"))
+        # hf_config can control how the model looks!
+        factors.append(self.hf_config.to_json_string())
         return hashlib.sha256(str(factors).encode()).hexdigest()
 
     def __init__(
@@ -332,7 +354,7 @@ class ModelConfig:
         disable_cascade_attn: bool = False,
         skip_tokenizer_init: bool = False,
         served_model_name: Optional[Union[str, list[str]]] = None,
-        limit_mm_per_prompt: Optional[Mapping[str, int]] = None,
+        limit_mm_per_prompt: Optional[dict[str, int]] = None,
         use_async_output_proc: bool = True,
         config_format: ConfigFormat = ConfigFormat.AUTO,
         hf_token: Optional[Union[bool, str]] = None,
@@ -555,7 +577,7 @@ class ModelConfig:
                 self.tokenizer = s3_tokenizer.dir
 
     def _init_multimodal_config(
-        self, limit_mm_per_prompt: Optional[Mapping[str, int]]
+        self, limit_mm_per_prompt: Optional[dict[str, int]]
     ) -> Optional["MultiModalConfig"]:
         if self.registry.is_multimodal_model(self.architectures):
             return MultiModalConfig(limit_per_prompt=limit_mm_per_prompt or {})
@@ -1358,20 +1380,26 @@ class CacheConfig:
             logger.warning("Possibly too large swap space. %s", msg)
 
 
+PoolType = Literal["ray"]
+
+
+@config
 @dataclass
 class TokenizerPoolConfig:
-    """Configuration for the tokenizer pool.
+    """Configuration for the tokenizer pool."""
 
-    Args:
-        pool_size: Number of tokenizer workers in the pool.
-        pool_type: Type of the pool.
-        extra_config: Additional config for the pool.
-            The way the config will be used depends on the
-            pool type.
-    """
-    pool_size: int
-    pool_type: Union[str, type["BaseTokenizerGroup"]]
-    extra_config: dict
+    pool_size: int = 0
+    """Number of tokenizer workers in the pool to use for asynchronous
+    tokenization. If 0, will use synchronous tokenization."""
+
+    pool_type: Union[PoolType, type["BaseTokenizerGroup"]] = "ray"
+    """Type of tokenizer pool to use for asynchronous tokenization. Ignored if
+    tokenizer_pool_size is 0."""
+
+    extra_config: dict = field(default_factory=dict)
+    """Additional config for the pool. The way the config will be used depends
+    on the pool type. This should be a JSON string that will be parsed into a
+    dictionary. Ignored if tokenizer_pool_size is 0."""
 
     def compute_hash(self) -> str:
         """
@@ -1402,7 +1430,7 @@ class TokenizerPoolConfig:
     @classmethod
     def create_config(
         cls, tokenizer_pool_size: int,
-        tokenizer_pool_type: Union[str, type["BaseTokenizerGroup"]],
+        tokenizer_pool_type: Union[PoolType, type["BaseTokenizerGroup"]],
         tokenizer_pool_extra_config: Optional[Union[str, dict]]
     ) -> Optional["TokenizerPoolConfig"]:
         """Create a TokenizerPoolConfig from the given parameters.
@@ -1477,7 +1505,7 @@ class LoadConfig:
     download_dir: Optional[str] = None
     """Directory to download and load the weights, default to the default
     cache directory of Hugging Face."""
-    model_loader_extra_config: Optional[Union[str, dict]] = None
+    model_loader_extra_config: dict = field(default_factory=dict)
     """Extra config for model loader. This will be passed to the model loader
     corresponding to the chosen load_format. This should be a JSON string that
     will be parsed into a dictionary."""
@@ -1508,10 +1536,6 @@ class LoadConfig:
         return hash_str
 
     def __post_init__(self):
-        model_loader_extra_config = self.model_loader_extra_config or {}
-        if isinstance(model_loader_extra_config, str):
-            self.model_loader_extra_config = json.loads(
-                model_loader_extra_config)
         if isinstance(self.load_format, str):
             load_format = self.load_format.lower()
             self.load_format = LoadFormat(load_format)
@@ -2023,9 +2047,19 @@ class SchedulerConfig:
         return self.num_scheduler_steps > 1
 
 
+Device = Literal["auto", "cuda", "neuron", "cpu", "tpu", "xpu", "hpu"]
+
+
+@config
+@dataclass
 class DeviceConfig:
-    device: Optional[torch.device]
-    device_type: str
+    """Configuration for the device to use for vLLM execution."""
+
+    device: Union[Device, torch.device] = "auto"
+    """Device type for vLLM execution."""
+    device_type: str = field(init=False)
+    """Device type from the current platform. This is set in
+    `__post_init__`."""
 
     def compute_hash(self) -> str:
         """
@@ -2047,8 +2081,8 @@ class DeviceConfig:
                                usedforsecurity=False).hexdigest()
         return hash_str
 
-    def __init__(self, device: str = "auto") -> None:
-        if device == "auto":
+    def __post_init__(self):
+        if self.device == "auto":
             # Automated device type detection
             from vllm.platforms import current_platform
             self.device_type = current_platform.device_type
@@ -2059,7 +2093,7 @@ class DeviceConfig:
                     "to turn on verbose logging to help debug the issue.")
         else:
             # Device type is assigned explicitly
-            self.device_type = device
+            self.device_type = self.device
 
         # Some device types require processing inputs on CPU
         if self.device_type in ["neuron"]:
@@ -2335,7 +2369,9 @@ class SpeculativeConfig:
                 )
 
                 # Automatically detect the method
-                if "eagle-" in self.draft_model_config.model.lower():
+                if self.method == 'eagle':
+                    pass
+                elif "eagle-" in self.draft_model_config.model.lower():
                     self.method = "eagle"
                 elif self.draft_model_config.hf_config.model_type == "medusa":
                     self.method = "medusa"
@@ -2688,13 +2724,16 @@ class PromptAdapterConfig:
                                                 self.prompt_adapter_dtype)
 
 
+@config
 @dataclass
 class MultiModalConfig:
     """Controls the behavior of multimodal models."""
 
-    limit_per_prompt: Mapping[str, int] = field(default_factory=dict)
+    limit_per_prompt: dict[str, int] = field(default_factory=dict)
     """
     The maximum number of input items allowed per prompt for each modality.
+    This should be a JSON string that will be parsed into a dictionary.
+    Defaults to 1 (V0) or 999 (V1) for each modality.
     """
 
     def compute_hash(self) -> str:
@@ -2716,24 +2755,20 @@ class MultiModalConfig:
                                usedforsecurity=False).hexdigest()
         return hash_str
 
-    def get_default_limit_per_prompt(self) -> int:
-        """
-        Return the default number of input items allowed per prompt
-        for any modality if not specified by the user.
-        """
-        return 999 if envs.VLLM_USE_V1 else 1
-
     def get_limit_per_prompt(self, modality: str) -> int:
         """
         Get the maximum number of input items allowed per prompt
         for the given modality.
         """
-        default = self.get_default_limit_per_prompt()
-        return self.limit_per_prompt.get(modality, default)
+        return self.limit_per_prompt.get(
+            modality,
+            999 if envs.VLLM_USE_V1 else 1,
+        )
 
     # TODO: Add configs to init vision tower or not.
 
 
+@config
 @dataclass
 class PoolerConfig:
     """Controls the behavior of output pooling in pooling models."""
@@ -2832,6 +2867,13 @@ def _get_and_verify_dtype(
             else:
                 torch_dtype = config_dtype
 
+            if config.model_type == "plamo2":
+                logger.info(
+                    "For PLaMo2, we cast models to bfloat16 instead of using "
+                    "float16 by default. This is because float16 does not work."
+                )
+                torch_dtype = torch.bfloat16
+
             from vllm.platforms import current_platform
             if (current_platform.is_cpu()
                     and current_platform.get_cpu_architecture()
@@ -2861,6 +2903,11 @@ def _get_and_verify_dtype(
                     "using float16 by default. Please specify `dtype` if you "
                     "want to use float16.")
                 torch_dtype = torch.bfloat16
+        elif dtype == "float16" and config.model_type == "plamo2":
+            logger.warning(
+                "For PLaMo2, using float16 is unstable and might cause "
+                "unexpected behavior. Please use bfloat16 or float32 instead.")
+            torch_dtype = torch.float16
         else:
             if dtype not in _STR_DTYPE_TO_TORCH_DTYPE:
                 raise ValueError(f"Unknown dtype: {dtype}")
@@ -3046,15 +3093,28 @@ def get_served_model_name(model: str,
     return served_model_name
 
 
+GuidedDecodingBackendV0 = Literal["auto", "outlines", "lm-format-enforcer",
+                                  "xgrammar"]
+GuidedDecodingBackendV1 = Literal["auto", "xgrammar", "guidance"]
+
+
+@config
 @dataclass
 class DecodingConfig:
-    """Dataclass which contains the decoding strategy of the engine"""
+    """Dataclass which contains the decoding strategy of the engine."""
 
-    # Which guided decoding algo to use.
-    # 'outlines' / 'lm-format-enforcer' / 'xgrammar'
-    guided_decoding_backend: str = "auto" if envs.VLLM_USE_V1 else "xgrammar"
+    guided_decoding_backend: Union[
+        GuidedDecodingBackendV0,
+        GuidedDecodingBackendV1] = "auto" if envs.VLLM_USE_V1 else "xgrammar"
+    """Which engine will be used for guided decoding (JSON schema / regex etc)
+    by default. With "auto", we will make opinionated choices based on request
+    contents and what the backend libraries currently support, so the behavior
+    is subject to change in each release."""
 
     reasoning_backend: Optional[str] = None
+    """Select the reasoning parser depending on the model that you're using.
+    This is used to parse the reasoning content into OpenAI API format.
+    Required for `--enable-reasoning`."""
 
     def compute_hash(self) -> str:
         """
@@ -3076,17 +3136,12 @@ class DecodingConfig:
         return hash_str
 
     def __post_init__(self):
-        v0_valid_guided_backends = [
-            'outlines', 'lm-format-enforcer', 'xgrammar', 'auto'
-        ]
-        v1_valid_guided_backends = ['xgrammar', 'guidance', 'auto']
-
         backend = GuidedDecodingParams(
             backend=self.guided_decoding_backend).backend_name
         if envs.VLLM_USE_V1:
-            valid_guided_backends = v1_valid_guided_backends
+            valid_guided_backends = get_args(GuidedDecodingBackendV1)
         else:
-            valid_guided_backends = v0_valid_guided_backends
+            valid_guided_backends = get_args(GuidedDecodingBackendV0)
         if backend not in valid_guided_backends:
             raise ValueError(f"Invalid guided_decoding_backend '{backend}',"
                              f" must be one of {valid_guided_backends}")

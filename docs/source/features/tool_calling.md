@@ -152,12 +152,13 @@ Recommended flags: `--tool-call-parser mistral --chat-template examples/tool_cha
 
 Supported models:
 
-* `meta-llama/Meta-Llama-3.1-8B-Instruct`
-* `meta-llama/Meta-Llama-3.1-70B-Instruct`
-* `meta-llama/Meta-Llama-3.1-405B-Instruct`
-* `meta-llama/Meta-Llama-3.1-405B-Instruct-FP8`
+All Llama 3.1 and 3.2 models should be supported.
 
-The tool calling that is supported is the [JSON based tool calling](https://llama.meta.com/docs/model-cards-and-prompt-formats/llama3_1/#json-based-tool-calling). For [pythonic tool calling](https://github.com/meta-llama/llama-models/blob/main/models/llama3_2/text_prompt_format.md#zero-shot-function-calling) in Llama-3.2 models, see the `pythonic` tool parser below.
+* `meta-llama/Llama-3.1-*`
+* `meta-llama/Llama-3.2-*`
+
+The tool calling that is supported is the [JSON based tool calling](https://llama.meta.com/docs/model-cards-and-prompt-formats/llama3_1/#json-based-tool-calling). For [pythonic tool calling](https://github.com/meta-llama/llama-models/blob/main/models/llama3_2/text_prompt_format.md#zero-shot-function-calling) introduced by the Llama-3.2 models, see the `pythonic` tool parser below.
+
 Other tool calling formats like the built in python tool calling or custom tool calling are not supported.
 
 Known issues:
@@ -166,10 +167,14 @@ Known issues:
 2. The model can generate parameters with a wrong format, such as generating
    an array serialized as string instead of an array.
 
-The `tool_chat_template_llama3_json.jinja` file contains the "official" Llama chat template, but tweaked so that
-it works better with vLLM.
+VLLM provides two JSON based chat templates for Llama 3.1 and 3.2:
 
-Recommended flags: `--tool-call-parser llama3_json --chat-template examples/tool_chat_template_llama3_json.jinja`
+* `examples/tool_chat_template_llama3.1_json.jinja` - this is the "official" chat template for the Llama 3.1
+models, but tweaked so that it works better with vLLM.
+* `examples/tool_chat_template_llama3.2_json.jinja` - this extends upon the Llama 3.1 chat template by adding support for
+images.
+
+Recommended flags: `--tool-call-parser llama3_json --chat-template {see_above}`
 
 #### IBM Granite
 

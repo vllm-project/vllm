@@ -156,8 +156,8 @@ class TPUWorker:
             self.vllm_config.compilation_config.static_forward_context,
             runner_kv_caches)
 
-        self.model_runner._dummy_run(
-            self.scheduler_config.max_num_batched_tokens)
+        # `max_num_tokens >= max_num_batched_tokens` due to padding.
+        self.model_runner._dummy_run(self.model_runner.max_num_tokens)
 
         # Synchronize before measuring the memory usage.
         xm.wait_device_ops()
