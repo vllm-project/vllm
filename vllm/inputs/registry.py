@@ -161,7 +161,11 @@ class InputProcessingContext(InputContext):
 
 
 class DummyData(NamedTuple):
-    """Dummy data used for profiling."""
+    """
+    Dummy data used for profiling.
+
+    Note: This is only used in V0.
+    """
 
     seq_data: "SequenceData"
     multi_modal_data: Optional["MultiModalDataDict"] = None
@@ -169,6 +173,9 @@ class DummyData(NamedTuple):
 
 
 class InputRegistry:
+    """
+    Note: This is only used in V0.
+    """
 
     def dummy_data_for_profiling(
         self,
