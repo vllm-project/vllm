@@ -71,7 +71,7 @@ def single_marlin_moe(
     E = w.shape[0]
     N = w.shape[2] // (num_bits // 2)
 
-    topk_weights, topk_ids = fused_topk(hidden_states, gating_output, topk,
+    topk_weights, topk_ids, token_expert_indices  = fused_topk(hidden_states, gating_output, topk,
                                         renormalize)
 
     # This might not be an optimal config for a single MMM

@@ -175,7 +175,7 @@ class ArcticMoE(nn.Module):
         # router_logits: (num_tokens, n_experts)
         router_logits, _ = self.gate(hidden_states)
         do_normalize = self.top_k > 1
-        topk_weights, topk_ids = fused_topk(hidden_states,
+        topk_weights, topk_ids, token_expert_indices = fused_topk(hidden_states,
                                             router_logits,
                                             self.top_k,
                                             renormalize=do_normalize)

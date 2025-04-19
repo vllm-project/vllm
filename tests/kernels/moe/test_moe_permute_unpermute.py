@@ -89,7 +89,10 @@ def torch_permute(
             align_last_token_offset = align_expert_first_token_offset[i]
             dst_row_id2src_row_id_in_expert = dst_row_id2src_row_id_map[first_token_offset:first_token_offset+n_token_in_expert] % n_token
             # store token in current expert with align_first_token_offset
-            permuted_hidden_states[align_first_token_offset:align_first_token_offset+n_token_in_expert, ...] = hidden_states[dst_row_id2src_row_id_in_expert, ...]
+            permuted_hidden_states[align_first_token_offset:\
+                                   align_first_token_offset+n_token_in_expert,\
+                                      ...] = hidden_states[\
+                                       dst_row_id2src_row_id_in_expert, ...]
             # set current expert m_indices
             m_indices[align_first_token_offset:align_last_token_offset] = i-1
             valid_row_idx += [i for i in range(align_first_token_offset, align_first_token_offset+n_token_in_expert)]
@@ -104,7 +107,8 @@ def torch_permute(
             align_first_token_offset = align_expert_first_token_offset[eid]
             token_offset = i - first_token_offset
             align_src_row_id2dst_row_id[i] = align_first_token_offset + token_offset
-        align_src_row_id2dst_row_id = align_src_row_id2dst_row_id[src2dst_idx].reshape((n_token, topk))
+        align_src_row_id2dst_row_id = align_src_row_id2dst_row_id[\
+            src2dst_idx].reshape((n_token, topk))
         return [permuted_hidden_states, align_expert_first_token_offset, 
                 align_src_row_id2dst_row_id, m_indices,valid_row_idx]
 

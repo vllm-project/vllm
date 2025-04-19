@@ -191,7 +191,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         apply_router_weight_on_input: bool = False,
         activation: str = "silu",
     ) -> torch.Tensor:
-        topk_weights, topk_ids = FusedMoE.select_experts(
+        topk_weights, topk_ids, token_expert_indices = FusedMoE.select_experts(
             hidden_states=x,
             router_logits=router_logits,
             use_grouped_topk=use_grouped_topk,
@@ -801,7 +801,7 @@ class FusedMoE(torch.nn.Module):
                 scoring_func=scoring_func,
                 e_score_correction_bias=e_score_correction_bias)
         elif custom_routing_function is None:
-            topk_weights, topk_ids = fused_topk(hidden_states=hidden_states,
+            topk_weights, topk_ids, token_expert_indices = fused_topk(hidden_states=hidden_states,
                                                 gating_output=router_logits,
                                                 topk=top_k,
                                                 renormalize=renormalize)

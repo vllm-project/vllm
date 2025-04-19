@@ -681,22 +681,15 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
 endif()
 
 if(VLLM_GPU_LANG STREQUAL "CUDA")
-  cuda_archs_loose_intersection(MOE_PERMUTE_ARCHS "8.0;8.6;8.7;8.9;9.0;10.0;10.1;12.0" "${CUDA_ARCHS}")
-  if (MOE_PERMUTE_ARCHS)
-    set(MOE_PERMUTE_SRC
-        "csrc/moe/permute_unpermute_kernels/moe_permute_unpermute_kernel.cu"
-        "csrc/moe/moe_permute_unpermute_op.cu")
+  set(MOE_PERMUTE_SRC
+      "csrc/moe/permute_unpermute_kernels/moe_permute_unpermute_kernel.cu"
+      "csrc/moe/moe_permute_unpermute_op.cu")
 
-    set_gencode_flags_for_srcs(
-      SRCS "${MARLIN_PERMUTE_SRC}"
-      CUDA_ARCHS "${MOE_PERMUTE_ARCHS}")
+  set_gencode_flags_for_srcs(
+    SRCS "${MARLIN_PERMUTE_SRC}"
+    CUDA_ARCHS "${MOE_PERMUTE_ARCHS}")
 
-    list(APPEND VLLM_MOE_EXT_SRC "${MOE_PERMUTE_SRC}")
-    message(STATUS "Building MOE permute kernels for archs: ${MOE_PERMUTE_ARCHS}")
-  else()
-    message(STATUS "Not building MOE permute kernels as no compatible archs found"
-                   " in CUDA target architectures")
-  endif()
+  list(APPEND VLLM_MOE_EXT_SRC "${MOE_PERMUTE_SRC}")
 endif()
 message(STATUS "Enabling moe extension.")
 define_gpu_extension_target(
