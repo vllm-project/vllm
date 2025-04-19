@@ -217,11 +217,9 @@ class MsgpackDecoder:
 
     def _decode_ndarray(self, arr: Any) -> np.ndarray:
         dtype, shape, data = arr
-        # Copy from inline representation, to decouple the memory storage
-        # of the message from the original buffer. Not needed in the
-        # auxiliary buffers case.
-        buffer = self.aux_buffers[data] if isinstance(data, int) \
-            else bytearray(data)
+        # zero-copy decode. We assume the ndarray will not be kept around,
+        # as it now locks the whole received message buffer in memory.
+        buffer = self.aux_buffers[data] if isinstance(data, int) else data
         return np.ndarray(buffer=buffer, dtype=np.dtype(dtype), shape=shape)
 
     def _decode_tensor(self, arr: Any) -> torch.Tensor:
