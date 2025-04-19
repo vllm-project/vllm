@@ -374,24 +374,31 @@ def rms_norm_dynamic_per_token_quant(
 
 # quantization ops
 # awq
-def awq_dequantize(qweight: torch.Tensor, scales: torch.Tensor,
-                   zeros: torch.Tensor, split_k_iters: int, thx: int,
-                   thy: int) -> torch.Tensor:
+def awq_dequantize(qweight: torch.Tensor,
+                   scales: torch.Tensor,
+                   zeros: torch.Tensor,
+                   split_k_iters: int,
+                   thx: int,
+                   thy: int,
+                   dtype: str = "fp16") -> torch.Tensor:
     if envs.VLLM_USE_TRITON_AWQ:
         from vllm.model_executor.layers.quantization.awq_triton import (
             awq_dequantize_triton)
-        return awq_dequantize_triton(qweight, scales, zeros)
-    return torch.ops._C.awq_dequantize(qweight, scales, zeros, split_k_iters,
-                                       thx, thy)
+        return awq_dequantize_triton(qweight, scales, zeros, split_k_iters, thx, thy, dtype)
+    return torch.ops._C.awq_dequantize(qweight, scales, zeros, split_k_iters, thx, thy, dtype)
 
 
-def awq_gemm(input: torch.Tensor, qweight: torch.Tensor, qzeros: torch.Tensor,
-             scales: torch.Tensor, split_k_iters: int) -> torch.Tensor:
+def awq_gemm(input: torch.Tensor, 
+             qweight: torch.Tensor,
+             scales: torch.Tensor,
+             qzeros: torch.Tensor, 
+             split_k_iters: int,
+             dtype: str = "fp16") -> torch.Tensor:
     if envs.VLLM_USE_TRITON_AWQ:
         from vllm.model_executor.layers.quantization.awq_triton import (
             awq_gemm_triton)
-        return awq_gemm_triton(input, qweight, qzeros, scales, split_k_iters)
-    return torch.ops._C.awq_gemm(input, qweight, qzeros, scales, split_k_iters)
+        return awq_gemm_triton(input, qweight, scales, qzeros, split_k_iters, dtype)
+    return torch.ops._C.awq_gemm(input, qweight, scales, qzeros, split_k_iters, dtype)
 
 
 # gptq

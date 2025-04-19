@@ -204,25 +204,36 @@ class AWQLinearMethod(LinearMethodBase):
                                           requires_grad=False)
 
     def apply(self,
-              layer: torch.nn.Module,
-              x: torch.Tensor,
-              bias: Optional[torch.Tensor] = None) -> torch.Tensor:
-        qweight = layer.qweight
-        scales = layer.scales
-        qzeros = layer.qzeros
-        pack_factor = self.quant_config.pack_factor
-        out_shape = (x.shape[:-1] + (qweight.shape[-1] * pack_factor, ))
-        reshaped_x = x.reshape(-1, x.shape[-1])
+          layer: torch.nn.Module,
+          x: torch.Tensor,
+          bias: Optional[torch.Tensor] = None) -> torch.Tensor:
+    qweight = layer.qweight
+    scales = layer.scales
+    qzeros = layer.qzeros
+    pack_factor = self.quant_config.pack_factor
+    out_shape = (x.shape[:-1] + (qweight.shape[-1] * pack_factor, ))
+    reshaped_x = x.reshape(-1, x.shape[-1])
 
-        # num_tokens >= threshold
-        FP16_MATMUL_HEURISTIC_CONDITION = x.shape[:-1].numel() >= 256
+    # 根据输入类型自动选择计算精度
+    use_bf16 = x.dtype == torch.bfloat16
+    dtype_str = "bf16" if use_bf16 else "fp16"
+    
+    # num_tokens >= threshold
+    MATMUL_HEURISTIC_CONDITION = x.shape[:-1].numel() >= 256
 
-        if FP16_MATMUL_HEURISTIC_CONDITION:
-            out = ops.awq_dequantize(qweight, scales, qzeros, 0, 0, 0)
-            out = torch.matmul(reshaped_x, out)
+    if MATMUL_HEURISTIC_CONDITION:
+        # 反量化后使用原生matmul
+        out = ops.awq_dequantize(qweight, scales, qzeros, 0, 0, 0, dtype_str)
+        if use_bf16:
+            with torch.cuda.amp.autocast(dtype=torch.bfloat16):
+                out = torch.matmul(reshaped_x, out)
         else:
-            out = ops.awq_gemm(reshaped_x, qweight, scales, qzeros,
-                               pack_factor)
-        if bias is not None:
-            out.add_(bias)
-        return out.reshape(out_shape)
+            out = torch.matmul(reshaped_x, out)
+    else:
+        # 直接使用量化GEMM内核
+        out = ops.awq_gemm(reshaped_x, qweight, scales, qzeros,
+                           pack_factor, dtype_str)
+    
+    if bias is not None:
+        out.add_(bias)
+    return out.reshape(out_shape)

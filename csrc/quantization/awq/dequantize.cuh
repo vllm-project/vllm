@@ -98,5 +98,92 @@ __device__ uint4 dequantize_s4_to_fp16x2(uint32_t const& source) {
   __builtin_unreachable();  // Suppress missing return statement warning
 }
 
+__device__ uint4 dequantize_int4_to_bf16x2(uint32_t const& source) {
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ < 800
+  assert(false);
+#else
+  uint4 result;
+
+  uint32_t* h = reinterpret_cast<uint32_t*>(&result);
+  uint32_t const i4s = reinterpret_cast<uint32_t const&>(source);
+
+  // First, we extract the i4s and construct an intermediate bf16 number.
+  static constexpr uint32_t immLut = (0xf0 & 0xcc) | 0xaa;
+  static constexpr uint32_t BOTTOM_MASK = 0x000f000f;
+  static constexpr uint32_t TOP_MASK = 0x00f000f0;
+  
+  // For BF16, we'll use a different magic number that accounts for the different exponent bias
+  static constexpr uint32_t I4s_TO_BF16s_MAGIC_NUM = 0x5F005F00; // {0x5F00, 0x5F00} in bfloat16
+
+  // Shift right by 8 to now consider elt_45 and elt_67
+  const uint32_t top_i4s = i4s >> 8;
+  
+  // Extract elt_01 - (i4s & 0x000f000f) | 0x5F005F00
+  asm volatile("lop3.b32 %0, %1, %2, %3, %4;\n"
+               : "=r"(h[0])
+               : "r"(i4s), "n"(BOTTOM_MASK), "n"(I4s_TO_BF16s_MAGIC_NUM),
+                 "n"(immLut));
+  // Extract elt_23 (i4s & 0x00f000f0) | 0x5F005F00
+  asm volatile("lop3.b32 %0, %1, %2, %3, %4;\n"
+               : "=r"(h[1])
+               : "r"(i4s), "n"(TOP_MASK), "n"(I4s_TO_BF16s_MAGIC_NUM),
+                 "n"(immLut));
+  // Extract elt_45 (top_i4s & 0x000f000f) | 0x5F005F00
+  asm volatile("lop3.b32 %0, %1, %2, %3, %4;\n"
+               : "=r"(h[2])
+               : "r"(top_i4s), "n"(BOTTOM_MASK), "n"(I4s_TO_BF16s_MAGIC_NUM),
+                 "n"(immLut));
+  // Extract elt_67 (top_i4s & 0x00f000f0) | 0x5F005F00
+  asm volatile("lop3.b32 %0, %1, %2, %3, %4;\n"
+               : "=r"(h[3])
+               : "r"(top_i4s), "n"(TOP_MASK), "n"(I4s_TO_BF16s_MAGIC_NUM),
+                 "n"(immLut));
+
+  // Constants for bfloat16 conversion
+  // For INT4 to BF16, we need to:
+  // 1. Subtract the bias (which is different from FP16)
+  // 2. Handle the sign bit properly (INT4 is signed)
+  
+  // This is the bfloat16 {0x5F00, 0x5F00} which represents {1.0, 1.0} * 2^0
+  static constexpr uint32_t BF16_BIAS = 0x5F005F00;
+  // This is the bfloat16 {0x2000, 0x2000} which represents {1.0, 1.0} * 2^-15
+  static constexpr uint32_t BF16_SCALE = 0x20002000;
+  // This is the bfloat16 {0x8000, 0x8000} which represents {-0.0, -0.0}
+  static constexpr uint32_t BF16_SIGN = 0x80008000;
+
+  // Convert the packed INT4 values to BF16
+  // For signed INT4, we need to handle the sign bit (bit 3) properly
+  // We'll subtract 8 from values with the sign bit set
+  asm volatile("sub.bf16x2 %0, %1, %2;\n"
+               : "=r"(h[0])
+               : "r"(h[0]), "r"(BF16_BIAS));
+  asm volatile("sub.bf16x2 %0, %1, %2;\n"
+               : "=r"(h[1])
+               : "r"(h[1]), "r"(BF16_BIAS));
+  asm volatile("sub.bf16x2 %0, %1, %2;\n"
+               : "=r"(h[2])
+               : "r"(h[2]), "r"(BF16_BIAS));
+  asm volatile("sub.bf16x2 %0, %1, %2;\n"
+               : "=r"(h[3])
+               : "r"(h[3]), "r"(BF16_BIAS));
+
+  // Apply scaling to get the final values in the correct range
+  asm volatile("mul.bf16x2 %0, %1, %2;\n"
+               : "=r"(h[0])
+               : "r"(h[0]), "r"(BF16_SCALE));
+  asm volatile("mul.bf16x2 %0, %1, %2;\n"
+               : "=r"(h[1])
+               : "r"(h[1]), "r"(BF16_SCALE));
+  asm volatile("mul.bf16x2 %0, %1, %2;\n"
+               : "=r"(h[2])
+               : "r"(h[2]), "r"(BF16_SCALE));
+  asm volatile("mul.bf16x2 %0, %1, %2;\n"
+               : "=r"(h[3])
+               : "r"(h[3]), "r"(BF16_SCALE));
+
+  return result;
+#endif
+  __builtin_unreachable();
+}
 }  // namespace awq
 }  // namespace vllm
