@@ -17,7 +17,7 @@ def start_monitoring_torch_compile(vllm_config: VllmConfig):
     torch_compile_start_time = time.time()
 
     compilation_config: CompilationConfig = vllm_config.compilation_config
-    if compilation_config.level == CompilationLevel.PIECEWISE and \
+    if compilation_config.level >= CompilationLevel.PIECEWISE and \
         compilation_config.debug_dump_path:
         import depyf
         path = os.path.join(compilation_config.debug_dump_path,
@@ -29,7 +29,7 @@ def start_monitoring_torch_compile(vllm_config: VllmConfig):
 
 def end_monitoring_torch_compile(vllm_config: VllmConfig):
     compilation_config: CompilationConfig = vllm_config.compilation_config
-    if compilation_config.level == CompilationLevel.PIECEWISE:
+    if compilation_config.level >= CompilationLevel.PIECEWISE:
         logger.info("torch.compile takes %.2f s in total",
                     compilation_config.compilation_time)
         global context_manager
