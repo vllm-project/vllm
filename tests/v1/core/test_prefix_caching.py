@@ -751,3 +751,25 @@ def test_reset_prefix_cache():
     assert manager.reset_prefix_cache()
     assert not manager.block_pool.cached_block_hash_to_block
     assert all([blk.block_hash is None for blk in manager.block_pool.blocks])
+
+
+def test_prefix_cache_stats_disabled():
+    """Test that prefix_cache_stats is None when log_stats is False."""
+    manager = KVCacheManager(
+        make_kv_cache_config(16, 11),
+        max_model_len=8192,
+        enable_caching=True,
+        log_stats=False,  # Disable logging stats
+    )
+    assert manager.prefix_cache_stats is None
+
+    # Call all functions that check whether log_stats is disabled.
+    req = make_request("0", list(range(16)))
+    computed_blocks, num_computed_tokens = manager.get_computed_blocks(req)
+    assert not computed_blocks
+    assert num_computed_tokens == 0
+    manager.allocate_slots(req, 16, computed_blocks)
+    manager.reset_prefix_cache()
+
+    # Ensure prefix_cache_stats remains None
+    assert manager.prefix_cache_stats is None
