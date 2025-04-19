@@ -136,8 +136,8 @@ class MultiModalPlaceholderMap:
         for placeholder_dict, mm_item in zip(multi_modal_placeholders,
                                              multi_modal_items):
             placeholder = range(
-                placeholder_dict["offset"],
-                placeholder_dict["offset"] + placeholder_dict["length"],
+                placeholder_dict.offset,
+                placeholder_dict.offset + placeholder_dict.length,
             )
             intersection = range(
                 max(positions.start, placeholder.start),
