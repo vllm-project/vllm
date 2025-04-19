@@ -1040,6 +1040,13 @@ See [this page](#generative-models) for more information on how to use generativ
   * ✅︎
   * ✅︎
   * ✅︎
+- * `Qwen2_5OmniThinkerForConditionalGeneration`
+  * Qwen2.5-Omni
+  * T + I<sup>E+</sup> + V<sup>E+</sup> + A<sup>+</sup>
+  * `Qwen/Qwen2.5-Omni-7B`
+  *
+  * ✅︎
+  * ✅︎\*
 - * `SkyworkR1VChatModel`
   * Skywork-R1V-38B
   * T + I
@@ -1107,6 +1114,14 @@ For more details, please see: <gh-pr:4087#issuecomment-2250397630>
 
 :::{warning}
 Our PaliGemma implementations have the same problem as Gemma 3 (see above) for both V0 and V1.
+:::
+
+:::{note}
+To use Qwen2.5-Omni, you have to install a fork of Hugging Face Transformers library from source via
+`pip install git+https://github.com/BakerBunker/transformers.git@qwen25omni`.
+
+Read audio from video pre-processing is currently supported on V0 (but not V1), because overlapping modalities is not yet supported in V1.
+`--mm-processor-kwargs '{"use_audio_in_video": True}'`.
 :::
 
 ### Pooling Models
