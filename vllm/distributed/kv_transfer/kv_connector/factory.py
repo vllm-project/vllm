@@ -49,11 +49,11 @@ class KVConnectorFactory:
         return connector_cls(rank, local_rank, config)
 
     @classmethod
-    def create_connector_v1(
-        cls,
-        config: "VllmConfig",
-        role: KVConnectorRole,
-    ) -> KVConnectorBase_V1:
+    def create_connector_v1(cls,
+                            config: "VllmConfig",
+                            role: KVConnectorRole,
+                            rank: int = 0,
+                            local_rank: int = 0) -> KVConnectorBase_V1:
         if not envs.VLLM_USE_V1:
             raise ValueError("Attempting to initialize a V1 Connector, "
                              f"but found {envs.VLLM_USE_V1=}")
@@ -70,12 +70,13 @@ class KVConnectorFactory:
         # - Co-locate with worker process
         # - Should only be used inside the forward context & attention layer
         # We build separately to enforce strict separation
-        return connector_cls(config, role)
+        return connector_cls(config, role, rank, local_rank)
 
 
 # Register various connectors here.
 # The registration should not be done in each individual file, as we want to
 # only load the files corresponding to the current connector.
+
 KVConnectorFactory.register_connector(
     "PyNcclConnector",
     "vllm.distributed.kv_transfer.kv_connector.simple_connector",
@@ -97,6 +98,15 @@ KVConnectorFactory.register_connector(
     "MooncakeStoreConnector")
 
 KVConnectorFactory.register_connector(
+    "P2pConnector", "vllm.distributed.kv_transfer.kv_connector.p2p_connector",
+    "P2pConnector")
+
+KVConnectorFactory.register_connector(
     "SharedStorageConnector",
     "vllm.distributed.kv_transfer.kv_connector.v1.shared_storage_connector",
     "SharedStorageConnector")
+
+KVConnectorFactory.register_connector(
+    "P2pNcclConnector",
+    "vllm.distributed.kv_transfer.kv_connector.v1.p2p_nccl_connector",
+    "P2pNcclConnector")
