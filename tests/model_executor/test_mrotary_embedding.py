@@ -3,7 +3,9 @@ from unittest.mock import Mock
 import torch
 import pytest
 
-from vllm.model_executor.layers.rotary_embedding import MRotaryEmbedding
+from vllm.model_executor.layers.mrotary_positions import (
+    mrope_get_input_positions_and_delta,
+)
 
 IMAGE = 101
 VIDEO = 102
@@ -12,7 +14,6 @@ VISION_START = 201
 VISION_END = 202
 AUDIO_START = 203
 AUDIO_END = 204
-
 
 SPATIAL_MERGE_SIZE_2 = 2
 
@@ -152,7 +153,7 @@ def test_vl_get_input_positions_and_delta_correctness(
             video_grid_thw.append([item["t"], item["h"], item["w"]])
             second_per_grid_ts.append(item["second_per_grid_t"])
     
-    input_positions_torch, mrope_position_delta_torch = MRotaryEmbedding.get_input_positions_and_delta(
+    input_positions_torch, mrope_position_delta_torch = mrope_get_input_positions_and_delta(
         input_tokens=input_tokens,
         hf_config=hf_config,
         image_grid_thw=image_grid_thw,
@@ -161,7 +162,7 @@ def test_vl_get_input_positions_and_delta_correctness(
         use_numba=False,
     )
 
-    input_positions_numba, mrope_position_delta_numba = MRotaryEmbedding.get_input_positions_and_delta(
+    input_positions_numba, mrope_position_delta_numba = mrope_get_input_positions_and_delta(
         input_tokens=input_tokens,
         hf_config=hf_config,
         image_grid_thw=image_grid_thw,
@@ -335,7 +336,8 @@ def test_omni_get_input_positions_and_delta_correctness(
     hf_config.thinker_config.vision_config.spatial_merge_size = spatial_merge_size
     hf_config.thinker_config.vision_config.tokens_per_second = tokens_per_second
 
-    hf_config.thinker_config.rope_scaling = {
+    hf_config.thinker_config.text_config = Mock()
+    hf_config.thinker_config.text_config.rope_scaling = {
         "mrope_section" : [16, 24, 24],
     }
 
@@ -365,7 +367,7 @@ def test_omni_get_input_positions_and_delta_correctness(
 
     audio_feature_lengths = torch.tensor(audio_feature_lengths, dtype=torch.int64)
     
-    input_positions_torch, mrope_position_delta_torch = MRotaryEmbedding.get_input_positions_and_delta(
+    input_positions_torch, mrope_position_delta_torch = mrope_get_input_positions_and_delta(
         input_tokens=input_tokens,
         hf_config=hf_config,
         image_grid_thw=image_grid_thw,
@@ -376,7 +378,7 @@ def test_omni_get_input_positions_and_delta_correctness(
         use_numba=False,
     )
 
-    input_positions_numba, mrope_position_delta_numba = MRotaryEmbedding.get_input_positions_and_delta(
+    input_positions_numba, mrope_position_delta_numba = mrope_get_input_positions_and_delta(
         input_tokens=input_tokens,
         hf_config=hf_config,
         image_grid_thw=image_grid_thw,

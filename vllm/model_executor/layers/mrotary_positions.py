@@ -406,14 +406,16 @@ def _emit_video_with_audio(
         if video_t >= next_chunk_t:
             next_chunk_t += t_ntoken_per_chunk
             if added_audio_token_num < audio_token_num:
+                chunked_audio_token_num = min(
+                    t_ntoken_per_chunk,
+                    audio_token_num - added_audio_token_num)
                 i, _ = _emit_standalone_tokens(
                     mrope_pos,
                     i=i,
                     start_t=start_t + added_audio_token_num,
-                    num_tokens=min(
-                        t_ntoken_per_chunk,
-                        audio_token_num - added_audio_token_num),
+                    num_tokens=chunked_audio_token_num,
                 )
+                added_audio_token_num += chunked_audio_token_num
             
         # video tokens
         i = _emit_frame_positions(
@@ -457,13 +459,13 @@ def _emit_standalone_tokens(
 ) -> tuple[int, int]:
     for t in range(start_t, start_t + num_tokens):
         assert i < mrope_pos.shape[1], "incomplete mrope positions"
-        i, _ = _emit_standalone_token(
+        i = _emit_standalone_token(
             mrope_pos,
             i=i,
             t=t,
         )
 
-    return i, t
+    return i, start_t + num_tokens - 1
 
 @numba.jit(nopython=True, inline="always")
 def _calc_audio_token_num(audio_feature_length: int):
