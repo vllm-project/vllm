@@ -55,6 +55,7 @@ if TYPE_CHECKING:
     VLLM_IMAGE_FETCH_TIMEOUT: int = 5
     VLLM_VIDEO_FETCH_TIMEOUT: int = 30
     VLLM_AUDIO_FETCH_TIMEOUT: int = 10
+    VLLM_TIMESERIES_FETCH_TIMEOUT: int = 30
     VLLM_MM_INPUT_CACHE_GIB: int = 8
     VLLM_TARGET_DEVICE: str = "cuda"
     MAX_JOBS: Optional[str] = None
@@ -432,6 +433,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Default is 10 seconds
     "VLLM_AUDIO_FETCH_TIMEOUT":
     lambda: int(os.getenv("VLLM_AUDIO_FETCH_TIMEOUT", "10")),
+
+    # Timeout for fetching time series when serving multimodal models
+    # Default is 30 seconds
+    "VLLM_TIMESERIES_FETCH_TIMEOUT":
+    lambda: int(os.getenv("VLLM_TIMESERIES_FETCH_TIMEOUT", "30")),
 
     # Cache size (in GiB) for multimodal input cache
     # Default is 4 GiB
