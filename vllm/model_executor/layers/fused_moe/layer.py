@@ -422,6 +422,7 @@ class FusedMoE(torch.nn.Module):
 
         if params_dtype is None:
             params_dtype = torch.get_default_dtype()
+        self.params_dtype = params_dtype
 
         # Note: here we guard against accessing the TP and DP groups when
         # uninitialized (this happens when testing)
@@ -472,6 +473,7 @@ class FusedMoE(torch.nn.Module):
         self.global_num_experts = num_experts
 
         assert intermediate_size % self.tp_size == 0
+        self.hidden_size = hidden_size
         self.intermediate_size_per_partition = intermediate_size // self.tp_size
         self.reduce_results = reduce_results
         self.renormalize = renormalize

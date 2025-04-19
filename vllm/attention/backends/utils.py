@@ -2,8 +2,10 @@
 """Attention backend utils"""
 from collections import defaultdict
 from contextlib import contextmanager
+from dataclasses import dataclass
 from itertools import accumulate
-from typing import TYPE_CHECKING, Any, Dict, List, Tuple, Type, TypeVar, Union
+from typing import (TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Type,
+                    TypeVar, Union)
 
 import numpy as np
 import torch
@@ -11,6 +13,7 @@ import torch
 from vllm.attention import (AttentionMetadata, AttentionMetadataBuilder,
                             AttentionState)
 from vllm.attention.backends.abstract import AttentionType
+from vllm.config import ModelConfig
 from vllm.logger import init_logger
 from vllm.multimodal import MultiModalPlaceholderMap
 from vllm.utils import async_tensor_h2d, make_tensor_with_pad
@@ -583,3 +586,24 @@ def get_num_prefill_decode_query_kv_tokens(
 
     return (num_prefill_query_tokens, num_prefill_kv_tokens,
             num_decode_query_tokens)
+
+
+@dataclass
+class MLADims:
+    q_lora_rank: Optional[int]
+    kv_lora_rank: int
+    qk_nope_head_dim: int
+    qk_rope_head_dim: int
+    v_head_dim: int
+
+
+def get_mla_dims(model_config: ModelConfig) -> MLADims:
+    hf_text_config = model_config.hf_text_config
+
+    return MLADims(
+        q_lora_rank=getattr(hf_text_config, "q_lora_rank", None),
+        kv_lora_rank=hf_text_config.kv_lora_rank,
+        qk_nope_head_dim=hf_text_config.qk_nope_head_dim,
+        qk_rope_head_dim=hf_text_config.qk_rope_head_dim,
+        v_head_dim=hf_text_config.v_head_dim,
+    )

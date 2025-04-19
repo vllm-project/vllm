@@ -98,7 +98,7 @@ def dse_qwen2_vl(inp: dict):
     print("Embedding output:", response_json["data"][0]["embedding"])
 
 
-if __name__ == '__main__':
+def parse_args():
     parser = argparse.ArgumentParser(
         "Script to call a specified VLM through the API. Make sure to serve "
         "the model with --task embed before running this.")
@@ -107,8 +107,10 @@ if __name__ == '__main__':
                         choices=["vlm2vec", "dse_qwen2_vl"],
                         required=True,
                         help="Which model to call.")
-    args = parser.parse_args()
+    return parser.parse_args()
 
+
+def main(args):
     if args.model == "vlm2vec":
         vlm2vec()
     elif args.model == "dse_qwen2_vl":
@@ -120,3 +122,8 @@ if __name__ == '__main__':
             "type": "text",
             "content": "What is the weather like today?",
         })
+
+
+if __name__ == '__main__':
+    args = parse_args()
+    main(args)

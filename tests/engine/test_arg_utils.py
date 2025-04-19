@@ -10,7 +10,7 @@ from vllm.utils import FlexibleArgumentParser
 
 
 @pytest.mark.parametrize(("arg", "expected"), [
-    (None, None),
+    (None, dict()),
     ("image=16", {
         "image": 16
     }),
@@ -24,6 +24,10 @@ from vllm.utils import FlexibleArgumentParser
     }),
 ])
 def test_limit_mm_per_prompt_parser(arg, expected):
+    """This functionality is deprecated and will be removed in the future.
+    This argument should be passed as JSON string instead.
+    
+    TODO: Remove with nullable_kvs."""
     parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
     if arg is None:
         args = parser.parse_args([])
@@ -53,12 +57,20 @@ def test_compilation_config():
     assert args.compilation_config.level == 3
 
     # set to string form of a dict
-    args = parser.parse_args(["--compilation-config", "{'level': 3}"])
-    assert args.compilation_config.level == 3
+    args = parser.parse_args([
+        "--compilation-config",
+        "{'level': 3, 'cudagraph_capture_sizes': [1, 2, 4, 8]}",
+    ])
+    assert (args.compilation_config.level == 3 and
+            args.compilation_config.cudagraph_capture_sizes == [1, 2, 4, 8])
 
     # set to string form of a dict
-    args = parser.parse_args(["--compilation-config={'level': 3}"])
-    assert args.compilation_config.level == 3
+    args = parser.parse_args([
+        "--compilation-config="
+        "{'level': 3, 'cudagraph_capture_sizes': [1, 2, 4, 8]}",
+    ])
+    assert (args.compilation_config.level == 3 and
+            args.compilation_config.cudagraph_capture_sizes == [1, 2, 4, 8])
 
 
 def test_prefix_cache_default():

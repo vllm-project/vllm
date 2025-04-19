@@ -264,7 +264,7 @@ fetch_video = global_media_connector.fetch_video
 
 def encode_audio_base64(
     audio: np.ndarray,
-    sampling_rate: int,
+    sampling_rate: float,
 ) -> str:
     """Encode audio as base64."""
     audio_io = AudioMediaIO()

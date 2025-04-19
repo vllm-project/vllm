@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, List, Tuple, Union
 
 import torch
 
+from vllm.distributed.kv_transfer.kv_connector.v1 import KVConnectorBase_V1
 from vllm.sequence import IntermediateTensors
 
 if TYPE_CHECKING:
@@ -121,3 +122,6 @@ class KVConnectorBase(ABC):
         """
 
         raise NotImplementedError
+
+
+KVConnectorBaseType = Union[KVConnectorBase, KVConnectorBase_V1]

@@ -150,6 +150,7 @@ def test_wer_correctness(model_name,
                          expected_wer,
                          n_examples=-1,
                          max_concurrent_request=None):
+    # TODO refactor to use `ASRDataset`
     with RemoteOpenAIServer(model_name, ['--enforce-eager']) as remote_server:
         dataset = load_hf_dataset(dataset_repo)
 

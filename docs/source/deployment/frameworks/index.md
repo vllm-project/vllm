@@ -9,6 +9,7 @@ dstack
 helm
 lws
 modal
+open-webui
 skypilot
 triton
 :::

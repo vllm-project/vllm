@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
+import json
+
 import pytest
 import requests
 from PIL import Image
@@ -37,7 +39,7 @@ def server():
         "--enforce-eager",
         "--trust-remote-code",
         "--limit-mm-per-prompt",
-        f"image={MAXIMUM_IMAGES}",
+        json.dumps({"image": MAXIMUM_IMAGES}),
         "--chat-template",
         str(vlm2vec_jinja_path),
     ]

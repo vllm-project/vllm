@@ -95,7 +95,7 @@ def run_decode(prefill_done):
         print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
 
 
-if __name__ == "__main__":
+def main():
     prefill_done = Event()
     prefill_process = Process(target=run_prefill, args=(prefill_done, ))
     decode_process = Process(target=run_decode, args=(prefill_done, ))
@@ -109,3 +109,7 @@ if __name__ == "__main__":
     # Terminate the prefill node when decode is finished
     decode_process.join()
     prefill_process.terminate()
+
+
+if __name__ == "__main__":
+    main()

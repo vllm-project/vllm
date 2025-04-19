@@ -46,7 +46,7 @@ class KVTransferAgent:
         assert self.config.kv_transfer_config.is_kv_transfer_instance, "KV"\
             "TransferAgent should only be used when kv_connector is set."
 
-        self.connector = KVConnectorFactory.create_connector(
+        self.connector = KVConnectorFactory.create_connector_v0(
             rank, local_rank, config)
 
     def send_kv_caches_and_hidden_states(

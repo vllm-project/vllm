@@ -16,7 +16,7 @@ Ensure that you have a running Kubernetes environment with GPU (you can follow [
 
 ## Deployment using vLLM production stack
 
-The standard vLLM production stack install uses a Helm chart. You can run this [bash script](https://github.com/vllm-project/production-stack/blob/main/tutorials/install-helm.sh) to install Helm on your GPU server.
+The standard vLLM production stack is installed using a Helm chart. You can run this [bash script](https://github.com/vllm-project/production-stack/blob/main/utils/install-helm.sh) to install Helm on your GPU server.
 
 To install the vLLM production stack, run the following commands on your desktop:
 

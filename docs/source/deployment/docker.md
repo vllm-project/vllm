@@ -19,6 +19,18 @@ $ docker run --runtime nvidia --gpus all \
     --model mistralai/Mistral-7B-v0.1
 ```
 
+This image can also be used with other container engines such as [Podman](https://podman.io/).
+
+```console
+$ podman run --gpus all \
+  -v ~/.cache/huggingface:/root/.cache/huggingface \
+  --env "HUGGING_FACE_HUB_TOKEN=$HF_TOKEN" \
+  -p 8000:8000 \
+  --ipc=host \
+  vllm/vllm-openai:latest \
+  --model mistralai/Mistral-7B-v0.1
+```
+
 You can add any other <project:#engine-args> you need after the image tag (`vllm/vllm-openai:latest`).
 
 :::{note}

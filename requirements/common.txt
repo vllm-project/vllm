@@ -8,7 +8,7 @@ blake3
 py-cpuinfo
 transformers >= 4.51.1
 huggingface-hub[hf_xet] >= 0.30.0  # Required for Xet downloads.
-tokenizers >= 0.19.1  # Required for Llama 3.
+tokenizers >= 0.21.1  # Required for fast incremental detokenization.
 protobuf # Required by LlamaTokenizer.
 fastapi[standard] >= 0.115.0 # Required by FastAPI's form models in the OpenAI API server's audio transcriptions endpoint.
 aiohttp
@@ -26,7 +26,7 @@ xgrammar == 0.1.18; platform_machine == "x86_64" or platform_machine == "aarch64
 typing_extensions >= 4.10
 filelock >= 3.16.1 # need to contain https://github.com/tox-dev/filelock/pull/317
 partial-json-parser # used for parsing partial JSON outputs
-pyzmq
+pyzmq >= 25.0.0
 msgspec
 gguf >= 0.13.0
 importlib_metadata

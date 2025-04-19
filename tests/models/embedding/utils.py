@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from collections.abc import Sequence
+from typing import NamedTuple
 
 import torch
 import torch.nn.functional as F
@@ -30,3 +31,17 @@ def check_embeddings_close(
                     f"\n{name_1}:\t{embeddings_1[:16]!r}")
 
         assert sim >= 1 - tol, fail_msg
+
+
+def matryoshka_fy(tensor, dimensions):
+    tensor = torch.tensor(tensor)
+    tensor = tensor[..., :dimensions]
+    tensor = F.normalize(tensor, p=2, dim=1)
+    return tensor
+
+
+class EmbedModelInfo(NamedTuple):
+    name: str
+    is_matryoshka: bool
+    architecture: str = ""
+    enable_test: bool = True

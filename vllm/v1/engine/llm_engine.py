@@ -230,6 +230,9 @@ class LLMEngine:
 
         return processed_outputs.request_outputs
 
+    def get_vllm_config(self):
+        return self.vllm_config
+
     def get_model_config(self):
         return self.model_config
 

@@ -152,6 +152,7 @@ class GrammarConfig:
     grammar_str: str | None = None
     json_object: bool | None = None
     any_whitespace: bool = True
+    regex_str: str | None = None
     max_threads: int = 8
 
     @classmethod
@@ -255,6 +256,13 @@ class GrammarConfig:
                 max_threads=max_threads,
                 tokenizer_data=tokenizer_data,
             )
+        elif guided_params.regex:
+            return cls(
+                regex_str=guided_params.regex,
+                tokenizer_hash=tokenizer_hash,
+                max_threads=max_threads,
+                tokenizer_data=tokenizer_data,
+            )
         else:
             raise ValueError(
                 "Currently only support JSON and EBNF grammar mode for xgrammar"
@@ -330,6 +338,8 @@ class XGrammarLogitsProcessor:
                 self.ctx = compiler\
                     .compile_json_schema('{"type": "object"}',
                                          any_whitespace=any_whitespace)
+            elif self.config.regex_str:
+                self.ctx = compiler.compile_regex(self.config.regex_str)
             else:
                 raise ValueError(
                     "Invalid configuration for xgrammar logits processor")
