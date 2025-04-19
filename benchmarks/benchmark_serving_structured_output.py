@@ -123,6 +123,8 @@ def sample_requests(tokenizer: PreTrainedTokenizerBase,
                 copy.deepcopy(schema) for _ in range(args.num_prompts)
             ]
             for i in range(len(json_schemas)):
+                if "properties" not in json_schemas[i]:
+                    json_schemas[i]["properties"] = {}
                 json_schemas[i]["properties"][
                     f"__optional_field_{uuid.uuid4()}"] = {
                         "type":
@@ -134,7 +136,7 @@ def sample_requests(tokenizer: PreTrainedTokenizerBase,
             json_schemas = [schema] * args.num_prompts
 
         def gen_prompt(index: int):
-            return f"Generate an example of a user profile given the following schema: {json.dumps(get_schema(index))}"  # noqa: E501
+            return f"Generate an example of a brief user profile given the following schema: {json.dumps(get_schema(index))}"  # noqa: E501
 
         def get_schema(index: int):
             return json_schemas[index % len(json_schemas)]
@@ -231,7 +233,8 @@ def sample_requests(tokenizer: PreTrainedTokenizerBase,
                 idx -= len_dataset
             schema = dataset["schema"][idx]
             prompt = tokenizer.apply_chat_template(dataset["prompt"][idx],
-                                                   tokenize=False)
+                                                   tokenize=False,
+                                                   add_generation_prompt=True)
             input_len = len(tokenizer(prompt).input_ids)
             completion = dataset["completion"][idx]
 
@@ -849,7 +852,7 @@ if __name__ == "__main__":
                             'json', 'json-unique', 'grammar', 'regex',
                             'choice', 'xgrammar_bench'
                         ])
-    parser.add_argument("--json_schema_path",
+    parser.add_argument("--json-schema-path",
                         type=str,
                         default=None,
                         help="Path to json schema.")
