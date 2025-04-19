@@ -327,7 +327,7 @@ class Phi3VProcessingInfo(BaseProcessingInfo):
         *,
         image_width: int,
         image_height: int,
-        processor: Optional[ProcessorMixin],
+        processor: Optional[ProcessorMixin] = None,
     ) -> int:
         if processor is None:
             processor = self.get_hf_processor()
