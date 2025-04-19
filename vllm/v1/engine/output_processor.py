@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from typing import Optional, Union
 
 from vllm.outputs import CompletionOutput, RequestOutput
-from vllm.sampling_params import RequestOutputKind
+from vllm.sampling_params import KVTransferParams, RequestOutputKind
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.transformers_utils.tokenizer_group import BaseTokenizerGroup
 from vllm.v1.engine import EngineCoreOutput, EngineCoreRequest, FinishReason
@@ -148,6 +148,7 @@ class RequestState:
         new_token_ids: list[int],
         finish_reason: Optional[FinishReason],
         stop_reason: Union[int, str, None],
+        kv_transfer_params: KVTransferParams,
     ) -> Optional[RequestOutput]:
 
         finished = finish_reason is not None
@@ -169,13 +170,15 @@ class RequestState:
             if not outputs:
                 return None
 
-        return self._new_request_output(request_id, outputs, finished)
+        return self._new_request_output(request_id, outputs, finished,
+                                        kv_transfer_params)
 
     def _new_request_output(
         self,
         request_id: str,
         outputs: list[CompletionOutput],
         finished: bool,
+        kv_transfer_params: KVTransferParams,
     ) -> RequestOutput:
 
         if self.output_kind == RequestOutputKind.DELTA:
@@ -191,6 +194,7 @@ class RequestState:
             prompt_logprobs=prompt_logprobs,
             outputs=outputs,
             finished=finished,
+            kv_transfer_params=kv_transfer_params,
         )
 
     def _new_completion_output(
@@ -337,6 +341,7 @@ class OutputProcessor:
             new_token_ids = engine_core_output.new_token_ids
             finish_reason = engine_core_output.finish_reason
             stop_reason = engine_core_output.stop_reason
+            kv_transfer_params = engine_core_output.kv_transfer_params
 
             req_state.is_prefilling = False
 
@@ -352,7 +357,8 @@ class OutputProcessor:
 
             # 4) Create and handle RequestOutput objects.
             if request_output := req_state.make_request_output(
-                    new_token_ids, finish_reason, stop_reason):
+                    new_token_ids, finish_reason, stop_reason,
+                    kv_transfer_params):
                 if req_state.queue is not None:
                     # AsyncLLM: put into queue for handling by generate().
                     req_state.queue.put(request_output)
