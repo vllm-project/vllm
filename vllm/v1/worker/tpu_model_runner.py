@@ -219,6 +219,11 @@ class TPUModelRunner:
         self.arange_np = np.arange(self.max_num_tokens, dtype=np.int32)
         self.num_reqs_paddings = _get_req_paddings(
             min_req_size=MIN_NUM_SEQS, max_req_size=self.max_num_reqs)
+        
+        max_token_idx = self.max_num_reqs * self.max_model_len - 1
+        # if max token idx exceeds int32 max, use int64 to avoid overflow
+        self.token_indices_dtype = np.int32 \
+            if max_token_idx <= np.iinfo(np.int32).max else np.int64
 
     def _update_num_xla_graphs(self, case_str):
         check_comp = self.check_recompilation and not self.enforce_eager
@@ -457,8 +462,10 @@ class TPUModelRunner:
         # E.g., [0, 1, 0, 1, 2, 3, 4, 0, 1, 2]
         # -> [0, 1, M, M + 1, M + 2, M + 3, M + 4, 2 * M, 2 * M + 1, 2 * M + 2]
         # where M is the max_model_len.
+        # For long context, may need to cast to int64 to avoid overflow
         token_indices = (positions_np +
-                         req_indices * self.input_batch.token_ids_cpu.shape[1])
+                         req_indices.astype(self.token_indices_dtype) * 
+                         self.input_batch.token_ids_cpu.shape[1])
 
         # NOTE(woosuk): We use torch.index_select instead of np.take here
         # because torch.index_select is much faster than np.take for large
