@@ -189,14 +189,17 @@ class InputRegistry:
             seq_data = SequenceData.from_prompt_token_counts((0, seq_len))
             return DummyData(seq_data=seq_data)
 
-        dummy_data = (mm_registry.get_encoder_dummy_data(
-            model_config, seq_len) if is_encoder_data else
-                      mm_registry.get_decoder_dummy_data(
-                          model_config, seq_len))
+        # Encoder dummy data does not contain multi-modal data
+        if is_encoder_data:
+            dummy_data = mm_registry.get_encoder_dummy_data(
+                model_config, seq_len)
+            seq_data = SequenceData.from_seqs(dummy_data.prompt_token_ids)
+            return DummyData(seq_data=seq_data)
+
+        dummy_data = mm_registry.get_decoder_dummy_data(model_config, seq_len)
 
         return DummyData(
             seq_data=SequenceData.from_seqs(dummy_data.prompt_token_ids),
-            multi_modal_data=getattr(dummy_data, "multi_modal_data", None),
-            multi_modal_placeholders=getattr(dummy_data,
-                                             "multi_modal_placeholders", None),
+            multi_modal_data=dummy_data.multi_modal_data,
+            multi_modal_placeholders=dummy_data.multi_modal_placeholders,
         )
