@@ -23,17 +23,10 @@ OCP_MX_BLOCK_SIZE = 32
 class QuarkW4A4MXFP4(QuarkScheme):
 
     def __init__(self, weight_quant_spec: Dict[str, Any], input_quant_spec: Dict[str, Any]):
-        try:
-            from quark.torch.quantization.config.config import QuantizationSpec
-        except ImportError as err:
-            raise ImportError(f"The package `amd-quark` is required to use AMD Quark MX-FP4 models. Please install it with `pip install amd-quark`. Error: {err}")
-
         self.out_dtype = torch.get_default_dtype()
-
         self.qscheme = "per_group"
-
-        self.weight_quant_spec = QuantizationSpec.from_dict(weight_quant_spec)
-        self.input_quant_spec = QuantizationSpec.from_dict(input_quant_spec)
+        self.weight_quant_spec = weight_quant_spec
+        self.input_quant_spec = input_quant_spec
 
     @classmethod
     def get_min_capability(cls) -> int:
@@ -46,16 +39,20 @@ class QuarkW4A4MXFP4(QuarkScheme):
         layer.weight_scale = torch.nn.Parameter(layer.weight_scale.data,
                                           requires_grad=False)
 
+        # TODO(bowenbao): perform emulation only when native mx kernel is unsupported.
         try:
             from quark.torch.export.nn.modules import realquantizer
+            from quark.torch.quantization.config.config import QuantizationSpec
         except ImportError as err:
             raise ImportError(
                 f"The package `amd-quark` is required to use AMD Quark MX-FP4 models. Please install it with `pip install amd-quark`. Error: {err}"
             )
 
-        # TODO(bowenbao): do this only when native mx kernel is unsupported.
+        weight_quant_spec = QuantizationSpec.from_dict(self.weight_quant_spec)
+        input_quant_spec = QuantizationSpec.from_dict(self.input_quant_spec)
+
         self.weight_quantizer = realquantizer.get_real_quantizer(
-            qspec=self.weight_quant_spec,
+            qspec=weight_quant_spec,
             quantizer=None,
             real_quantized=True,
             reorder=False,  # TODO: load from config
@@ -66,7 +63,7 @@ class QuarkW4A4MXFP4(QuarkScheme):
         self.weight_quantizer.scale.data = layer.weight_scale.data
 
         self.input_quantizer = realquantizer.get_real_quantizer(
-            qspec=self.input_quant_spec,
+            qspec=input_quant_spec,
             quantizer=None,
             real_quantized=False,
             float_dtype=self.out_dtype,
