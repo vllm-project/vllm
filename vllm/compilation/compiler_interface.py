@@ -167,8 +167,7 @@ class InductorAdaptor(CompilerInterface):
         compiler_config: Dict[str, Any],
         runtime_shape: Optional[int] = None
     ) -> Tuple[Optional[Callable], Optional[Any]]:
-        from torch._inductor import config
-        current_config = config.get_config_copy()
+        current_config = {}
         from torch._inductor.compile_fx import compile_fx
 
         # disable remote cache
