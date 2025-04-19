@@ -402,9 +402,26 @@ you can use the [official OpenAI Python client](https://github.com/openai/openai
 To use the Transcriptions API, please install with extra audio dependencies using `pip install vllm[audio]`.
 :::
 
+Code example: <gh-file:examples/online_serving/openai_transcription_client.py>
 <!-- TODO: api enforced limits + uploading audios -->
 
-Code example: <gh-file:examples/online_serving/openai_transcription_client.py>
+#### Extra Parameters
+
+The following [sampling parameters](#sampling-params) are supported.
+
+:::{literalinclude} ../../../vllm/entrypoints/openai/protocol.py
+:language: python
+:start-after: begin-transcription-sampling-params
+:end-before: end-transcription-sampling-params
+:::
+
+The following extra parameters are supported:
+
+:::{literalinclude} ../../../vllm/entrypoints/openai/protocol.py
+:language: python
+:start-after: begin-transcription-extra-params
+:end-before: end-transcription-extra-params
+:::
 
 (tokenizer-api)=
 
