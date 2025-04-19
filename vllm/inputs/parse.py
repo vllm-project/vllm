@@ -97,15 +97,16 @@ def parse_singleton_prompt(
     if isinstance(prompt, str):
         return ParsedStrPrompt(type="str", content=prompt)
     elif isinstance(prompt, dict):
-        if "prompt_token_ids" in prompt:
-            return ParsedTokensPrompt(type="tokens",
-                                      content=prompt)  # type: ignore
+        # Type ignores are because mypy does not correctly infer the TypedDicts
+        # Pyright does succeed.
+        if "prompt_embeds" in prompt:
+            return ParsedEmbedsPrompt(
+                type="embeds", content=prompt)  # type: ignore[typeddict-item]
+        elif "prompt_token_ids" in prompt:
+            return ParsedTokensPrompt(
+                type="tokens", content=prompt)  # type: ignore[typeddict-item]
         elif "prompt" in prompt:
             return ParsedTextPrompt(type="text", content=prompt)
-
-        elif "prompt_embeds" in prompt:
-            return ParsedEmbedsPrompt(type="embeds", content=prompt)
-
     raise TypeError(
         "inputs must be a string, TextPrompt, TokensPrompt, or EmbedsPrompt")
 
