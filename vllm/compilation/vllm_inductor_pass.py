@@ -1,10 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import time
+from typing import Optional
 
 import torch
 
-from vllm.config import CompilationConfig
+from vllm.config import CompilationConfig, VllmConfig
 # yapf: disable
 from vllm.distributed import get_tensor_model_parallel_rank as get_tp_rank
 from vllm.distributed import (
@@ -24,8 +25,10 @@ class VllmInductorPass(InductorPass):
     It provides timing, logging, and dumping utilities.
     """
 
-    def __init__(self, config: CompilationConfig.PassConfig):
-        self.config = config
+    def __init__(self, config: VllmConfig):
+        self.config = config.compilation_config.pass_config
+        self.dtype = config.model_config.dtype
+        self.device = config.device_config.device
         self.pass_name = self.__class__.__name__
 
     def dump_graph(self, graph: torch.fx.Graph, stage: str, always=False):
@@ -49,6 +52,9 @@ class VllmInductorPass(InductorPass):
         self._end_time = time.perf_counter_ns()
         duration_ms = float(self._end_time - self._start_time) / 1.0e6
         logger.debug("%s completed in %.1f ms", self.pass_name, duration_ms)
+
+    def is_applicable_for_shape(self, shape: Optional[int]):
+        return True
 
 
 class PrinterInductorPass(VllmInductorPass):

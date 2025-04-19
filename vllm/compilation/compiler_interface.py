@@ -14,6 +14,8 @@ import torch.fx as fx
 from vllm.config import VllmConfig
 from vllm.utils import is_torch_equal_or_newer
 
+from .inductor_pass import pass_context
+
 
 class CompilerInterface:
     """
@@ -303,11 +305,12 @@ class InductorAdaptor(CompilerInterface):
                     torch._functorch.config.patch(
                         enable_remote_autograd_cache=False))
 
-            compiled_graph = compile_fx(
-                graph,
-                example_inputs,
-                inner_compile=hijacked_compile_fx_inner,
-                config_patches=current_config)
+            with pass_context(runtime_shape):
+                compiled_graph = compile_fx(
+                    graph,
+                    example_inputs,
+                    inner_compile=hijacked_compile_fx_inner,
+                    config_patches=current_config)
 
         assert hash_str is not None, (
             "failed to get the hash of the compiled graph")
