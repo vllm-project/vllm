@@ -100,6 +100,8 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
             vllm_config=vllm_config,
             kv_cache_dtype=kv_cache_dtype,
             is_driver_worker=is_driver_worker,
+            input_registry=input_registry,
+            mm_registry=mm_registry,
         )
 
         # Crash for unsupported encoder/scenarios
