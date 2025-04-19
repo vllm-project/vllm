@@ -62,6 +62,7 @@ def run_simple_demo(args: argparse.Namespace):
         tokenizer_mode="mistral" if args.format == "mistral" else "auto",
         config_format="mistral" if args.format == "mistral" else "auto",
         load_format="mistral" if args.format == "mistral" else "auto",
+        limit_mm_per_prompt={"image": 1},
         max_model_len=4096,
         max_num_seqs=2,
         tensor_parallel_size=2,

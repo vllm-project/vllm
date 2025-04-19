@@ -172,25 +172,8 @@ class Qwen2_5OmniThinkerProcessingInfo(Qwen2AudioProcessingInfo,
         assert isinstance(feature_extractor, WhisperFeatureExtractor)
         return feature_extractor
 
-    def get_max_audio_tokens(self) -> int:
-        hf_config = self.get_hf_config()
-        max_source_position = hf_config.audio_config.max_source_positions
-        output_lengths = (max_source_position - 2) // 2 + 1
-        return output_lengths
-
     def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
         return {"audio": None, "image": None, "video": None}
-
-    def get_mm_max_tokens_per_item(
-        self,
-        seq_len: int,
-        mm_counts: Mapping[str, int],
-    ) -> Mapping[str, int]:
-        return {
-            "audio": self.get_max_audio_tokens(),
-            "image": self.get_max_image_tokens(),
-            "video": self.get_max_video_tokens(seq_len, mm_counts),
-        }
 
 
 class Qwen2_5OmniThinkerDummyInputsBuilder(
@@ -210,7 +193,6 @@ class Qwen2_5OmniThinkerDummyInputsBuilder(
         return (audio_token * num_audios + image_token * num_images +
                 video_token * num_videos)
 
-    # TODO: @abstractmethod after transition
     def get_dummy_mm_data(
         self,
         seq_len: int,
