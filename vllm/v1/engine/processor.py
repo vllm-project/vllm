@@ -22,6 +22,8 @@ from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.engine.mm_input_cache import MirroredProcessingCache
 from vllm.v1.structured_output.backend_guidance import (
     validate_guidance_grammar)
+from vllm.v1.structured_output.backend_outlines import (
+    validate_structured_output_request_outlines)
 from vllm.v1.structured_output.backend_xgrammar import (
     validate_xgrammar_grammar)
 
@@ -147,7 +149,7 @@ class Processor:
 
         supported_backends = [
             "xgrammar", "xgrammar:disable-any-whitespace", "guidance",
-            "guidance:disable-any-whitespace", "auto"
+            "guidance:disable-any-whitespace", "outlines", "auto"
         ]
 
         engine_level_backend = self.decoding_config.guided_decoding_backend
@@ -176,6 +178,9 @@ class Processor:
             # https://github.com/guidance-ai/llguidance/blob/main/docs/syntax.md#special-tokens
             # Without tokenizer these are disallowed in grammars.
             validate_guidance_grammar(params, tokenizer=None)
+        elif engine_level_backend == "outlines":
+            # outlines backend
+            validate_structured_output_request_outlines(params)
         else:
             # NOTE: engine_level_backend must be "auto" here, because we have
             # checked supported_backends above.
