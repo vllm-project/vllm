@@ -1310,10 +1310,6 @@ class CacheConfig:
     num_cpu_blocks: Optional[int] = field(default=None, init=False)
     """The number of blocks to allocate for CPU memory."""
 
-    @property
-    def swap_space_bytes(self) -> float:
-        return self.swap_space * GiB_bytes
-
     def compute_hash(self) -> str:
         """
         WARNING: Whenever a new field is added to this config,
@@ -1334,6 +1330,8 @@ class CacheConfig:
         return hash_str
 
     def __post_init__(self) -> None:
+        self.swap_space_bytes = self.swap_space * GiB_bytes
+
         self._verify_args()
         self._verify_cache_dtype()
         self._verify_prefix_caching()
