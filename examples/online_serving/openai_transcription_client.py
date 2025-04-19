@@ -26,7 +26,12 @@ def sync_openai():
             model="openai/whisper-large-v3",
             language="en",
             response_format="json",
-            temperature=0.0)
+            temperature=0.0,
+            # Additional sampling params not provided by OpenAI API.
+            extra_body=dict(
+                seed=4419,
+                repetition_penalty=1.3,
+            ))
         print("transcription result:", transcription.text)
 
 
