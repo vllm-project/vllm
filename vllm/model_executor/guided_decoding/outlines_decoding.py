@@ -10,8 +10,9 @@ from typing import Optional, Tuple, Union
 
 from transformers import PreTrainedTokenizerBase
 
+from vllm.config import ModelConfig
 from vllm.model_executor.guided_decoding.outlines_logits_processors import (
-    CFGLogitsProcessor, JSONLogitsProcessor, RegexLogitsProcessor)
+    JSONLogitsProcessor, RegexLogitsProcessor)
 from vllm.reasoning import ReasoningParser
 from vllm.sampling_params import GuidedDecodingParams
 
@@ -20,35 +21,7 @@ class GuidedDecodingMode(Enum):
     JSON = "json"
     REGEX = "regex"
     CHOICE = "choice"
-    GRAMMAR = "grammar"
 
-
-# https://github.com/outlines-dev/outlines/blob/main/outlines/grammars/json.lark
-# the main difference is that we changed the start: value to
-# start: object | array, so we are denying scalar values as the root of the
-# JSON. Starting with scalars as the root seems to cause llama to generate
-# without stop.
-JSON_GRAMMAR = r"""
-?start: object | array
-
-?value: object
-| array
-| UNESCAPED_STRING
-| SIGNED_NUMBER      -> number
-| "true"             -> true
-| "false"            -> false
-| "null"             -> null
-
-array  : "[" [value ("," value)*] "]"
-object : "{" [pair ("," pair)*] "}"
-pair   : UNESCAPED_STRING ":" value
-
-%import common.UNESCAPED_STRING
-%import common.SIGNED_NUMBER
-%import common.WS
-
-%ignore WS
-"""
 
 global_thread_pool = None  # used for generating logits processor fsm
 
@@ -59,16 +32,12 @@ _MAX_THREADPOOL_WORKERS = 16
 
 
 async def get_outlines_guided_decoding_logits_processor(
-    guided_params: GuidedDecodingParams,
-    tokenizer: PreTrainedTokenizerBase,
-    reasoner: Optional[ReasoningParser],
-) -> Union[JSONLogitsProcessor, RegexLogitsProcessor, CFGLogitsProcessor,
-           None]:
+    guided_params: GuidedDecodingParams, tokenizer: PreTrainedTokenizerBase,
+    reasoner: Optional[ReasoningParser], model_config: ModelConfig
+) -> Union[JSONLogitsProcessor, RegexLogitsProcessor, None]:
     """
     Given an OpenAI-compatible request, check for guided decoding parameters
     and get the necessary logits processor for the given guide.
-    We cache logit processors by (guide, tokenizer), and on cache hit
-    we make a shallow copy to reuse the same underlying FSM.
     """
     global global_thread_pool
     guide, mode = _get_guide_and_mode(guided_params)
@@ -82,31 +51,28 @@ async def get_outlines_guided_decoding_logits_processor(
         global_thread_pool = concurrent.futures.ThreadPoolExecutor(
             max_workers=max_workers)
     loop = asyncio.get_running_loop()
-
+    vocab_size = model_config.get_vocab_size()
     return await loop.run_in_executor(global_thread_pool,
                                       _get_logits_processor, guide, tokenizer,
                                       mode, guided_params.whitespace_pattern,
-                                      reasoner)
+                                      reasoner, vocab_size)
 
 
 def get_local_outlines_guided_decoding_logits_processor(
-    guided_params: GuidedDecodingParams,
-    tokenizer: PreTrainedTokenizerBase,
-    reasoner: Optional[ReasoningParser],
-) -> Union[JSONLogitsProcessor, RegexLogitsProcessor, CFGLogitsProcessor,
-           None]:
+    guided_params: GuidedDecodingParams, tokenizer: PreTrainedTokenizerBase,
+    reasoner: Optional[ReasoningParser], model_config: ModelConfig
+) -> Union[JSONLogitsProcessor, RegexLogitsProcessor, None]:
     """
     Given an OpenAI-compatible request, check for guided decoding parameters
     and get the necessary logits processor for the given guide.
-    We cache logit processors by (guide, tokenizer), and on cache hit
-    we make a shallow copy to reuse the same underlying FSM.
     """
     guide, mode = _get_guide_and_mode(guided_params)
     if not guide or not mode:
         return None
 
     return _get_logits_processor(guide, tokenizer, mode,
-                                 guided_params.whitespace_pattern, reasoner)
+                                 guided_params.whitespace_pattern, reasoner,
+                                 model_config.get_vocab_size())
 
 
 def _get_guide_and_mode(
@@ -129,26 +95,23 @@ def _get_guide_and_mode(
         choices_regex = "(" + "|".join(choices) + ")"
         return choices_regex, GuidedDecodingMode.CHOICE
     elif guided_params.grammar:
-        return guided_params.grammar, GuidedDecodingMode.GRAMMAR
-    elif guided_params.json_object:
-        return JSON_GRAMMAR, GuidedDecodingMode.GRAMMAR
+        raise ValueError(
+            "The `outlines` guided decoding backend no longer supports grammar "
+            "guided generation. Please use either the `xgrammar` or `guidance` "
+            "backend")
     else:
         return None, None
 
 
 def _get_logits_processor(
-    guide: str,
-    tokenizer: PreTrainedTokenizerBase,
-    mode: GuidedDecodingMode,
-    whitespace_pattern: Union[str, None],
-    reasoner: Optional[ReasoningParser],
-) -> Union[JSONLogitsProcessor, RegexLogitsProcessor, CFGLogitsProcessor]:
+        guide: str, tokenizer: PreTrainedTokenizerBase,
+        mode: GuidedDecodingMode, whitespace_pattern: Union[str, None],
+        reasoner: Optional[ReasoningParser],
+        vocab_size: int) -> Union[JSONLogitsProcessor, RegexLogitsProcessor]:
     if mode == GuidedDecodingMode.JSON:
         return JSONLogitsProcessor(guide, tokenizer, whitespace_pattern,
-                                   reasoner)
+                                   reasoner, vocab_size)
     elif mode == GuidedDecodingMode.REGEX or mode == GuidedDecodingMode.CHOICE:
-        return RegexLogitsProcessor(guide, tokenizer, reasoner)
-    elif mode == GuidedDecodingMode.GRAMMAR:
-        return CFGLogitsProcessor(guide, tokenizer, reasoner)
+        return RegexLogitsProcessor(guide, tokenizer, reasoner, vocab_size)
     else:
         raise ValueError(f"Unknown guided decoding mode {mode}")
