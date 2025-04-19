@@ -35,13 +35,6 @@ class QuarkW4A4MXFP4(QuarkScheme):
         self.weight_quant_spec = QuantizationSpec.from_dict(weight_quant_spec)
         self.input_quant_spec = QuantizationSpec.from_dict(input_quant_spec)
 
-        # self.input_quantizer = ScaledFakeQuantize(
-        #     quant_obj="activation",
-        #     quant_spec=input_quant_spec
-        # )
-        # self.input_quantizer.enable_observer()
-        # self.input_quantizer.enable_fake_quant()
-
     @classmethod
     def get_min_capability(cls) -> int:
         # lovelace and up
@@ -102,8 +95,6 @@ class QuarkW4A4MXFP4(QuarkScheme):
         )
         layer.register_parameter("weight", weight)
 
-        print(f"set weight {weight.data.shape}")
-
         # WEIGHT SCALE
         weight_scale = GroupQuantScaleParameter(
             data=torch.empty(
@@ -122,8 +113,9 @@ class QuarkW4A4MXFP4(QuarkScheme):
                       x: torch.Tensor,
                       bias: Optional[torch.Tensor] = None) -> torch.Tensor:
 
-        qdq_x = self.input_quantizer(x)  # .to(torch.float32))
-        # NOTE: Reference from QParamsLinear.forward. Casting after q/dp is required.
+        # TODO: observer/quantize kernel unstable when cudagraph is enabled.
+        qdq_x = self.input_quantizer(x)
+        # TODO: Reference from QParamsLinear.forward. Casting after q/dp is required.
         dq_weight = self.weight_quantizer(layer.weight).to(self.out_dtype)
 
         return F.linear(qdq_x, dq_weight, bias)
