@@ -2,6 +2,15 @@
 
 #include <torch/all.h>
 
+torch::Tensor LLMM1(at::Tensor& in_a, at::Tensor& in_b,
+                    const int64_t rows_per_block);
+
+torch::Tensor wvSplitK(at::Tensor& in_a, at::Tensor& in_b,
+                       const int64_t CuCount);
+
+void wvSplitKQ(at::Tensor& in_a, at::Tensor& in_b, at::Tensor& out_c,
+               at::Tensor& scale_a, at::Tensor& scale_b, const int64_t CuCount);
+
 void paged_attention(torch::Tensor& out, torch::Tensor& exp_sums,
                      torch::Tensor& max_logits, torch::Tensor& tmp_out,
                      torch::Tensor& query, torch::Tensor& key_cache,
