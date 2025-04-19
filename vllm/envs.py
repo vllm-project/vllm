@@ -529,7 +529,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
 
     # use aiter ops unless specifically disabled
     "VLLM_ROCM_USE_AITER":
-    lambda: (os.getenv("VLLM_USE_AITER", "False").lower() in ("true", "1")),
+    lambda: (os.getenv("VLLM_ROCM_USE_AITER", "False").lower() in
+             ("true", "1")),
 
     # use aiter linear op if aiter ops are enabled
     "VLLM_ROCM_USE_AITER_LINEAR":

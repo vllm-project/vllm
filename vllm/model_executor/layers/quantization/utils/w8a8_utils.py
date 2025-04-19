@@ -197,7 +197,7 @@ def cutlass_w8a8_scaled_mm(*, qinput: torch.Tensor, weight: torch.Tensor,
 #     )
 
 
-def rocm_aiter_per_tensor_w8a8_scaled_mm(*, qinput: torch.Tensor,
+def rocm_aiter_per_tensor_w8a8_scaled_mm(qinput: torch.Tensor,
                                          weight: torch.Tensor,
                                          out_dtype: torch.dtype,
                                          scale_a: torch.Tensor,
@@ -207,7 +207,7 @@ def rocm_aiter_per_tensor_w8a8_scaled_mm(*, qinput: torch.Tensor,
                                          output_shape: List) -> torch.Tensor:
 
     output = aiter_ops.rocm_aiter_tuned_gemm(qinput,
-                                             weight,
+                                             weight.t(),
                                              out_dtype=out_dtype,
                                              scale_a=scale_a,
                                              scale_b=scale_b,
@@ -216,8 +216,7 @@ def rocm_aiter_per_tensor_w8a8_scaled_mm(*, qinput: torch.Tensor,
     return torch.narrow(output, 0, 0, input_2d.shape[0]).view(*output_shape)
 
 
-def torch_per_tensor_w8a8_scaled_mm(*, qinput: torch.Tensor,
-                                    weight: torch.Tensor,
+def torch_per_tensor_w8a8_scaled_mm(qinput: torch.Tensor, weight: torch.Tensor,
                                     out_dtype: torch.dtype,
                                     scale_a: torch.Tensor,
                                     scale_b: torch.Tensor, bias: torch.Tensor,
@@ -237,8 +236,7 @@ def torch_per_tensor_w8a8_scaled_mm(*, qinput: torch.Tensor,
     return torch.narrow(output, 0, 0, input_2d.shape[0]).view(*output_shape)
 
 
-def torch_per_token_w8a8_scaled_mm(*, qinput: torch.Tensor,
-                                   weight: torch.Tensor,
+def torch_per_token_w8a8_scaled_mm(qinput: torch.Tensor, weight: torch.Tensor,
                                    out_dtype: torch.dtype,
                                    scale_a: torch.Tensor,
                                    scale_b: torch.Tensor, bias: torch.Tensor,
@@ -263,14 +261,16 @@ def torch_per_token_w8a8_scaled_mm(*, qinput: torch.Tensor,
     return output
 
 
-def torch_channelwise_w8a8_scaled_mm(*, qinput: torch.Tensor,
-                                     weight: torch.Tensor,
-                                     out_dtype: torch.dtype,
-                                     scale_a: torch.Tensor,
-                                     scale_b: torch.Tensor, bias: torch.Tensor,
-                                     input_2d: torch.Tensor,
-                                     output_shape: List,
-                                     **kwargs) -> torch.Tensor:
+def torch_channelwise_w8a8_scaled_mm(
+    qinput: torch.Tensor,
+    weight: torch.Tensor,
+    out_dtype: torch.dtype,
+    scale_a: torch.Tensor,
+    scale_b: torch.Tensor,
+    bias: torch.Tensor,
+    input_2d: torch.Tensor,
+    output_shape: List,
+) -> torch.Tensor:
     # Use unfused DQ due to limitations with scaled_mm
 
     # Symmetric quantized GEMM by definition computes the following:
@@ -318,7 +318,7 @@ def dispatch_w8a8_scaled_mm(
         return cutlass_w8a8_scaled_mm
     if per_tensor_weights and per_tensor_activations:
         if is_rocm_aiter_linear_enabled():
-            return aiter_ops.rocm_aiter_tuned_gemm
+            return rocm_aiter_per_tensor_w8a8_scaled_mm
         return torch_per_tensor_w8a8_scaled_mm
     # torch.scaled_mm supports per tensor weights + activations only
     # so fallback to naive if per channel or per token
@@ -410,7 +410,7 @@ class Fp8LinearOp:
             self.cutlass_fp8_supported, per_tensor_weights,
             per_tensor_activations, use_per_token_if_dynamic)
 
-        return w8a8_scaled_mm_func(qinput=qinput,
+        return w8a8_scaled_mm_func(qinput,
                                    weight=weight,
                                    out_dtype=input.dtype,
                                    scale_a=x_scale,
