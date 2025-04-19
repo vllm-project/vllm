@@ -15,6 +15,7 @@ from vllm.attention import get_attn_backend
 from vllm.config import VllmConfig
 from vllm.distributed import get_pp_group
 from vllm.forward_context import set_forward_context
+from vllm.inputs import INPUT_REGISTRY, InputRegistry
 from vllm.logger import init_logger
 from vllm.model_executor import SamplingMetadataCache
 from vllm.model_executor.layers.sampler import SamplerOutput
@@ -23,8 +24,7 @@ from vllm.multimodal import (MULTIMODAL_REGISTRY, BatchedTensorInputs,
                              MultiModalKwargs, MultiModalPlaceholderMap,
                              MultiModalRegistry)
 from vllm.sampling_params import SamplingParams
-from vllm.sequence import (IntermediateTensors, SequenceData,
-                           SequenceGroupMetadata)
+from vllm.sequence import IntermediateTensors, SequenceGroupMetadata
 from vllm.utils import DeviceMemoryProfiler, GiB_bytes, make_tensor_with_pad
 from vllm.worker.model_runner import AttentionMetadata, SamplingMetadata
 from vllm.worker.model_runner_base import (
@@ -368,6 +368,7 @@ class XPUModelRunner(ModelRunnerBase[ModelInputForXPUWithSamplingMetadata]):
         kv_cache_dtype: Optional[str] = "auto",
         is_driver_worker: bool = False,
         return_hidden_states: bool = False,
+        input_registry: InputRegistry = INPUT_REGISTRY,
         mm_registry: MultiModalRegistry = MULTIMODAL_REGISTRY,
     ):
 
@@ -392,6 +393,7 @@ class XPUModelRunner(ModelRunnerBase[ModelInputForXPUWithSamplingMetadata]):
         )
 
         # Multi-modal data support
+        self.input_registry = input_registry
         self.mm_registry = mm_registry
 
         # Lazy initialization.
@@ -454,15 +456,15 @@ class XPUModelRunner(ModelRunnerBase[ModelInputForXPUWithSamplingMetadata]):
                        (group_id < max_num_batched_tokens % max_num_seqs))
             batch_size += seq_len
 
-            dummy_data = self.mm_registry.get_decoder_dummy_data(
-                self.model_config, seq_len)
-            dummy_seq_data = SequenceData.from_seqs(
-                dummy_data.prompt_token_ids)
+            dummy_data = self.input_registry \
+                .dummy_data_for_profiling(self.model_config,
+                                          seq_len,
+                                          self.mm_registry)
 
             seq = SequenceGroupMetadata(
                 request_id=str(group_id),
                 is_prompt=True,
-                seq_data={group_id: dummy_seq_data},
+                seq_data={group_id: dummy_data.seq_data},
                 sampling_params=sampling_params,
                 block_tables=None,
                 lora_request=None,

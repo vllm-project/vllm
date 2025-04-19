@@ -28,8 +28,8 @@ __all__ = [
     "build_explicit_enc_dec_prompt",
     "to_enc_dec_tuple_list",
     "zip_enc_dec_prompts",
-    "INPUT_REGISTRY",  # DEPRECATED
+    "INPUT_REGISTRY",
     "InputContext",
     "InputProcessingContext",
-    "InputRegistry",  # DEPRECATED
+    "InputRegistry",
 ]

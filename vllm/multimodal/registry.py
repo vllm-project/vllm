@@ -103,6 +103,9 @@ class MultiModalRegistry:
         Get the maximum number of tokens per data item from each modality based 
         on underlying model configuration.
         """
+        if not model_config.is_multimodal_model:
+            return {}
+
         processor = self.create_processor(model_config, disable_cache=True)
         profiler = MultiModalProfiler(processor)
 
@@ -184,6 +187,9 @@ class MultiModalRegistry:
         Get the maximum number of multi-modal input instances for each modality
         that are allowed per prompt for a model class.
         """
+        if not model_config.is_multimodal_model:
+            return {}
+
         processor = self.create_processor(model_config, disable_cache=True)
         profiler = MultiModalProfiler(processor)
         return profiler.get_mm_limits()
@@ -250,6 +256,9 @@ class MultiModalRegistry:
         See also:
             :ref:`mm-processing`
         """
+        if not model_config.is_multimodal_model:
+            raise ValueError(f"{model_config.model} is not a multimodal model")
+
         if tokenizer is None:
             tokenizer = cached_tokenizer_from_config(model_config)
         if disable_cache is None:

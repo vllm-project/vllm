@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, NamedTuple, Optional, Union
 
 from transformers import BatchFeature, PretrainedConfig, ProcessorMixin
-from typing_extensions import TypeVar, deprecated
+from typing_extensions import TypeVar
 
 from vllm.transformers_utils.processor import cached_processor_from_config
 from vllm.transformers_utils.tokenizer import AnyTokenizer
@@ -170,10 +170,6 @@ class DummyData(NamedTuple):
 
 class InputRegistry:
 
-    @deprecated("Legacy input processor/mapper pipeline has been removed. "
-                "Please update your model runner to use "
-                "`MultiModalRegistry.get_decoder_dummy_data` instead of "
-                "`InputRegistry.dummy_data_for_profiling`.")
     def dummy_data_for_profiling(
         self,
         model_config: "ModelConfig",
@@ -185,28 +181,22 @@ class InputRegistry:
         Create dummy data for profiling the memory usage of a model.
 
         The model is identified by ``model_config``.
-
-        Note:
-            This should be called after
-            :meth:`~MultiModalRegistry.init_mm_limits_per_prompt`.
         """
         # Avoid circular import
-        from vllm.multimodal.profiling import MultiModalProfiler
         from vllm.sequence import SequenceData
 
-        processor = mm_registry.create_processor(model_config,
-                                                 disable_cache=True)
-        profiler = MultiModalProfiler(processor)
+        if not model_config.is_multimodal_model:
+            seq_data = SequenceData.from_prompt_token_counts((0, seq_len))
+            return DummyData(seq_data=seq_data)
 
-        dummy_data_v1 = (profiler.get_encoder_dummy_data(seq_len)
-                         if is_encoder_data else
-                         profiler.get_decoder_dummy_data(seq_len))
-        _seq_data = SequenceData.from_seqs(
-            dummy_data_v1.prompt_token_ids)  # type: ignore[attr-defined]
+        dummy_data = (mm_registry.get_encoder_dummy_data(
+            model_config, seq_len) if is_encoder_data else
+                      mm_registry.get_decoder_dummy_data(
+                          model_config, seq_len))
 
         return DummyData(
-            seq_data=_seq_data,
-            multi_modal_data=getattr(dummy_data_v1, "multi_modal_data", None),
-            multi_modal_placeholders=getattr(dummy_data_v1,
+            seq_data=SequenceData.from_seqs(dummy_data.prompt_token_ids),
+            multi_modal_data=getattr(dummy_data, "multi_modal_data", None),
+            multi_modal_placeholders=getattr(dummy_data,
                                              "multi_modal_placeholders", None),
         )
