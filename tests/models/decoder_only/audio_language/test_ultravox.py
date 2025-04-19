@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import json
-from typing import Optional
+from typing import Any, Optional
 
 import numpy as np
 import pytest
@@ -43,6 +43,18 @@ def audio(request):
     return AudioAsset(request.param)
 
 
+def params_kwargs_to_cli_args(params_kwargs: dict[str, Any]) -> list[str]:
+    """Convert kwargs to CLI args."""
+    args = []
+    for key, value in params_kwargs.items():
+        if isinstance(value, bool):
+            if value:
+                args.append(f"--{key.replace('_','-')}")
+        else:
+            args.append(f"--{key.replace('_','-')}={value}")
+    return args
+
+
 @pytest.fixture(params=[
     pytest.param({}, marks=pytest.mark.cpu_model),
     pytest.param(CHUNKED_PREFILL_KWARGS),
@@ -52,10 +64,7 @@ def server(request, audio_assets):
         "--dtype", "bfloat16", "--max-model-len", "4096", "--enforce-eager",
         "--limit-mm-per-prompt",
         json.dumps({"audio": len(audio_assets)}), "--trust-remote-code"
-    ] + [
-        f"--{key.replace('_','-')}={value}"
-        for key, value in request.param.items()
-    ]
+    ] + params_kwargs_to_cli_args(request.param)
 
     with RemoteOpenAIServer(MODEL_NAME,
                             args,

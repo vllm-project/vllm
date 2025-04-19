@@ -816,6 +816,7 @@ def run_phi4mm(questions: list[str], modality: str) -> ModelRequestData:
         trust_remote_code=True,
         max_model_len=5120,
         max_num_seqs=2,
+        max_num_batched_tokens=12800,
         enable_lora=True,
         max_lora_rank=320,
         # Note - mm_processor_kwargs can also be passed to generate/chat calls

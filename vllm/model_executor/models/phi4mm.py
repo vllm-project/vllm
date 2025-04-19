@@ -20,15 +20,15 @@ from vllm.model_executor.models.llama import LlamaModel
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.inputs import (MultiModalFieldConfig, MultiModalKwargs,
-                                    NestedTensors)
+from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig,
+                                    MultiModalKwargs, NestedTensors)
 from vllm.multimodal.parse import (AudioProcessorItems, ImageEmbeddingItems,
                                    ImageProcessorItems, ImageSize,
                                    MultiModalDataItems, MultiModalDataParser)
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
                                         BaseProcessingInfo, PromptReplacement,
                                         PromptUpdate)
-from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
+from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
 from vllm.utils import is_list_of
 
@@ -747,13 +747,25 @@ class Phi4MMProcessingInfo(BaseProcessingInfo):
 
 class Phi4MMDummyInputsBuilder(BaseDummyInputsBuilder[Phi4MMProcessingInfo]):
 
-    def get_dummy_processor_inputs(
+    def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
+        num_audios = mm_counts.get("audio", 0)
+        num_images = mm_counts.get("image", 0)
+
+        image_tokens: list[str] = self.info.image_tokens[:num_images]
+        audio_tokens: list[str] = self.info.audio_tokens[:num_audios]
+
+        return "".join(image_tokens + audio_tokens)
+
+    def get_dummy_mm_data(
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-    ) -> ProcessorInputs:
+    ) -> MultiModalDataDict:
         num_audios = mm_counts.get("audio", 0)
         num_images = mm_counts.get("image", 0)
+
+        target_width, target_height = \
+            self.info.get_image_size_with_most_features()
 
         target_width, target_height = \
             self.info.get_image_size_with_most_features()
@@ -768,13 +780,7 @@ class Phi4MMDummyInputsBuilder(BaseDummyInputsBuilder[Phi4MMProcessingInfo]):
                                    num_audios=num_audios),
         }
 
-        image_tokens: list[str] = self.info.image_tokens[:num_images]
-        audio_tokens: list[str] = self.info.audio_tokens[:num_audios]
-
-        return ProcessorInputs(
-            prompt_text="".join(image_tokens + audio_tokens),
-            mm_data=mm_data,
-        )
+        return mm_data
 
 
 class Phi4MMMultiModalProcessor(BaseMultiModalProcessor[Phi4MMProcessingInfo]):
