@@ -518,9 +518,6 @@ class Qwen2_5OmniThinkerMultiModalProcessor(
         """
         Qwen2.5-Omni reimplements this function to handle text only.
         """
-        print(prompt)
-        print(hf_processor_mm_kwargs)
-        print(mm_items)
         if isinstance(prompt, str):
             if enable_hf_prompt_update:
                 return self._apply_hf_processor_text_mm(
