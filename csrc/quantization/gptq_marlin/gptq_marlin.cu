@@ -512,10 +512,6 @@ void marlin_mm(const void* A, const void* B, void* C, void* C_tmp, void* s,
   TORCH_CHECK(max_shared_mem > 0);
 
   int m_split_sizes[2] = {prob_m / 64 * 64, prob_m - prob_m / 64 * 64};
-  if (m_split_sizes[1] > 48) {
-    m_split_sizes[0] = prob_m;
-    m_split_sizes[1] = 0;
-  }
 
   int max_shared_mem_new = max_shared_mem;
   for (int prob_m_split : m_split_sizes) {
@@ -589,11 +585,14 @@ void marlin_mm(const void* A, const void* B, void* C, void* C_tmp, void* s,
     cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize,
                          max_shared_mem_new);
 
+    bool part_use_atomic_add =
+        use_atomic_add && div_ceil(prob_m_split, 64) * prob_n <= 2048;
+
     // avoid ">>>" being formatted to "> > >"
     // clang-format off
     kernel<<<blocks, num_threads, max_shared_mem_new, stream>>>(
         A_ptr, B_ptr, C_ptr, C_tmp_ptr, s_ptr, zp_ptr, g_idx_ptr, num_groups,
-        prob_m_split, prob_n, prob_k, lda, locks, use_atomic_add,
+        prob_m_split, prob_n, prob_k, lda, locks, part_use_atomic_add,
         use_fp32_reduce, max_shared_mem_new);
     // clang-format on
 
