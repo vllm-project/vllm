@@ -22,7 +22,7 @@ MODELS = [
 ]
 
 TENSOR_PARALLEL_SIZES = [1]
-MAX_NUM_REQS = [16, 1924]
+MAX_NUM_REQS = [16, 1024]
 
 # TODO: Enable when CI/CD will have a multi-tpu instance
 # TENSOR_PARALLEL_SIZES = [1, 4]
@@ -40,6 +40,7 @@ def test_basic(
     model: str,
     max_tokens: int,
     tensor_parallel_size: int,
+    max_num_seqs: int,
 ) -> None:
     prompt = "The next numbers of the sequence " + ", ".join(
         str(i) for i in range(1024)) + " are:"
@@ -55,7 +56,7 @@ def test_basic(
                 max_num_batched_tokens=1024,
                 max_model_len=8192,
                 gpu_memory_utilization=0.7,
-                max_num_seqs=16,
+                max_num_seqs=max_num_seqs,
                 tensor_parallel_size=tensor_parallel_size) as vllm_model:
             vllm_outputs = vllm_model.generate_greedy(example_prompts,
                                                       max_tokens)
