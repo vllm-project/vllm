@@ -399,7 +399,10 @@ __global__ void Marlin(
       sh_block_sorted_ids_int4 + moe_block_size / 4;
   int4* sh_block_topk_weights_int4 =
       sh_rd_block_sorted_ids_int4 + moe_block_size / 4;
-  int4* sh_new = sh_block_topk_weights_int4 + moe_block_size / 4;
+  // sh_block_topk_weights_int4 only need (moe_block_size / 4);
+  // but we pad to align to 256 bytes
+  int4* sh_new =
+      sh_block_topk_weights_int4 + moe_block_size / 2 + moe_block_size;
   int32_t* sh_block_sorted_ids =
       reinterpret_cast<int*>(sh_block_sorted_ids_int4);
   int32_t* sh_rd_block_sorted_ids =
@@ -766,8 +769,8 @@ __global__ void Marlin(
                 stages * b_sh_stage);
   int4* sh_a = sh_s + sh_s_size;
   constexpr int shm_size_used =
-      moe_block_size * 3 / 4 + stages * (g_idx_stage + zp_sh_stage) +
-      sh_s_size + (sh_red_size > sh_b_size ? sh_red_size : sh_b_size);
+      moe_block_size + stages * (g_idx_stage + zp_sh_stage) + sh_s_size +
+      (sh_red_size > sh_b_size ? sh_red_size : sh_b_size);
 
   // all remaining shared memory is used to cache A (input)
   // sh_a_max_row is at least ` stages * 16 * thread_m_blocks `
@@ -831,9 +834,8 @@ __global__ void Marlin(
   // Asynchronously fetch the next A, B and s tile from global to the next
   // shared memory pipeline location.
   bool should_load_a = true;
-  int max_allowed_stage_data =
-      ((sh_a_max_row - moe_block_size) / block_num_valid_tokens + 1) / stages *
-      stages;
+  int max_num_stage_groups =
+      ((sh_a_max_row - moe_block_size) / block_num_valid_tokens + 1) / stages;
   auto fetch_to_shared = [&](int pipe, int a_off, bool pred = true,
                              int pipe_a = 0) {
     if (pred) {
@@ -1674,8 +1676,6 @@ __global__ void Marlin(
     // have even length meaning that the next iteration will always start at
     // index 0.
 
-    int max_num_stage_groups = max_allowed_stage_data / stages;
-
     for (int stage_group_id = 0; stage_group_id < max_num_stage_groups;
          stage_group_id++) {
   #pragma unroll
@@ -1820,13 +1820,13 @@ __global__ void Marlin(
       init_slice();
 
       if (slice_col == 0) {
-        max_allowed_stage_data =
+        max_num_stage_groups =
             ((sh_a_max_row - moe_block_size) / block_num_valid_tokens + 1) /
-            stages * stages;
+            stages;
       }
 
       if (slice_col == 0 || old_slice_row ||
-          prob_k > thread_k_blocks * 16 * max_allowed_stage_data) {
+          prob_k > thread_k_blocks * 16 * stages * max_num_stage_groups) {
         should_load_a = true;
       } else {
         should_load_a = false;

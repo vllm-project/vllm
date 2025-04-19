@@ -202,20 +202,21 @@ int get_scales_cache_size(thread_config_t const& th_config, int prob_m,
   }
 }
 
-int get_kernel_cache_size(thread_config_t const& th_config, int thread_m_blocks,
-                          int prob_m, int prob_n, int prob_k, int num_bits,
-                          int group_size, bool has_act_order, bool is_k_full,
-                          int has_zp, int is_zp_float) {
+int get_kernel_cache_size(thread_config_t const& th_config, bool m_block_size_8,
+                          int thread_m_blocks, int prob_m, int prob_n,
+                          int prob_k, int num_bits, int group_size,
+                          bool has_act_order, bool is_k_full, int has_zp,
+                          int is_zp_float) {
   int pack_factor = 32 / num_bits;
 
   // Get B size
   int tb_k = th_config.thread_k;
   int tb_n = th_config.thread_n;
-  int tb_m = thread_m_blocks * 16;
+  int tb_m = thread_m_blocks * (m_block_size_8 ? 8 : 16);
 
   // shm size for block_sorted_ids/rd_block_sorted_ids/block_topk_weights
   // both of them requires tb_m * 4 bytes (tb_m * int32 or tb_m * float32)
-  int sh_block_meta_size = tb_m * 4 * 3;
+  int sh_block_meta_size = tb_m * 4;
   int sh_a_size = pipe_stages * (tb_m * tb_k) * 2;
   int sh_b_size = pipe_stages * (tb_k * tb_n / pack_factor) * 4;
   int sh_red_size = tb_m * (tb_n + 8) * 2;
@@ -239,10 +240,11 @@ int get_kernel_cache_size(thread_config_t const& th_config, int thread_m_blocks,
   return total_size;
 }
 
-bool is_valid_config(thread_config_t const& th_config, int thread_m_blocks,
-                     int prob_m, int prob_n, int prob_k, int num_bits,
-                     int group_size, bool has_act_order, bool is_k_full,
-                     int has_zp, int is_zp_float, int max_shared_mem) {
+bool is_valid_config(thread_config_t const& th_config, bool m_block_size_8,
+                     int thread_m_blocks, int prob_m, int prob_n, int prob_k,
+                     int num_bits, int group_size, bool has_act_order,
+                     bool is_k_full, int has_zp, int is_zp_float,
+                     int max_shared_mem) {
   // Sanity
   if (th_config.thread_k == -1 || th_config.thread_n == -1 ||
       th_config.num_threads == -1) {
@@ -266,8 +268,8 @@ bool is_valid_config(thread_config_t const& th_config, int thread_m_blocks,
 
   // Check that pipeline fits into cache
   int cache_size = get_kernel_cache_size(
-      th_config, thread_m_blocks, prob_m, prob_n, prob_k, num_bits, group_size,
-      has_act_order, is_k_full, has_zp, is_zp_float);
+      th_config, m_block_size_8, thread_m_blocks, prob_m, prob_n, prob_k,
+      num_bits, group_size, has_act_order, is_k_full, has_zp, is_zp_float);
   return cache_size <= max_shared_mem;
 }
 
@@ -414,15 +416,15 @@ exec_config_t determine_exec_config(const vllm::ScalarType& q_type, int prob_m,
   for (int i = 0; i < thread_configs_size; i++) {
     thread_config_t th_config = thread_configs[i];
 
-    if (!is_valid_config(th_config, thread_m_blocks, prob_m, prob_n, prob_k,
-                         num_bits, group_size, has_act_order, is_k_full, has_zp,
-                         is_zp_float, max_shared_mem)) {
+    if (!is_valid_config(th_config, m_block_size_8, thread_m_blocks, prob_m,
+                         prob_n, prob_k, num_bits, group_size, has_act_order,
+                         is_k_full, has_zp, is_zp_float, max_shared_mem)) {
       continue;
     }
 
     int cache_size = get_kernel_cache_size(
-        th_config, thread_m_blocks, prob_m, prob_n, prob_k, num_bits,
-        group_size, has_act_order, is_k_full, has_zp, is_zp_float);
+        th_config, m_block_size_8, thread_m_blocks, prob_m, prob_n, prob_k,
+        num_bits, group_size, has_act_order, is_k_full, has_zp, is_zp_float);
 
     int group_blocks = 0;
     if (!has_act_order) {
@@ -588,18 +590,18 @@ void marlin_mm(const void* A, const void* B, void* C, void* C_tmp, void* s,
   int thread_k_blocks = thread_k / 16;
   int thread_n_blocks = thread_n / 16;
 
-  TORCH_CHECK(is_valid_config(thread_tfg, thread_m_blocks, prob_m, prob_n,
-                              prob_k, num_bits, group_size, has_act_order,
-                              is_k_full, has_zp, is_zp_float, max_shared_mem),
-              "Invalid thread config: thread_m_blocks = ", thread_m_blocks,
-              ", thread_k = ", thread_tfg.thread_k,
-              ", thread_n = ", thread_tfg.thread_n,
-              ", num_threads = ", thread_tfg.num_threads, " for MKN = [",
-              prob_m, ", ", prob_k, ", ", prob_n, "] and num_bits = ", num_bits,
-              ", group_size = ", group_size,
-              ", has_act_order = ", has_act_order, ", is_k_full = ", is_k_full,
-              ", has_zp = ", has_zp, ", is_zp_float = ", is_zp_float,
-              ", max_shared_mem = ", max_shared_mem);
+  TORCH_CHECK(
+      is_valid_config(thread_tfg, m_block_size_8, thread_m_blocks, prob_m,
+                      prob_n, prob_k, num_bits, group_size, has_act_order,
+                      is_k_full, has_zp, is_zp_float, max_shared_mem),
+      "Invalid thread config: thread_m_blocks = ", thread_m_blocks,
+      ", thread_k = ", thread_tfg.thread_k,
+      ", thread_n = ", thread_tfg.thread_n,
+      ", num_threads = ", thread_tfg.num_threads, " for MKN = [", prob_m, ", ",
+      prob_k, ", ", prob_n, "] and num_bits = ", num_bits,
+      ", group_size = ", group_size, ", has_act_order = ", has_act_order,
+      ", is_k_full = ", is_k_full, ", has_zp = ", has_zp,
+      ", is_zp_float = ", is_zp_float, ", max_shared_mem = ", max_shared_mem);
 
   auto kernel = get_marlin_kernel<scalar_t>(
       q_type, thread_m_blocks, thread_n_blocks, thread_k_blocks, m_block_size_8,
