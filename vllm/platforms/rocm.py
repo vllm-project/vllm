@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import os
+import subprocess
 from functools import cache, lru_cache, wraps
 from typing import TYPE_CHECKING, Dict, List, Optional
 
@@ -99,12 +100,24 @@ def device_id_to_physical_device_id(device_id: int) -> int:
 
 
 @cache
+def get_gcn_arch():
+    # Try to avoid torch cuda calls to avoid initializing CUDA
+    output = subprocess.check_output(['rocminfo']).decode()
+    for line in output.split('\n'):
+        if "Name:" in line and "gfx" in line:
+            print("init line", line.strip().split()[-1])
+            return line.strip().split()[-1]
+    # Fallback
+    return torch.cuda.get_device_properties("cuda").gcnArchName
+
+
+@cache
 def use_rocm_custom_paged_attention(qtype: torch.dtype, head_size: int,
                                     block_size: int, gqa_ratio: int,
                                     max_seq_len: int,
                                     sliding_window: int) -> bool:
 
-    GPU_ARCH = torch.cuda.get_device_properties("cuda").gcnArchName
+    GPU_ARCH = get_gcn_arch()
     ON_NAVI = "gfx1" in GPU_ARCH
     ON_MI250_MI300 = any(arch in GPU_ARCH for arch in ["gfx90a", "gfx942"])
 
@@ -286,13 +299,13 @@ class RocmPlatform(Platform):
 
     @classmethod
     def supports_fp8(cls) -> bool:
-        gcn_arch = torch.cuda.get_device_properties(0).gcnArchName
-        return any(gfx in gcn_arch for gfx in ['gfx94', 'gfx95', 'gfx12'])
+        return any(gfx in get_gcn_arch()
+                   for gfx in ['gfx94', 'gfx95', 'gfx12'])
 
     @classmethod
     def is_fp8_fnuz(cls) -> bool:
         # only device 0 is checked, this assumes MI300 platforms are homogeneous
-        return 'gfx94' in torch.cuda.get_device_properties(0).gcnArchName
+        return 'gfx94' in get_gcn_arch()
 
     @classmethod
     def fp8_dtype(cls) -> torch.dtype:
@@ -309,6 +322,5 @@ class RocmPlatform(Platform):
     @classmethod
     def use_custom_allreduce(cls) -> bool:
         # We only enable custom allreduce for MI300 series
-        gcn_arch = torch.cuda.get_device_properties(0).gcnArchName
         supported_archs = ['gfx94']
-        return any(gfx in gcn_arch for gfx in supported_archs)
+        return any(gfx in get_gcn_arch() for gfx in supported_archs)
