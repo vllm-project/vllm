@@ -535,14 +535,14 @@ def torch_pplx_moe(pgi, dp_size, a, w1, w2, scores, topk):
 
     dispatch_combine = PplxDispatchCombine(
         ata,
-        max_num_tokens, # // world_size?
+        max_num_tokens,
         pgi.world_size,
         dp_size,
         rank,
         a.dtype,
     )
 
-    experts = BatchedExperts(max_num_tokens, rank)
+    experts = BatchedExperts(rank, pgi.world_size, max_num_tokens)
 
     fused_experts = FusedMoEModularKernel(
         dispatch_combine,
@@ -560,6 +560,8 @@ def torch_pplx_moe(pgi, dp_size, a, w1, w2, scores, topk):
         # Chunking weights like this only works for batched format
         chunk_by_rank(w1, rank, world_size),
         chunk_by_rank(w2, rank, world_size),
+        #w1,
+        #w2,
         chunk_topk_weight,
         chunk_topk_ids,
         global_num_experts=num_experts #? num_local_experts?

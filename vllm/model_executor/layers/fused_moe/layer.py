@@ -262,8 +262,8 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         #print(f"block_m = {block_m}")
 
         if isinstance(dispatch_combine, (BatchedDispatchCombine, PplxDispatchCombine)):
-            logger.info("BatchedExperts")
-            experts = BatchedExperts()
+            logger.info(f"BatchedExperts {self.moe}")
+            experts = BatchedExperts() #rank=self.moe.ep_rank, world_size=self.moe.ep_size)
         else:
             experts = TritonExperts(
                 use_fp8_w8a8 = False,
