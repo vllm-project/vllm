@@ -1229,12 +1229,12 @@ class MRotaryEmbedding(RotaryEmbedding):
             ]:
                 if use_audio_in_video and idx > 0:
                     if src_item[idx] == vision_end_token_id and \
-                        # processing the <|audio_eos|> before <|vision_eos|>
                         src_item[idx - 1] == audio_end_token_id:
+                        # processing the <|audio_eos|> before <|vision_eos|>
                         start_idx -= 1
                     elif src_item[idx] == audio_start_token_id and \
-                        # processing the <|audio_bos|> after <|vision_eos|>
                         src_item[idx - 1] == vision_start_token_id:
+                        # processing the <|audio_bos|> after <|vision_eos|>
                         start_idx -= 1
                 new_src_item.append(src_item[idx])
                 llm_pos_ids = torch.tensor([start_idx],
