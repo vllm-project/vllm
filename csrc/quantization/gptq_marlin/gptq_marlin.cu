@@ -512,10 +512,16 @@ void marlin_mm(const void* A, const void* B, void* C, void* C_tmp, void* s,
   TORCH_CHECK(max_shared_mem > 0);
 
   int m_split_sizes[2] = {prob_m / 64 * 64, prob_m - prob_m / 64 * 64};
+  int max_par = 16;
+  if (n <= 4096) max_par = 16 * 8;
 
   int max_shared_mem_new = max_shared_mem;
-  for (int prob_m_split : m_split_sizes) {
-    if (prob_m_split == 0) continue;
+  int rest_m = prob_m;
+  while (rest_m) {
+    int par_count = rest_m / 64;
+    if (par_count > max_par) par_count = max_par;
+    int prob_m_split = par_count > 0 ? (par_count * 64) : rest_m;
+    rest_m -= prob_m_split;
 
     int thread_k = thread_k_init;
     int thread_n = thread_n_init;

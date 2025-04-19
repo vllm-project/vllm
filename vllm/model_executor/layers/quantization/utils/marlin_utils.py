@@ -7,11 +7,14 @@ import torch
 
 import vllm.envs as envs
 from vllm import _custom_ops as ops
+from vllm.logger import init_logger
 from vllm.model_executor.layers.linear import LinearBase
 from vllm.platforms import current_platform
 from vllm.scalar_type import ScalarType, scalar_types
 
 from .quant_utils import pack_cols, unpack_cols
+
+logger = init_logger(__name__)
 
 GPTQ_MARLIN_TILE = 16
 GPTQ_MARLIN_MIN_THREAD_N = 64
@@ -316,6 +319,15 @@ def moe_awq_to_marlin_zero_points(q_zp_packed: torch.Tensor, size_k: int,
     return output
 
 
+def maybe_warn_marlin_atomic_add(device, dtype):
+    device_capability = torch.cuda.get_device_capability(device)
+    if device_capability[0] < 9 and dtype == torch.bfloat16:
+        logger.info_once(
+            "You are running Marlin kernel with bf16 on GPUs before SM90. "
+            "You can consider change to fp16 to achieve better performance "
+            "if possible.")
+
+
 def should_use_atomic_add_reduce(m: int, n: int, k: int, device: torch.device,
                                  dtype: torch.dtype) -> bool:
     # disable atomicAdd reduce by default,
@@ -323,14 +335,18 @@ def should_use_atomic_add_reduce(m: int, n: int, k: int, device: torch.device,
     if not envs.VLLM_MARLIN_USE_ATOMIC_ADD or device.type != "cuda":
         return False
 
+    # the performance of atomicAdd is better than global reduce
+    # only when m*n is small and k is large
+    if n >= 2048 or k < 2048:
+        return False
+
     # sm8x doesn't support atomicAdd + bfloat16 natively
     device_capability = torch.cuda.get_device_capability(device)
     if device_capability[0] < 9 and dtype == torch.bfloat16:
+        maybe_warn_marlin_atomic_add(device, dtype)
         return False
 
-    # the performance of atomicAdd is better than global reduce
-    # only when m*n is small and k is large
-    return n < 2048 and k >= 2048
+    return True
 
 
 def apply_gptq_marlin_linear(

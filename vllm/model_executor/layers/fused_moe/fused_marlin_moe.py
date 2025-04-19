@@ -9,7 +9,7 @@ import vllm._custom_ops as ops
 from vllm.model_executor.layers.fused_moe.fused_moe import (
     moe_align_block_size, try_get_optimal_moe_config)
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
-    marlin_make_workspace_new)
+    marlin_make_workspace_new, maybe_warn_marlin_atomic_add)
 from vllm.scalar_type import ScalarType, scalar_types
 from vllm.utils import direct_register_custom_op
 
@@ -67,8 +67,8 @@ def fused_marlin_moe(hidden_states: torch.Tensor,
         scalar_types.float8_e4m3fn
     ]
 
-    num_bits = 4 if quant_type in [scalar_types.uint4, scalar_types.uint4b8
-                                   ] else 8
+    int4_scalar_types = [scalar_types.uint4, scalar_types.uint4b8]
+    num_bits = 4 if quant_type in int4_scalar_types else 8
 
     # Check constraints.
     assert hidden_states.shape[0] == gating_output.shape[
@@ -124,6 +124,11 @@ def fused_marlin_moe(hidden_states: torch.Tensor,
     intermediate_cache3 = intermediate_cache13[:M * topk_ids.shape[1] * K]
     intermediate_cache3 = intermediate_cache3.view(-1, K)
 
+    maybe_warn_marlin_atomic_add(hidden_states.device,
+                                 hidden_states.dtype == torch.half)
+    use_atomic_add = hidden_states.dtype == torch.half or \
+        torch.cuda.get_device_capability(hidden_states.device)[0] >= 9
+
     intermediate_cache1 = ops.moe_wna16_marlin_gemm(
         hidden_states,
         intermediate_cache1,
@@ -146,7 +151,7 @@ def fused_marlin_moe(hidden_states: torch.Tensor,
         size_n=2 * N,
         size_k=K,
         is_k_full=is_k_full,
-        use_atomic_add=False,
+        use_atomic_add=use_atomic_add,
         use_fp32_reduce=True,
         is_zp_float=False)
 
@@ -178,7 +183,7 @@ def fused_marlin_moe(hidden_states: torch.Tensor,
         size_n=K,
         size_k=N,
         is_k_full=is_k_full,
-        use_atomic_add=False,
+        use_atomic_add=use_atomic_add,
         use_fp32_reduce=True,
         is_zp_float=False).view(-1, topk, K)
 
