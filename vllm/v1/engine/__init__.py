@@ -153,8 +153,9 @@ class EngineCoreRequestType(enum.Enum):
     without separate encoding step.
     """
     ADD = b'\x00'
-    ABORT = b'\x01'
-    START_DP = b'\x02'
-    UTILITY = b'\x03'
+    ADD_BATCHED = b'\x01'
+    ABORT = b'\x02'
+    START_DP = b'\x03'
+    UTILITY = b'\x04'
     # Sentinel used within EngineCoreProc.
-    EXECUTOR_FAILED = b'\x04'
+    EXECUTOR_FAILED = b'\x05'
