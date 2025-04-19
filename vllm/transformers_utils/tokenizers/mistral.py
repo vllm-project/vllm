@@ -17,6 +17,7 @@ if TYPE_CHECKING:
     # make sure `mistral_common` is lazy imported,
     # so that users who only use non-mistral models
     # will not be bothered by the dependency.
+    from mistral_common.exceptions import MistralCommonException
     from mistral_common.protocol.instruct.request import ChatCompletionRequest
     from mistral_common.tokens.tokenizers.mistral import (
         MistralTokenizer as PublicMistralTokenizer)
@@ -375,8 +376,15 @@ class MistralTokenizer(TokenizerBase):
                             tools: Optional[List[Dict[str, Any]]] = None,
                             **kwargs) -> List[int]:
 
-        request = make_mistral_chat_completion_request(messages, tools)
-        encoded = self.mistral.encode_chat_completion(request)
+        try:
+
+            request = make_mistral_chat_completion_request(messages, tools)
+            encoded = self.mistral.encode_chat_completion(request)
+
+        # Mistral requests are only validated within the scope of
+        # `encode_chat_completion`.
+        except MistralCommonException as e:
+            raise AssertionError from e
 
         # encode-decode to get clean prompt
         return encoded.tokens
