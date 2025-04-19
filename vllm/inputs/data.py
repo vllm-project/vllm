@@ -293,9 +293,10 @@ class SingletonInputsAdapter:
     def prompt_embeds(self) -> Optional[torch.Tensor]:
         inputs = self.inputs
 
-        if inputs["type"] == "embeds":
+        if inputs["type"] == "token" or inputs["type"] == "multimodal":
             return inputs.get("prompt_embeds")
-        return None
+
+        assert_never(inputs)  # type: ignore[arg-type]
 
     @cached_property
     def multi_modal_data(self) -> "MultiModalDataDict":
