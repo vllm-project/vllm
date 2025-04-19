@@ -47,3 +47,5 @@ opentelemetry-sdk>=1.26.0,<1.27.0  # vllm.tracing
 opentelemetry-api>=1.26.0,<1.27.0  # vllm.tracing
 opentelemetry-exporter-otlp>=1.26.0,<1.27.0  # vllm.tracing
 opentelemetry-semantic-conventions-ai>=0.4.1,<0.5.0  # vllm.tracing
+numba == 0.60.0; python_version == '3.9' # v0.61 doesn't support Python 3.9. Required for N-gram speculative decoding & Qwen2/2.5-VL
+numba == 0.61.2; python_version > '3.9'
