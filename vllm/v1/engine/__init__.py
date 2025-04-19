@@ -104,8 +104,6 @@ class EngineCoreOutput(
     finish_reason: Optional[FinishReason] = None
     stop_reason: Union[int, str, None] = None
     events: Optional[list[EngineCoreEvent]] = None
-
-    # In P/D case, used to trigger remote decode
     kv_transfer_params: Optional[KVTransferParams] = None
 
     @property
