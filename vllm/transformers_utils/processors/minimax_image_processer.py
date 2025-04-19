@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 from typing import Dict, Iterable, List, Optional, Tuple, Union
 
 import numpy as np
@@ -365,7 +366,7 @@ class ImageProcessor(BaseImageProcessor):
         image_std: Optional[Union[float, List[float]]] = None,
         process_image_mode: Optional[str] = 'resize',
         patch_size: Optional[int] = 14,
-        image_grid_pinpoints: List = None,
+        image_grid_pinpoints: Optional[List[List[int]]] = None,
         **kwargs,
     ) -> None:
         super().__init__(**kwargs)
@@ -420,6 +421,12 @@ class ImageProcessor(BaseImageProcessor):
             **kwargs):
         images = make_list_of_images(images)
         all_images = []
+
+        if self.size is None or not isinstance(self.size, (list, tuple)):
+            raise ValueError(
+                "size must be a tuple or list of (width, height), but got {}".
+                format(self.size))
+
         for image in images:
             resized_image = image.resize(self.size, Image.BICUBIC)
             transform_img = _transform(self.size[1], self.size[0],
@@ -446,6 +453,12 @@ class ImageProcessor(BaseImageProcessor):
             **kwargs):
         images = make_list_of_images(images)
         all_images = []
+
+        if self.size is None or not isinstance(self.size, (list, tuple)):
+            raise ValueError(
+                "size must be a tuple or list of (width, height), but got {}".
+                format(self.size))
+
         for image in images:
             resized_image = keepratio_resize(image, self.size)
             transform_img = _transform(self.size[1], self.size[0],
@@ -506,6 +519,11 @@ class ImageProcessor(BaseImageProcessor):
 
         best_resolution = select_best_resolution(data.size,
                                                  image_grid_pinpoints)
+
+        if self.size is None or not isinstance(self.size, (list, tuple)):
+            raise ValueError(
+                "size must be a tuple or list of (width, height), but got {}".
+                format(self.size))
 
         resized_data, scale = keepratio_resize(data,
                                                best_resolution,
@@ -577,6 +595,11 @@ class ImageProcessor(BaseImageProcessor):
         new_images = []
         image_sizes = []
 
+        if self.size is None or not isinstance(self.size, (list, tuple)):
+            raise ValueError(
+                "size must be a tuple or list of (width, height), but got {}".
+                format(self.size))
+
         for image in images:
             ori_w, ori_h = image.size
             image_sizes.append([ori_h, ori_w])
@@ -613,6 +636,11 @@ class ImageProcessor(BaseImageProcessor):
         images = make_list_of_images(images)
         new_images = []
         image_sizes = []
+
+        if self.size is None or not isinstance(self.size, (list, tuple)):
+            raise ValueError(
+                "size must be a tuple or list of (width, height), but got {}".
+                format(self.size))
 
         for image in images:
             ori_w, ori_h = image.size

@@ -1,5 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
 import os
-from typing import List, Union
+from typing import List, TypedDict, Union
 
 from transformers.feature_extraction_utils import BatchFeature
 from transformers.image_utils import ImageInput, get_image_size, to_numpy_array
@@ -12,7 +13,7 @@ logger = logging.get_logger(__name__)
 LEGACY_PROCESSING = int(os.getenv('LEGACY_PROCESSING', 1))
 
 
-class MiniMaxVL01ProcessorKwargs(ProcessingKwargs, total=False):
+class MiniMaxVL01ProcessorKwargs(ProcessingKwargs, TypedDict, total=False):
     _defaults = {
         "text_kwargs": {
             "padding": False,
