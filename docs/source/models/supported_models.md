@@ -1117,8 +1117,8 @@ Our PaliGemma implementations have the same problem as Gemma 3 (see above) for b
 :::
 
 :::{note}
-To use Qwen2.5-Omni, you have to install a fork of Hugging Face Transformers library from source via
-`pip install git+https://github.com/BakerBunker/transformers.git@qwen25omni`.
+To use Qwen2.5-Omni, you have to install Hugging Face Transformers library from source via
+`pip install git+https://github.com/huggingface/transformers.git`.
 
 Read audio from video pre-processing is currently supported on V0 (but not V1), because overlapping modalities is not yet supported in V1.
 `--mm-processor-kwargs '{"use_audio_in_video": True}'`.
