@@ -338,6 +338,9 @@ class EngineCoreProc(EngineCore):
             output_address = self.startup_handshake(
                 input_socket, on_head_node, vllm_config.parallel_config)
 
+            # Update config which may have changed from the handshake.
+            vllm_config.__post_init__()
+
             # Set up data parallel environment.
             self._init_data_parallel(vllm_config)
 
@@ -436,7 +439,7 @@ class EngineCoreProc(EngineCore):
         try:
             parallel_config: ParallelConfig = kwargs[
                 "vllm_config"].parallel_config
-            if parallel_config.data_parallel_size > 1:
+            if parallel_config.data_parallel_size > 1 or dp_rank > 0:
                 # Set data parallel rank for this engine process.
                 parallel_config.data_parallel_rank = dp_rank
                 parallel_config.data_parallel_rank_local = local_dp_rank

@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import argparse
+import signal
 
 import uvloop
 
@@ -65,8 +66,7 @@ class ServeSubcommand(CLISubcommand):
             '-dpr',
             type=int,
             default=0,
-            help='Starting data parallel rank for secondary '
-            'nodes.')
+            help='Starting data parallel rank for secondary nodes.')
         serve_parser.add_argument(
             "--config",
             type=str,
@@ -104,6 +104,14 @@ def run_headless(args: argparse.Namespace):
         raise RuntimeError("data_parallel_size_local must be > 0 in "
                            "headless mode")
 
+    # Catch SIGTERM and SIGINT to allow graceful shutdown.
+    def signal_handler(signum, frame):
+        logger.debug("Received %d signal.", signum)
+        raise SystemExit
+
+    signal.signal(signal.SIGTERM, signal_handler)
+    signal.signal(signal.SIGINT, signal_handler)
+
     logger.info(
         "Launching %d data parallel engine(s) in headless mode, "
         "with head node address %s.", local_engine_count, input_address)
@@ -124,4 +132,5 @@ def run_headless(args: argparse.Namespace):
     try:
         engine_manager.join_first()
     finally:
+        logger.info("Shutting down.")
         engine_manager.close()
