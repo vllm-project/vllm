@@ -810,7 +810,7 @@ class CompletionRequest(OpenAIBaseModel):
 
     kv_transfer_params: Optional[KVTransferParams] = Field(
         default=None,
-        description="KVTransfer parameters used for P/D disaggregation.")
+        description="KVTransfer parameters used for disaggregated serving.")
 
     # doc: end-completion-extra-params
 
