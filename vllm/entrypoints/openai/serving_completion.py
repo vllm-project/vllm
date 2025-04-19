@@ -184,7 +184,8 @@ class OpenAIServingCompletion(OpenAIServing):
         # we do not stream the results when use beam search.
         stream = (request.stream
                   and (request.best_of is None or request.n == request.best_of)
-                  and not request.use_beam_search)
+                  and not request.use_beam_search
+                  and not request.kv_transfer_params.do_remote_decode)
 
         # Streaming response
         if stream:
@@ -476,12 +477,15 @@ class OpenAIServingCompletion(OpenAIServing):
 
         request_metadata.final_usage_info = usage
 
+        # TODO(rob): assert somewhere that we dont have a batch req.
+        assert (len(final_res_batch) == 1)
         return CompletionResponse(
             id=request_id,
             created=created_time,
             model=model_name,
             choices=choices,
             usage=usage,
+            kv_transfer_params=final_res_batch[0].kv_transfer_params,
         )
 
     def _create_completion_logprobs(

@@ -10,13 +10,13 @@ import msgspec
 from vllm.lora.request import LoRARequest
 from vllm.multimodal import MultiModalKwargs
 from vllm.multimodal.inputs import PlaceholderRange
-from vllm.sampling_params import SamplingParams
+from vllm.sampling_params import KVTransferParams, SamplingParams
 from vllm.v1.metrics.stats import SchedulerStats
 from vllm.v1.outputs import LogprobsLists, LogprobsTensors
 
 # These are possible values of RequestOutput.finish_reason,
 # so form part of the external API.
-FINISH_REASON_STRINGS = ("stop", "length", "abort")
+FINISH_REASON_STRINGS = ("stop", "length", "abort", "remote_decode")
 
 
 class FinishReason(enum.IntEnum):
@@ -28,11 +28,13 @@ class FinishReason(enum.IntEnum):
     stop - a stop string was emitted
     length - max_tokens was consumed, or max_model_len was reached
     abort - aborted for another reason
+    remote_decode - request will be processed as a remote_decode 
 
     """
     STOP = 0
     LENGTH = 1
     ABORT = 2
+    REMOTE_DECODE = 3
 
     def __str__(self):
         return FINISH_REASON_STRINGS[self.value]
@@ -102,6 +104,9 @@ class EngineCoreOutput(
     finish_reason: Optional[FinishReason] = None
     stop_reason: Union[int, str, None] = None
     events: Optional[list[EngineCoreEvent]] = None
+
+    # In P/D case, used to trigger remote decode
+    kv_transfer_params: Optional[KVTransferParams] = None
 
     @property
     def finished(self) -> bool:

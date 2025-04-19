@@ -719,7 +719,6 @@ class Scheduler(SchedulerInterface):
 
                 # Check for stop and update request state.
                 # This must be called before we make the EngineCoreOutput.
-                # TODO: What if we detect we're done here when doing P/D disagg?
                 stopped = check_stop(request, self.max_model_len)
                 if stopped:
                     self._free_request(request)
@@ -741,7 +740,21 @@ class Scheduler(SchedulerInterface):
 
             # Get prompt logprobs for this request.
             prompt_logprobs_tensors = prompt_logprobs_dict.get(req_id)
+
+            # NOTE: new_token_ids is None if we have a partial prefill.
             if new_token_ids:
+                # If remote_decode, stop the request in the engine and add
+                # it to the sending KVs state. We hold onto this request in the
+                # engine until the sending is done.
+                kv_transfer_params = None
+                if request.do_remote_decode and not stopped:
+                    assert self.connector is not None
+                    stopped = True
+                    request.status = RequestStatus.FINISHED_REMOTE_DECODE
+                    self.sending_KV_req_ids.add(req_id)
+                    kv_transfer_params = self.connector.make_transfer_params(
+                        request=request, remote_decode=True)
+
                 # Add EngineCoreOutput for this Request.
                 outputs.append(
                     EngineCoreOutput(
@@ -751,17 +764,13 @@ class Scheduler(SchedulerInterface):
                         new_logprobs=new_logprobs,
                         new_prompt_logprobs_tensors=prompt_logprobs_tensors,
                         stop_reason=request.stop_reason,
-                        events=request.take_events()))
+                        events=request.take_events(),
+                        kv_transfer_params=kv_transfer_params,
+                    ))
+
             else:
                 # Invariant: EngineCore returns no partial prefill outputs.
                 assert not prompt_logprobs_tensors
-
-            if self.connector is not None and request.do_remote_decode:
-                stopped = True
-                self.waiting_to_send_KV_req_ids.add(req_id)
-                # TODO: Add ZMQ request
-                #self.connector.send_remote_decode_request(
-                #    self.kv_cache_manager.req_to_blocks[req_id])
 
             self.scheduled_req_ids.remove(req_id)
             if not stopped:

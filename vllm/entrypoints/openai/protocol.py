@@ -17,7 +17,8 @@ from vllm.entrypoints.chat_utils import ChatCompletionMessageParam
 from vllm.logger import init_logger
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import (BeamSearchParams, GuidedDecodingParams,
-                                  RequestOutputKind, SamplingParams)
+                                  KVTransferParams, RequestOutputKind,
+                                  SamplingParams)
 from vllm.sequence import Logprob
 from vllm.utils import random_uuid, resolve_obj_by_qualname
 
@@ -807,6 +808,9 @@ class CompletionRequest(OpenAIBaseModel):
             " as strings of the form 'token_id:{token_id}' so that tokens "
             "that are not JSON-encodable can be identified."))
 
+    kv_transfer_params: Optional[KVTransferParams] = Field(
+        default=None, description=("TODO"))
+
     # doc: end-completion-extra-params
 
     # Default sampling parameters for completion requests
@@ -932,7 +936,9 @@ class CompletionRequest(OpenAIBaseModel):
                 else RequestOutputKind.FINAL_ONLY,
             guided_decoding=guided_decoding,
             logit_bias=self.logit_bias,
-            allowed_token_ids=self.allowed_token_ids)
+            allowed_token_ids=self.allowed_token_ids,
+            kv_transfer_params=self.kv_transfer_params,
+        )
 
     @model_validator(mode="before")
     @classmethod
@@ -1182,6 +1188,7 @@ class CompletionResponse(OpenAIBaseModel):
     model: str
     choices: list[CompletionResponseChoice]
     usage: UsageInfo
+    kv_transfer_params: Optional[KVTransferParams] = Field(default=None)
 
 
 class CompletionResponseStreamChoice(OpenAIBaseModel):
