@@ -26,6 +26,8 @@ def server():
         "2048",
         "--max-num-seqs",
         "5",
+        "--max_num_batched_tokens",
+        "3072",
         "--enforce-eager",
         "--trust-remote-code",
         "--limit-mm-per-prompt",

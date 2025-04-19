@@ -212,20 +212,29 @@ class MultiModalProfiler(Generic[_I]):
             num_tokens_to_pad = max(total_len, seq_len) - total_len
             encoder_prompt_token_ids.extend([0] * num_tokens_to_pad)
         # NOTE: Whisper allows total_len > seq_len.
-        elif total_len > seq_len and not envs.VLLM_USE_V1:
+        elif total_len > seq_len:
             # `max_num_batched_tokens` is defined by `SchedulerConfig`
-            logger.warning_once(
-                "The encoder sequence length used for profiling ("
+            message = (
+                "The sequence length used for profiling ("
                 f"max_num_batched_tokens / max_num_seqs = {seq_len}) "
-                " is too short "
+                "is too short "
                 "to hold the multi-modal embeddings in the worst case "
                 f"({total_len} tokens in total, out of which "
                 f"{self._get_mm_num_tokens(mm_inputs)} are reserved for "
                 "multi-modal embeddings). This may cause certain "
                 "multi-modal inputs to fail during inference, even when "
                 "the input text is short. To avoid this, you should "
-                "increase `max_model_len`, reduce `max_num_seqs`, "
-                "and/or reduce `mm_counts`.")
+                "increase `max_model_len` and `max_num_batched_tokens`, "
+                "reduce `max_num_seqs`, and/or reduce `mm_counts`.")
+            # V0 does not support chunked prefill.
+            logger.warning_once(message)
+            # V1 enabled chunked prefill by default, and too short
+            # max_num_batched_tokens can cause correctness issue,
+            # so we need to raise error to avoid it.
+            # TODO(Isotr0py): activate the below logic once V1 support
+            # encoder-decoder models.
+            # if envs.VLLM_USE_V1:
+            #     raise ValueError(message)
 
         return DummyEncoderData(encoder_prompt_token_ids)
 
@@ -239,10 +248,9 @@ class MultiModalProfiler(Generic[_I]):
         prompt_token_ids = mm_inputs["prompt_token_ids"]
         total_len = len(prompt_token_ids)
 
-        # V0 does not support chunked prefill.
-        if total_len > seq_len and not envs.VLLM_USE_V1:
+        if total_len > seq_len:
             # `max_num_batched_tokens` is defined by `SchedulerConfig`
-            logger.warning_once(
+            message = (
                 "The sequence length used for profiling ("
                 f"max_num_batched_tokens / max_num_seqs = {seq_len}) "
                 "is too short "
@@ -252,8 +260,15 @@ class MultiModalProfiler(Generic[_I]):
                 "multi-modal embeddings). This may cause certain "
                 "multi-modal inputs to fail during inference, even when "
                 "the input text is short. To avoid this, you should "
-                "increase `max_model_len`, reduce `max_num_seqs`, "
-                "and/or reduce `mm_counts`.")
+                "increase `max_model_len` and `max_num_batched_tokens`, "
+                "reduce `max_num_seqs`, and/or reduce `mm_counts`.")
+            # V1 enabled chunked prefill by default, and too short
+            # max_num_batched_tokens can cause correctness issue,
+            # so we need to raise error to avoid it.
+            if envs.VLLM_USE_V1:
+                raise ValueError(message)
+            # V0 does not support chunked prefill.
+            logger.warning_once(message)
 
         if total_len < seq_len:
             prompt_token_ids.extend([0] * (seq_len - total_len))
