@@ -1371,6 +1371,10 @@ class TranscriptionStreamResponse(OpenAIBaseModel):
     usage: Optional[UsageInfo] = Field(default=None)
 
 
+BatchRequestInputBody = Union[ChatCompletionRequest, EmbeddingRequest,
+                              ScoreRequest, RerankRequest]
+
+
 class BatchRequestInput(OpenAIBaseModel):
     """
     The per-line object of the batch input file.
@@ -1391,21 +1395,22 @@ class BatchRequestInput(OpenAIBaseModel):
     url: str
 
     # The parameters of the request.
-    body: Union[ChatCompletionRequest, EmbeddingRequest, ScoreRequest]
+    body: BatchRequestInputBody
 
     @field_validator('body', mode='plain')
     @classmethod
     def check_type_for_url(cls, value: Any, info: ValidationInfo):
         # Use url to disambiguate models
-        url = info.data['url']
+        url: str = info.data["url"]
         if url == "/v1/chat/completions":
             return ChatCompletionRequest.model_validate(value)
         if url == "/v1/embeddings":
             return TypeAdapter(EmbeddingRequest).validate_python(value)
-        if url == "/v1/score":
+        if url.endswith("/score"):
             return ScoreRequest.model_validate(value)
-        return TypeAdapter(Union[ChatCompletionRequest, EmbeddingRequest,
-                                 ScoreRequest]).validate_python(value)
+        if url.endswith("/rerank"):
+            return RerankRequest.model_validate(value)
+        return TypeAdapter(BatchRequestInputBody).validate_python(value)
 
 
 class BatchResponseData(OpenAIBaseModel):
@@ -1417,7 +1422,7 @@ class BatchResponseData(OpenAIBaseModel):
 
     # The body of the response.
     body: Optional[Union[ChatCompletionResponse, EmbeddingResponse,
-                         ScoreResponse]] = None
+                         ScoreResponse, RerankResponse]] = None
 
 
 class BatchRequestOutput(OpenAIBaseModel):
@@ -1597,9 +1602,9 @@ class TranscriptionRequest(OpenAIBaseModel):
     """
 
     stream: Optional[bool] = False
-    """Custom field not present in the original OpenAI definition. When set, 
+    """Custom field not present in the original OpenAI definition. When set,
     it will enable output to be streamed in a similar fashion as the Chat
-    Completion endpoint. 
+    Completion endpoint.
     """
     # Flattened stream option to simplify form data.
     stream_include_usage: Optional[bool] = False
