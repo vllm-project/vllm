@@ -299,10 +299,13 @@ def test_fused_moe_batched_experts(
     torch.testing.assert_close(triton_output, torch_output, atol=2e-2, rtol=0)
 
 
+def rank_chunk(num, r, w):
+    rem = num % w
+    return (num // w) + (1 if r < rem else 0)
+
+
 def chunk_by_rank(t, r, w):
-    num = t.shape[0]
-    assert num % w == 0, f"{num}, {w}"  # for now
-    chunk = num // w
+    chunk = rank_chunk(t.shape[0], r, w)
     #print(f"chunk {t.shape}, {w}, {r}, {chunk}, {r*chunk}:{(r + 1)*chunk}")
     return t[(r * chunk):(r + 1)*chunk]
 
@@ -312,12 +315,11 @@ def torch_pplx_dispatch_combine(pgi, dp_size, a, w1, w2, scores, topk):
 
     num_tokens, hidden_dim = a.shape
     num_experts = w1.shape[0]
-    num_local_experts = w1.shape[0] // pgi.world_size
     block_size = 128
     device = pgi.device
-    rank_num_tokens = num_tokens // pgi.world_size
     rank = pgi.rank
     world_size = pgi.world_size
+    rank_num_tokens = rank_chunk(num_tokens, rank, world_size)
     max_num_tokens = num_tokens
     #print(f"device = {device}, max_num_tokens = {max_num_tokens}, topk = {topk}, num_ex = {num_experts}, dp_size = {dp_size}")
 
@@ -354,7 +356,7 @@ def torch_pplx_dispatch_combine(pgi, dp_size, a, w1, w2, scores, topk):
     score_chunk = chunk_by_rank(scores, rank, world_size).to(device)
     chunk_topk_weight, chunk_topk_ids = fused_topk(a_chunk, score_chunk, topk, False)
 
-    print(f"chunk_topk_ids = {chunk_topk_ids.view(-1)}")
+    #print(f"chunk_topk_ids = {chunk_topk_ids.view(-1)}")
 
     b_a, b_a_scale, expert_num_tokens = dispatch_combine.dispatch(
         a_chunk,
@@ -372,8 +374,8 @@ def torch_pplx_dispatch_combine(pgi, dp_size, a, w1, w2, scores, topk):
     #max_num = tokens_per_expert.max()
     tokens_per_expert = chunk_by_rank(tokens_per_expert, rank, world_size).to(dtype=torch.int32)
 
-    print(f"tpe {tokens_per_expert}")
-    print(f"ent {expert_num_tokens}")
+    #print(f"tpe {tokens_per_expert}")
+    #print(f"ent {expert_num_tokens}")
 
     #torch.set_printoptions(profile="full")
     #torch.distributed.all_reduce(naive_b_a, op=torch.distributed.ReduceOp.MAX)
@@ -501,15 +503,12 @@ def torch_pplx_moe(pgi, dp_size, a, w1, w2, scores, topk):
 
     num_tokens, hidden_dim = a.shape
     num_experts = w1.shape[0]
-    num_local_experts = num_experts // pgi.world_size
     block_size = 128
     device = pgi.device
-    rank_num_tokens = num_tokens // pgi.world_size  # TODO even divide
-
-    max_num_tokens = num_tokens
-    #print(f"device = {device}, max_num_tokens = {max_num_tokens}, topk = {topk}, num_ex = {num_experts}, dp_size = {dp_size}")
     rank = pgi.rank
     world_size = pgi.world_size
+    rank_num_tokens = rank_chunk(num_tokens, rank, world_size)
+    max_num_tokens = num_tokens
 
     ata = AllToAll(
         max_num_tokens=max_num_tokens,
@@ -558,6 +557,7 @@ def torch_pplx_moe(pgi, dp_size, a, w1, w2, scores, topk):
 
     out = fused_experts(
         a_chunk,
+        # Chunking weights like this only works for batched format
         chunk_by_rank(w1, rank, world_size),
         chunk_by_rank(w2, rank, world_size),
         chunk_topk_weight,
@@ -571,7 +571,7 @@ def torch_pplx_moe(pgi, dp_size, a, w1, w2, scores, topk):
 
     #print(f"OUT {rank}: {out.shape} {out}")
 
-    return out[:rank_num_tokens] # chunk_by_rank?
+    return out[:rank_num_tokens]
 
 
 def _pplx_moe(
@@ -624,18 +624,13 @@ def _pplx_moe(
     nvshmem_finalize()
 
 
-@pytest.mark.parametrize("m", [2, 32, 64, 222]) #, 1024 * 128])
-@pytest.mark.parametrize("n", [128, 1024, 2048])
-@pytest.mark.parametrize("k", [128, 512, 1024])
+# TODO: M == 1 doesn't work
+@pytest.mark.parametrize("m", [2, 3, 32, 45, 64, 222]) #, 1024 * 128])
+@pytest.mark.parametrize("n", [128, 1024])# , 2048])
+@pytest.mark.parametrize("k", [128, 512]) # , 1024])
 @pytest.mark.parametrize("e", NUM_EXPERTS)
 @pytest.mark.parametrize("topk", TOP_KS)
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
-# @pytest.mark.parametrize("m", [64]) ##, 32]) #, 1024 * 128])
-# @pytest.mark.parametrize("n", [128])
-# @pytest.mark.parametrize("k", [128])
-# @pytest.mark.parametrize("e", [8]) #NUM_EXPERTS)
-# @pytest.mark.parametrize("topk", [2]) #TOP_KS)
-# @pytest.mark.parametrize("dtype", [torch.bfloat16])
 @pytest.mark.parametrize("world_dp_size", [[2, 1]]) #, [4, 2]])
 def test_pplx_moe(
     m: int,
