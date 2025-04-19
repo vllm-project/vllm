@@ -37,6 +37,12 @@ def test_can_initialize(model_arch):
             "num_local_experts": 2,
         })
 
+        if hasattr(hf_config, "vision_config"):
+            hf_config.vision_config.update({
+                "num_layers": 1,
+                "num_hidden_layers": 1,
+            })
+
         return hf_config
 
     # Avoid calling model.forward()
