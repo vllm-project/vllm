@@ -34,6 +34,7 @@ if TYPE_CHECKING:
     from vllm.attention.backends.abstract import AttentionMetadata
     from vllm.config import VllmConfig
     from vllm.forward_context import ForwardContext
+    from vllm.sampling_params import KVTransferParams
     from vllm.v1.request import Request
 
 logger = init_logger(__name__)
@@ -216,3 +217,10 @@ class KVConnectorBase_V1(ABC):
 
     def is_request_done_receiving(self, req_id: str) -> bool:
         raise NotImplementedError
+
+    @abstractmethod
+    def build_transfer_params(self, request: "Request") -> "KVTransferParams":
+        """
+        Build the KV transfer parameters for this step.
+        """
+        pass

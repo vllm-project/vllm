@@ -26,14 +26,17 @@ class SamplingType(IntEnum):
     RANDOM_SEED = 2
 
 
+# TODO(rob): make this per connector
 class KVTransferParams(
         msgspec.Struct,
         omit_defaults=True,  # type: ignore[call-arg]
         # required for @cached_property.
         dict=True):
     request_id: str
-    remote_id: Optional[str] = None
+    remote_instance_id: Optional[str] = None
     remote_block_ids: Optional[list[int]] = None
+    do_remote_decode: bool = False
+    do_remote_prefill: bool = False
 
 
 # maybe make msgspec?
