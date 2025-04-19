@@ -114,7 +114,7 @@ def test_cutlass_moe_no_graph(
             w2_d[expert] = (w2_q[expert].t().float() * w2_scale[expert]).half()
 
         score = torch.randn((m, e), device="cuda", dtype=dtype)
-        topk_weights, topk_ids = fused_topk(a, score, topk, renormalize=False)
+        topk_weights, topk_ids, token_expert_indices = fused_topk(a, score, topk, renormalize=False)
 
         triton_output = fused_experts(a_d, w1_d, w2_d, topk_weights, topk_ids)
 
@@ -220,7 +220,7 @@ def test_cutlass_moe_cuda_graph(
             w2_d[expert] = (w2_q[expert].t().float() * w2_scale[expert]).half()
 
         score = torch.randn((m, e), device="cuda", dtype=dtype)
-        topk_weights, topk_ids = fused_topk(a, score, topk, renormalize=False)
+        topk_weights, topk_ids, token_expert_indices = fused_topk(a, score, topk, renormalize=False)
 
         triton_output = fused_experts(a_d, w1_d, w2_d, topk_weights, topk_ids)
 
