@@ -477,8 +477,6 @@ class OpenAIServingCompletion(OpenAIServing):
 
         request_metadata.final_usage_info = usage
 
-        # TODO(rob): assert somewhere that we dont have a batch req.
-        assert (len(final_res_batch) == 1)
         return CompletionResponse(
             id=request_id,
             created=created_time,

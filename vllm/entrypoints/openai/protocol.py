@@ -809,7 +809,8 @@ class CompletionRequest(OpenAIBaseModel):
             "that are not JSON-encodable can be identified."))
 
     kv_transfer_params: Optional[KVTransferParams] = Field(
-        default=None, description=("TODO"))
+        default=None,
+        description=("KVTransfer parameters used for P/D disaggregation."))
 
     # doc: end-completion-extra-params
 
