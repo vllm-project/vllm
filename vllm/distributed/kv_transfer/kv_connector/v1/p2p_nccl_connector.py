@@ -74,8 +74,11 @@ class P2pNcclConnectorMetadata(KVConnectorMetadata):
 
 class P2pNcclConnector(KVConnectorBase_V1):
 
-    def __init__(self, vllm_config: "VllmConfig", role: KVConnectorRole,
-                 rank: int, local_rank: int):
+    def __init__(self,
+                 vllm_config: "VllmConfig",
+                 role: KVConnectorRole,
+                 rank: int = 0,
+                 local_rank: int = 0):
         super().__init__(vllm_config=vllm_config, role=role)
         self._block_size = vllm_config.cache_config.block_size
         self._requests_need_load: dict[str, Request] = {}
@@ -218,7 +221,7 @@ class P2pNcclConnector(KVConnectorBase_V1):
             if request.is_store:
                 request_id = request.request_id
                 ip, port = self.parse_request_id(request_id, True)
-                remote_address = ip + ":" + str(port + self.rank)
+                remote_address = ip + ":" + str(port + self._rank)
                 kv_cache = extract_kv_from_layer(kv_layer,
                                                  request.slot_mapping)
                 self.p2p_nccl_pipe.send_tensor(request_id + "-" + layer_name,
