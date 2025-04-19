@@ -47,7 +47,7 @@ def _build_test_vectors_no_logprobs() -> DummyOutputProcessorTestVectors:
         tokenizer=tokenizer,
         tokenizer_group=init_tokenizer_from_configs(
             vllm_config.model_config, vllm_config.scheduler_config,
-            vllm_config.parallel_config, vllm_config.lora_config),
+            vllm_config.lora_config),
         vllm_config=vllm_config,
         full_tokens=[tokenizer(text).input_ids for text in FULL_STRINGS],
         prompt_tokens=prompt_tokens,
