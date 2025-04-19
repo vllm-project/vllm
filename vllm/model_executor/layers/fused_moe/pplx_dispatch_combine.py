@@ -84,7 +84,7 @@ class PplxDispatchCombine(mk.FusedMoEQuantizeDispatchCombine):
             dtype=a1q.dtype,
             device=device,
         )
-        expert_x.fill_(0) #torch.nan   # debugging, remove later
+        #expert_x.fill_(0) #torch.nan   # debugging, remove later
 
         logger.debug(f"GOT HERE B {self.rank}")
 

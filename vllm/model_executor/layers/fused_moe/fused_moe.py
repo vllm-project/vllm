@@ -1774,9 +1774,6 @@ class BatchedDispatchCombine(mk.FusedMoEQuantizeDispatchCombine):
         num_tokens = a1.shape[0]
         topk = topk_ids.shape[1]
 
-        #assert num_experts % self.world_size == 0
-        #num_local_experts = num_experts // self.world_size
-
         tokens_per_expert = torch.bincount(topk_ids.view(-1), minlength=num_experts)
         max_num_tokens = tokens_per_expert.max()
         expert_counts = torch.zeros(num_experts, dtype=torch.int, device=a1.device)
@@ -1889,31 +1886,20 @@ class BatchedExperts(mk.FusedMoEPermuteExpertsUnpermute):
         num_tokens, topk = topk_ids.shape
         _, tmp_max_num_tokens, K = hidden_states.shape
         max_num_tokens = tmp_max_num_tokens if self.max_num_tokens is None else self.max_num_tokens
-        print(f"global_num_experts = {global_num_experts}")
+        #print(f"global_num_experts = {global_num_experts}")
         num_experts = global_num_experts
         out = _resize_cache(workspace13, (num_experts, max_num_tokens, w2.shape[1]))
         num_local_experts = expert_num_tokens.numel()
-        #assert num_local_experts >= topk_ids.view(-1).max()
-        #print(f"apply a={hidden_states}")
-        #print(f"apply topk={topk_ids}")
-        #print(f"apply num_tokens={expert_num_tokens}")
+        #print(f"shapes = {hidden_states.shape}, {w1.shape}, {w2.shape}, {out.shape} {expert_num_tokens.shape} {workspace2.shape} {num_experts}")
 
         for expert in range(num_local_experts):  # num_experts
             num = expert_num_tokens[expert]
-            assert num <= max_num_tokens
+            assert num <= max_num_tokens, f"{num}, {max_num_tokens}"
+            #print(f"{type(num)}, {num}, {max_num_tokens}")
             if num > 0:
                 tmp = _resize_cache(workspace2, (num, w1.shape[1] // 2))
                 self.activation(activation, tmp, hidden_states[expert,:num,:] @ w1[expert].transpose(0, 1))
                 out[expert, :num, :] = tmp @ w2[expert].transpose(0, 1)
-                # fill remainder with 0???
-                #out[expert, num:, :].fill_(0)
-            else:
-                #out[expert, :, :].fill_(0) # ??
-                pass
-
-        #print("END EXPERTS")
-
-        #print(f"apply out={out}")
 
         return out
 
