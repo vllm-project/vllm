@@ -3,6 +3,7 @@ from typing import Optional
 
 import torch
 
+import vllm.envs as envs
 from vllm.platforms import current_platform
 from vllm.utils import direct_register_custom_op
 
@@ -53,6 +54,10 @@ if current_platform.is_rocm():
         fake_impl=rocm_aiter_tuned_gemm_fake,
         dispatch_key=current_platform.dispatch_key,
     )
+
+
+def is_rocm_aiter_linear_enabled() -> bool:
+    return (envs.VLLM_ROCM_USE_AITER_LINEAR and envs.VLLM_ROCM_USE_AITER)
 
 
 class aiter_ops:

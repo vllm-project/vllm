@@ -15,8 +15,7 @@ from vllm.model_executor.layers.fused_moe.fused_moe import (
 from vllm.model_executor.layers.layernorm import (
     RMSNorm, dispatch_cuda_rmsnorm_func, fused_add_rms_norm, rms_norm,
     rocm_aiter_fused_add_rms_norm, rocm_aiter_rms_norm)
-from vllm.model_executor.layers.linear import (
-    dipsatch_unquantized_linear_func, rocm_aiter_tgemm_mm)
+from vllm.model_executor.layers.linear import dispatch_unquantized_linear_func
 from vllm.platforms import current_platform
 
 
@@ -105,16 +104,18 @@ def test_unquantized_linear_dispatch(use_rocm_aiter: str,
                                      use_rocm_aiter_linear: str, monkeypatch):
     monkeypatch.setenv("VLLM_ROCM_USE_AITER", use_rocm_aiter)
     monkeypatch.setenv("VLLM_ROCM_USE_AITER_LINEAR", use_rocm_aiter_linear)
-    linear_func = dipsatch_unquantized_linear_func()
+    linear_func = dispatch_unquantized_linear_func()
     print(f"use_rocm_aiter: {use_rocm_aiter}, " +
           f"use_rocm_aiter_linear: {use_rocm_aiter_linear}")
     if current_platform.is_rocm() and int(use_rocm_aiter) and int(
             use_rocm_aiter_linear):
-        assert linear_func == rocm_aiter_tgemm_mm
+        from vllm._aiter_ops import aiter_ops
+        assert linear_func == aiter_ops.rocm_aiter_tuned_gemm
     else:
         assert linear_func == F.linear
 
 
+@pytest.mark.parametrize("use_rocm_aiter", ["0", "1"])
 def test_topk_dispatch(use_rocm_aiter: str, monkeypatch):
     monkeypatch.setenv("VLLM_ROCM_USE_AITER", use_rocm_aiter)
     topk_func = dispatch_topk_func()

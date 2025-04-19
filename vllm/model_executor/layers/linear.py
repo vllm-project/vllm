@@ -53,8 +53,7 @@ WEIGHT_LOADER_V2_SUPPORTED = [
 
 def dispatch_unquantized_linear_func(
 ) -> Callable[[torch.Tensor, torch.Tensor, torch.Tensor], torch.Tensor]:
-    from vllm.model_executor.layers.quantization.utils.w8a8_utils import (  # noqa: E501
-        is_rocm_aiter_linear_enabled)
+    from vllm._aiter_ops import is_rocm_aiter_linear_enabled
     if is_rocm_aiter_linear_enabled():
         return aiter_ops.rocm_aiter_tuned_gemm
     return F.linear

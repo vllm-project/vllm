@@ -4,7 +4,6 @@ from typing import Callable, List, Optional, Tuple, Union
 
 import torch
 
-import vllm.envs as envs
 from vllm import _custom_ops as ops
 # from vllm.utils import direct_register_custom_op
 from vllm._aiter_ops import aiter_ops
@@ -21,10 +20,6 @@ TORCH_DEVICE_IDENTITY = None
 # are time consuming.
 USE_ROWWISE_TORCH_SCALED_MM = (current_platform.is_rocm()
                                and current_platform.has_device_capability(94))
-
-
-def is_rocm_aiter_linear_enabled() -> bool:
-    return (envs.VLLM_ROCM_USE_AITER_LINEAR and envs.VLLM_ROCM_USE_AITER)
 
 
 def sparse_cutlass_supported() -> bool:
@@ -153,50 +148,6 @@ def cutlass_w8a8_scaled_mm(*, qinput: torch.Tensor, weight: torch.Tensor,
     return output.view(*output_shape)
 
 
-# def rocm_aiter_tuned_gemm_impl(
-#     input: torch.Tensor,
-#     weight: torch.Tensor,
-#     bias: Optional[torch.Tensor]=None,
-#     out_dtype: Optional[torch.dtype]=None,
-#     scale_a: Optional[torch.Tensor]=None,
-#     scale_b: Optional[torch.Tensor]=None) -> torch.Tensor:
-
-#     # This AITER function can be used for
-#     # - per-tensor activations + per-tensor weights
-#     #   e.g. vllm/model_executor/layers/linear.py
-#     # - per-token-activations + per-channel-weights
-#     #   e.g. vllm/model_executor/layers/quantization/utils/w8a8_utils.py
-#     from aiter.tuned_gemm import tgemm as aiter_tgemm
-
-#     return aiter_tgemm.mm(input,
-#                             weight.t(),
-#                             otype=out_dtype,
-#                             scale_a=scale_a,
-#                             scale_b=scale_b,
-#                             bias=bias)
-
-# def rocm_aiter_tuned_gemm_fake(
-#     input: torch.Tensor,
-#     weight: torch.Tensor,
-#     bias: Optional[torch.Tensor]=None,
-#     out_dtype: Optional[torch.dtype]=None,
-#     scale_a: Optional[torch.Tensor]=None,
-#     scale_b: Optional[torch.Tensor]=None) -> torch.Tensor:
-
-#     m, _ = input.shape
-#     n = weight.shape[1]
-#     return torch.empty((m, n), dtype=out_dtype, device=input.device)
-
-# if current_platform.is_rocm():
-#     direct_register_custom_op(
-#         op_name="rocm_aiter_tuned_gemm",
-#         op_func=rocm_aiter_tuned_gemm_impl,
-#         mutates_args=[],
-#         fake_impl=rocm_aiter_tuned_gemm_fake,
-#         dispatch_key=current_platform.dispatch_key,
-#     )
-
-
 def rocm_aiter_per_tensor_w8a8_scaled_mm(qinput: torch.Tensor,
                                          weight: torch.Tensor,
                                          out_dtype: torch.dtype,
@@ -317,6 +268,7 @@ def dispatch_w8a8_scaled_mm(
     if cutlass_fp8_supported:
         return cutlass_w8a8_scaled_mm
     if per_tensor_weights and per_tensor_activations:
+        from vllm._aiter_ops import is_rocm_aiter_linear_enabled
         if is_rocm_aiter_linear_enabled():
             return rocm_aiter_per_tensor_w8a8_scaled_mm
         return torch_per_tensor_w8a8_scaled_mm
