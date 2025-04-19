@@ -197,8 +197,8 @@ def kernel_paged_attention_2d(
                      query_head_idx * output_stride_1)
 
     tl.store(
-        output_ptr + output_offset[:, None] \
-            + tl.arange(0, HEAD_SIZE_PADDED)[None, :],
+        output_ptr + output_offset[:, None] +
+        tl.arange(0, HEAD_SIZE_PADDED)[None, :],
         acc,
         mask=dim_mask[None, :] & head_mask[:, None],
     )
@@ -573,18 +573,14 @@ def chunked_prefill_paged_decode(
     num_queries_per_kv_padded = max(triton.next_power_of_2(num_queries_per_kv),
                                     16)
 
-    use_custom = use_rocm_custom_paged_attention(
-        query.dtype,
-        head_size,
-        block_size,
-        num_queries_per_kv,
-        max_seq_len,
-        sliding_window,
-    )
+    use_custom = use_rocm_custom_paged_attention(query.dtype, head_size,
+                                                 block_size,
+                                                 num_queries_per_kv,
+                                                 max_seq_len, sliding_window)
     if use_custom:
         _PARTITION_SIZE_ROCM = 256
-        max_num_partitions = (max_seq_len + _PARTITION_SIZE_ROCM -
-                              1) // _PARTITION_SIZE_ROCM
+        max_num_partitions = ((max_seq_len + _PARTITION_SIZE_ROCM - 1) //
+                              _PARTITION_SIZE_ROCM)
         assert _PARTITION_SIZE_ROCM % block_size == 0
         total_num_seq = query.shape[0]
         tmp_output = torch.empty(
