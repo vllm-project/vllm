@@ -33,6 +33,8 @@ from vllm.transformers_utils.config import (
     maybe_register_config_serialize_by_value)
 from vllm.usage.usage_lib import UsageContext
 from vllm.worker.model_runner_base import InputProcessingError
+from vllm.zero_overhead.v0.llm_engine import ZeroOverheadEngine
+from vllm.zero_overhead.v0.utils import is_zero_overhead
 
 logger = init_logger(__name__)
 
@@ -79,7 +81,10 @@ class MQLLMEngine:
         # the python object to be reused again.
         kwargs['use_cached_outputs'] = True
 
-        self.engine = LLMEngine(*args, **kwargs)
+        if is_zero_overhead():
+            self.engine = ZeroOverheadEngine(*args, **kwargs)
+        else:
+            self.engine = LLMEngine(*args, **kwargs)
         self.log_requests = log_requests
 
         self.use_async_sockets = use_async_sockets

@@ -21,6 +21,7 @@ from vllm.sequence import (VLLM_INVALID_TOKEN_ID,
                            CompletionSequenceGroupOutput, Logprob,
                            PromptLogprobs, SampleLogprobs, SequenceOutput)
 from vllm.spec_decode.metrics import SpecDecodeWorkerMetrics
+from vllm.zero_overhead.v0.utils import is_zero_overhead
 
 if envs.VLLM_USE_FLASHINFER_SAMPLER and find_spec("flashinfer"):
     import flashinfer.sampling
@@ -38,6 +39,9 @@ def get_sampler() -> torch.nn.Module:
         # Lazy import: the v1 package isn't distributed
         from vllm.v1.sample.sampler import Sampler as V1Sampler
         return V1Sampler()
+    if is_zero_overhead():
+        from vllm.zero_overhead.v0.sampler import ZeroOverheadSampler
+        return ZeroOverheadSampler()
     return Sampler()
 
 
