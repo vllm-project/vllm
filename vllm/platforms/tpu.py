@@ -97,6 +97,20 @@ class TpuPlatform(Platform):
                 "Using bfloat16 instead.", vllm_config.model_config.dtype)
             vllm_config.model_config.dtype = torch.bfloat16
 
+        if envs.VLLM_USE_V1:
+            from vllm.v1.attention.backends.pallas import (
+                PallasAttentionBackend)
+            min_page_size = PallasAttentionBackend.get_min_page_size(
+                vllm_config)
+            if min_page_size > vllm_config.cache_config.block_size:
+                logger.warning(
+                    "Increase the page size from %s to %s to make sure there's"
+                    "no SMEM OOM",
+                    vllm_config.cache_config.block_size,
+                    min_page_size,
+                )
+                vllm_config.cache_config.block_size = min_page_size
+
         parallel_config = vllm_config.parallel_config
         scheduler_config = vllm_config.scheduler_config
         if parallel_config.worker_cls == "auto":
