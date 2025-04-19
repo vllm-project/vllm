@@ -747,7 +747,7 @@ def compute_hash() -> str:
     variables, ensure that it is included in the factors list if
     it affects the computation graph. For example, different values
     of VLLM_PP_LAYER_PARTITION will generate different computation
-    graphs, so it is included in the factors list. The env vars that 
+    graphs, so it is included in the factors list. The env vars that
     affect the choice of different kernels or attention backends should
     also be included in the factors list.
     """

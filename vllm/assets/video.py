@@ -2,7 +2,7 @@
 
 from dataclasses import dataclass
 from functools import lru_cache
-from typing import Literal
+from typing import Literal, Optional
 
 import cv2
 import numpy as np
@@ -10,7 +10,14 @@ import numpy.typing as npt
 from huggingface_hub import hf_hub_download
 from PIL import Image
 
+from vllm.utils import PlaceholderModule
+
 from .base import get_cache_dir
+
+try:
+    import librosa
+except ImportError:
+    librosa = PlaceholderModule("librosa")  # type: ignore[assignment]
 
 
 @lru_cache
@@ -85,3 +92,12 @@ class VideoAsset:
         video_path = download_video_asset(self.name)
         ret = video_to_ndarrays(video_path, self.num_frames)
         return ret
+
+    def get_audio(self, sampling_rate: Optional[float] = None) -> npt.NDArray:
+        """
+        Read audio data from the video asset, used in Qwen2.5-Omni examples.
+        
+        See also: examples/offline_inference/qwen2_5_omni/only_thinker.py
+        """
+        video_path = download_video_asset(self.name)
+        return librosa.load(video_path, sr=sampling_rate)[0]

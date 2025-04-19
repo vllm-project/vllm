@@ -506,6 +506,8 @@ class BaseMultiModalItemTracker(ABC, Generic[_T]):
                 return "<|image|>"
             if model_type in ("qwen2_vl", "qwen2_5_vl"):
                 return "<|vision_start|><|image_pad|><|vision_end|>"
+            if model_type == "qwen2_5_omni":
+                return "<|vision_start|><|IMAGE|><|vision_end|>"
             if model_type == "molmo":
                 return ""
             if model_type == "aria":
@@ -521,7 +523,7 @@ class BaseMultiModalItemTracker(ABC, Generic[_T]):
                 return "<|audio|>"
             if model_type == "phi4mm":
                 return "<|endoftext11|>"  # 200011 (see vocab.json in hf model)
-            if model_type == "qwen2_audio":
+            if model_type in ("qwen2_audio", "qwen2_5_omni"):
                 return (f"Audio {current_count}: "
                         f"<|audio_bos|><|AUDIO|><|audio_eos|>")
             if model_type == "minicpmo":
@@ -530,6 +532,8 @@ class BaseMultiModalItemTracker(ABC, Generic[_T]):
         elif modality == "video":
             if model_type in ("qwen2_vl", "qwen2_5_vl"):
                 return "<|vision_start|><|video_pad|><|vision_end|>"
+            if model_type == "qwen2_5_omni":
+                return "<|vision_start|><|VIDEO|><|vision_end|>"
             if model_type in ("minicpmo", "minicpmv"):
                 return "(<video>./</video>)"
             if model_type.startswith("llava"):
