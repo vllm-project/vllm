@@ -256,8 +256,8 @@ def process_image(image: Any) -> Mapping[str, Any]:
     Raises:
         ValueError: If the input is not a supported type.
     """
-    if isinstance(image, dict) and 'bytes' in image:
-        image = Image.open(BytesIO(image['bytes']))
+    if isinstance(image, dict) and "bytes" in image:
+        image = Image.open(BytesIO(image["bytes"]))
     if isinstance(image, Image.Image):
         image = image.convert("RGB")
         with io.BytesIO() as image_data:
@@ -408,10 +408,11 @@ class ShareGPTDataset(BenchmarkDataset):
             prompt_len = len(prompt_ids)
             new_output_len = (len(completion_ids)
                               if output_len is None else output_len)
-            if not is_valid_sequence(prompt_len,
-                                     new_output_len,
-                                     skip_min_output_len_check=output_len
-                                     is not None):
+            if not is_valid_sequence(
+                    prompt_len,
+                    new_output_len,
+                    skip_min_output_len_check=output_len is not None,
+            ):
                 continue
             if enable_multimodal_chat:
                 prompt = self.apply_multimodal_chat_transformation(
@@ -618,16 +619,20 @@ class HuggingFaceDataset(BenchmarkDataset):
 
 class ConversationDataset(HuggingFaceDataset):
     """Dataset for conversation data with multimodal support."""
+
     SUPPORTED_DATASET_PATHS = {
-        'lmms-lab/LLaVA-OneVision-Data', 'Aeala/ShareGPT_Vicuna_unfiltered'
+        "lmms-lab/LLaVA-OneVision-Data",
+        "Aeala/ShareGPT_Vicuna_unfiltered",
     }
 
-    def sample(self,
-               tokenizer: PreTrainedTokenizerBase,
-               num_requests: int,
-               output_len: Optional[int] = None,
-               enable_multimodal_chat: bool = False,
-               **kwargs) -> list:
+    def sample(
+        self,
+        tokenizer: PreTrainedTokenizerBase,
+        num_requests: int,
+        output_len: Optional[int] = None,
+        enable_multimodal_chat: bool = False,
+        **kwargs,
+    ) -> list:
         # Filter examples with at least 2 conversations
         filtered_data = self.data.filter(
             lambda x: len(x["conversations"]) >= 2)
@@ -649,8 +654,8 @@ class ConversationDataset(HuggingFaceDataset):
             if dynamic_output and not is_valid_sequence(
                     prompt_len, completion_len):
                 continue
-            mm_content = process_image(
-                item["image"]) if "image" in item else None
+            mm_content = (process_image(item["image"])
+                          if "image" in item else None)
             if enable_multimodal_chat:
                 # Note: when chat is enabled the request prompt_len is no longer
                 # accurate and we will be using request output to count the
@@ -744,12 +749,14 @@ class InstructCoderDataset(HuggingFaceDataset):
         "likaixin/InstructCoder",
     }
 
-    def sample(self,
-               tokenizer: PreTrainedTokenizerBase,
-               num_requests: int,
-               output_len: Optional[int] = None,
-               enable_multimodal_chat: bool = False,
-               **kwargs) -> list:
+    def sample(
+        self,
+        tokenizer: PreTrainedTokenizerBase,
+        num_requests: int,
+        output_len: Optional[int] = None,
+        enable_multimodal_chat: bool = False,
+        **kwargs,
+    ) -> list:
         output_len = (output_len
                       if output_len is not None else self.DEFAULT_OUTPUT_LEN)
         sampled_requests = []
@@ -777,23 +784,27 @@ class AIMODataset(HuggingFaceDataset):
     """
     Dataset class for processing a AIMO dataset with reasoning questions.
     """
+
     SUPPORTED_DATASET_PATHS = {
-        "AI-MO/aimo-validation-aime", "AI-MO/NuminaMath-1.5",
-        "AI-MO/NuminaMath-CoT"
+        "AI-MO/aimo-validation-aime",
+        "AI-MO/NuminaMath-1.5",
+        "AI-MO/NuminaMath-CoT",
     }
 
-    def sample(self,
-               tokenizer: PreTrainedTokenizerBase,
-               num_requests: int,
-               output_len: Optional[int] = None,
-               **kwargs) -> list:
+    def sample(
+        self,
+        tokenizer: PreTrainedTokenizerBase,
+        num_requests: int,
+        output_len: Optional[int] = None,
+        **kwargs,
+    ) -> list:
         sampled_requests = []
         dynamic_output = output_len is None
 
         for item in self.data:
             if len(sampled_requests) >= num_requests:
                 break
-            prompt, completion = item['problem'], item["solution"]
+            prompt, completion = item["problem"], item["solution"]
 
             prompt_ids = tokenizer(prompt).input_ids
             completion_ids = tokenizer(completion).input_ids
@@ -801,10 +812,12 @@ class AIMODataset(HuggingFaceDataset):
             completion_len = len(completion_ids)
             output_len = completion_len if dynamic_output else output_len
             assert isinstance(output_len, int) and output_len > 0
-            if dynamic_output and not is_valid_sequence(prompt_len,
-                                                        completion_len,
-                                                        max_prompt_len=2048,
-                                                        max_total_len=32000):
+            if dynamic_output and not is_valid_sequence(
+                    prompt_len,
+                    completion_len,
+                    max_prompt_len=2048,
+                    max_total_len=32000,
+            ):
                 continue
             sampled_requests.append(
                 SampleRequest(
@@ -815,3 +828,103 @@ class AIMODataset(HuggingFaceDataset):
                 ))
         self.maybe_oversample_requests(sampled_requests, num_requests)
         return sampled_requests
+
+
+# -----------------------------------------------------------------------------
+# Next Edit Prediction Dataset Implementation
+# -----------------------------------------------------------------------------
+zeta_prompt = """### Instruction:
+You are a code completion assistant and your task is to analyze user edits and then rewrite an excerpt that the user provides, suggesting the appropriate edits within the excerpt, taking into account the cursor location.
+
+### User Edits:
+
+{}
+
+### User Excerpt:
+
+{}
+
+### Response:
+
+""" # noqa: E501
+
+
+def _format_zeta_prompt(
+        examples: dict,
+        original_start_marker: str = "<|editable_region_start|>") -> dict:
+    """Format the zeta prompt for the Next Edit Prediction (NEP) dataset.
+    
+    This function formats examples from the NEP dataset 
+    into prompts and expected outputs. It could be 
+    further extended to support more NEP datasets.
+    
+    Args:
+        examples: The dataset examples containing events, 
+            inputs, and outputs.
+        original_start_marker: The marker indicating the 
+            start of the editable region. Defaults to 
+            "<|editable_region_start|>".
+            
+    Returns:
+        A dictionary with the formatted prompts and expected outputs.
+    """
+    events = examples["events"]
+    inputs = examples["input"]
+    outputs = examples["output"]
+    prompts, expected_outputs = [], []
+    for event, input, output in zip(events, inputs, outputs):
+        # create the final prompt
+        prompts.append(zeta_prompt.format(event, input))
+
+        # following the original implementation, extract the focused region
+        # from the raw output
+        output_start_index = output.find(original_start_marker)
+        output_focused_region = output[output_start_index:]
+        output = output_focused_region
+        expected_outputs.append(output)
+
+    return {"prompt": prompts, "expected_output": expected_outputs}
+
+
+class NextEditPredictionDataset(HuggingFaceDataset):
+    """
+    Dataset class for processing a Next Edit Prediction dataset.
+    """
+
+    SUPPORTED_DATASET_PATHS = {
+        "zed-industries/zeta",
+    }
+    MAPPING_PROMPT_FUNCS = {
+        "zed-industries/zeta": _format_zeta_prompt,
+    }
+
+    def load_data(self) -> None:
+        """Load data from HuggingFace datasets."""
+        super().load_data()
+        formatting_prompt_func = self.MAPPING_PROMPT_FUNCS.get(
+            self.dataset_path)
+        if formatting_prompt_func is None:
+            raise ValueError(f"Unsupported dataset path: {self.dataset_path}")
+        self.data = self.data.map(formatting_prompt_func, batched=True)
+
+    def sample(self, tokenizer: PreTrainedTokenizerBase, num_requests: int,
+               **kwargs):
+        samples = []
+        for item in self.data:
+            if len(samples) >= num_requests:
+                break
+            samples.append(
+                SampleRequest(
+                    prompt=item["prompt"],
+                    prompt_len=len(tokenizer(item["prompt"]).input_ids),
+                    expected_output_len=len(
+                        tokenizer(item["expected_output"]).input_ids),
+                ))
+        if len(samples) < num_requests:
+            logger.info(
+                "Requested %d samples, but the dataset %s only has %d",
+                num_requests,
+                self.dataset_path,
+                len(samples),
+            )
+        return samples
