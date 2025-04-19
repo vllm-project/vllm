@@ -1,7 +1,3 @@
-# SPDX-License-Identifier: Apache-2.0
-"""
-Processor class for MiniMaxVL01.
-"""
 import os
 from typing import List, Union
 

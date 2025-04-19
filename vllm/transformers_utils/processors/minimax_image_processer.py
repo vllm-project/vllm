@@ -1,4 +1,3 @@
-# SPDX-License-Identifier: Apache-2.0
 from typing import Dict, Iterable, List, Optional, Tuple, Union
 
 import numpy as np
