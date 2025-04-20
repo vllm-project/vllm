@@ -21,22 +21,11 @@ from typing import (TYPE_CHECKING, Any, Callable, ClassVar, Final, Literal,
 import torch
 from pydantic import BaseModel, Field, PrivateAttr
 from torch.distributed import ProcessGroup, ReduceOp
-from transformers import PretrainedConfig
 
 import vllm.envs as envs
 from vllm.compilation.inductor_pass import CallableInductorPass, InductorPass
 from vllm.logger import init_logger
-from vllm.model_executor.layers.quantization import (QUANTIZATION_METHODS,
-                                                     get_quantization_config)
-from vllm.model_executor.models import ModelRegistry
-from vllm.platforms import CpuArchEnum, current_platform
-from vllm.sampling_params import GuidedDecodingParams
 from vllm.tracing import is_otel_available, otel_import_error_traceback
-from vllm.transformers_utils.config import (
-    ConfigFormat, get_config, get_hf_image_processor_config,
-    get_hf_text_config, get_pooling_config,
-    get_sentence_transformer_tokenizer_config, is_encoder_decoder,
-    try_get_generation_config, uses_mrope)
 from vllm.transformers_utils.s3_utils import S3Model
 from vllm.transformers_utils.utils import is_s3, maybe_model_redirect
 from vllm.utils import (GiB_bytes, LayerBlockType, cuda_device_count_stateless,
@@ -46,6 +35,7 @@ from vllm.utils import (GiB_bytes, LayerBlockType, cuda_device_count_stateless,
 if TYPE_CHECKING:
     from _typeshed import DataclassInstance
     from ray.util.placement_group import PlacementGroup
+    from transformers.configuration_utils import PretrainedConfig
 
     from vllm.executor.executor_base import ExecutorBase
     from vllm.model_executor.layers.quantization.base_config import (
@@ -88,8 +78,8 @@ _TASK_RUNNER: dict[_ResolvedTask, RunnerType] = {
     for task in tasks
 }
 
-HfOverrides = Union[dict[str, Any], Callable[[PretrainedConfig],
-                                             PretrainedConfig]]
+HfOverrides = Union[dict[str, Any], Callable[["PretrainedConfig"],
+                                             "PretrainedConfig"]]
 
 
 class SupportsHash(Protocol):
@@ -120,7 +110,7 @@ def get_attr_docs(cls: type[Any]) -> dict[str, str]:
     def pairwise(iterable):
         """
         Manually implement https://docs.python.org/3/library/itertools.html#itertools.pairwise
-        
+
         Can be removed when Python 3.9 support is dropped.
         """
         iterator = iter(iterable)
@@ -266,7 +256,7 @@ class ModelConfig:
         config_format: The config format which shall be loaded.
             Defaults to 'auto' which defaults to 'hf'.
         hf_token: The token to use as HTTP bearer authorization for remote files
-            . If `True`, will use the token generated when running 
+            . If `True`, will use the token generated when running
             `huggingface-cli login` (stored in `~/.huggingface`).
         hf_overrides: If a dictionary, contains arguments to be forwarded to the
             HuggingFace config. If a callable, it is called to update the
@@ -295,6 +285,7 @@ class ModelConfig:
         override_generation_config: Override the generation config with the
             given config.
     """
+    from vllm.transformers_utils.config import ConfigFormat
 
     def compute_hash(self) -> str:
         """
@@ -369,6 +360,8 @@ class ModelConfig:
         override_generation_config: Optional[dict[str, Any]] = None,
         model_impl: Union[str, ModelImpl] = ModelImpl.AUTO,
     ) -> None:
+        from vllm.transformers_utils.config import get_config, get_hf_image_processor_config, get_hf_text_config
+
         self.model = maybe_model_redirect(model)
         self.tokenizer = maybe_model_redirect(tokenizer)
 
@@ -545,6 +538,8 @@ class ModelConfig:
 
     @property
     def registry(self):
+        from vllm.model_executor.models import ModelRegistry
+
         return ModelRegistry
 
     @property
@@ -589,6 +584,8 @@ class ModelConfig:
         return None
 
     def _get_encoder_config(self):
+        from vllm.transformers_utils.config import get_sentence_transformer_tokenizer_config
+
         return get_sentence_transformer_tokenizer_config(
             self.model, self.revision)
 
@@ -596,6 +593,7 @@ class ModelConfig:
         self,
         override_pooler_config: Optional["PoolerConfig"],
     ) -> Optional["PoolerConfig"]:
+        from vllm.transformers_utils.config import get_pooling_config
 
         if self.runner_type == "pooling":
             user_config = override_pooler_config or PoolerConfig()
@@ -646,6 +644,8 @@ class ModelConfig:
         architectures: list[str],
         supported_tasks: set[_ResolvedTask],
     ) -> Optional[_ResolvedTask]:
+        from vllm.transformers_utils.config import get_pooling_config
+
         model_id = self.model
         if get_pooling_config(model_id, self.revision):
             return "embed"
@@ -746,6 +746,8 @@ class ModelConfig:
         return quant_cfg
 
     def _verify_quantization(self) -> None:
+        from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS, get_quantization_config
+
         supported_quantization = QUANTIZATION_METHODS
         optimized_quantization_methods = [
             "fp8", "marlin", "modelopt", "gptq_marlin_24", "gptq_marlin",
@@ -795,6 +797,8 @@ class ModelConfig:
                     "non-quantized models.", self.quantization)
 
     def _verify_cuda_graph(self) -> None:
+        from vllm.platforms import current_platform
+
         if self.max_seq_len_to_capture is None:
             self.max_seq_len_to_capture = self.max_model_len
         self.max_seq_len_to_capture = min(self.max_seq_len_to_capture,
@@ -1141,6 +1145,8 @@ class ModelConfig:
         return self.multimodal_config
 
     def try_get_generation_config(self) -> dict[str, Any]:
+        from vllm.transformers_utils.config import try_get_generation_config
+
         if self.generation_config in ("auto", "vllm"):
             config = try_get_generation_config(
                 self.hf_config_path or self.model,
@@ -1208,10 +1214,14 @@ class ModelConfig:
     @property
     def is_encoder_decoder(self) -> bool:
         """Extract the HF encoder/decoder model flag."""
+        from vllm.transformers_utils.config import is_encoder_decoder
+
         return is_encoder_decoder(self.hf_config)
 
     @property
     def uses_mrope(self) -> bool:
+        from vllm.transformers_utils.config import uses_mrope
+
         return uses_mrope(self.hf_config)
 
     @property
@@ -1236,6 +1246,8 @@ class ModelConfig:
 
     @property
     def is_v1_compatible(self) -> bool:
+        from vllm.model_executor.models import ModelRegistry
+
         architectures = getattr(self.hf_config, "architectures", [])
         return ModelRegistry.is_v1_compatible(architectures)
 
@@ -1624,7 +1636,7 @@ class ParallelConfig:
     """The full name of the worker class to use. If "auto", the worker class
     will be determined based on the platform."""
     sd_worker_cls: str = "auto"
-    """The full name of the worker class to use for speculative decofing. 
+    """The full name of the worker class to use for speculative decofing.
     If "auto", the worker class will be determined based on the platform."""
     worker_extension_cls: str = ""
     """The full name of the worker extension class to use. The worker extension
@@ -1815,13 +1827,13 @@ class SchedulerConfig:
 
     max_num_batched_tokens: int = None  # type: ignore
     """Maximum number of tokens to be processed in a single iteration.
-    
+
     This config has no static default. If left unspecified by the user, it will
     be set in `EngineArgs.create_engine_config` based on the usage context."""
 
     max_num_seqs: int = None  # type: ignore
     """Maximum number of sequences to be processed in a single iteration.
-    
+
     This config has no static default. If left unspecified by the user, it will
     be set in `EngineArgs.create_engine_config` based on the usage context."""
 
@@ -1867,7 +1879,7 @@ class SchedulerConfig:
     # TODO (ywang96): Make this configurable.
     max_num_encoder_input_tokens: int = field(init=False)
     """Multimodal encoder compute budget, only used in V1.
-    
+
     NOTE: This is not currently configurable. It will be overridden by
     max_num_batched_tokens in case max multimodal embedding size is larger."""
 
@@ -2282,7 +2294,7 @@ class SpeculativeConfig:
         return cls(**dict_value)
 
     @staticmethod
-    def hf_config_override(hf_config: PretrainedConfig) -> PretrainedConfig:
+    def hf_config_override(hf_config: "PretrainedConfig") -> "PretrainedConfig":
         if hf_config.model_type == "deepseek_v3":
             hf_config.model_type = "deepseek_mtp"
         if hf_config.model_type == "deepseek_mtp":
@@ -2501,7 +2513,7 @@ class SpeculativeConfig:
     def _verify_and_get_draft_tp(
             target_parallel_config: ParallelConfig,
             speculative_draft_tensor_parallel_size: Optional[int],
-            draft_hf_config: PretrainedConfig) -> int:
+            draft_hf_config: "PretrainedConfig") -> int:
         """
         Verifies and adjusts the tensor parallel size for a draft model
         specified using speculative_draft_tensor_parallel_size.
@@ -2859,7 +2871,7 @@ _ROCM_NOT_SUPPORTED_DTYPE: list[str] = []  #
 
 
 def _get_and_verify_dtype(
-    config: PretrainedConfig,
+    config: "PretrainedConfig",
     dtype: Union[str, torch.dtype],
 ) -> torch.dtype:
     # NOTE: getattr(config, "torch_dtype", torch.float32) is not correct
@@ -2877,6 +2889,8 @@ def _get_and_verify_dtype(
         config_dtype = torch.float32
 
     if isinstance(dtype, str):
+        from vllm.platforms import CpuArchEnum
+
         dtype = dtype.lower()
         if dtype == "auto":
             if config_dtype == torch.float32:
@@ -2953,7 +2967,7 @@ def _get_and_verify_dtype(
 
 
 def _get_and_verify_max_len(
-    hf_config: PretrainedConfig,
+    hf_config: "PretrainedConfig",
     max_model_len: Optional[int],
     disable_sliding_window: bool,
     sliding_window_len: Optional[Union[int, list[Optional[int]]]],
@@ -3154,6 +3168,8 @@ class DecodingConfig:
         return hash_str
 
     def __post_init__(self):
+        from vllm.sampling_params import GuidedDecodingParams
+
         backend = GuidedDecodingParams(
             backend=self.guided_decoding_backend).backend_name
         if envs.VLLM_USE_V1:
@@ -3792,7 +3808,7 @@ class VllmConfig:
 
     def with_hf_config(
         self,
-        hf_config: PretrainedConfig,
+        hf_config: "PretrainedConfig",
         architectures: Optional[list[str]] = None,
     ) -> "VllmConfig":
         if architectures is not None:

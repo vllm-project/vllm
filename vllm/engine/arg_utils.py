@@ -17,7 +17,7 @@ from typing_extensions import TypeIs
 import vllm.envs as envs
 from vllm import version
 from vllm.config import (BlockSize, CacheConfig, CacheDType, CompilationConfig,
-                         Config, ConfigFormat, DecodingConfig, Device,
+                         Config, DecodingConfig, Device,
                          DeviceConfig, DistributedExecutorBackend, HfOverrides,
                          KVTransferConfig, LoadConfig, LoadFormat, LoRAConfig,
                          ModelConfig, ModelImpl, MultiModalConfig,
@@ -26,11 +26,8 @@ from vllm.config import (BlockSize, CacheConfig, CacheDType, CompilationConfig,
                          SchedulerConfig, SchedulerPolicy, SpeculativeConfig,
                          TaskOption, TokenizerPoolConfig, VllmConfig,
                          get_attr_docs, get_field)
-from vllm.executor.executor_base import ExecutorBase
 from vllm.logger import init_logger
-from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS
 from vllm.plugins import load_general_plugins
-from vllm.reasoning import ReasoningParserManager
 from vllm.test_utils import MODEL_WEIGHTS_S3_BUCKET, MODELS_ON_S3
 from vllm.transformers_utils.utils import check_gguf_file
 from vllm.usage.usage_lib import UsageContext
@@ -39,6 +36,7 @@ from vllm.utils import FlexibleArgumentParser, is_in_ray_actor
 # yapf: enable
 
 if TYPE_CHECKING:
+    from vllm.executor.executor_base import ExecutorBase
     from vllm.transformers_utils.tokenizer_group import BaseTokenizerGroup
 
 logger = init_logger(__name__)
@@ -76,7 +74,7 @@ def optional_float(val: str) -> Optional[float]:
 def nullable_kvs(val: str) -> Optional[dict[str, int]]:
     """NOTE: This function is deprecated, args should be passed as JSON
     strings instead.
-    
+
     Parses a string containing comma separate key [str] to value [int]
     pairs into a dictionary.
 
@@ -136,7 +134,7 @@ class EngineArgs:
     allowed_local_media_path: str = ""
     download_dir: Optional[str] = LoadConfig.download_dir
     load_format: str = LoadConfig.load_format
-    config_format: ConfigFormat = ConfigFormat.AUTO
+    config_format: str = 'auto'
     dtype: str = 'auto'
     kv_cache_dtype: CacheDType = CacheConfig.cache_dtype
     seed: Optional[int] = None
@@ -146,7 +144,7 @@ class EngineArgs:
     # notice.
     distributed_executor_backend: Optional[Union[
         DistributedExecutorBackend,
-        Type[ExecutorBase]]] = ParallelConfig.distributed_executor_backend
+        Type["ExecutorBase"]]] = ParallelConfig.distributed_executor_backend
     # number of P/D disaggregation (or other disaggregation) workers
     pipeline_parallel_size: int = ParallelConfig.pipeline_parallel_size
     tensor_parallel_size: int = ParallelConfig.tensor_parallel_size
@@ -277,6 +275,9 @@ class EngineArgs:
     @staticmethod
     def add_cli_args(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
         """Shared CLI arguments for vLLM engine."""
+        from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS
+        from vllm.reasoning import ReasoningParserManager
+        from vllm.transformers_utils.config import ConfigFormat
 
         def is_type_in_union(cls: TypeHint, type: TypeHint) -> bool:
             """Check if the class is a type in a union type."""
@@ -1702,7 +1703,7 @@ def _warn_or_fallback(feature_name: str) -> bool:
 def human_readable_int(value):
     """Parse human-readable integers like '1k', '2M', etc.
     Including decimal values with decimal multipliers.
-    
+
     Examples:
     - '1k' -> 1,000
     - '1K' -> 1,024

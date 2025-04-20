@@ -10,13 +10,8 @@ import json
 import ssl
 from collections.abc import Sequence
 from typing import Optional, Union, get_args
+from line_profiler import profile
 
-from vllm.engine.arg_utils import AsyncEngineArgs, optional_str
-from vllm.entrypoints.chat_utils import (ChatTemplateContentFormatOption,
-                                         validate_chat_template)
-from vllm.entrypoints.openai.serving_models import (LoRAModulePath,
-                                                    PromptAdapterPath)
-from vllm.entrypoints.openai.tool_parsers import ToolParserManager
 from vllm.utils import FlexibleArgumentParser
 
 
@@ -29,6 +24,8 @@ class LoRAParserAction(argparse.Action):
         values: Optional[Union[str, Sequence[str]]],
         option_string: Optional[str] = None,
     ):
+        from vllm.entrypoints.openai.serving_models import LoRAModulePath
+
         if values is None:
             values = []
         if isinstance(values, str):
@@ -65,6 +62,8 @@ class PromptAdapterParserAction(argparse.Action):
         values: Optional[Union[str, Sequence[str]]],
         option_string: Optional[str] = None,
     ):
+        from vllm.entrypoints.openai.serving_models import PromptAdapterPath
+
         if values is None:
             values = []
         if isinstance(values, str):
@@ -77,7 +76,12 @@ class PromptAdapterParserAction(argparse.Action):
         setattr(namespace, self.dest, adapter_list)
 
 
+@profile
 def make_arg_parser(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
+    from vllm.engine.arg_utils import AsyncEngineArgs, optional_str
+    from vllm.entrypoints.chat_utils import ChatTemplateContentFormatOption
+    from vllm.entrypoints.openai.tool_parsers import ToolParserManager
+
     parser.add_argument("--host",
                         type=optional_str,
                         default=None,
@@ -273,6 +277,8 @@ def make_arg_parser(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
 
 def validate_parsed_serve_args(args: argparse.Namespace):
     """Quick checks for model serve args that raise prior to loading."""
+    from vllm.entrypoints.chat_utils import validate_chat_template
+
     if hasattr(args, "subparser") and args.subparser != "serve":
         return
 

@@ -3,20 +3,18 @@
 # The CLI entrypoint to vLLM.
 import signal
 import sys
+import importlib
+from line_profiler import profile
 
-import vllm.entrypoints.cli.benchmark.main
-import vllm.entrypoints.cli.collect_env
-import vllm.entrypoints.cli.openai
-import vllm.entrypoints.cli.serve
 import vllm.version
 from vllm.entrypoints.utils import cli_env_setup
 from vllm.utils import FlexibleArgumentParser
 
 CMD_MODULES = [
-    vllm.entrypoints.cli.openai,
-    vllm.entrypoints.cli.serve,
-    vllm.entrypoints.cli.benchmark.main,
-    vllm.entrypoints.cli.collect_env,
+    "vllm.entrypoints.cli.openai",
+    "vllm.entrypoints.cli.serve",
+    "vllm.entrypoints.cli.benchmark.main",
+    "vllm.entrypoints.cli.collect_env",
 ]
 
 
@@ -29,6 +27,7 @@ def register_signal_handlers():
     signal.signal(signal.SIGTSTP, signal_handler)
 
 
+@profile
 def main():
     cli_env_setup()
 
@@ -39,12 +38,35 @@ def main():
                         version=vllm.version.__version__)
     subparsers = parser.add_subparsers(required=False, dest="subparser")
     cmds = {}
-    for cmd_module in CMD_MODULES:
-        new_cmds = cmd_module.cmd_init()
-        for cmd in new_cmds:
-            cmd.subparser_init(subparsers).set_defaults(
-                dispatch_function=cmd.cmd)
-            cmds[cmd.name] = cmd
+
+    module = importlib.import_module("vllm.entrypoints.cli.openai")
+    new_cmds = module.cmd_init()
+    for cmd in new_cmds:
+        cmd.subparser_init(subparsers).set_defaults(
+            dispatch_function=cmd.cmd)
+        cmds[cmd.name] = cmd
+
+    module = importlib.import_module("vllm.entrypoints.cli.serve")
+    new_cmds = module.cmd_init()
+    for cmd in new_cmds:
+        c = cmd.subparser_init(subparsers)
+        c.set_defaults(dispatch_function=cmd.cmd)
+        cmds[cmd.name] = cmd
+
+    module = importlib.import_module("vllm.entrypoints.cli.benchmark.main")
+    new_cmds = module.cmd_init()
+    for cmd in new_cmds:
+        cmd.subparser_init(subparsers).set_defaults(
+            dispatch_function=cmd.cmd)
+        cmds[cmd.name] = cmd
+
+    module = importlib.import_module("vllm.entrypoints.cli.collect_env")
+    new_cmds = module.cmd_init()
+    for cmd in new_cmds:
+        cmd.subparser_init(subparsers).set_defaults(
+            dispatch_function=cmd.cmd)
+        cmds[cmd.name] = cmd
+
     args = parser.parse_args()
     if args.subparser in cmds:
         cmds[args.subparser].validate(args)

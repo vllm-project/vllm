@@ -1,13 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import argparse
+from line_profiler import profile
 
 import uvloop
 
 from vllm.entrypoints.cli.types import CLISubcommand
-from vllm.entrypoints.openai.api_server import run_server
-from vllm.entrypoints.openai.cli_args import (make_arg_parser,
-                                              validate_parsed_serve_args)
 from vllm.utils import FlexibleArgumentParser
 
 
@@ -20,6 +18,8 @@ class ServeSubcommand(CLISubcommand):
 
     @staticmethod
     def cmd(args: argparse.Namespace) -> None:
+        from vllm.entrypoints.openai.api_server import run_server
+
         # If model is specified in CLI (as positional arg), it takes precedence
         if hasattr(args, 'model_tag') and args.model_tag is not None:
             args.model = args.model_tag
@@ -27,11 +27,16 @@ class ServeSubcommand(CLISubcommand):
         uvloop.run(run_server(args))
 
     def validate(self, args: argparse.Namespace) -> None:
+        from vllm.entrypoints.openai.cli_args import validate_parsed_serve_args
+
         validate_parsed_serve_args(args)
 
+    @profile
     def subparser_init(
             self,
             subparsers: argparse._SubParsersAction) -> FlexibleArgumentParser:
+        from vllm.entrypoints.openai.cli_args import make_arg_parser
+
         serve_parser = subparsers.add_parser(
             "serve",
             help="Start the vLLM OpenAI Compatible API server.",
