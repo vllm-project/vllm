@@ -171,7 +171,6 @@ class OvisProcessor(ProcessorMixin):
                         # Converts in list for ease of use
                         ids_list = ids_tensor.tolist()
                         attn_list = attn_mask.tolist()
-                        placeholder_ids = image_features["image_placeholders"][idx]
 
                         new_ids = []
                         new_attn = []
@@ -179,8 +178,10 @@ class OvisProcessor(ProcessorMixin):
                         # replace placeholders
                         for i, token_id in enumerate(ids_list):
                             if token_id == image_token_id:
+                                placeholder_ids = image_features["image_placeholders"][idx]
                                 new_ids.extend(placeholder_ids)
                                 new_attn.extend([1] * len(placeholder_ids))
+                                idx += 1
                             else:
                                 new_ids.append(token_id)
                                 new_attn.append(attn_list[i])
@@ -188,7 +189,6 @@ class OvisProcessor(ProcessorMixin):
                         # Converts back to tensors
                         ids_tensor = torch.tensor(new_ids, dtype=torch.long)
                         attn_mask = torch.tensor(new_attn, dtype=torch.long)
-                        idx += 1
                     else:
                         raise RuntimeError(
                             'Mismatch between the images you provided and the number of placeholder present in the text')

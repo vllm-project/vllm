@@ -439,7 +439,7 @@ VLM_TEST_SETTINGS = {
     ),
     "ovis2": VLMTestInfo(
         models=["AIDC-AI/Ovis2-1B"],
-        test_type=(VLMTestType.IMAGE,),
+        test_type=(VLMTestType.IMAGE, VLMTestType.MULTI_IMAGE),
         prompt_formatter=lambda img_prompt: f"<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n<|im_start|>user\n{img_prompt}<|im_end|>\n<|im_start|>assistant\n", # noqa: E501
         img_idx_to_prompt=lambda idx: "<image>\n", # noqa: E501
         max_model_len=4096,
