@@ -65,7 +65,7 @@ def maybe_backend_fallback(
             fallback_or_error(
                 guided_params,
                 "xgrammar does not support advanced JSON schema features like "
-                "enums, patterns or numeric ranges.", "outlines")
+                "string length, item limits, or property bounds.", "outlines")
 
         # xgrammar only supports GBNF grammars, so we must convert Lark.
         # We must check if the grammar is likely Lark and if that
