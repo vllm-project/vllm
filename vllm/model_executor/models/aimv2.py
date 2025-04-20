@@ -7,7 +7,7 @@ from typing import Optional, Tuple, Union
 import torch
 from vllm.attention import Attention, AttentionType
 from vllm.config import VllmConfig, CacheConfig
-from vllm.model_executor.layers.linear import QKVParallelLinear, RowParallelLinear, ColumnParallelLinear
+from vllm.model_executor.layers.linear import QKVParallelLinear, RowParallelLinear, ColumnParallelLinear, ReplicatedLinear
 from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
 
 from torch import nn
@@ -37,10 +37,9 @@ class Aimv2VisualTokenizer(torch.nn.Module):
         )
         head_dim = config.vocab_size - len(IMAGE_INDICATOR_IDS)  # reserved tokens for IMAGE_INDICATORS
         self.head = torch.nn.Sequential(
-            ColumnParallelLinear(
+            ReplicatedLinear(
                 config.backbone_config.hidden_size * config.hidden_stride * config.hidden_stride, head_dim,
                 bias=False,
-                gather_output=True,
             ),
             torch.nn.LayerNorm(head_dim)
         )
@@ -156,27 +155,28 @@ class AIMv2SwiGLUFFN(nn.Module):
         in_features = config.hidden_size
         bias = config.use_bias
 
-        self.fc1 = nn.Linear(in_features, hidden_features, bias=bias)#ColumnParallelLinear(in_features,
-                   #              hidden_features,
-                   #              bias=bias,
-                   #              quant_config=quant_config,
-                   #              prefix=f"{prefix}.fc1")
-        self.fc2 = nn.Linear(hidden_features, in_features, bias=bias)#ColumnParallelLinear(hidden_features,
-                   #              in_features,
-                   #              bias=bias,
-                   #              quant_config=quant_config,
-                   #              prefix=f"{prefix}.fc2")
-        self.fc3 = nn.Linear(in_features, hidden_features, bias=bias)#RowParallelLinear(in_features,
-                   #           hidden_features,
-                   #           bias=bias,
-                   #           quant_config=quant_config,
-                   #           prefix=f"{prefix}.fc3")
+        # TODO(Isotr0py): investigate if we can add TP to visual tokenizer
+        self.fc1 = ReplicatedLinear(in_features,
+                                hidden_features,
+                                bias=bias,
+                                quant_config=quant_config,
+                                prefix=f"{prefix}.fc1")
+        self.fc2 = ReplicatedLinear(hidden_features,
+                                 in_features,
+                                 bias=bias,
+                                 quant_config=quant_config,
+                                 prefix=f"{prefix}.fc2")
+        self.fc3 = ReplicatedLinear(in_features,
+                             hidden_features,
+                             bias=bias,
+                             quant_config=quant_config,
+                             prefix=f"{prefix}.fc3")
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x_parallel= self.fc1(x)#, _ = self.fc1(x)
-        gate= self.fc3(x)#, _ = self.fc3(x)
+        x_parallel, _ = self.fc1(x)
+        gate, _ = self.fc3(x)
         x_parallel = F.silu(x_parallel) * gate
-        out =self.fc2(x_parallel)#, _ = self.fc2(x_parallel)
+        out, _ = self.fc2(x_parallel)
         return out
 
 
@@ -219,25 +219,28 @@ class AIMv2Attention(nn.Module):
         super().__init__()
         dim = config.hidden_size
 
+        # TODO(Isotr0py): investigate if we can add TP to visual tokenizer
         self.num_heads = config.num_attention_heads
-        self.qkv = nn.Linear(dim, dim * 3, bias=config.qkv_bias)#QKVParallelLinear(
-                   # hidden_size=dim,
-                   # head_size=dim // config.num_attention_heads,
-                   # total_num_heads=config.num_attention_heads,
-                   # bias=config.qkv_bias,
-                   # quant_config=quant_config,
-                   # prefix=f"{prefix}.qkv")
-        self.proj = nn.Linear(dim, dim, bias=config.use_bias)#RowParallelLinear(input_size=dim,
-                    #                  output_size=dim,
-                    #                  bias = config.use_bias,
-                    #                  quant_config=quant_config,
-                    #                  prefix=f"{prefix}.proj")
+        self.qkv = ReplicatedLinear(dim, dim * 3, bias=config.qkv_bias)
+        # self.qkv = QKVParallelLinear(
+        #               hidden_size=dim,
+        #               head_size=dim // config.num_attention_heads,
+        #               total_num_heads=config.num_attention_heads,
+        #               bias=config.qkv_bias,
+        #               quant_config=quant_config,
+        #               prefix=f"{prefix}.qkv")
+        self.proj = ReplicatedLinear(dim, dim, bias=config.use_bias)
+        # self.proj = RowParallelLinear(input_size=dim,
+        #                  output_size=dim,
+        #                  bias = config.use_bias,
+        #                  quant_config=quant_config,
+        #                  prefix=f"{prefix}.proj")
 
     def forward( # todo might implement multiple attn implementations
         self, x: torch.Tensor, mask: Optional[torch.Tensor] = None
     ) -> torch.Tensor:
         B, N, C = x.shape
-        qkv = self.qkv(x) #, _ = self.qkv(x)
+        qkv, _ = self.qkv(x)
 
         qkv = qkv.reshape(B, N, 3, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4)
 
@@ -245,7 +248,7 @@ class AIMv2Attention(nn.Module):
 
         x = F.scaled_dot_product_attention(q, k, v, attn_mask=mask)
         x = x.transpose(1, 2).contiguous().reshape(B, N, C)
-        x= self.proj(x)#, _ = self.proj(x)
+        x, _ = self.proj(x)
         return x
 
 
