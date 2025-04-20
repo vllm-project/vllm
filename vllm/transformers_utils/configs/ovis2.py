@@ -2,9 +2,9 @@
 
 # copied from https://huggingface.co/AIDC-AI/Ovis2-1B/blob/main/configuration_aimv2.py
 # and https://huggingface.co/AIDC-AI/Ovis2-1B/blob/main/configuration_ovis.py
-from typing import Any, Union, Optional
+from typing import Any, Optional, Union
 
-from transformers import PretrainedConfig, AutoConfig
+from transformers import AutoConfig, PretrainedConfig
 
 
 class AIMv2Config(PretrainedConfig):
@@ -63,6 +63,7 @@ class AIMv2Config(PretrainedConfig):
         self.qkv_bias = qkv_bias
         self.use_bias = use_bias
 
+
 IGNORE_ID = -100
 IMAGE_TOKEN_ID = -200
 IMAGE_TOKEN = "<image>"
@@ -71,21 +72,22 @@ IMAGE_INDICATOR_IDS = [-301, -302, -303, -304, -305]
 
 AutoConfig.register("aimv2", AIMv2Config)
 
+
 # ----------------------------------------------------------------------
 #                     Visual Tokenizer Configuration
 # ----------------------------------------------------------------------
 class BaseVisualTokenizerConfig(PretrainedConfig):
-    def __init__(
-        self,
-        vocab_size=16384,
-        tokenize_function="softmax",
-        tau=1.0,
-        depths=None,
-        drop_cls_token=False,
-        backbone_config: Optional[Union[PretrainedConfig, dict]] = None,
-        hidden_stride: int = 1,
-        **kwargs
-    ):
+
+    def __init__(self,
+                 vocab_size=16384,
+                 tokenize_function="softmax",
+                 tau=1.0,
+                 depths=None,
+                 drop_cls_token=False,
+                 backbone_config: Optional[Union[PretrainedConfig,
+                                                 dict]] = None,
+                 hidden_stride: int = 1,
+                 **kwargs):
         super().__init__(**kwargs)
         self.vocab_size = vocab_size
         self.tokenize_function = tokenize_function
@@ -101,7 +103,8 @@ class BaseVisualTokenizerConfig(PretrainedConfig):
             if not isinstance(backbone_config, PretrainedConfig):
                 model_type = backbone_config['model_type']
                 backbone_config.pop('model_type')
-                backbone_config = AutoConfig.for_model(model_type, **backbone_config)
+                backbone_config = AutoConfig.for_model(model_type,
+                                                       **backbone_config)
         self.backbone_config = backbone_config
         self.hidden_stride = hidden_stride
 
@@ -127,17 +130,16 @@ AutoConfig.register("aimv2_visual_tokenizer", Aimv2VisualTokenizerConfig)
 class OvisConfig(PretrainedConfig):
     model_type = "ovis"
 
-    def __init__(
-        self,
-        llm_config: Optional[Union[PretrainedConfig, dict]] = None,
-        visual_tokenizer_config: Optional[Union[PretrainedConfig, dict]] = None,
-        multimodal_max_length=8192,
-        hidden_size=None,
-        conversation_formatter_class=None,
-        llm_attn_implementation=None,
-        disable_tie_weight=False,
-        **kwargs
-    ):
+    def __init__(self,
+                 llm_config: Optional[Union[PretrainedConfig, dict]] = None,
+                 visual_tokenizer_config: Optional[Union[PretrainedConfig,
+                                                         dict]] = None,
+                 multimodal_max_length=8192,
+                 hidden_size=None,
+                 conversation_formatter_class=None,
+                 llm_attn_implementation=None,
+                 disable_tie_weight=False,
+                 **kwargs):
         super().__init__(**kwargs)
         if llm_config is not None:
             assert isinstance(llm_config, (PretrainedConfig, dict)), \
@@ -155,7 +157,8 @@ class OvisConfig(PretrainedConfig):
             if not isinstance(visual_tokenizer_config, PretrainedConfig):
                 model_type = visual_tokenizer_config['model_type']
                 visual_tokenizer_config.pop('model_type')
-                visual_tokenizer_config = AutoConfig.for_model(model_type, **visual_tokenizer_config)
+                visual_tokenizer_config = AutoConfig.for_model(
+                    model_type, **visual_tokenizer_config)
 
         self.visual_tokenizer_config = visual_tokenizer_config
         self.multimodal_max_length = multimodal_max_length

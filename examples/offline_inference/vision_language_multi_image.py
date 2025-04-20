@@ -452,11 +452,12 @@ def load_ovis2(question: str, image_urls: list[str]) -> ModelRequestData:
         hf_overrides={"architectures": ["Ovis2ForConditionalGeneration"]},
     )
 
-    placeholder = '\n'.join([f'Image {i+1}: <image>' for i in range(len(image_urls))]) + '\n'
+    placeholder = '\n'.join(
+        [f'Image {i+1}: <image>' for i in range(len(image_urls))]) + '\n'
     prompt = ("<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n"
-             f"<|im_start|>user\n{placeholder}"
-             f"{question}<|im_end|>\n"
-             "<|im_start|>assistant\n")
+              f"<|im_start|>user\n{placeholder}"
+              f"{question}<|im_end|>\n"
+              "<|im_start|>assistant\n")
 
     return ModelRequestData(
         engine_args=engine_args,

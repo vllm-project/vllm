@@ -2,53 +2,56 @@
 
 # A modified implementation of the AIMv2 Transformer
 # inserted here also the image tokenizer used by Ovis2
-from typing import Optional, Tuple, Union
+from typing import Optional
 
 import torch
-from vllm.attention import Attention, AttentionType
-from vllm.config import VllmConfig, CacheConfig
-from vllm.model_executor.layers.linear import QKVParallelLinear, RowParallelLinear, ColumnParallelLinear, ReplicatedLinear
-from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
-
-from torch import nn
+from torch import nn, softmax
 from torch.nn import functional as F
-from transformers.modeling_outputs import BaseModelOutputWithNoAttention
-from transformers.modeling_utils import PreTrainedModel
-
-from torch import softmax
 from torch.nn.functional import gumbel_softmax, pad
-from vllm.transformers_utils.processor import cached_get_image_processor
-from vllm.transformers_utils.configs.ovis2 import AIMv2Config, Aimv2VisualTokenizerConfig
 
-IMAGE_INDICATOR_IDS = [-301, -302, -303, -304, -305] # kept for vocab prefixed tokens
+from vllm.model_executor.layers.linear import ReplicatedLinear
+from vllm.model_executor.layers.quantization.base_config import (
+    QuantizationConfig)
+from vllm.transformers_utils.configs.ovis2 import (AIMv2Config,
+                                                   Aimv2VisualTokenizerConfig)
+from vllm.transformers_utils.processor import cached_get_image_processor
+
+IMAGE_INDICATOR_IDS = [-301, -302, -303, -304,
+                       -305]  # kept for vocab prefixed tokens
 
 
 class Aimv2VisualTokenizer(torch.nn.Module):
 
-    def __init__(self, config: Aimv2VisualTokenizerConfig, quant_config: Optional[QuantizationConfig] = None, prefix: str = "", **kwargs):
+    def __init__(self,
+                 config: Aimv2VisualTokenizerConfig,
+                 quant_config: Optional[QuantizationConfig] = None,
+                 prefix: str = "",
+                 **kwargs):
         super().__init__()
-        self.image_processor = cached_get_image_processor(kwargs['image_processor_name_or_path'], trust_remote_code=True)
+        self.image_processor = cached_get_image_processor(
+            kwargs['image_processor_name_or_path'], trust_remote_code=True)
         self.config = config
         self.image_processor.do_center_crop = False
         self.backbone = AIMv2Model(
-            config = config.backbone_config, # noqa
+            config=config.backbone_config,  # noqa
             quant_config=quant_config,
-            prefix=f"{prefix}.visual_tokenizer"
-        )
-        head_dim = config.vocab_size - len(IMAGE_INDICATOR_IDS)  # reserved tokens for IMAGE_INDICATORS
+            prefix=f"{prefix}.visual_tokenizer")
+        head_dim = config.vocab_size - len(
+            IMAGE_INDICATOR_IDS)  # reserved tokens for IMAGE_INDICATORS
         self.head = torch.nn.Sequential(
             ReplicatedLinear(
-                config.backbone_config.hidden_size * config.hidden_stride * config.hidden_stride, head_dim,
+                config.backbone_config.hidden_size * config.hidden_stride *
+                config.hidden_stride,
+                head_dim,
                 bias=False,
-            ),
-            torch.nn.LayerNorm(head_dim)
-        )
+            ), torch.nn.LayerNorm(head_dim))
 
-        assert all((self.image_processor.do_resize,
-                    not getattr(self.image_processor, 'do_center_crop', False),
-                    self.image_processor.do_rescale,
-                    self.image_processor.do_normalize
-                    )), f"image_processor `{self.image_processor}` is not supported currently"
+        assert all(
+            (self.image_processor.do_resize,
+             not getattr(self.image_processor, 'do_center_crop', False),
+             self.image_processor.do_rescale,
+             self.image_processor.do_normalize)
+        ), f"image_processor `{self.image_processor}` is not supported currently"
 
     @property
     def dtype(self):
@@ -70,11 +73,13 @@ class Aimv2VisualTokenizer(torch.nn.Module):
     def get_image_size(self):
         raise NotImplementedError
 
-
     def tokenize(self, logits):
+
         def st_argmax(y_soft, dim):  # straight-through softmax
             index = y_soft.max(dim, keepdim=True)[1]
-            y_hard = torch.zeros_like(y_soft, memory_format=torch.legacy_contiguous_format).scatter_(dim, index, 1.0)
+            y_hard = torch.zeros_like(
+                y_soft, memory_format=torch.legacy_contiguous_format).scatter_(
+                    dim, index, 1.0)
             ret = y_hard - y_soft.detach() + y_soft
             return ret
 
@@ -86,7 +91,8 @@ class Aimv2VisualTokenizer(torch.nn.Module):
             tokens = st_argmax(logits, dim=-1)
         else:
             raise ValueError(
-                f'Invalid `max_type`, expected softmax or gumbel_argmax or st_argmax, but got {self.config.tokenize_function}')
+                f'Invalid `max_type`, expected softmax or gumbel_argmax or st_argmax, but got {self.config.tokenize_function}'
+            )
         return tokens
 
     def encode(self, pixel_values):
@@ -98,31 +104,40 @@ class Aimv2VisualTokenizer(torch.nn.Module):
         # e.g., for hidden_stride=2, this leads to a token length reduction: 1024 -> 256 for aimv2
         if self.config.hidden_stride > 1:
             n, l, d = features.shape  # this `d` maybe different from the above `d
-            sqrt_l = int(l ** 0.5)
-            assert sqrt_l ** 2 == l, "The token sequence length should be a perfect square."
+            sqrt_l = int(l**0.5)
+            assert sqrt_l**2 == l, "The token sequence length should be a perfect square."
             features = features.reshape(n, sqrt_l, sqrt_l, d)
-            pl = (self.config.hidden_stride - (sqrt_l % self.config.hidden_stride)) % self.config.hidden_stride
+            pl = (self.config.hidden_stride -
+                  (sqrt_l %
+                   self.config.hidden_stride)) % self.config.hidden_stride
             features = pad(features, (0, 0, 0, pl, 0, pl), "constant", 0)
             sqrt_l += pl
-            features = features.reshape(n, sqrt_l // self.config.hidden_stride, self.config.hidden_stride,
-                                        sqrt_l // self.config.hidden_stride, self.config.hidden_stride, d)
-            features = features.permute(0, 1, 3, 2, 4, 5)  # [n, sqrt_l/hs, sqrt_l/hs, hs, hs, d]
-            features = features.flatten(3)  # [n, sqrt_l/hs, sqrt_l/hs, hs*hs*d]
+            features = features.reshape(n, sqrt_l // self.config.hidden_stride,
+                                        self.config.hidden_stride,
+                                        sqrt_l // self.config.hidden_stride,
+                                        self.config.hidden_stride, d)
+            features = features.permute(
+                0, 1, 3, 2, 4, 5)  # [n, sqrt_l/hs, sqrt_l/hs, hs, hs, d]
+            features = features.flatten(
+                3)  # [n, sqrt_l/hs, sqrt_l/hs, hs*hs*d]
             features = features.reshape(
-                n, -1, self.config.hidden_stride * self.config.hidden_stride * d)
+                n, -1,
+                self.config.hidden_stride * self.config.hidden_stride * d)
 
         return features
 
     def forward(self, pixel_values: torch.Tensor) -> torch.Tensor:
         """[BatchSize, ImageShape] -> [BatchSize, Token, VocabSize]"""
         features = self.encode(pixel_values)
-        logits, _ = self.head[0](features) # we spllit the sequncial here for not throwing an error
+        logits, _ = self.head[0](
+            features)  # we spllit the sequncial here for not throwing an error
         logits = self.head[1](logits)
         tokens = self.tokenize(logits)
         # tokens' shape is [BatchSize, #Token, VocabSize-5], so padding with [BatchSize, #Token, 5], after
         # which, tokens' shape should become [BatchSize, #Token, VocabSize]
         batch_size, token_len, _ = tokens.shape
-        padding_tensor = torch.zeros(size=(batch_size, token_len, len(IMAGE_INDICATOR_IDS)),
+        padding_tensor = torch.zeros(size=(batch_size, token_len,
+                                           len(IMAGE_INDICATOR_IDS)),
                                      dtype=tokens.dtype,
                                      device=tokens.device,
                                      layout=tokens.layout,
@@ -132,6 +147,7 @@ class Aimv2VisualTokenizer(torch.nn.Module):
 
 
 class RMSNorm(nn.Module):
+
     def __init__(self, dim: int, eps: float = 1e-6):
         super().__init__()
         self.weight = nn.Parameter(torch.ones(dim))
@@ -149,7 +165,9 @@ class RMSNorm(nn.Module):
 
 
 class AIMv2SwiGLUFFN(nn.Module):
-    def __init__(self, config: AIMv2Config, quant_config: QuantizationConfig, prefix: str):
+
+    def __init__(self, config: AIMv2Config, quant_config: QuantizationConfig,
+                 prefix: str):
         super().__init__()
         hidden_features = config.intermediate_size
         in_features = config.hidden_size
@@ -157,20 +175,20 @@ class AIMv2SwiGLUFFN(nn.Module):
 
         # TODO(Isotr0py): investigate if we can add TP to visual tokenizer
         self.fc1 = ReplicatedLinear(in_features,
-                                hidden_features,
-                                bias=bias,
-                                quant_config=quant_config,
-                                prefix=f"{prefix}.fc1")
+                                    hidden_features,
+                                    bias=bias,
+                                    quant_config=quant_config,
+                                    prefix=f"{prefix}.fc1")
         self.fc2 = ReplicatedLinear(hidden_features,
-                                 in_features,
-                                 bias=bias,
-                                 quant_config=quant_config,
-                                 prefix=f"{prefix}.fc2")
+                                    in_features,
+                                    bias=bias,
+                                    quant_config=quant_config,
+                                    prefix=f"{prefix}.fc2")
         self.fc3 = ReplicatedLinear(in_features,
-                             hidden_features,
-                             bias=bias,
-                             quant_config=quant_config,
-                             prefix=f"{prefix}.fc3")
+                                    hidden_features,
+                                    bias=bias,
+                                    quant_config=quant_config,
+                                    prefix=f"{prefix}.fc3")
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x_parallel, _ = self.fc1(x)
@@ -180,8 +198,8 @@ class AIMv2SwiGLUFFN(nn.Module):
         return out
 
 
-
 class AIMv2PatchEmbed(nn.Module):
+
     def __init__(self, config: AIMv2Config):
         super().__init__()
         self.proj = nn.Conv2d(
@@ -199,12 +217,14 @@ class AIMv2PatchEmbed(nn.Module):
 
 
 class AIMv2ViTPreprocessor(nn.Module):
+
     def __init__(self, config: AIMv2Config):
         super().__init__()
-        num_patches = (config.image_size // config.patch_size) ** 2
+        num_patches = (config.image_size // config.patch_size)**2
 
         self.patchifier = AIMv2PatchEmbed(config)
-        self.pos_embed = nn.Parameter(torch.zeros((1, num_patches, config.hidden_size)))
+        self.pos_embed = nn.Parameter(
+            torch.zeros((1, num_patches, config.hidden_size)))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         tokens = self.patchifier(x)
@@ -215,7 +235,9 @@ class AIMv2ViTPreprocessor(nn.Module):
 
 
 class AIMv2Attention(nn.Module):
-    def __init__(self, config: AIMv2Config, quant_config: QuantizationConfig, prefix: str):
+
+    def __init__(self, config: AIMv2Config, quant_config: QuantizationConfig,
+                 prefix: str):
         super().__init__()
         dim = config.hidden_size
 
@@ -236,13 +258,15 @@ class AIMv2Attention(nn.Module):
         #                  quant_config=quant_config,
         #                  prefix=f"{prefix}.proj")
 
-    def forward( # todo might implement multiple attn implementations
-        self, x: torch.Tensor, mask: Optional[torch.Tensor] = None
-    ) -> torch.Tensor:
+    def forward(  # todo might implement multiple attn implementations
+            self,
+            x: torch.Tensor,
+            mask: Optional[torch.Tensor] = None) -> torch.Tensor:
         B, N, C = x.shape
         qkv, _ = self.qkv(x)
 
-        qkv = qkv.reshape(B, N, 3, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4)
+        qkv = qkv.reshape(B, N, 3, self.num_heads,
+                          C // self.num_heads).permute(2, 0, 3, 1, 4)
 
         q, k, v = qkv.unbind(0)
 
@@ -253,29 +277,39 @@ class AIMv2Attention(nn.Module):
 
 
 class AIMv2Block(nn.Module):
-    def __init__(self, config: AIMv2Config, quant_config: QuantizationConfig, prefix: str):
+
+    def __init__(self, config: AIMv2Config, quant_config: QuantizationConfig,
+                 prefix: str):
         super().__init__()
-        self.attn = AIMv2Attention(config, quant_config=quant_config, prefix=f"{prefix}.attn")
+        self.attn = AIMv2Attention(config,
+                                   quant_config=quant_config,
+                                   prefix=f"{prefix}.attn")
         self.norm_1 = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
-        self.mlp = AIMv2SwiGLUFFN(config, quant_config=quant_config, prefix=f"{prefix}.mlp")
+        self.mlp = AIMv2SwiGLUFFN(config,
+                                  quant_config=quant_config,
+                                  prefix=f"{prefix}.mlp")
         self.norm_2 = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
-    def forward(
-        self, x: torch.Tensor, mask: Optional[torch.Tensor] = None
-    ) -> torch.Tensor:
+    def forward(self,
+                x: torch.Tensor,
+                mask: Optional[torch.Tensor] = None) -> torch.Tensor:
         x = x + self.attn(self.norm_1(x), mask)
         x = x + self.mlp(self.norm_2(x))
         return x
 
 
 class AIMv2Transformer(nn.Module):
-    def __init__(self, config: AIMv2Config, quant_config: QuantizationConfig, prefix: str):
+
+    def __init__(self, config: AIMv2Config, quant_config: QuantizationConfig,
+                 prefix: str):
         super().__init__()
 
-        self.blocks = nn.ModuleList(
-            [AIMv2Block(config, quant_config, prefix=f"{prefix}.blocks.{i}") for i in range(config.num_hidden_layers)]
-        )
-        self.post_trunk_norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.blocks = nn.ModuleList([
+            AIMv2Block(config, quant_config, prefix=f"{prefix}.blocks.{i}")
+            for i in range(config.num_hidden_layers)
+        ])
+        self.post_trunk_norm = RMSNorm(config.hidden_size,
+                                       eps=config.rms_norm_eps)
 
     def forward(
         self,
@@ -283,7 +317,7 @@ class AIMv2Transformer(nn.Module):
         mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         #outputs = []
-        for block in self.blocks: # they take the -1 as the ref embeddings, like a clip skip
+        for block in self.blocks:  # they take the -1 as the ref embeddings, like a clip skip
             tokens = block(tokens, mask)
             #outputs.append(tokens)
         #tokens = self.post_trunk_norm(tokens) NO NORM IN THE OG IMPLEMENTATION
@@ -291,10 +325,16 @@ class AIMv2Transformer(nn.Module):
 
 
 class AIMv2Model(torch.nn.Module):
-    def __init__(self, config: AIMv2Config, quant_config: QuantizationConfig, prefix: str = ""):
+
+    def __init__(self,
+                 config: AIMv2Config,
+                 quant_config: QuantizationConfig,
+                 prefix: str = ""):
         super().__init__()
         self.preprocessor = AIMv2ViTPreprocessor(config)
-        self.trunk = AIMv2Transformer(config, quant_config=quant_config, prefix=f"{prefix}.trunk")
+        self.trunk = AIMv2Transformer(config,
+                                      quant_config=quant_config,
+                                      prefix=f"{prefix}.trunk")
 
     @property
     def dtype(self):
@@ -311,8 +351,6 @@ class AIMv2Model(torch.nn.Module):
     ) -> torch.Tensor:
 
         x = self.preprocessor(pixel_values)
-        x = self.trunk(
-            x, mask
-        )
+        x = self.trunk(x, mask)
 
         return x

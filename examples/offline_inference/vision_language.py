@@ -724,6 +724,7 @@ def run_nvlm_d(questions: list[str], modality: str) -> ModelRequestData:
         prompts=prompts,
     )
 
+
 # Ovis2
 def run_ovis2(questions: list[str], modality: str) -> ModelRequestData:
     assert modality == "image"
@@ -743,12 +744,10 @@ def run_ovis2(questions: list[str], modality: str) -> ModelRequestData:
     )
 
     placeholder = "<image>\n"
-    prompts = [
-        ("<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n"
-         f"<|im_start|>user\n{placeholder}"
-         f"{question}<|im_end|>\n"
-         "<|im_start|>assistant\n") for question in questions
-    ]
+    prompts = [("<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n"
+                f"<|im_start|>user\n{placeholder}"
+                f"{question}<|im_end|>\n"
+                "<|im_start|>assistant\n") for question in questions]
 
     return ModelRequestData(
         engine_args=engine_args,

@@ -674,7 +674,8 @@ def ovis2_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
 
         text = text.split("<|im_start|>user\n")[1].split("<|im_end|>\n")[0]
 
-        prompt, input_ids, pixel_values = hf_model.model.preprocess_inputs(text_or_conversations=text, images=images)
+        prompt, input_ids, pixel_values = hf_model.model.preprocess_inputs(
+            text_or_conversations=text, images=images)
         attention_mask = torch.ne(input_ids, text_tokenizer.pad_token_id)
 
         inputs = {

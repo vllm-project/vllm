@@ -28,8 +28,9 @@ import PIL
 import torch
 from transformers import AutoProcessor, BatchFeature
 from transformers.image_utils import ImageInput
-from transformers.processing_utils import ProcessingKwargs, ProcessorMixin, Unpack
-from transformers.tokenization_utils_base import TextInput, PreTokenizedInput
+from transformers.processing_utils import (ProcessingKwargs, ProcessorMixin,
+                                           Unpack)
+from transformers.tokenization_utils_base import PreTokenizedInput, TextInput
 
 __all__ = [ 'OvisProcessor']
 IGNORE_ID = -100
