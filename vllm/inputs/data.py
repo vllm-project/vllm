@@ -229,10 +229,13 @@ class EmbedsInputs(TypedDict):
     """The type of inputs."""
 
     prompt_embeds: torch.Tensor
-    """The embeddings of the prompt, if available."""
+    """The embeddings of the prompt."""
 
     prompt_token_ids: NotRequired[list[int]]
-    """The token IDs of the prompt."""
+    """
+    The token IDs of the prompt. Should always be a list of 0 of the same 
+    length as prompt_embeds.
+    """
 
     prompt: NotRequired[str]
     """
