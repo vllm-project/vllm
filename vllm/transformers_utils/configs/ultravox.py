@@ -1,9 +1,32 @@
 # SPDX-License-Identifier: Apache-2.0
 
 # Adapted from https://github.com/fixie-ai/ultravox/blob/ecd58c4041030bae2ad15aa6bcf04ab43199ea02/ultravox/model/ultravox_config.py
+import warnings
 from typing import Any, Dict, Optional
 
 import transformers
+
+MODEL_TO_AUDIO_TOKEN = {
+    'gemma-3': 262145,
+    'Llama-3': 128256,
+}
+
+
+def guess_audio_token(text_model_id: Optional[str],
+                      text_config_obj: transformers.PretrainedConfig) -> int:
+    if text_model_id is not None:
+        for model_prefix, audio_token in MODEL_TO_AUDIO_TOKEN.items():
+            if model_prefix.lower() in text_model_id.lower():
+                return audio_token
+
+    if hasattr(text_config_obj, "vocab_size"):
+        warnings.warn(
+            "Could not guess audio token id by text_model_id."
+            " Using vocab_size from text_config_obj.",
+            stacklevel=2)
+        return text_config_obj.vocab_size
+    else:
+        raise ValueError("Could not guess audio token id.")
 
 
 class UltravoxConfig(transformers.PretrainedConfig):
@@ -44,6 +67,7 @@ class UltravoxConfig(transformers.PretrainedConfig):
     """
 
     model_type = "ultravox"
+    audio_token = "<|audio|>"
     is_composition = False
 
     def __init__(
@@ -79,29 +103,39 @@ class UltravoxConfig(transformers.PretrainedConfig):
             # Avoid circular import
             from vllm.transformers_utils.config import get_config
 
-            self.text_config = get_config(text_model_id,
-                                          trust_remote_code=False)
+            text_config_obj = get_config(text_model_id,
+                                         trust_remote_code=False)
         else:
             text_config = text_config or {}
-            self.text_config = transformers.CONFIG_MAPPING[text_config.get(
+            text_config_obj = transformers.CONFIG_MAPPING[text_config.get(
                 "model_type", "llama")](**text_config)
+
+        if isinstance(text_config_obj, transformers.Gemma3Config):
+            text_config_obj = text_config_obj.text_config
+            text_config_obj.architectures = ["Gemma3ForCausalLM"]
+            text_config_obj.nested = True
+        else:
+            text_config_obj.nested = False
 
         if audio_model_id is not None:
             # Avoid circular import
             from vllm.transformers_utils.config import get_config
 
-            self.audio_config = get_config(audio_model_id,
-                                           trust_remote_code=False)
+            audio_config = get_config(audio_model_id, trust_remote_code=False)
         else:
             audio_config = audio_config or {}
-            self.audio_config = transformers.CONFIG_MAPPING[audio_config.get(
+            audio_config = transformers.CONFIG_MAPPING[audio_config.get(
                 "model_type", "whisper")](**audio_config)
 
+        self.audio_token_index = guess_audio_token(text_model_id,
+                                                   text_config_obj)
+        self.text_config = text_config_obj
+        self.audio_config = audio_config
         self.text_model_lora_config = text_model_lora_config or {}
         self.audio_model_lora_config = audio_model_lora_config or {}
 
-        self.vocab_size = self.text_config.vocab_size
+        self.vocab_size = text_config_obj.vocab_size
 
-        self.initializer_range = self.text_config.initializer_range
+        self.initializer_range = text_config_obj.initializer_range
 
         super().__init__(**kwargs)
