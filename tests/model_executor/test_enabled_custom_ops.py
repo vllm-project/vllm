@@ -3,6 +3,7 @@
 import pytest
 import torch.nn.functional as F
 
+from vllm._aiter_ops import clear_rocm_aiter_environment_variables_state_cache
 from vllm.config import CompilationConfig, VllmConfig, set_current_vllm_config
 from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.layers.activation import (GeluAndMul,
@@ -104,6 +105,7 @@ def test_unquantized_linear_dispatch(use_rocm_aiter: str,
                                      use_rocm_aiter_linear: str, monkeypatch):
     monkeypatch.setenv("VLLM_ROCM_USE_AITER", use_rocm_aiter)
     monkeypatch.setenv("VLLM_ROCM_USE_AITER_LINEAR", use_rocm_aiter_linear)
+    clear_rocm_aiter_environment_variables_state_cache()
     linear_func = dispatch_unquantized_linear_func()
     print(f"use_rocm_aiter: {use_rocm_aiter}, " +
           f"use_rocm_aiter_linear: {use_rocm_aiter_linear}")
