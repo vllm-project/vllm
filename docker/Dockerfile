@@ -5,11 +5,11 @@
 # docs/source/contributing/dockerfile/dockerfile.md and
 # docs/source/assets/contributing/dockerfile-stages-dependency.png
 
-ARG CUDA_VERSION=12.4.1
+ARG CUDA_VERSION=12.8.1
 #################### BASE BUILD IMAGE ####################
 # prepare basic build environment
 FROM nvidia/cuda:${CUDA_VERSION}-devel-ubuntu20.04 AS base
-ARG CUDA_VERSION=12.4.1
+ARG CUDA_VERSION=12.8.1
 ARG PYTHON_VERSION=3.12
 ARG TARGETPLATFORM
 ENV DEBIAN_FRONTEND=noninteractive
@@ -66,7 +66,11 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 COPY requirements/common.txt requirements/common.txt
 COPY requirements/cuda.txt requirements/cuda.txt
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv pip install --system -r requirements/cuda.txt
+    uv pip install --system -r requirements/cuda.txt --index-strategy unsafe-best-match
+
+# TESTING: install xformers from source to test 2.7.0 final RC
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv pip install --system -v -U --no-build-isolation git+https://github.com/facebookresearch/xformers.git@main#egg=xformers
 
 # cuda arch list used by torch
 # can be useful for both `dev` and `test`
@@ -91,7 +95,7 @@ COPY requirements/build.txt requirements/build.txt
 ENV UV_HTTP_TIMEOUT=500
 
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv pip install --system -r requirements/build.txt
+    uv pip install --system -r requirements/build.txt --index-strategy unsafe-best-match
 
 COPY . .
 ARG GIT_REPO_CHECK=0
@@ -163,14 +167,14 @@ COPY requirements/lint.txt requirements/lint.txt
 COPY requirements/test.txt requirements/test.txt
 COPY requirements/dev.txt requirements/dev.txt
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv pip install --system -r requirements/dev.txt
+    uv pip install --system -r requirements/dev.txt --index-strategy unsafe-best-match
 #################### DEV IMAGE ####################
 
 #################### vLLM installation IMAGE ####################
 # image with vLLM installed
 # TODO: Restore to base image after FlashInfer AOT wheel fixed
 FROM nvidia/cuda:${CUDA_VERSION}-devel-ubuntu22.04 AS vllm-base
-ARG CUDA_VERSION=12.4.1
+ARG CUDA_VERSION=12.8.1
 ARG PYTHON_VERSION=3.12
 WORKDIR /vllm-workspace
 ENV DEBIAN_FRONTEND=noninteractive
@@ -249,7 +253,7 @@ COPY ./vllm/collect_env.py .
 # TODO: Remove this once FlashInfer AOT wheel is fixed
 COPY requirements/build.txt requirements/build.txt
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv pip install --system -r requirements/build.txt
+    uv pip install --system -r requirements/build.txt --index-strategy unsafe-best-match
 
 #################### vLLM installation IMAGE ####################
 
@@ -266,7 +270,7 @@ ENV UV_HTTP_TIMEOUT=500
 
 # install development dependencies (for testing)
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv pip install --system -r requirements/dev.txt
+    uv pip install --system -r requirements/dev.txt --index-strategy unsafe-best-match
 
 # install development dependencies (for testing)
 RUN --mount=type=cache,target=/root/.cache/uv \
