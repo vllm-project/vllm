@@ -148,11 +148,7 @@ class CudaPlatformBase(Platform):
         # TODO(lucas): handle this more gracefully
         # Note: model_config may be None during testing
         if model_config is not None and model_config.use_mla:
-            # if `VLLM_ATTENTION_BACKEND` is not set and we are using MLA, then
-            # we default to FlashMLA backend, so we need to force the blocksize
-            # here
-            use_flashmla = (envs.VLLM_ATTENTION_BACKEND is None \
-                or envs.VLLM_ATTENTION_BACKEND == "FLASHMLA")
+            use_flashmla = envs.VLLM_ATTENTION_BACKEND == "FLASHMLA"
             from vllm.attention.ops.flashmla import is_flashmla_supported
             if use_flashmla and is_flashmla_supported()[0] \
                 and cache_config.block_size != 64:
@@ -180,24 +176,30 @@ class CudaPlatformBase(Platform):
                              kv_cache_dtype, block_size, use_v1,
                              use_mla) -> str:
         if use_mla:
-            # TODO(lucas): refactor to  be more concise
-            #  we should probably consider factoring out V1 here
-            if selected_backend == _Backend.TRITON_MLA or block_size != 64:
-                if use_v1:
-                    logger.info_once("Using Triton MLA backend on V1 engine.")
-                    return ("vllm.v1.attention.backends.mla."
-                            "triton_mla.TritonMLABackend")
-                else:
-                    logger.info("Using Triton MLA backend.")
-                    return "vllm.attention.backends.triton_mla.TritonMLABackend"
-            else:
-                from vllm.attention.backends.flashmla import (
-                    is_flashmla_supported)
-                if not is_flashmla_supported()[0]:
-                    logger.warning(
-                        "FlashMLA backend is not supported due to %s",
-                        is_flashmla_supported()[1])
-                elif block_size != 64:
+            from vllm.attention.backends.flashmla import is_flashmla_supported
+            from vllm.vllm_flash_attn.fa_utils import flash_attn_supports_mla
+
+            # currently FlashAttn MLA is only supported on V1
+            flashattn_mla_supported = flash_attn_supports_mla() and use_v1
+            flash_mla_supported = is_flashmla_supported()[0] \
+                and block_size == 64
+
+            use_flashmla = selected_backend == _Backend.FLASHMLA or (
+                selected_backend is None and flash_mla_supported)
+            use_flashattn = selected_backend == _Backend.FLASH_ATTN or (
+                selected_backend is None and flashattn_mla_supported)
+            use_triton = selected_backend == _Backend.TRITON_MLA or (
+                selected_backend is None)
+
+            # prioritize: FlashAttn MLA > FlashMLA > Triton MLA
+            if use_flashattn:
+                assert use_v1
+                logger.info_once(
+                    "Using FlashAttention MLA backend on V1 engine.")
+                return ("vllm.v1.attention.backends.mla."
+                        "flashattn_mla.FlashAttnMLABackend")
+            if use_flashmla:
+                if block_size != 64:
                     logger.warning(
                         "FlashMLA backend is not supported for block size %d"
                         " (currently only supports block size 64).",
@@ -212,6 +214,14 @@ class CudaPlatformBase(Platform):
                         logger.info("Using FlashMLA backend.")
                         return ("vllm.attention.backends."
                                 "flashmla.FlashMLABackend")
+            if use_triton:
+                if use_v1:
+                    logger.info_once("Using Triton MLA backend on V1 engine.")
+                    return ("vllm.v1.attention.backends.mla."
+                            "triton_mla.TritonMLABackend")
+                else:
+                    logger.info("Using Triton MLA backend.")
+                    return "vllm.attention.backends.triton_mla.TritonMLABackend"
         if use_v1:
             if selected_backend == _Backend.TRITON_ATTN_VLLM_V1:
                 logger.info_once("Using Triton backend on V1 engine.")

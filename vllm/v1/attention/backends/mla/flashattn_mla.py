@@ -1,56 +1,59 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from dataclasses import dataclass
-from typing import Any, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
 import torch
 
-from vllm.attention.backends.abstract import (AttentionType,
-                                              is_quantized_kv_cache)
-from vllm.attention.ops.flashmla import (flash_mla_with_kvcache,
-                                         get_mla_metadata,
-                                         is_flashmla_supported)
+from vllm.attention.backends.abstract import AttentionType
 from vllm.logger import init_logger
 from vllm.v1.attention.backends.mla.common import (MLACommonBackend,
                                                    MLACommonDecodeMetadata,
                                                    MLACommonImpl,
                                                    MLACommonMetadata,
                                                    MLACommonMetadataBuilder)
+from vllm.vllm_flash_attn import flash_attn_varlen_func
+from vllm.vllm_flash_attn.fa_utils import flash_attn_supports_mla
+
+if TYPE_CHECKING:
+    pass
 
 logger = init_logger(__name__)
 
 
-class FlashMLABackend(MLACommonBackend):
+class FlashAttnMLABackend(MLACommonBackend):
 
     @staticmethod
     def get_name() -> str:
-        return "FLASHMLA_VLLM_V1"
+        return "FLASHATTN_MLA_VLLM_V1"
 
     @staticmethod
-    def get_metadata_cls() -> type["FlashMLAMetadata"]:
-        return FlashMLAMetadata
+    def get_metadata_cls() -> type["FlashAttnMLAMetadata"]:
+        return FlashAttnMLAMetadata
 
     @staticmethod
-    def get_builder_cls() -> type["FlashMLAMetadataBuilder"]:
-        return FlashMLAMetadataBuilder
+    def get_builder_cls() -> type["FlashAttnMLAMetadataBuilder"]:
+        return FlashAttnMLAMetadataBuilder
 
     @staticmethod
-    def get_impl_cls() -> type["FlashMLAImpl"]:
-        return FlashMLAImpl
+    def get_impl_cls() -> type["FlashAttnMLAImpl"]:
+        return FlashAttnMLAImpl
 
 
 @dataclass
-class FlashMLADecodeMetadata(MLACommonDecodeMetadata):
-    tile_scheduler_metadata: tuple[torch.Tensor, torch.Tensor]
-    num_splits: torch.Tensor
+class FlashAttnMLADecodeMetadata(MLACommonDecodeMetadata):
+    query_start_loc: torch.Tensor
+    max_query_len: int
+    max_seq_len: int
 
 
 @dataclass
-class FlashMLAMetadata(MLACommonMetadata[FlashMLADecodeMetadata]):
+class FlashAttnMLAMetadata(MLACommonMetadata[FlashAttnMLADecodeMetadata]):
     pass
 
 
-class FlashMLAMetadataBuilder(MLACommonMetadataBuilder[FlashMLAMetadata]):
+class FlashAttnMLAMetadataBuilder(
+        MLACommonMetadataBuilder[FlashAttnMLAMetadata]):
 
     def __init__(self, runner):
         super().__init__(runner)
@@ -63,24 +66,23 @@ class FlashMLAMetadataBuilder(MLACommonMetadataBuilder[FlashMLAMetadata]):
                       query_start_loc_cpu: torch.Tensor,
                       query_start_loc_device: torch.Tensor,
                       input_positions: torch.Tensor,
-                      block_table: torch.Tensor) -> FlashMLADecodeMetadata:
-        tile_scheduler_metadata, num_splits = \
-            get_mla_metadata(
-            seq_lens_device,
-            self.num_q_heads,
-            1, # MQA for the decode path
-        )
+                      block_table: torch.Tensor) -> FlashAttnMLADecodeMetadata:
 
-        return FlashMLADecodeMetadata(
+        query_lens_cpu = (query_start_loc_cpu[1:] - query_start_loc_cpu[:-1])
+        max_query_len = query_lens_cpu.max().item()
+        max_seq_len = seq_lens_cpu.max().item()
+
+        return FlashAttnMLADecodeMetadata(
             input_positions=input_positions,
             block_table=block_table,
             seq_lens=seq_lens_device,
-            tile_scheduler_metadata=tile_scheduler_metadata,
-            num_splits=num_splits,
+            query_start_loc=query_start_loc_device,
+            max_query_len=max_query_len,
+            max_seq_len=max_seq_len,
         )
 
 
-class FlashMLAImpl(MLACommonImpl[FlashMLAMetadata]):
+class FlashAttnMLAImpl(MLACommonImpl[MLACommonMetadata]):
 
     def __init__(
             self,
@@ -101,8 +103,8 @@ class FlashMLAImpl(MLACommonImpl[FlashMLAMetadata]):
                          blocksparse_params, logits_soft_cap, attn_type,
                          **mla_args)
 
-        assert is_flashmla_supported(), \
-            "FlashMLA is not supported on this device"
+        assert flash_attn_supports_mla(), \
+            "FlashAttnMLA is not supported on this device"
 
         unsupported_features = [
             alibi_slopes, sliding_window, blocksparse_params, logits_soft_cap
@@ -119,34 +121,36 @@ class FlashMLAImpl(MLACommonImpl[FlashMLAMetadata]):
                                       "are not implemented for "
                                       "FlashMLAImpl")
 
-        if is_quantized_kv_cache(self.kv_cache_dtype):
-            raise NotImplementedError(
-                "FlashMLA V1 with FP8 KV cache not yet supported")
-
     def _forward_decode(
         self,
         q_nope: torch.Tensor,
         q_pe: torch.Tensor,
         kv_c_and_k_pe_cache: torch.Tensor,
-        attn_metadata: FlashMLAMetadata,
+        attn_metadata: MLACommonMetadata,
     ) -> torch.Tensor:
         assert kv_c_and_k_pe_cache.numel() > 0
-        assert attn_metadata.decode is not None
+        if self.kv_cache_dtype.startswith("fp8"):
+            raise NotImplementedError("FP8 FlashMLA not yet supported")
 
-        q = torch.cat([q_nope, q_pe], dim=-1)\
-            .unsqueeze(1) # Add seqlen dim of 1 (decode)
+        decode_meta = attn_metadata.decode
+        assert decode_meta is not None
 
-        o, _ = flash_mla_with_kvcache(
-            q=q,
-            k_cache=kv_c_and_k_pe_cache.unsqueeze(-2),  # Add head dim of 1
-            block_table=attn_metadata.decode.block_table,
-            cache_seqlens=attn_metadata.decode.seq_lens,
-            head_dim_v=self.kv_lora_rank,
-            tile_scheduler_metadata=attn_metadata.decode.
-            tile_scheduler_metadata,
-            num_splits=attn_metadata.decode.num_splits,
+        kv_c_cache = kv_c_and_k_pe_cache[..., :self.kv_lora_rank]
+        kv_pe_cache = kv_c_and_k_pe_cache[..., self.kv_lora_rank:]
+
+        o = flash_attn_varlen_func(
+            q=q_pe,
+            k=kv_pe_cache.unsqueeze(-2),  # Add head dim of 1
+            v=kv_c_cache.unsqueeze(-2),  # Add head dim of 1
+            q_v=q_nope,
+            max_seqlen_q=decode_meta.max_query_len,
+            cu_seqlens_q=decode_meta.query_start_loc,
+            max_seqlen_k=decode_meta.max_seq_len,
+            seqused_k=decode_meta.seq_lens,
+            block_table=decode_meta.block_table,
             softmax_scale=self.scale,
             causal=True,
+            fa_version=3  # only version 3 is supported
         )
 
         return self._v_up_proj_and_o_proj(o)

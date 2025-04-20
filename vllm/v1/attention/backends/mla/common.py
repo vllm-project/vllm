@@ -219,6 +219,8 @@ if TYPE_CHECKING:
     from vllm.v1.worker.gpu_input_batch import InputBatch
     from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 
+is_hip = current_platform.is_rocm()
+
 logger = init_logger(__name__)
 
 
@@ -342,6 +344,7 @@ class MLACommonMetadataBuilder(Generic[M]):
     NOTE: Please read the comment at the top of the file before trying to
     understand this class
     """
+    decode_threshold: int = 1
 
     def __init__(self,
                  runner: "GPUModelRunner",
@@ -402,11 +405,10 @@ class MLACommonMetadataBuilder(Generic[M]):
 
         for i, req_id in enumerate(input_batch.req_ids):
             num_tokens = scheduler_output.num_scheduled_tokens[req_id]
-            # for now treat 1 scheduled token as "decode" even if its not,
-            # we should update this to something like < 8 in the future but
-            # currently the TritonMLA._forward_decode only supports
-            # num_tokens = 1
-            if num_tokens == 1:
+            # for now treat <= decode_threshold scheduled token as "decode" and
+            # use the less compute efficient but more memory efficient
+            # _forward_decode for these requests
+            if num_tokens <= self.decode_threshold:
                 decodes.append(i)
                 num_decode_tokens += num_tokens
             else:
@@ -447,12 +449,16 @@ class MLACommonMetadataBuilder(Generic[M]):
 
         return modified_batch
 
-    def _build_decode(self, input_positions: torch.Tensor,
-                      block_table: torch.Tensor, seq_lens: torch.Tensor):
+    def _build_decode(self, seq_lens_cpu: torch.Tensor,
+                      seq_lens_device: torch.Tensor,
+                      query_start_loc_cpu: torch.Tensor,
+                      query_start_loc_device: torch.Tensor,
+                      input_positions: torch.Tensor,
+                      block_table: torch.Tensor):
         return MLACommonDecodeMetadata(
             input_positions=input_positions,
             block_table=block_table,
-            seq_lens=seq_lens,
+            seq_lens=seq_lens_device,
         )
 
     def build(self, num_reqs: int, num_actual_tokens: int, max_query_len: int,
@@ -465,8 +471,8 @@ class MLACommonMetadataBuilder(Generic[M]):
         device = self.runner.device
         block_table = (
             self.runner.input_batch.block_table.get_device_tensor()[:num_reqs])
-        query_start_loc = self.runner.query_start_loc_cpu[:num_reqs + 1].to(
-            device, non_blocking=True)
+        query_start_loc_cpu = self.runner.query_start_loc_cpu[:num_reqs + 1]
+        query_start_loc = query_start_loc_cpu.to(device, non_blocking=True)
         slot_mapping = self.runner.slot_mapping_cpu[:num_actual_tokens].to(
             device, non_blocking=True).long()
         input_positions = self.runner.positions_cpu[:num_actual_tokens].to(
@@ -556,9 +562,13 @@ class MLACommonMetadataBuilder(Generic[M]):
         decode_metadata = None
         if self._num_decodes > 0:
             decode_metadata = self._build_decode(
+                query_start_loc_device=query_start_loc[:self._num_decodes + 1],
+                query_start_loc_cpu=query_start_loc_cpu[:self._num_decodes +
+                                                        1],
+                seq_lens_device=seq_lens[:self._num_decodes],
+                seq_lens_cpu=seq_lens_cpu[:self._num_decodes],
                 input_positions=input_positions[:self._num_decode_tokens],
                 block_table=block_table[:self._num_decodes, ...],
-                seq_lens=seq_lens[:self._num_decodes],
             )
 
         return self.metadata_cls(
