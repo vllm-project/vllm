@@ -16,7 +16,8 @@ from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.transformers_utils.tokenizer_group import BaseTokenizerGroup
 
 from .data import (DecoderOnlyInputs, EncoderDecoderInputs, ProcessorInputs,
-                   PromptType, SingletonInputs, SingletonPrompt, token_inputs)
+                   PromptType, SingletonInputs, SingletonPrompt, embeds_inputs,
+                   token_inputs)
 from .parse import is_explicit_encoder_decoder_prompt, parse_singleton_prompt
 
 logger = init_logger(__name__)
@@ -387,6 +388,27 @@ class InputPreprocessor:
                 mm_processor_kwargs=mm_processor_kwargs,
             )
 
+        if parsed["type"] == "embeds":
+            prompt_embeds_content = parsed["content"]
+
+            prompt_embeds = prompt_embeds_content["prompt_embeds"]
+
+            # prompt_embeds must be (seq_len, hidden_size), but if the user
+            # passes in a batch of size 1, i.e. (1, seq_len, hidden_size),
+            # we can unambiguously process the intent by squeezing the batch
+            # dimension.
+            if prompt_embeds.ndim == 3 and prompt_embeds.shape[0] == 1:
+                prompt_embeds = prompt_embeds.squeeze(dim=0)
+
+            if prompt_embeds.ndim != 2:
+                raise ValueError(
+                    "prompt_embeds must be of shape (seq_len, hidden_size).")
+
+            return embeds_inputs(
+                prompt_embeds=prompt_embeds,
+                prompt=prompt_embeds_content.get("prompt"),
+            )
+
         assert_never(parsed)
 
     async def _prompt_to_llm_inputs_async(
@@ -458,6 +480,27 @@ class InputPreprocessor:
                 prompt_token_ids=prompt_token_ids,
                 multi_modal_data=multi_modal_data,
                 mm_processor_kwargs=mm_processor_kwargs,
+            )
+
+        if parsed["type"] == "embeds":
+            prompt_embeds_content = parsed["content"]
+
+            prompt_embeds = prompt_embeds_content["prompt_embeds"]
+
+            # prompt_embeds must be (seq_len, hidden_size), but if the user
+            # passes in a batch of size 1, i.e. (1, seq_len, hidden_size),
+            # we can unambiguously process the intent by squeezing the batch
+            # dimension.
+            if prompt_embeds.ndim == 3 and prompt_embeds.shape[0] == 1:
+                prompt_embeds = prompt_embeds.squeeze(dim=0)
+
+            if prompt_embeds.ndim != 2:
+                raise ValueError(
+                    "prompt_embeds must be of shape (seq_len, hidden_size).")
+
+            return embeds_inputs(
+                prompt_embeds=prompt_embeds,
+                prompt=prompt_embeds_content.get("prompt"),
             )
 
         assert_never(parsed)
@@ -668,6 +711,8 @@ class InputPreprocessor:
                 prompt_inputs["prompt_token_ids"],
                 prompt_adapter_request=prompt_adapter_request,
             )
+        elif (prompt_inputs["type"] == "embeds"):
+            pass
         else:
             assert_never(prompt_inputs)  # type: ignore[arg-type]
 

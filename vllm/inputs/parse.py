@@ -6,8 +6,9 @@ from typing_extensions import TypeIs
 
 from vllm.utils import is_list_of
 
-from .data import (ExplicitEncoderDecoderPrompt, ProcessorInputs, PromptType,
-                   SingletonInputs, SingletonPrompt, TextPrompt, TokensPrompt)
+from .data import (EmbedsPrompt, ExplicitEncoderDecoderPrompt, ProcessorInputs,
+                   PromptType, SingletonInputs, SingletonPrompt, TextPrompt,
+                   TokensPrompt)
 
 
 class ParsedText(TypedDict):
@@ -84,23 +85,36 @@ class ParsedTokensPrompt(TypedDict):
     content: TokensPrompt
 
 
+class ParsedEmbedsPrompt(TypedDict):
+    type: Literal['embeds']
+    content: EmbedsPrompt
+
+
 def parse_singleton_prompt(
     prompt: SingletonPrompt,
-) -> Union[ParsedStrPrompt, ParsedTextPrompt, ParsedTokensPrompt]:
+) -> Union[ParsedStrPrompt, ParsedTextPrompt, ParsedTokensPrompt,
+           ParsedEmbedsPrompt]:
     if isinstance(prompt, str):
         return ParsedStrPrompt(type="str", content=prompt)
     elif isinstance(prompt, dict):
-        if "prompt_token_ids" in prompt:
-            return ParsedTokensPrompt(type="tokens",
-                                      content=prompt)  # type: ignore
+        # Type ignores are because mypy does not correctly infer the TypedDicts
+        # Pyright does succeed.
+        if "prompt_embeds" in prompt:
+            return ParsedEmbedsPrompt(
+                type="embeds", content=prompt)  # type: ignore[typeddict-item]
+        elif "prompt_token_ids" in prompt:
+            return ParsedTokensPrompt(
+                type="tokens", content=prompt)  # type: ignore[typeddict-item]
         elif "prompt" in prompt:
             return ParsedTextPrompt(type="text", content=prompt)
-
-    raise TypeError("inputs must be a string, TextPrompt, or TokensPrompt")
+    raise TypeError(
+        "inputs must be a string, TextPrompt, TokensPrompt, or EmbedsPrompt")
 
 
 def is_token_prompt(prompt: PromptType) -> TypeIs[TokensPrompt]:
-    return isinstance(prompt, dict) and "prompt_token_ids" in prompt
+    return isinstance(
+        prompt, dict
+    ) and "prompt_token_ids" in prompt and "prompt_embeds" not in prompt
 
 
 def is_explicit_encoder_decoder_prompt(

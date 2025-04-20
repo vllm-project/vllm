@@ -1071,6 +1071,7 @@ class Scheduler:
             )
         ignored_seq_groups: List[SequenceGroup] = []
         seq_groups: List[ScheduledSequenceGroup] = []
+        using_prompt_embeds: bool = False
 
         waiting_queue = self.waiting
 
@@ -1135,6 +1136,15 @@ class Scheduler:
                 for seq in waiting_seqs:
                     seq.status = SequenceStatus.FINISHED_IGNORED
                 ignored_seq_groups.append(seq_group)
+                waiting_queue.popleft()
+                continue
+
+            # We cannot mix sequence groups that use prompt embeds and
+            # those that do not.
+            if len(seq_groups) == 0:
+                using_prompt_embeds = seq_group.uses_prompt_embeds()
+            if using_prompt_embeds != seq_group.uses_prompt_embeds():
+                leftover_waiting_sequences.appendleft(seq_group)
                 waiting_queue.popleft()
                 continue
 
@@ -1295,17 +1305,39 @@ class Scheduler:
 
         # Merge lists
         num_prefill_groups = len(prefills.seq_groups)
+        ignored_seq_groups_for_embeds = list[SequenceGroup]()
         if num_prefill_groups > 0:
             scheduled_seq_groups = prefills.seq_groups
             scheduled_seq_groups.extend(running_scheduled.decode_seq_groups)
+            ignored_seq_groups_for_embeds.clear()
         else:
             scheduled_seq_groups = running_scheduled.decode_seq_groups
+            if len(scheduled_seq_groups) > 0:
+                using_prompt_embeds = scheduled_seq_groups[
+                    0].seq_group.uses_prompt_embeds()
+                ignored_seq_groups_for_embeds.clear()
+                indices_ignored = list[int]()
+                for i, schedule_seq_group in enumerate(scheduled_seq_groups):
+                    if using_prompt_embeds !=\
+                        schedule_seq_group.seq_group.uses_prompt_embeds():
+                        ignored_seq_groups_for_embeds.append(
+                            schedule_seq_group.seq_group)
+                        indices_ignored.append(i)
+                if len(ignored_seq_groups_for_embeds) > 0:
+                    scheduled_seq_groups = [
+                        group for i, group in enumerate(scheduled_seq_groups)
+                        if i not in indices_ignored
+                    ]
+            else:
+                ignored_seq_groups_for_embeds.clear()
+
         scheduled_seq_groups.extend(swapped_in.decode_seq_groups)
 
         blocks_to_copy = running_scheduled.blocks_to_copy
         blocks_to_copy.extend(swapped_in.blocks_to_copy)
 
         ignored_seq_groups = prefills.ignored_seq_groups
+        ignored_seq_groups.extend(ignored_seq_groups_for_embeds)
         ignored_seq_groups.extend(swapped_in.infeasible_seq_groups)
 
         return SchedulerOutputs(

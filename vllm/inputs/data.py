@@ -59,7 +59,20 @@ class TokensPrompt(TypedDict):
     """
 
 
-SingletonPrompt = Union[str, TextPrompt, TokensPrompt]
+class EmbedsPrompt(TypedDict):
+    """Schema for a prompt provided via token embeddings."""
+
+    prompt_embeds: torch.Tensor
+    """The embeddings of the prompt."""
+
+    prompt_token_ids: NotRequired[list[int]]
+    """A list of token IDs to pass to the model."""
+
+    prompt: NotRequired[str]
+    """The input text to be tokenized before passing to the model."""
+
+
+SingletonPrompt = Union[str, TextPrompt, TokensPrompt, EmbedsPrompt]
 """
 Set of possible schemas for a single prompt:
 
@@ -209,7 +222,45 @@ def token_inputs(
     return inputs
 
 
-DecoderOnlyInputs = Union[TokenInputs, "MultiModalInputs"]
+class EmbedsInputs(TypedDict):
+    """Represents embeddings-based inputs."""
+
+    type: Literal["embeds"]
+    """The type of inputs."""
+
+    prompt_embeds: torch.Tensor
+    """The embeddings of the prompt."""
+
+    prompt_token_ids: NotRequired[list[int]]
+    """
+    The token IDs of the prompt. Should always be a list of 0 of the same 
+    length as prompt_embeds.
+    """
+
+    prompt: NotRequired[str]
+    """
+    The original prompt text corresponding to the token IDs, if available.
+    """
+
+
+def embeds_inputs(
+    prompt_embeds: torch.Tensor,
+    prompt: Optional[str] = None,
+) -> EmbedsInputs:
+    """Construct :class:`EmbedsInputs` from optional values."""
+    inputs = EmbedsInputs(
+        type="embeds",
+        prompt_embeds=prompt_embeds,
+        prompt_token_ids=[0] * len(prompt_embeds),
+    )
+
+    if prompt is not None:
+        inputs["prompt"] = prompt
+
+    return inputs
+
+
+DecoderOnlyInputs = Union[TokenInputs, EmbedsInputs, "MultiModalInputs"]
 """
 The inputs in :class:`~vllm.LLMEngine` before they are
 passed to the model executor.
@@ -231,7 +282,7 @@ class EncoderDecoderInputs(TypedDict):
     """The inputs for the decoder portion."""
 
 
-SingletonInputs = Union[TokenInputs, "MultiModalInputs"]
+SingletonInputs = Union[TokenInputs, EmbedsInputs, "MultiModalInputs"]
 """
 A processed :class:`SingletonPrompt` which can be passed to
 :class:`vllm.sequence.Sequence`.
@@ -249,7 +300,7 @@ class SingletonInputsAdapter:
     def prompt(self) -> Optional[str]:
         inputs = self.inputs
 
-        if inputs["type"] == "token" or inputs["type"] == "multimodal":
+        if inputs["type"] in ("token", "multimodal", "embeds"):
             return inputs.get("prompt")
 
         assert_never(inputs)  # type: ignore[arg-type]
@@ -258,7 +309,7 @@ class SingletonInputsAdapter:
     def prompt_token_ids(self) -> list[int]:
         inputs = self.inputs
 
-        if inputs["type"] == "token" or inputs["type"] == "multimodal":
+        if inputs["type"] in ("token", "multimodal", "embeds"):
             return inputs.get("prompt_token_ids", [])
 
         assert_never(inputs)  # type: ignore[arg-type]
@@ -267,8 +318,11 @@ class SingletonInputsAdapter:
     def token_type_ids(self) -> list[int]:
         inputs = self.inputs
 
-        if inputs["type"] == "token" or inputs["type"] == "multimodal":
-            return inputs.get("token_type_ids", [])
+        if inputs["type"] in ("token", "multimodal", "embeds"):
+            # mypy incorrectly infer the type of inputs.get("token_type_ids")
+            # claiming it to be `object` and not `list[int]`.
+            return inputs.get("token_type_ids",
+                              [])  # type: ignore[return-value]
 
         assert_never(inputs)  # type: ignore[arg-type]
 
@@ -278,6 +332,9 @@ class SingletonInputsAdapter:
 
         if inputs["type"] == "token" or inputs["type"] == "multimodal":
             return None
+
+        if inputs["type"] == "embeds":
+            return inputs["prompt_embeds"]  # type: ignore[typeddict-item]
 
         assert_never(inputs)  # type: ignore[arg-type]
 
@@ -291,6 +348,9 @@ class SingletonInputsAdapter:
         if inputs["type"] == "multimodal":
             return inputs.get("mm_kwargs", {})
 
+        if inputs["type"] == "embeds":
+            return {}
+
         assert_never(inputs)  # type: ignore[arg-type]
 
     @cached_property
@@ -303,6 +363,9 @@ class SingletonInputsAdapter:
         if inputs["type"] == "multimodal":
             return inputs.get("mm_kwargs", {})
 
+        if inputs["type"] == "embeds":
+            return {}
+
         assert_never(inputs)  # type: ignore[arg-type]
 
     @cached_property
@@ -310,11 +373,15 @@ class SingletonInputsAdapter:
         inputs = self.inputs
 
         if inputs["type"] == "token":
-            return inputs.get("multi_modal_hashes", [])
+            return inputs.get("multi_modal_hashes",
+                              [])  # type: ignore[return-value]
 
         if inputs["type"] == "multimodal":
             # only the case when we use MultiModalInputs
             return inputs.get("mm_hashes", [])  # type: ignore[return-value]
+
+        if inputs["type"] == "embeds":
+            return []
 
         assert_never(inputs)  # type: ignore[arg-type]
 
@@ -328,6 +395,9 @@ class SingletonInputsAdapter:
         if inputs["type"] == "multimodal":
             return inputs.get("mm_placeholders", {})
 
+        if inputs["type"] == "embeds":
+            return {}
+
         assert_never(inputs)  # type: ignore[arg-type]
 
     @cached_property
@@ -335,9 +405,13 @@ class SingletonInputsAdapter:
         inputs = self.inputs
 
         if inputs["type"] == "token":
-            return inputs.get("mm_processor_kwargs", {})
+            return inputs.get("mm_processor_kwargs",
+                              {})  # type: ignore[return-value]
 
         if inputs["type"] == "multimodal":
+            return {}
+
+        if inputs["type"] == "embeds":
             return {}
 
         assert_never(inputs)  # type: ignore[arg-type]
