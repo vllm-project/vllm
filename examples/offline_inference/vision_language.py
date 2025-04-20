@@ -150,7 +150,7 @@ def run_florence2(questions: list[str], modality: str) -> ModelRequestData:
 
     engine_args = EngineArgs(
         model="microsoft/Florence-2-large",
-        tokenizer="facebook/bart-large",
+        tokenizer="Isotr0py/Florence-2-tokenizer",
         max_model_len=4096,
         max_num_seqs=2,
         trust_remote_code=True,
@@ -376,9 +376,9 @@ def run_kimi_vl(questions: list[str], modality: str) -> ModelRequestData:
 
     engine_args = EngineArgs(
         model="moonshotai/Kimi-VL-A3B-Instruct",
-        max_model_len=4096,
-        disable_mm_preprocessor_cache=args.disable_mm_preprocessor_cache,
         trust_remote_code=True,
+        max_model_len=4096,
+        limit_mm_per_prompt={"image": 1},
     )
 
     return ModelRequestData(
@@ -845,10 +845,13 @@ def run_phi4mm(questions: list[str], modality: str) -> ModelRequestData:
     engine_args = EngineArgs(
         model=model_path,
         trust_remote_code=True,
-        max_model_len=4096,
+        max_model_len=5120,
         max_num_seqs=2,
+        max_num_batched_tokens=12800,
         enable_lora=True,
         max_lora_rank=320,
+        # Note - mm_processor_kwargs can also be passed to generate/chat calls
+        mm_processor_kwargs={"dynamic_hd": 16},
         limit_mm_per_prompt={"image": 1},
     )
 
@@ -972,6 +975,42 @@ def run_qwen2_5_vl(questions: list[str], modality: str) -> ModelRequestData:
     )
 
 
+# Qwen2.5-Omni
+def run_qwen2_5_omni(questions: list[str], modality: str):
+    model_name = "Qwen/Qwen2.5-Omni-7B"
+
+    engine_args = EngineArgs(
+        model=model_name,
+        max_model_len=4096,
+        max_num_seqs=5,
+        mm_processor_kwargs={
+            "min_pixels": 28 * 28,
+            "max_pixels": 1280 * 28 * 28,
+            "fps": [1],
+        },
+        limit_mm_per_prompt={"image": 1},
+    )
+
+    if modality == "image":
+        placeholder = "<|IMAGE|>"
+    elif modality == "video":
+        placeholder = "<|VIDEO|>"
+
+    default_system = (
+        "You are Qwen, a virtual human developed by the Qwen Team, Alibaba "
+        "Group, capable of perceiving auditory and visual inputs, as well as "
+        "generating text and speech.")
+
+    prompts = [(f"<|im_start|>system\n{default_system}<|im_end|>\n"
+                f"<|im_start|>user\n<|vision_bos|>{placeholder}<|vision_eos|>"
+                f"{question}<|im_end|>\n"
+                "<|im_start|>assistant\n") for question in questions]
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompts=prompts,
+    )
+
+
 # SkyworkR1V
 def run_skyworkr1v(questions: list[str], modality: str) -> ModelRequestData:
     assert modality == "image"
@@ -1042,6 +1081,7 @@ model_example_map = {
     "qwen_vl": run_qwen_vl,
     "qwen2_vl": run_qwen2_vl,
     "qwen2_5_vl": run_qwen2_5_vl,
+    "qwen2_5_omni": run_qwen2_5_omni,
     "skywork_chat": run_skyworkr1v,
     "smolvlm": run_smolvlm,
 }
@@ -1129,6 +1169,59 @@ def time_counter(enable: bool):
         yield
 
 
+def parse_args():
+    parser = FlexibleArgumentParser(
+        description='Demo on using vLLM for offline inference with '
+        'vision language models for text generation')
+    parser.add_argument('--model-type',
+                        '-m',
+                        type=str,
+                        default="llava",
+                        choices=model_example_map.keys(),
+                        help='Huggingface "model_type".')
+    parser.add_argument('--num-prompts',
+                        type=int,
+                        default=4,
+                        help='Number of prompts to run.')
+    parser.add_argument('--modality',
+                        type=str,
+                        default="image",
+                        choices=['image', 'video'],
+                        help='Modality of the input.')
+    parser.add_argument('--num-frames',
+                        type=int,
+                        default=16,
+                        help='Number of frames to extract from the video.')
+    parser.add_argument("--seed",
+                        type=int,
+                        default=None,
+                        help="Set the seed when initializing `vllm.LLM`.")
+
+    parser.add_argument(
+        '--image-repeat-prob',
+        type=float,
+        default=None,
+        help='Simulates the hit-ratio for multi-modal preprocessor cache'
+        ' (if enabled)')
+
+    parser.add_argument(
+        '--disable-mm-preprocessor-cache',
+        action='store_true',
+        help='If True, disables caching of multi-modal preprocessor/mapper.')
+
+    parser.add_argument(
+        '--time-generate',
+        action='store_true',
+        help='If True, then print the total generate() call time')
+
+    parser.add_argument(
+        '--use-different-prompt-per-request',
+        action='store_true',
+        help='If True, then use different prompt (with the same multi-modal '
+        'data) for each request.')
+    return parser.parse_args()
+
+
 def main(args):
     model = args.model_type
     if model not in model_example_map:
@@ -1207,55 +1300,5 @@ def main(args):
 
 
 if __name__ == "__main__":
-    parser = FlexibleArgumentParser(
-        description='Demo on using vLLM for offline inference with '
-        'vision language models for text generation')
-    parser.add_argument('--model-type',
-                        '-m',
-                        type=str,
-                        default="llava",
-                        choices=model_example_map.keys(),
-                        help='Huggingface "model_type".')
-    parser.add_argument('--num-prompts',
-                        type=int,
-                        default=4,
-                        help='Number of prompts to run.')
-    parser.add_argument('--modality',
-                        type=str,
-                        default="image",
-                        choices=['image', 'video'],
-                        help='Modality of the input.')
-    parser.add_argument('--num-frames',
-                        type=int,
-                        default=16,
-                        help='Number of frames to extract from the video.')
-    parser.add_argument("--seed",
-                        type=int,
-                        default=None,
-                        help="Set the seed when initializing `vllm.LLM`.")
-
-    parser.add_argument(
-        '--image-repeat-prob',
-        type=float,
-        default=None,
-        help='Simulates the hit-ratio for multi-modal preprocessor cache'
-        ' (if enabled)')
-
-    parser.add_argument(
-        '--disable-mm-preprocessor-cache',
-        action='store_true',
-        help='If True, disables caching of multi-modal preprocessor/mapper.')
-
-    parser.add_argument(
-        '--time-generate',
-        action='store_true',
-        help='If True, then print the total generate() call time')
-
-    parser.add_argument(
-        '--use-different-prompt-per-request',
-        action='store_true',
-        help='If True, then use different prompt (with the same multi-modal '
-        'data) for each request.')
-
-    args = parser.parse_args()
+    args = parse_args()
     main(args)
