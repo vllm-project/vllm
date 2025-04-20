@@ -438,6 +438,8 @@ class InputRegistry:
         elif inputs["type"] == "multimodal":
             # Be more strict in V2
             assert "mm_kwargs" in inputs
+        elif inputs["type"] == "embeds":
+            pass
         else:
             assert_never(inputs["type"])  # type: ignore[arg-type]
 

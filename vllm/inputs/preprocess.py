@@ -16,7 +16,8 @@ from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.transformers_utils.tokenizer_group import BaseTokenizerGroup
 
 from .data import (DecoderOnlyInputs, EncoderDecoderInputs, ProcessorInputs,
-                   PromptType, SingletonInputs, SingletonPrompt, token_inputs)
+                   PromptType, SingletonInputs, SingletonPrompt, embeds_inputs,
+                   token_inputs)
 from .parse import is_explicit_encoder_decoder_prompt, parse_singleton_prompt
 
 logger = init_logger(__name__)
@@ -403,13 +404,9 @@ class InputPreprocessor:
                 raise ValueError(
                     "prompt_embeds must be of shape (seq_len, hidden_size).")
 
-            prompt_token_ids = prompt_embeds_content.get(
-                "prompt_token_ids", [0] * len(prompt_embeds))
-
-            return token_inputs(
-                prompt_token_ids=prompt_token_ids,
-                prompt=prompt_embeds_content.get("prompt"),
+            return embeds_inputs(
                 prompt_embeds=prompt_embeds,
+                prompt=prompt_embeds_content.get("prompt"),
             )
 
         assert_never(parsed)
@@ -501,12 +498,9 @@ class InputPreprocessor:
                 raise ValueError(
                     "prompt_embeds must be of shape (seq_len, hidden_size).")
 
-            prompt_token_ids = prompt_embeds_content.get(
-                "prompt_token_ids", [0] * len(prompt_embeds))
-            return token_inputs(
-                prompt_token_ids=prompt_token_ids,
-                prompt=prompt_embeds_content.get("prompt"),
+            return embeds_inputs(
                 prompt_embeds=prompt_embeds,
+                prompt=prompt_embeds_content.get("prompt"),
             )
 
         assert_never(parsed)
@@ -717,6 +711,8 @@ class InputPreprocessor:
                 prompt_inputs["prompt_token_ids"],
                 prompt_adapter_request=prompt_adapter_request,
             )
+        elif (prompt_inputs["type"] == "embeds"):
+            pass
         else:
             assert_never(prompt_inputs)  # type: ignore[arg-type]
 

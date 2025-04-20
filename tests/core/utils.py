@@ -9,7 +9,7 @@ import torch
 
 from vllm import SamplingParams
 from vllm.core.scheduler import Scheduler, SchedulerOutputs
-from vllm.inputs import EncoderDecoderInputs, token_inputs
+from vllm.inputs import EncoderDecoderInputs, embeds_inputs, token_inputs
 from vllm.lora.request import LoRARequest
 from vllm.sequence import (Logprob, Sequence, SequenceGroup,
                            SequenceGroupMetadata)
@@ -34,11 +34,13 @@ def create_dummy_prompt(
         prompt_tokens = list(range(prompt_length))
 
     prompt_str = " ".join([str(t) for t in prompt_tokens])
+    inputs = token_inputs(
+        prompt_token_ids=prompt_tokens,
+        prompt=prompt_str) if prompt_embeds is None else embeds_inputs(
+            prompt_embeds=prompt_embeds, prompt=prompt_str)
     prompt = Sequence(
         int(request_id),
-        inputs=token_inputs(prompt_token_ids=prompt_tokens,
-                            prompt=prompt_str,
-                            prompt_embeds=prompt_embeds),
+        inputs=inputs,
         block_size=block_size,
     )
     seq_group = SequenceGroup(
