@@ -6,12 +6,12 @@ from typing import TYPE_CHECKING, Any, Optional
 import torch
 
 from vllm.attention.backends.abstract import AttentionType
+from vllm.attention.backends.mla.common import (MLACommonBackend,
+                                                MLACommonDecodeMetadata,
+                                                MLACommonImpl,
+                                                MLACommonMetadata,
+                                                MLACommonMetadataBuilder)
 from vllm.logger import init_logger
-from vllm.v1.attention.backends.mla.common import (MLACommonBackend,
-                                                   MLACommonDecodeMetadata,
-                                                   MLACommonImpl,
-                                                   MLACommonMetadata,
-                                                   MLACommonMetadataBuilder)
 from vllm.vllm_flash_attn import flash_attn_varlen_func, get_scheduler_metadata
 from vllm.vllm_flash_attn.fa_utils import flash_attn_supports_mla
 
@@ -45,7 +45,6 @@ class FlashAttnMLADecodeMetadata(MLACommonDecodeMetadata):
     query_start_loc: torch.Tensor
     max_query_len: int
     max_seq_len: int
-    scheduler_metadata: Optional[torch.Tensor] = None
 
 
 @dataclass
@@ -176,8 +175,8 @@ class FlashAttnMLAImpl(MLACommonImpl[MLACommonMetadata]):
             block_table=decode_meta.block_table,
             softmax_scale=self.scale,
             causal=True,
-            fa_version=3,  # only version 3 is supported
             scheduler_metadata=decode_meta.scheduler_metadata,
+            fa_version=3  # only version 3 is supported
         )
 
         return self._v_up_proj_and_o_proj(o)

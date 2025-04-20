@@ -224,7 +224,7 @@ class CudaPlatformBase(Platform):
             # TODO(lucas): refactor to be more concise
             #  we should probably consider factoring out V1 here
 
-            from vllm.attention.backends.flashmla import is_flashmla_supported
+            from vllm.attention.ops.flashmla import is_flashmla_supported
             from vllm.vllm_flash_attn.fa_utils import flash_attn_supports_mla
 
             use_cutlassmla = selected_backend == _Backend.CUTLASS_MLA or (
@@ -233,7 +233,7 @@ class CudaPlatformBase(Platform):
             use_flashattn = selected_backend == _Backend.FLASH_ATTN or (
                 selected_backend is None and flash_attn_supports_mla())
             use_flashmla = selected_backend == _Backend.FLASHMLA or (
-                selected_backend is None and is_flash_mla_supported()[0])
+                selected_backend is None and is_flashmla_supported()[0])
             use_triton = selected_backend == _Backend.TRITON_MLA or (
                 selected_backend is None)
 
