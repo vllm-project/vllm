@@ -39,6 +39,8 @@ class IncrementalDetokenizer:
         request: EngineCoreRequest,
     ) -> "IncrementalDetokenizer":
 
+        assert request.sampling_params is not None
+
         if tokenizer is None:
             # No tokenizer => skipping detokenization.
             return IncrementalDetokenizer()
