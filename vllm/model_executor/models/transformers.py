@@ -84,7 +84,7 @@ def replace_linear_class(
 ) -> Union[ColumnParallelLinear, RowParallelLinear]:
     """
     Replace nn.Linear with one of vLLM's tensor parallel linear classes.
-    
+
     Args:
         linear (nn.Linear): `nn.Linear` to be replaced.
         style (str): Tensor parallel style of the new linear, e.g. "colwise".

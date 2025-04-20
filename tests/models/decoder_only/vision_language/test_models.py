@@ -139,6 +139,23 @@ VLM_TEST_SETTINGS = {
         image_size_factors=[(), (0.25,), (0.25, 0.25, 0.25), (0.25, 0.2, 0.15)],
         marks=[pytest.mark.core_model, pytest.mark.cpu_model],
     ),
+    "qwen2_5_omni": VLMTestInfo(
+        models=["Qwen/Qwen2.5-Omni-7B"],
+        test_type=(
+            VLMTestType.IMAGE,
+            VLMTestType.MULTI_IMAGE,
+            VLMTestType.VIDEO
+        ),
+        prompt_formatter=lambda img_prompt: f"<|im_start|>User\n{img_prompt}<|im_end|>\n<|im_start|>assistant\n", # noqa: E501
+        img_idx_to_prompt=lambda idx: "<|vision_bos|><|IMAGE|><|vision_eos|>", # noqa: E501
+        video_idx_to_prompt=lambda idx: "<|vision_bos|><|VIDEO|><|vision_eos|>", # noqa: E501
+        max_model_len=4096,
+        max_num_seqs=2,
+        auto_cls=AutoModelForVision2Seq,
+        vllm_output_post_proc=model_utils.qwen2_vllm_to_hf_output,
+        image_size_factors=[(), (0.25,), (0.25, 0.25, 0.25), (0.25, 0.2, 0.15)],
+        marks=[pytest.mark.core_model, pytest.mark.cpu_model],
+    ),
     #### Extended model tests
     "aria": VLMTestInfo(
         models=["rhymes-ai/Aria"],
@@ -317,6 +334,18 @@ VLM_TEST_SETTINGS = {
         max_model_len=4096,
         use_tokenizer_eos=True,
         patch_hf_runner=model_utils.internvl_patch_hf_runner,
+    ),
+    "kimi_vl": VLMTestInfo(
+        models=["moonshotai/Kimi-VL-A3B-Instruct"],
+        test_type=(VLMTestType.IMAGE, VLMTestType.MULTI_IMAGE),
+        prompt_formatter=lambda img_prompt: f"<|im_user|>user<|im_middle|>{img_prompt}<|im_end|><|im_assistant|>assistant<|im_middle|>", # noqa: E501
+        img_idx_to_prompt=lambda _: "<|media_start|>image<|media_content|><|media_pad|><|media_end|>",  # noqa: E501
+        max_model_len=8192,
+        max_num_seqs=2,
+        dtype="bfloat16",
+        tensor_parallel_size=1,
+        vllm_output_post_proc=model_utils.kimiv_vl_vllm_to_hf_output,
+        marks=[large_gpu_mark(min_gb=48)],
     ),
     "llama4": VLMTestInfo(
         models=["meta-llama/Llama-4-Scout-17B-16E-Instruct"],
