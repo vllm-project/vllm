@@ -229,7 +229,7 @@ class OvisProcessor(ProcessorMixin):
         return height, width
 
     def get_token_value(self, tok):
-        return self.tokenizer.vocab[self.extra_special_tokens[tok]]
+        return self.tokenizer.get_vocab()[self.extra_special_tokens[tok]]
 
     def construct_image_placeholders(self, grid):
 

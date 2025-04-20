@@ -43,7 +43,7 @@ from vllm.model_executor.models.aimv2 import Aimv2VisualTokenizer
 from vllm.model_executor.models.utils import maybe_prefix, flatten_bn, AutoWeightsLoader, init_vllm_registered_model
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.inputs import (MultiModalFieldConfig, MultiModalKwargs, NestedTensors,
+from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig, MultiModalKwargs, NestedTensors,
                                     )
 from vllm.multimodal.parse import (ImageSize,
                                    MultiModalDataItems)
@@ -114,16 +114,11 @@ class Ovis2ProcessingInfo(BaseProcessingInfo):
             "image": self.get_hf_config().multimodal_max_length // ((9 + 1) *
                                                                     NUMBER_OF_TOKEN_TO_RESERVE_FOR_SEGMENT)}
 
-    def get_mm_max_tokens_per_item(
-            self,
-            seq_len: int,
-            mm_counts: Mapping[str, int],
-    ) -> Mapping[str, int]:
-        return {
-            "image": (9 + 1) * NUMBER_OF_TOKEN_TO_RESERVE_FOR_SEGMENT + 11
-        }  # 6 image pos token
+    def get_max_image_tokens(self) -> int:
+        # 6 image pos token
+        return (9 + 1) * NUMBER_OF_TOKEN_TO_RESERVE_FOR_SEGMENT + 11
 
-    def get_image_size(self) -> ImageSize:
+    def get_image_size_with_most_features(self) -> ImageSize:
         image_processor = self.get_image_processor()
         return ImageSize(width=image_processor.size['shortest_edge'] * 9 * 2,
                          height=image_processor.size['shortest_edge'] * 9 * 2)
@@ -131,27 +126,27 @@ class Ovis2ProcessingInfo(BaseProcessingInfo):
 
 class Ovis2DummyInputsBuilder(BaseDummyInputsBuilder[Ovis2ProcessingInfo]):
 
-    def get_dummy_processor_inputs(
-            self,
-            seq_len: int,
-            mm_counts: Mapping[str, int]
-    ) -> ProcessorInputs:
-        target_width, target_height = \
-            self.info.get_image_size()
+    def get_dummy_text(self, mm_counts):
         num_images = mm_counts.get("image", 0)
+        return IMAGE_TOKEN * num_images
+    
+    def get_dummy_mm_data(
+        self,
+        seq_len: int,
+        mm_counts: Mapping[str, int],
+    ) -> MultiModalDataDict:
+        num_images = mm_counts.get("image", 0)
+
+        target_width, target_height = \
+            self.info.get_image_size_with_most_features()
 
         mm_data = {
             "image":
-                self._get_dummy_images(width=target_width,
-                                       height=target_height,
-                                       num_images=num_images),
+            self._get_dummy_images(width=target_width,
+                                   height=target_height,
+                                   num_images=num_images),
         }
-
-        return ProcessorInputs(
-            prompt_text=IMAGE_TOKEN * num_images,
-            mm_data=mm_data,
-
-        )
+        return mm_data
 
 
 class Ovis2MultiModalProcessor(BaseMultiModalProcessor[Ovis2ProcessingInfo]):
