@@ -513,7 +513,7 @@ void marlin_mm(const void* A, const void* B, void* C, void* C_tmp, void* s,
 
   int m_split_sizes[2] = {prob_m / 64 * 64, prob_m - prob_m / 64 * 64};
   int max_par = 16;
-  if (n <= 4096) max_par = 16 * 8;
+  if (prob_n <= 4096) max_par = 16 * 8;
 
   int max_shared_mem_new = max_shared_mem;
   int rest_m = prob_m;
