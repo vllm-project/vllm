@@ -228,7 +228,7 @@ First, launch the OpenAI-compatible server:
 
 ```bash
 vllm serve microsoft/Phi-3.5-vision-instruct --task generate \
-  --trust-remote-code --max-model-len 4096 --limit-mm-per-prompt image=2
+  --trust-remote-code --max-model-len 4096 --limit-mm-per-prompt '{"image":2}'
 ```
 
 Then, you can use the OpenAI client as follows:
