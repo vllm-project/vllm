@@ -147,7 +147,7 @@ class FlashAttnMLAImpl(MLACommonImpl[MLACommonMetadata]):
             cu_seqlens_q=decode_meta.query_start_loc,
             max_seqlen_k=decode_meta.max_seq_len,
             seqused_k=decode_meta.seq_lens,
-            block_table=decode_meta.block_tables,
+            block_table=decode_meta.block_table,
             softmax_scale=self.scale,
             causal=True,
             fa_version=3  # only version 3 is supported
