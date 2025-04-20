@@ -64,8 +64,10 @@ class EmbedsPrompt(TypedDict):
 
     prompt_embeds: torch.Tensor
     """The embeddings of the prompt."""
+
     prompt_token_ids: NotRequired[list[int]]
     """A list of token IDs to pass to the model."""
+
     prompt: NotRequired[str]
     """The input text to be tokenized before passing to the model."""
 
