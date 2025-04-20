@@ -318,8 +318,10 @@ class SingletonInputsAdapter:
     def token_type_ids(self) -> list[int]:
         inputs = self.inputs
 
-        if inputs["type"] in ("token", "multimodal", "embeds"):
+        if inputs["type"] in ("token", "multimodal"):
             return inputs.get("token_type_ids", [])
+        if inputs["type"] == "embeds":
+            return []
 
         assert_never(inputs)  # type: ignore[arg-type]
 
