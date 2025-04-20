@@ -12,7 +12,7 @@ from typing import Any, Optional, TypeAlias
 import torch
 import tqdm
 
-from vllm import LLM, SamplingParams
+from vllm import LLM, SamplingParams, envs
 from vllm.engine.arg_utils import EngineArgs
 from vllm.profiler import layerwise_profile
 from vllm.utils import FlexibleArgumentParser
@@ -261,8 +261,13 @@ def run_profile(context: ProfileContext, csv_output: Optional[str],
 
     decode_profs = []
     for _ in tqdm.tqdm(range(num_steps_to_profile - 1)):
-        num_running_seqs = llm.llm_engine.scheduler[
-            0].get_num_unfinished_seq_groups()
+        if envs.VLLM_USE_V1:
+            num_running_seqs = llm.llm_engine.scheduler[
+                0].get_num_unfinished_requests()
+        else:
+            num_running_seqs = llm.llm_engine.scheduler[
+                0].get_num_unfinished_seq_groups()
+
         with layerwise_profile(
                 num_running_seqs=num_running_seqs) as decode_prof:
             llm.llm_engine.step()
