@@ -1574,6 +1574,12 @@ class ParallelConfig:
     enable_expert_parallel: bool = False
     """Use expert parallelism instead of tensor parallelism for MoE layers."""
 
+    num_share_fusion_replicas: int = 0
+    """num_share_fusion_replicas: This value control how many replicas
+    the user want to have to fuse expert in deepseek v2 style models
+    set it to 0 disable share expert fusion and set it to > 0 values
+    to enable. Larger value consume more GPU memory but is faster"""
+
     max_parallel_loading_workers: Optional[int] = None
     """Maximum number of parallal loading workers when loading model
     sequentially in multiple batches. To avoid RAM OOM when using tensor
@@ -1675,6 +1681,7 @@ class ParallelConfig:
         factors: list[Any] = []
         factors.append(self.pipeline_parallel_size)
         factors.append(self.tensor_parallel_size)
+        factors.append(self.num_share_fusion_replicas)
         return hashlib.sha256(str(factors).encode()).hexdigest()
 
     def __post_init__(self) -> None:
@@ -1744,6 +1751,8 @@ class ParallelConfig:
 
         if self.distributed_executor_backend is None and self.world_size == 1:
             self.distributed_executor_backend = "uni"
+
+        self.num_share_fusion_replicas = envs.VLLM_SHARED_EXPERT_FUSION_REPLICAS
 
         self._verify_args()
 

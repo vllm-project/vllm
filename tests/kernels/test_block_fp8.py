@@ -2,6 +2,7 @@
 
 # Adapted from https://github.com/sgl-project/sglang/pull/2575
 import itertools
+import os
 
 import pytest
 import torch
@@ -180,7 +181,11 @@ def test_w8a8_block_fp8_matmul(M, N, K, block_size, out_dtype, seed):
 def test_w8a8_block_fp8_fused_moe(M, N, K, E, topk, block_size, dtype, seed):
     if topk > E:
         pytest.skip(f"Skipping test; topk={topk} > E={E}")
-
+    if E == 258:
+        # This block is to test out the following kernel:
+        # sgl_moe_align_block_size_fuse_share_kernel,
+        # defined at csrc/moe/moe_align_sum_kernels.cu
+        os.environ['VLLM_SHARED_EXPERT_FUSION_REPLICAS'] = "2"
     torch.manual_seed(seed)
     factor_for_scale = 1e-2
     fp8_info = torch.finfo(torch.float8_e4m3fn)
@@ -234,6 +239,7 @@ def test_w8a8_block_fp8_fused_moe(M, N, K, E, topk, block_size, dtype, seed):
     rel_diff = (torch.mean(
         torch.abs(out.to(torch.float32) - ref_out.to(torch.float32))) /
                 torch.mean(torch.abs(ref_out.to(torch.float32))))
+    os.environ.pop("VLLM_SHARED_EXPERT_FUSION_REPLICAS", "0")
     assert rel_diff < 0.03
 
 

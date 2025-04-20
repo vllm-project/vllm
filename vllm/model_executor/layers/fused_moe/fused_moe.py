@@ -895,9 +895,10 @@ def grouped_topk(
     num_expert_group: int = 0,
     topk_group: int = 0,
     scoring_func: str = "softmax",
-    e_score_correction_bias: Optional[torch.Tensor] = None
+    e_score_correction_bias: Optional[torch.Tensor] = None,
+    num_share_fusion_replicas: int = 0,
+    routed_scaling_factor: Optional[float] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
-
     assert hidden_states.shape[0] == gating_output.shape[0], (
         "Number of tokens mismatch")
 
@@ -909,6 +910,7 @@ def grouped_topk(
         raise ValueError(f"Unsupported scoring function: {scoring_func}")
 
     num_token = scores.shape[0]
+    num_experts = scores.shape[1]
     if e_score_correction_bias is not None:
         # Store original scores before applying correction bias. We use biased
         # scores for expert selection but original scores for routing weights
@@ -939,8 +941,27 @@ def grouped_topk(
                                             dim=-1,
                                             sorted=False)
 
+    if num_share_fusion_replicas > 0:
+        assert routed_scaling_factor is not None, \
+        "With num_share_fusion_replicas>0"
+        ", routed_scaling_factor need to be provided"
+        topk_ids[:, -1] = torch.randint(low=num_experts,
+                                        high=num_experts +
+                                        num_share_fusion_replicas,
+                                        size=(topk_ids.size(0), ),
+                                        dtype=topk_ids.dtype,
+                                        device=topk_ids.device)
+        if renormalize:
+            topk_weights[:, -1] = topk_weights[:, :-1].sum(
+                dim=-1) * 1.0 / routed_scaling_factor
+        else:
+            topk_weights[:, -1] = routed_scaling_factor
     if renormalize:
-        topk_weights = topk_weights / topk_weights.sum(dim=-1, keepdim=True)
+        topk_weights_sum = topk_weights.sum(
+            dim=-1, keepdim=True
+        ) if num_share_fusion_replicas == 0 else topk_weights[:, :-1].sum(
+            dim=-1, keepdim=True)
+        topk_weights = topk_weights / topk_weights_sum
 
     return topk_weights.to(torch.float32), topk_ids.to(torch.int32)
 
@@ -1453,6 +1474,7 @@ def fused_moe(
     a1_scale: Optional[torch.Tensor] = None,
     a2_scale: Optional[torch.Tensor] = None,
     block_shape: Optional[List[int]] = None,
+    num_share_fusion_replicas: int = 0,
 ) -> torch.Tensor:
     """
     This function computes a Mixture of Experts (MoE) layer using two sets of
@@ -1499,16 +1521,22 @@ def fused_moe(
         a2.
     - block_shape: (Optional[List[int]]): Optional block size for block-wise
         quantization.
-
+    - num_share_fusion_replicas (int): indicate if enable share expert fusion,
+      and if enabled, how many share expert replicas are there in MoE.
     Returns:
     - torch.Tensor: The output tensor after applying the MoE layer.
     """
 
     if use_grouped_topk:
         assert num_expert_group is not None and topk_group is not None
-        topk_weights, topk_ids = grouped_topk(hidden_states, gating_output,
-                                              topk, renormalize,
-                                              num_expert_group, topk_group)
+        topk_weights, topk_ids = grouped_topk(
+            hidden_states,
+            gating_output,
+            topk,
+            renormalize,
+            num_expert_group,
+            topk_group,
+            num_share_fusion_replicas=num_share_fusion_replicas)
     elif custom_routing_function is None:
         topk_weights, topk_ids = fused_topk(hidden_states, gating_output, topk,
                                             renormalize)
