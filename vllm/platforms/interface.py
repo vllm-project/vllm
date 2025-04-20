@@ -404,6 +404,12 @@ class Platform:
     ) -> None:
         """Raises if this request is unsupported on this platform"""
 
+    @classmethod
+    def supports_spec_decoding(cls) -> bool:
+        """Returns whether the current platform can support speculative decode.
+        """
+        return False
+
 
 class UnspecifiedPlatform(Platform):
     _enum = PlatformEnum.UNSPECIFIED
