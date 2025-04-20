@@ -434,7 +434,8 @@ class InputRegistry:
         if inputs["type"] == "token":
             # In case the input processor for that model fails to set it
             if "mm_processor_kwargs" not in inputs:
-                inputs["mm_processor_kwargs"] = mm_processor_kwargs
+                inputs[
+                    "mm_processor_kwargs"] = mm_processor_kwargs  # type: ignore[typeddict-unknown-key]
         elif inputs["type"] == "multimodal":
             # Be more strict in V2
             assert "mm_kwargs" in inputs

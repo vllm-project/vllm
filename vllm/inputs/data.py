@@ -318,10 +318,11 @@ class SingletonInputsAdapter:
     def token_type_ids(self) -> list[int]:
         inputs = self.inputs
 
-        if inputs["type"] in ("token", "multimodal"):
-            return inputs.get("token_type_ids", [])
-        if inputs["type"] == "embeds":
-            return []
+        if inputs["type"] in ("token", "multimodal", "embeds"):
+            # mypy incorrectly infer the type of inputs.get("token_type_ids")
+            # claiming it to be `object` and not `list[int]`.
+            return inputs.get("token_type_ids",
+                              [])  # type: ignore[return-value]
 
         assert_never(inputs)  # type: ignore[arg-type]
 
@@ -333,7 +334,7 @@ class SingletonInputsAdapter:
             return None
 
         if inputs["type"] == "embeds":
-            return inputs["prompt_embeds"]
+            return inputs["prompt_embeds"]  # type: ignore[typeddict-item]
 
         assert_never(inputs)  # type: ignore[arg-type]
 
@@ -372,7 +373,8 @@ class SingletonInputsAdapter:
         inputs = self.inputs
 
         if inputs["type"] == "token":
-            return inputs.get("multi_modal_hashes", [])
+            return inputs.get("multi_modal_hashes",
+                              [])  # type: ignore[return-value]
 
         if inputs["type"] == "multimodal":
             # only the case when we use MultiModalInputs
@@ -403,7 +405,8 @@ class SingletonInputsAdapter:
         inputs = self.inputs
 
         if inputs["type"] == "token":
-            return inputs.get("mm_processor_kwargs", {})
+            return inputs.get("mm_processor_kwargs",
+                              {})  # type: ignore[return-value]
 
         if inputs["type"] == "multimodal":
             return {}
