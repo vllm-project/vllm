@@ -1526,6 +1526,6 @@ def get_model_loader(load_config: LoadConfig) -> BaseModelLoader:
         return RunaiModelStreamerLoader(load_config)
 
     if load_config.load_format == LoadFormat.RUNAI_STREAMER_SHARDED:
-        return ShardedStateLoader(load_config, True)
+        return ShardedStateLoader(load_config, runai_model_streamer=True)
 
     return DefaultModelLoader(load_config)
