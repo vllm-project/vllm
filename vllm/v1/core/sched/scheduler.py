@@ -186,6 +186,7 @@ class Scheduler(SchedulerInterface):
             assert num_new_tokens > 0
 
             # Make sure the input position does not exceed the max model len.
+            # This is necessary when using spec decoding.
             num_new_tokens = min(
                 num_new_tokens,
                 self.max_model_len - request.num_computed_tokens)
