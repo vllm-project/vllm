@@ -130,14 +130,14 @@ cd vllm;  pip install -r requirements-hpu.txt; VLLM_TARGET_DEVICE=hpu pip instal
 
 ```
 
-## step 2. do benchmark
+## step 2. benchmark
 
-```
+``` bash
 # need to skip test run in benchmark_serving.py to avoid server hang issue
 cp dp_only/benchmark_serving.py benchmarks/benchmark_serving.py
 
 bash dp_only/benchmark-inc-staticfp8-i1k-o1k-ep8-bestperf-nowarmup.sh
-``
+```
 
 # Others. run with multi nodes
 

@@ -61,10 +61,10 @@ done
 echo "ALL servers are ready"
 
 # start proxy router
-python3 examples/online_serving/disagg_examples/disagg_proxy_demo.py \
+python3 examples/online_serving/dp_proxy.py \
     --model $MODEL_PATH \
     --decode 127.0.0.1:8801 127.0.0.1:8802 127.0.0.1:8803 127.0.0.1:8804 127.0.0.1:8805 127.0.0.1:8806 127.0.0.1:8807 127.0.0.1:8808\
-    --port 8123 2>&1 | tee pd_benchmark_logs/${log_name}/disagg_proxy_demo.log &
+    --port 8123 2>&1 | tee pd_benchmark_logs/${log_name}/dp_proxy.log &
 
 sleep 10
 
