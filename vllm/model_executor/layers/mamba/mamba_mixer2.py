@@ -468,7 +468,7 @@ class MambaMixer2(CustomOp):
             dim=0,
         )
         C_p, C_d = torch.split(
-            B,
+            C,
             [num_prefill_tokens, num_decodes],
             dim=0,
         )
