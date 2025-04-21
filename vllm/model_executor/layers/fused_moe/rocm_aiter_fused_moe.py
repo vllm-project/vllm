@@ -89,7 +89,6 @@ def rocm_aiter_fused_experts(
             "apply_router_weight_on_input is not supported for block scaled moe"
         )
 
-        # TODO: verify this code path for DeepSeekV3
         assert w1_scale is not None
         assert w2_scale is not None
 

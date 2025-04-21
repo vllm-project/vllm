@@ -254,10 +254,9 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
             is_rocm_aiter_moe_enabled)
 
         # Property to determine if AITER is used
-        self.use_rocm_aiter_moe = is_rocm_aiter_moe_enabled()
-        if self.use_rocm_aiter_moe:
+        if is_rocm_aiter_moe_enabled():
             from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (  # noqa E501
-                shuffle_weights)
+                rocm_aiter_fused_experts, shuffle_weights)
 
             # reshaping weights is required for aiter moe kernel.
             shuffled_w13, shuffled_w2 = shuffle_weights(
@@ -268,9 +267,6 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
             layer.w2_weight = torch.nn.Parameter(shuffled_w2,
                                                  requires_grad=False)
 
-        if self.use_rocm_aiter_moe:
-            from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (  # noqa E501
-                rocm_aiter_fused_experts)
             self.fused_experts_func = rocm_aiter_fused_experts
         else:
             from vllm.model_executor.layers.fused_moe import fused_experts
