@@ -198,12 +198,16 @@ def torch_per_token_w8a8_scaled_mm(*, qinput: torch.Tensor,
                                    scale_b: torch.Tensor, bias: torch.Tensor,
                                    input_2d: torch.Tensor,
                                    output_shape: List) -> torch.Tensor:
-    # For now validated on ROCm platform
-    # fp8 rowwise scaling in torch._scaled_mm is introduced in
-    # https://github.com/pytorch/pytorch/pull/144432 using
-    # hipBLASLt and ROCm 6.3, which only exists in torch 2.7 and above.
-    # For CUDA platform please validate if the
-    # torch._scaled_mm support rowwise scaled GEMM
+    # Note: Callers of this function should check USE_ROWWISE_TORCH_SCALED_MM
+    #  when using it.
+    #  For now it has only been validated on ROCm platform.
+    #  fp8 rowwise scaling in torch._scaled_mm is introduced in
+    #  https://github.com/pytorch/pytorch/pull/144432 using
+    #  hipBLASLt and ROCm 6.3, which only exists in torch 2.7 and above.
+    #
+    #  For CUDA platform please validate if the torch._scaled_mm supports
+    #  rowwise scaled GEMM before using it
+
     # Fused GEMM_DQ Rowwise GEMM
     output = torch._scaled_mm(qinput,
                               weight,
