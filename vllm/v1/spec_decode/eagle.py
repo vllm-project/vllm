@@ -136,8 +136,7 @@ class EagleProposer:
                                             self.max_model_len)
             # For the requests that exceed the max model length, we set the
             # sequence length to 1 to minimize their overheads in attention.
-            attn_metadata.seq_lens = torch.where(exceeds_max_model_len, 1,
-                                                 attn_metadata.seq_lens)
+            attn_metadata.seq_lens.masked_fill_(exceeds_max_model_len, 1)
 
             # Compute the slot mapping.
             block_numbers = clamped_positions // self.block_size
@@ -149,11 +148,8 @@ class EagleProposer:
             # Mask out the slot mappings that exceed the max model length.
             # Otherwise, the KV cache will be inadvertently updated with the
             # padding tokens.
-            attn_metadata.slot_mapping = torch.where(
-                exceeds_max_model_len,
-                PADDING_SLOT_ID,
-                attn_metadata.slot_mapping,
-            )
+            attn_metadata.slot_mapping.masked_fill_(exceeds_max_model_len,
+                                                    PADDING_SLOT_ID)
 
             # Run the model.
             with set_forward_context(attn_metadata, self.vllm_config):
