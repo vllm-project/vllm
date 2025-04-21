@@ -115,15 +115,21 @@ def set_forward_context(attn_metadata: Any,
                     break
             assert num_experts > 0, \
                 "No expert found in the model config. Please check the model config."
+            if hasattr(vllm_config.model_config.hf_text_config, "quantization_config"):
+                quantization_config = vllm_config.model_config.hf_text_config.quantization_config
+                activation_scheme = quantization_config["activation_scheme"]
+            else:
+                activation_scheme = "none"
             request_batch_size = attn_metadata.slot_mapping.size(0)
             padded_seq_length = attn_metadata.slot_mapping.size(1)
             hidden_size = vllm_config.model_config.get_hidden_size()
             device = attn_metadata.slot_mapping.device
-            dtype = vllm_config.model_config.dtype
+            router_logits_dtype = vllm_config.model_config.dtype
+            hidden_states_dtype = torch.float8_e4m3fn if activation_scheme == "static" else router_logits_dtype
             hidden_states_across_dp = torch.empty((request_batch_size * dp_size, padded_seq_length, hidden_size),\
-                device=device, dtype=dtype)
+                device=device, dtype=hidden_states_dtype)
             router_logits_across_dp = torch.empty((batchsize * dp_size, num_experts),\
-                device=device, dtype=dtype)
+                device=device, dtype=router_logits_dtype)
             dp_metadata = DPMetadata(cu_tokens_across_dp_cpu,
                                      hidden_states_across_dp,
                                      router_logits_across_dp)

@@ -11,6 +11,7 @@ import vllm.envs as envs
 import os
 from vllm import _custom_ops as ops
 from vllm.distributed import get_tensor_model_parallel_world_size
+from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import (FusedMoE, FusedMoEMethodBase,
                                                   FusedMoeWeightScaleSupported)
@@ -906,6 +907,16 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         e_score_correction_bias: Optional[torch.Tensor] = None,
         ep_rank=0,
     ):
+        if self.quant_config.activation_scheme == "static" and layer.dp_size > 1:
+            x_scale = layer.w13_input_scale.data
+            x = torch.ops.hpu.cast_to_fp8_v2(x, 1.0/x_scale, False, False, torch.float8_e4m3fn)[0]
+            cu_tokens_across_dp_cpu = get_forward_context(
+            ).dp_metadata.cu_tokens_across_dp_cpu
+            hidden_states_across_dp = get_forward_context(
+            ).dp_metadata.hidden_states_across_dp
+            x = layer.multicast_fn(x, cu_tokens_across_dp_cpu,\
+                hidden_states_across_dp)
+
         batch_size, seq_len, hidden_dim = x.shape
         num_experts = layer.local_num_experts
         n_expert_slice = num_experts // self.moe_n_slice
@@ -997,7 +1008,10 @@ class Fp8MoEMethod(FusedMoEMethodBase):
 
         def do_dynamic_moe_with_static_scaling(x, topk_ids, topk_weights, w13_weight_fp8, w2_weight_fp8, moe_n_slice, n_expert_slice, w13_weight_scale_inv_fp8, w2_weight_scale_inv_fp8):
             x_scale = layer.w13_input_scale.data
-            x_fp8 = torch.ops.hpu.cast_to_fp8_v2(x, 1.0/x_scale, False, False, torch.float8_e4m3fn)[0]
+            if layer.dp_size == 1:
+                x_fp8 = torch.ops.hpu.cast_to_fp8_v2(x, 1.0/x_scale, False, False, torch.float8_e4m3fn)[0]
+            else:
+                x_fp8 = x
             final_hidden_states = torch.ops.hpu.mixture_of_experts(
                 hidden_states=x_fp8,
                 expert_routing_table=(topk_ids.to(torch.int64) - ep_shift),

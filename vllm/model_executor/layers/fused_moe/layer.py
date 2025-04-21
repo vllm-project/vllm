@@ -513,8 +513,10 @@ class FusedMoE(torch.nn.Module):
         if quant_config is None:
             self.quant_method: Optional[QuantizeMethodBase] = (
                 UnquantizedFusedMoEMethod())
+            self.activation_scheme = 'none'
         else:
             self.quant_method = quant_config.get_quant_method(self, prefix)
+            self.activation_scheme = quant_config.activation_scheme
         assert self.quant_method is not None
 
         local_num_experts = torch.sum(self.expert_map != -1) \
@@ -904,17 +906,18 @@ class FusedMoE(torch.nn.Module):
         if self.dp_size > 1:
             cu_tokens_across_dp_cpu = get_forward_context(
             ).dp_metadata.cu_tokens_across_dp_cpu
-            hidden_states_across_dp = get_forward_context(
-            ).dp_metadata.hidden_states_across_dp
+
             router_logits_across_dp = get_forward_context(
             ).dp_metadata.router_logits_across_dp
-
-            hidden_states = self.multicast_fn(hidden_states,
-                                              cu_tokens_across_dp_cpu,
-                                              hidden_states_across_dp)
             router_logits = self.multicast_fn(router_logits,
                                               cu_tokens_across_dp_cpu,
                                               router_logits_across_dp)
+            if self.activation_scheme != "static":
+                hidden_states_across_dp = get_forward_context(
+                ).dp_metadata.hidden_states_across_dp
+                hidden_states = self.multicast_fn(hidden_states,
+                                                  cu_tokens_across_dp_cpu,
+                                                  hidden_states_across_dp)
 
         # Matrix multiply.
         final_hidden_states = self.quant_method.apply(
