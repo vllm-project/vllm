@@ -97,7 +97,7 @@ class BaseVisualTokenizerConfig(PretrainedConfig):
         if isinstance(depths, str):
             depths = [int(x) for x in depths.split('|')]
         self.depths = depths
-        self.backbone_kwargs = {}
+        self.backbone_kwargs = dict[str, Any]()
         self.drop_cls_token = drop_cls_token
         if backbone_config is not None:
             assert isinstance(backbone_config, (PretrainedConfig, dict)), \

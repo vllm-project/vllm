@@ -35,7 +35,7 @@ from transformers.tokenization_utils_base import PreTokenizedInput, TextInput
 __all__ = [ 'OvisProcessor']
 IGNORE_ID = -100
 
-class OvisProcessorKwargs(ProcessingKwargs, total=False):
+class OvisProcessorKwargs(ProcessingKwargs, total=False):   # type: ignore[call-arg]
     _defaults = {
         "text_kwargs": {
             "padding": False,
@@ -290,7 +290,7 @@ class OvisProcessor(ProcessorMixin):
 
             return square_values
 
-        def _partition(img, grid):
+        def _partition(img, grid) -> list[tuple[int, int, int, int]]:
             w, h = img.size
             row_height = h // grid[0]
             col_width = w // grid[1]
