@@ -11,7 +11,8 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import QKVParallelLinear
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
-from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
+from vllm.model_executor.layers.quantization.base_config import (
+    QuantizationConfig)
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     DEFAULT_VOCAB_PADDING_SIZE, ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
@@ -25,6 +26,7 @@ logger = init_logger(__name__)
 
 
 class LlamaDecoderLayer(LlamaDecoderLayer):
+
     def __init__(
         self,
         config: LlamaConfig,
@@ -65,7 +67,8 @@ class LlamaDecoderLayer(LlamaDecoderLayer):
             hidden_states=hidden_states,
         )
 
-        hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
+        hidden_states, residual = self.post_attention_layernorm(
+            hidden_states, residual)
 
         # Fully Connected
         hidden_states = self.mlp(hidden_states)
@@ -197,8 +200,6 @@ class EagleLlamaForCausalLM(LlamaForCausalLM):
     ) -> Optional[torch.Tensor]:
         logits = self.logits_processor(self.lm_head, hidden_states,
                                        sampling_metadata)
-        # pad logits from draft vocab to target vocab
-        # and convert indices accordingly
         base = torch.arange(self.config.draft_vocab_size, device=logits.device)
         targets = base + self.draft_id_to_target_id
         logits_new = logits.new_full((
@@ -212,8 +213,6 @@ class EagleLlamaForCausalLM(LlamaForCausalLM):
         loader = AutoWeightsLoader(
             self,
             skip_prefixes=None,
-            # skip_prefixes=(["lm_head."]
-            #                if self.config.tie_word_embeddings else None),
         )
 
         model_weights = {}
