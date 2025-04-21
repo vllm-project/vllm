@@ -11,6 +11,9 @@ from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionMetadata, AttentionType,
                                               is_quantized_kv_cache)
 from vllm.attention.backends.utils import CommonAttentionState
+from vllm.logger import init_logger
+
+logger = init_logger(__name__)
 
 
 class PallasAttentionBackend(AttentionBackend):
@@ -105,7 +108,12 @@ class PallasAttentionBackendImpl(AttentionImpl):
         blocksparse_params: Optional[Dict[str, Any]] = None,
         logits_soft_cap: Optional[float] = None,
         attn_type: str = AttentionType.DECODER,
+        use_irope: bool = False,
     ) -> None:
+        if use_irope:
+            logger.warning_once(
+                "Using irope in Pallas is not supported yet, it will fall back "
+                "to global attention for long context.")
         self.num_heads = num_heads
         self.head_size = head_size
         self.scale = float(scale)
