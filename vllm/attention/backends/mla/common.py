@@ -889,10 +889,11 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[T], Generic[T]):
 
         num_seqs = len(seq_lens)
         if use_captured_graph:
-            num_decode_tokens = batch_size - self.num_prefill_tokens
             self.slot_mapping.extend([PAD_SLOT_ID] * cuda_graph_pad_size)
             self.block_tables.extend(self.__class__.BLOCK_TABLE_EXTENDER *
                                      cuda_graph_pad_size)
+            num_decode_tokens = batch_size - self.num_prefill_tokens
+
             block_tables = self._get_graph_runner_block_tables(
                 num_seqs, self.block_tables)
         else:
@@ -1090,7 +1091,14 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
                 q,
                 k,
                 maybe_padded_v,
-                **kwargs,
+                None,  # output
+                kwargs["cu_seqlens_q"],
+                kwargs["cu_seqlens_k"],
+                kwargs["max_seqlen_q"],
+                kwargs["max_seqlen_k"],
+                kwargs["causal"],
+                softmax_scale,
+                None,  # bias
             )
         if is_vllm_fa:
             attn_out = self.flash_attn_varlen_func(
