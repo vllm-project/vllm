@@ -27,7 +27,7 @@ def test_processor_override(
     num_imgs: int,
     kwargs_on_init: bool,
 ):
-    """Ensure Qwen2VLMultiModalProcessor handles min/max pixels properly."""
+    """Ensure MiniMaxVL01MultiModalProcessor handles min/max pixels properly."""
     ctx = build_model_context(
         model_id,
         mm_processor_kwargs=mm_processor_kwargs if kwargs_on_init else None,

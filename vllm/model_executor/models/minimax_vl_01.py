@@ -30,8 +30,6 @@ from vllm.multimodal.processing import (BaseMultiModalProcessor,
 from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs.minimax_vl_01 import MiniMaxVL01Config
-from vllm.transformers_utils.processors.minimax_vl_01_processing import (
-    MiniMaxVL01Processor)
 
 from .clip import CLIPVisionModel
 from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsPP
@@ -287,13 +285,7 @@ class MiniMaxVL01DummyInputsBuilder(BaseDummyInputsBuilder[_I]):
 class MiniMaxVL01ProcessingInfo(BaseMiniMaxVL01ProcessingInfo):
 
     def get_hf_processor(self, **kwargs: object):
-        hf_processor = self.ctx.get_hf_processor(MiniMaxVL01Processor,
-                                                 **kwargs)
-        # In case patch_size is omitted from `processor_config.json`
-        # e.g. for E5-V: https://huggingface.co/royokong/e5-v
-        if hf_processor.patch_size is None:
-            patch_size = self.get_vision_encoder_info().get_patch_size()
-            hf_processor.patch_size = patch_size
+        hf_processor = self.ctx.get_hf_processor(**kwargs)
         return hf_processor
 
 
