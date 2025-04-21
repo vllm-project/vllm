@@ -22,8 +22,8 @@ from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.engine.mm_input_cache import MirroredProcessingCache
 from vllm.v1.structured_output.backend_guidance import (
     validate_guidance_grammar)
-from vllm.v1.structured_output.utils import (
-    validate_structured_output_request_xgrammar)
+from vllm.v1.structured_output.backend_xgrammar import (
+    validate_xgrammar_grammar)
 
 
 class Processor:
@@ -149,44 +149,47 @@ class Processor:
             "xgrammar", "xgrammar:disable-any-whitespace", "guidance",
             "guidance:disable-any-whitespace", "auto"
         ]
+
         engine_level_backend = self.decoding_config.guided_decoding_backend
         if engine_level_backend not in supported_backends:
             raise ValueError(f"Only {supported_backends} structured output is "
                              "supported in V1.")
         if params.guided_decoding.backend:
             if params.guided_decoding.backend != engine_level_backend:
-                raise ValueError("Request-level structured output backend "
-                                 "must match engine-level backend. "
-                                 f"{params.guided_decoding.backend}"
-                                 f" != {engine_level_backend}")
+                raise ValueError(
+                    "Request-level structured output backend selection is no "
+                    "longer supported. The request specified "
+                    f"'{params.guided_decoding.backend}', but vLLM was "
+                    f"initialised with '{engine_level_backend}'. This error "
+                    "can be resolved by removing backend selection from the "
+                    "request.")
         else:
             params.guided_decoding.backend = engine_level_backend
 
         # Request content validation
         if engine_level_backend.startswith("xgrammar"):
             # xgrammar with no fallback
-            validate_structured_output_request_xgrammar(params)
-            params.guided_decoding.backend = engine_level_backend
-        elif engine_level_backend == "auto":
+            validate_xgrammar_grammar(params)
+        elif engine_level_backend.startswith("guidance"):
+            # TODO: ideally we would have the LLTokenizer here as Lark syntax
+            # allows <|special_token|> and similar, see
+            # https://github.com/guidance-ai/llguidance/blob/main/docs/syntax.md#special-tokens
+            # Without tokenizer these are disallowed in grammars.
+            validate_guidance_grammar(params, tokenizer=None)
+        else:
+            # NOTE: engine_level_backend must be "auto" here, because we have
+            # checked supported_backends above.
             # "auto" is an opt-in to opinionated behavior where we try to
             # choose a backend based on request contents. This is not the
             # default as it is less predictable and subject to change
             # between releases as feature support changes.
             try:
-                validate_structured_output_request_xgrammar(params)
+                validate_xgrammar_grammar(params)
                 params.guided_decoding.backend = "xgrammar"
             except ValueError:
                 # The request includes some jsonschema feature(s) that
                 # are not supported in xgrammar. Fall back to guidance.
                 params.guided_decoding.backend = "guidance"
-
-        if engine_level_backend.startswith("guidance"):
-            # TODO ideally we would have the LLTokenizer here as Lark syntax
-            # allows <|special_token|> and similar, see
-            # https://github.com/guidance-ai/llguidance/blob/main/docs/syntax.md#special-tokens
-            # Without tokenizer these are disallowed in grammars.
-            validate_guidance_grammar(params, tokenizer=None)
-            params.guided_decoding.backend = engine_level_backend
 
     def process_inputs(
         self,
@@ -202,12 +205,6 @@ class Processor:
 
         # TODO(woosuk): Support pooling models.
         # TODO(woosuk): Support encoder-decoder models.
-
-        from vllm.platforms import current_platform
-        current_platform.validate_request(
-            prompt=prompt,
-            params=params,
-        )
         self._validate_lora(lora_request)
         self._validate_params(params)
         if priority != 0:
@@ -230,6 +227,12 @@ class Processor:
             lora_request=lora_request,
             prompt_adapter_request=prompt_adapter_request,
             return_mm_hashes=self.use_hash,
+        )
+        from vllm.platforms import current_platform
+        current_platform.validate_request(
+            prompt=prompt,
+            params=params,
+            processed_inputs=processed_inputs,
         )
         eos_token_id = self.input_preprocessor.get_eos_token_id(lora_request)
 
@@ -351,7 +354,7 @@ class Processor:
             raise ValueError(f"Token id {max_input_id} is out of vocabulary")
 
         max_prompt_len = self.model_config.max_model_len
-        if len(prompt_ids) >= max_prompt_len:
+        if len(prompt_ids) > max_prompt_len:
             if prompt_type == "encoder" and model_config.is_multimodal_model:
                 mm_registry = self.input_preprocessor.mm_registry
                 mm_processor = mm_registry.create_processor(
