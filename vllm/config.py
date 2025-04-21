@@ -346,7 +346,7 @@ class ModelConfig:
     limit_mm_per_prompt: dict[str, int] = field(default_factory=dict)
     """Maximum number of data items per modality per prompt. Only applicable
     for multimodal models."""
-    interleave_mm_strings: bool = False 
+    interleave_mm_strings: bool = False
     """Enable fully interleaved support for multimodal prompts, while using 
     --chat-template-content-format=string. Defaults to False."""
     media_io_kwargs: dict[str, dict[str, Any]] = field(default_factory=dict)
@@ -3126,8 +3126,8 @@ class MultiModalConfig:
     """
     If `True`, disable caching of the processed multi-modal inputs.
     """
-    
-    interleave_mm_strings: bool = False 
+
+    interleave_mm_strings: bool = False
     """
     Enable fully interleaved support for multimodal prompts.
     """

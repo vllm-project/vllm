@@ -52,7 +52,6 @@ from vllm.utils import deprecate_kwargs, random_uuid
 
 logger = init_logger(__name__)
 
-
 MODALITY_PLACEHOLDERS_MAP = {
     "image": "<##IMAGE##>",
     "audio": "<##AUDIO##>",
@@ -361,6 +360,7 @@ def resolve_mistral_chat_template(
             "so it will be ignored.")
     return None
 
+
 @deprecate_kwargs(
     "trust_remote_code",
     additional_message="Please use `model_config.trust_remote_code` instead.",
@@ -648,12 +648,13 @@ class BaseMultiModalContentParser(ABC):
         # }
         self._placeholder_storage: dict[str, list] = defaultdict(list)
 
-    def _add_placeholder(self, modality: str, placeholder: Optional[str]):
+    def _add_placeholder(self, modality: ModalityStr,
+                         placeholder: Optional[str]):
         mod_placeholder = MODALITY_PLACEHOLDERS_MAP[modality]
         if placeholder:
             self._placeholder_storage[mod_placeholder].append(placeholder)
 
-    def mm_placeholder_storage(self) -> dict[str, int]:
+    def mm_placeholder_storage(self) -> dict[str, list]:
         return dict(self._placeholder_storage)
 
     @abstractmethod
@@ -917,7 +918,7 @@ def _get_full_multimodal_text_prompt(placeholder_storage: dict[str, list],
                 "(current value: %s) "
                 "when manually placing image placeholders.", interleave_strings
             )
-            logger.debug(text_prompt)
+            logger.debug("Input prompt: %s", text_prompt)
             raise ValueError(
                 f"Found more '{placeholder}' placeholders in input prompt than "
                 "actual multimodal data items.")
@@ -1216,6 +1217,7 @@ def parse_chat_messages(
             content_format,
             interleave_strings=(
                 content_format == "string"
+                and model_config.multimodal_config is not None
                 and model_config.multimodal_config.interleave_mm_strings
             )
         )
@@ -1243,6 +1245,7 @@ def parse_chat_messages_futures(
             content_format,
             interleave_strings=(
                 content_format == "string"
+                and model_config.multimodal_config is not None
                 and model_config.multimodal_config.interleave_mm_strings
             )
         )
