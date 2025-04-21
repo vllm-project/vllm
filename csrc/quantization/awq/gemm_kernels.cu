@@ -27,7 +27,7 @@ __global__ void __launch_bounds__(64)
   // Only support matrix n = 64 or 128
   assert(N == 64 || N == 128);
 #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ < 750
-  assert(false);
+  assert(false);  
 #else
   static constexpr uint32_t ZERO = 0x0;
   float C_warp[32];
@@ -194,28 +194,7 @@ __global__ void __launch_bounds__(64)
             : "r"(addr));
       }
 
-      for (int ax1_0 = 0; ax1_0 < N / 32; ++ax1_0) {
-        {
-          unsigned int addr;
-          __asm__ __volatile__(
-              "{ .reg .u64 addr; cvta.to.shared.u64 addr, %1; cvt.u32.u64 %0, "
-              "addr; }\n"
-              : "=r"(addr)
-              : "l"((void*)((&(B_shared[(((k_0_1 * (N * 16 + 128)) +
-                                          (((int)threadIdx.y) * (N / 2))) +
-                                         (ax1_0 * 16))])) +
-                            (((((int)threadIdx.x) & 15) * (N + 8)) +
-                             ((((int)threadIdx.x) >> 4) * 8)))));
-          __asm__ __volatile__(
-              "ldmatrix.sync.aligned.m8n8.x4.trans.shared.b16"
-              "{%0, %1, %2, %3}, [%4];\n"
-              : "=r"(((unsigned*)(B_shared_warp + (ax1_0 * 8)))[0]),
-                "=r"(((unsigned*)(B_shared_warp + (ax1_0 * 8)))[1]),
-                "=r"(((unsigned*)(B_shared_warp + (ax1_0 * 8)))[2]),
-                "=r"(((unsigned*)(B_shared_warp + (ax1_0 * 8)))[3])
-              : "r"(addr));
-        }
-      }
+      
       for (int j_0_4 = 0; j_0_4 < N / 32; ++j_0_4) {
   #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ == 750
         {
@@ -438,7 +417,7 @@ __global__ void __launch_bounds__(64)
     }
   }
 
-  // ... [Previous memory address calculations remain the same, just change half to __nv_bfloat16]
+  
   static constexpr int row_stride_warp = 32 * 8 / 32;
   static constexpr int row_stride = 2 * 32 * 8 / N;
   
@@ -487,6 +466,8 @@ __global__ void __launch_bounds__(64)
       (((int)blockIdx_y) % j_factors1) * N + 
       ((int)threadIdx.y) * (N / 2) +
       (((int)threadIdx.x) % 4) * 2;
+  int k_bound = (IC / 32 + split_k_iters - 1) / split_k_iters;
+  if ((k_bound - 1) * split_k_iters * 32 + blockIdx_z * 32 >= IC) k_bound -= 1;
   // Main computation loop
   for (int _k_0_0 = 0; _k_0_0 < k_bound; ++_k_0_0) {
     int k_0_0 = _k_0_0 * split_k_iters + blockIdx_z;
@@ -503,11 +484,13 @@ __global__ void __launch_bounds__(64)
     uint32_t zeros_loaded = *(uint32_t*)(zeros_ptr + k_0_0 * 32 / G * (OC / 8));
     uint4 B_loaded_zero = dequantize_s4_to_bf16x2(zeros_loaded);  // Changed to BF16
     uint4 B_loaded_scale = *(uint4*)(scaling_factors_ptr + k_0_0 * 32 / G * (OC));
+    int* B_ptr_local = B_ptr + k_0_0 * 32 * (OC / 8);
 
     for (int ax0_ax1_fused_0 = 0; ax0_ax1_fused_0 < N / 16; ++ax0_ax1_fused_0) {
       uint32_t B_loaded = *(uint32_t*)(B_ptr_local + ax0_ax1_fused_0 * row_stride * (OC / 8));
       uint4 B_loaded_bf16 = dequantize_s4_to_bf16x2(B_loaded);  // Changed to BF16
 
+      // Apply zero and scaling in BF16
       // Apply zero and scaling in BF16
       asm volatile("sub.bf16x2 %0, %1, %2;\n"
                   : "=r"(B_loaded_bf16.x)
@@ -515,7 +498,25 @@ __global__ void __launch_bounds__(64)
       asm volatile("fma.rn.bf16x2 %0, %1, %2, %3;\n"
                   : "=r"(B_loaded_bf16.x)
                   : "r"(B_loaded_bf16.x), "r"(B_loaded_scale.x), "r"(ZERO));
-      // ... [Repeat for y, z, w components]
+      asm volatile("sub.bf16x2 %0, %1, %2;\n"
+                  : "=r"(B_loaded_bf16.y)
+                  : "r"(B_loaded_bf16.y), "r"(B_loaded_zero.y));
+      asm volatile("fma.rn.bf16x2 %0, %1, %2, %3;\n"
+                  : "=r"(B_loaded_bf16.y)
+                  : "r"(B_loaded_bf16.y), "r"(B_loaded_scale.y), "r"(ZERO));
+      asm volatile("sub.bf16x2 %0, %1, %2;\n"
+                  : "=r"(B_loaded_bf16.z)
+                  : "r"(B_loaded_bf16.z), "r"(B_loaded_zero.z));
+      asm volatile("fma.rn.bf16x2 %0, %1, %2, %3;\n"
+                  : "=r"(B_loaded_bf16.z)
+                  : "r"(B_loaded_bf16.z), "r"(B_loaded_scale.z), "r"(ZERO));
+      asm volatile("sub.bf16x2 %0, %1, %2;\n"
+                  : "=r"(B_loaded_bf16.w)
+                  : "r"(B_loaded_bf16.w), "r"(B_loaded_zero.w));
+      asm volatile("fma.rn.bf16x2 %0, %1, %2, %3;\n"
+                  : "=r"(B_loaded_bf16.w)
+                  : "r"(B_loaded_bf16.w), "r"(B_loaded_scale.w), "r"(ZERO));
+      
 
       *(uint4*)(B_shared_ptr + ax0_ax1_fused_0 * row_stride * (N + 8)) = B_loaded_bf16;
     }
@@ -524,6 +525,15 @@ __global__ void __launch_bounds__(64)
     // Tensor Core operations with BF16
     for (int k_0_1 = 0; k_0_1 < 2; ++k_0_1) {
       // Load A matrix into warp
+      unsigned int addr;
+      __asm__ __volatile__(
+            "{ .reg .u64 addr; cvta.to.shared.u64 addr, %1; cvt.u32.u64 %0, "
+            "addr; }\n"
+            : "=r"(addr)
+            : "l"((void*)((&(A_shared[(k_0_1 * 16)])) +
+                          (((((int)threadIdx.x) & 15) * 40) +
+                           ((((int)threadIdx.x) >> 4) * 8)))));
+
       __asm__ __volatile__(
           "ldmatrix.sync.aligned.m8n8.x4.shared.b16"
           "{%0, %1, %2, %3}, [%4];\n"
@@ -532,37 +542,50 @@ __global__ void __launch_bounds__(64)
             "=r"(((unsigned*)(A_shared_warp + 0))[2]),
             "=r"(((unsigned*)(A_shared_warp + 0))[3])
           : "r"(addr));
-
-      // Load B matrix into warp
-      __asm__ __volatile__(
-          "ldmatrix.sync.aligned.m8n8.x4.trans.shared.b16"
-          "{%0, %1, %2, %3}, [%4];\n"
-          : "=r"(((unsigned*)(B_shared_warp + (ax1_0 * 8)))[0]),
-            "=r"(((unsigned*)(B_shared_warp + (ax1_0 * 8)))[1]),
-            "=r"(((unsigned*)(B_shared_warp + (ax1_0 * 8)))[2]),
-            "=r"(((unsigned*)(B_shared_warp + (ax1_0 * 8)))[3])
-          : "r"(addr));
-
       // BF16 Tensor Core MMA
-      #if __CUDA_ARCH__ >= 800
-      __asm__ __volatile__(
-          "mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32"
-          "{%0, %1, %2, %3}, {%4, %5, %6, %7}, {%8, %9}, {%10, %11, %12, %13};\n"
-          : "=f"(((float*)(C_warp + (j_0_4 * 8)))[0]),
-            "=f"(((float*)(C_warp + (j_0_4 * 8)))[1]),
-            "=f"(((float*)(C_warp + (j_0_4 * 8)))[2]),
-            "=f"(((float*)(C_warp + (j_0_4 * 8)))[3])
-          : "r"(((unsigned*)(A_shared_warp + 0))[0]),
-            "r"(((unsigned*)(A_shared_warp + 0))[1]),
-            "r"(((unsigned*)(A_shared_warp + 0))[2]),
-            "r"(((unsigned*)(A_shared_warp + 0))[3]),
-            "r"(((unsigned*)(B_shared_warp + (j_0_4 * 8)))[0]),
-            "r"(((unsigned*)(B_shared_warp + (j_0_4 * 8)))[1]),
-            "f"(((float*)(C_warp + (j_0_4 * 8)))[0]),
-            "f"(((float*)(C_warp + (j_0_4 * 8)))[1]),
-            "f"(((float*)(C_warp + (j_0_4 * 8)))[2]),
-            "f"(((float*)(C_warp + (j_0_4 * 8)))[3]));
-      #endif
+      for (int j_0_4 = 0; j_0_4 < N / 32; ++j_0_4) {
+        
+        __asm__ __volatile__(
+                "mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32"
+                "{%0, %1, %2, %3}, {%4, %5, %6, %7}, {%8, %9}, {%10, %11, %12, "
+                "%13};\n"
+                : "=f"(((float*)(C_warp + (j_0_4 * 8)))[0]),
+                  "=f"(((float*)(C_warp + (j_0_4 * 8)))[1]),
+                  "=f"(((float*)(C_warp + (j_0_4 * 8)))[2]),
+                  "=f"(((float*)(C_warp + (j_0_4 * 8)))[3])
+                : "r"(((unsigned*)(A_shared_warp + 0))[0]),
+                  "r"(((unsigned*)(A_shared_warp + 0))[1]),
+                  "r"(((unsigned*)(A_shared_warp + 0))[2]),
+                  "r"(((unsigned*)(A_shared_warp + 0))[3]),
+                  "r"(((unsigned*)(B_shared_warp + (j_0_4 * 8)))[0]),
+                  "r"(((unsigned*)(B_shared_warp + (j_0_4 * 8)))[1]),
+                  "f"(((float*)(C_warp + (j_0_4 * 8)))[0]),
+                  "f"(((float*)(C_warp + (j_0_4 * 8)))[1]),
+                  "f"(((float*)(C_warp + (j_0_4 * 8)))[2]),
+                  "f"(((float*)(C_warp + (j_0_4 * 8)))[3]));
+        
+
+        
+        __asm__ __volatile__(
+            "mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32"
+            "{%0, %1, %2, %3}, {%4, %5, %6, %7}, {%8, %9}, {%10, %11, %12, "
+            "%13};\n"
+            : "=f"(((float*)(C_warp + ((j_0_4 * 8) + 4)))[0]),
+              "=f"(((float*)(C_warp + ((j_0_4 * 8) + 4)))[1]),
+              "=f"(((float*)(C_warp + ((j_0_4 * 8) + 4)))[2]),
+              "=f"(((float*)(C_warp + ((j_0_4 * 8) + 4)))[3])
+            : "r"(((unsigned*)(A_shared_warp + 0))[0]),
+              "r"(((unsigned*)(A_shared_warp + 0))[1]),
+              "r"(((unsigned*)(A_shared_warp + 0))[2]),
+              "r"(((unsigned*)(A_shared_warp + 0))[3]),
+              "r"(((unsigned*)(B_shared_warp + ((j_0_4 * 8) + 4)))[0]),
+              "r"(((unsigned*)(B_shared_warp + ((j_0_4 * 8) + 4)))[1]),
+              "f"(((float*)(C_warp + ((j_0_4 * 8) + 4)))[0]),
+              "f"(((float*)(C_warp + ((j_0_4 * 8) + 4)))[1]),
+              "f"(((float*)(C_warp + ((j_0_4 * 8) + 4)))[2]),
+              "f"(((float*)(C_warp + ((j_0_4 * 8) + 4)))[3]));
+        
+      }
     }
   }
 
@@ -571,7 +594,8 @@ __global__ void __launch_bounds__(64)
     for (int local_id = 0; local_id < 8; ++local_id) {
       int row_offset = ...;  // Same as before
       if (row_offset < M) {
-        *(C_ptr + ...) = __float2bfloat16(C_warp[(ax1_0_1 * 8) + local_id]);
+        *(C_ptr + ax1_0_1 * 16 + row_offset * OC + (local_id / 4) * 8 +
+          local_id % 2) = __float2bfloat16(C_warp[(ax1_0_1 * 8) + local_id]);
       }
     }
   }
