@@ -13,15 +13,14 @@ from vllm.distributed import divide, get_tensor_model_parallel_world_size
 from vllm.distributed.parallel_state import get_pp_group
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.layernorm import RMSNorm
-from vllm.model_executor.layers.linear import (ColumnParallelLinear, MergedColumnParallelLinear,
-                                               QKVParallelLinear, ReplicatedLinear,
-                                               RowParallelLinear)
+from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.mamba.mamba_mixer2 import (
     MambaMixer2, extra_groups_for_head_shards)
 from vllm.model_executor.layers.mamba.mamba2_metadata import (
     Mamba2Metadata, prepare_mamba2_metadata)
 from vllm.model_executor.layers.quantization import QuantizationConfig
+from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     DEFAULT_VOCAB_PADDING_SIZE, ParallelLMHead, VocabParallelEmbedding)
@@ -34,7 +33,7 @@ from vllm.utils import LayerBlockType
 
 from .interfaces import (HasInnerState, IsHybrid, SupportsLoRA, SupportsPP,
                          SupportsQuant, SupportsV0Only)
-from .utils import (AutoWeightsLoader, is_pp_missing_parameter,
+from .utils import (AutoWeightsLoader,
                     make_empty_intermediate_tensors_factory, make_layers,
                     maybe_prefix)
 
@@ -55,7 +54,7 @@ class GraniteMoeHybridMambaDecoderLayer(nn.Module):
         self.hidden_size = config.hidden_size
         self.residual_multiplier = config.residual_multiplier        
 
-        self.self_attn = MambaMixer2(hidden_size= config.hidden_size,
+        self.mamba = MambaMixer2(hidden_size= config.hidden_size,
                                 ssm_state_size = config.mamba_d_state,
                                 conv_kernel_size = config.mamba_d_conv,
                                 intermediate_size = config.mamba_expand *\
@@ -100,7 +99,7 @@ class GraniteMoeHybridMambaDecoderLayer(nn.Module):
     ):
         residual = hidden_states
         hidden_states = self.input_layernorm(hidden_states)
-        hidden_states = self.self_attn(hidden_states, mamba_cache_params,
+        hidden_states = self.mamba(hidden_states, mamba_cache_params,
                                    mamba2_metadata)
         hidden_states = residual + hidden_states * self.residual_multiplier
         
@@ -205,44 +204,48 @@ class GraniteMoeHybridMultiheadLatentAttention(nn.Module):
         self.causal = True
         self.hidden_size = config.hidden_size
         self.num_heads = config.num_attention_heads
+        self.head_dim = self.hidden_size // self.num_heads
+        self.num_key_value_heads = config.num_key_value_heads
+        self.num_key_value_groups = self.num_heads // self.num_key_value_heads
         self.attention_bias = config.attention_bias
-        self.query_compression_size = config.mla_query_comp_size
-        self.key_value_compression_size = config.mla_key_value_comp_size
+        
         self.attention_multiplier = config.attention_multiplier
-        self.softmax_dropout_p = config.mla_softmax_dropout
         
-        self.softmax_dropout = nn.Identity() if config.mla_softmax_dropout == 0 else nn.Dropout(config.mla_softmax_dropout)
-        self.dropout = nn.Identity() if config.mla_dropout == 0 else nn.Dropout(config.mla_dropout)
-        self.head_dim = self.hidden_size // self.num_heads 
-
-        self.c_attn_down_projection = ReplicatedLinear(self.hidden_size,
-                                          self.query_compression_size + 2 * self.key_value_compression_size,
-                                          bias=self.attention_bias,
-                                          quant_config=quant_config)    
-    
-        self.query_up_projection = ReplicatedLinear(self.query_compression_size,
-                                          self.hidden_size,
+        self.q_proj = ReplicatedLinear(   self.hidden_size,
+                                          self.num_heads * self.head_dim,
                                           bias=self.attention_bias,
                                           quant_config=quant_config)
         
-        self.key_up_projection = ReplicatedLinear(self.key_value_compression_size,
-                                          self.hidden_size,
+        self.k_proj = ReplicatedLinear(   self.hidden_size,
+                                          self.num_key_value_heads * self.head_dim,
                                           bias=self.attention_bias,
                                           quant_config=quant_config)
         
-        self.value_up_projection = ReplicatedLinear(self.key_value_compression_size,
-                                          self.hidden_size,
+        self.v_proj = ReplicatedLinear(   self.hidden_size,
+                                          self.num_key_value_heads * self.head_dim,
                                           bias=self.attention_bias,
                                           quant_config=quant_config)
         
-        self.c_proj = ReplicatedLinear(self.hidden_size,
+        self.o_proj = ReplicatedLinear(self.hidden_size,
                                           self.hidden_size,
                                           bias=self.attention_bias,
                                           quant_config=quant_config)
       
+        self.position_embedding_type = config.position_embedding_type
+        if self.position_embedding_type == "rope":
+            self.rotary_emb = get_rope(
+                self.head_dim,
+                rotary_dim=self.head_dim,
+                max_position=config.max_position_embeddings,
+                base=int(config.rope_theta),
+                rope_scaling=config.rope_scaling if hasattr(config, "rope_scaling") and config.rope_scaling is not None else None,
+                is_neox_style=True,
+            )
+      
         self.attn = Attention(self.num_heads,
                               self.head_dim,
                               self.attention_multiplier,
+                              num_kv_heads=self.num_key_value_heads,
                               cache_config=cache_config,
                               quant_config=quant_config,
                               prefix=f"{prefix}.attn")
@@ -251,29 +254,26 @@ class GraniteMoeHybridMultiheadLatentAttention(nn.Module):
         self,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
-        attention_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
 
-        hidden_states = self.c_attn_down_projection(hidden_states)[0]
-        query, key, value = hidden_states.split(
-                (self.query_compression_size, self.key_value_compression_size, self.key_value_compression_size), dim=-1
-            )
-        query = self.query_up_projection(query)[0]
-        key = self.key_up_projection(key)[0]
-        value = self.value_up_projection(value)[0]
+        query = self.q_proj(hidden_states)[0]
+        key = self.k_proj(hidden_states)[0]
+        value = self.v_proj(hidden_states)[0]
+        
+        if self.position_embedding_type == "rope":
+            query, key = self.rotary_emb(positions, query, key)
         
         hidden_states = self.attn(query, key, value)
         del query, key, value
 
-        hidden_states = self.c_proj(hidden_states)[0]
-        hidden_states = self.dropout(hidden_states)
+        hidden_states = self.o_proj(hidden_states)[0]
         return hidden_states
 
 
 
 ALL_DECODER_LAYER_TYPES = {
-    "multihead_latent_attention": GraniteMoeHybridAttentionDecoderLayer,
-    "mamba2": GraniteMoeHybridMambaDecoderLayer,
+    "attention": GraniteMoeHybridAttentionDecoderLayer,
+    "mamba": GraniteMoeHybridMambaDecoderLayer,
 }
 
 class GraniteMoeHybridModel(nn.Module):
