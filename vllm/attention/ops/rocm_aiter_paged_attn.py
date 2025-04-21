@@ -5,6 +5,9 @@ import aiter as rocm_aiter
 import torch
 
 from vllm.attention.ops.paged_attn import PagedAttention
+from vllm.platforms import current_platform
+
+FP8_DTYPE = current_platform.fp8_dtype()
 
 
 class AITERPagedAttention(PagedAttention):
@@ -26,12 +29,11 @@ class AITERPagedAttention(PagedAttention):
                                                 kv_cache_dtype, k_scale,
                                                 v_scale)
         else:
-            if "fp8" in kv_cache_dtype:
-                key_cache = key_cache.view(torch.float8_e4m3fnuz)
-                value_cache = value_cache.view(torch.float8_e4m3fnuz)
-            else:
-                key_cache = key_cache.view(torch.int8)
-                value_cache = value_cache.view(torch.int8)
+            kv_cache_torch_dtype = (FP8_DTYPE
+                                    if "fp8" in kv_cache_dtype else torch.int8)
+            key_cache = key_cache.view(kv_cache_torch_dtype)
+            value_cache = value_cache.view(kv_cache_torch_dtype)
+
             rocm_aiter.reshape_and_cache_with_pertoken_quant(
                 key, value, key_cache, value_cache, k_scale, v_scale,
                 slot_mapping.flatten(), True)
