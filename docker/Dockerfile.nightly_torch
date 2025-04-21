@@ -1,4 +1,4 @@
-# The vLLM Dockerfile is used to construct vLLM image that can be directly used for testing
+# The vLLM Dockerfile is used to construct vLLM image against torch nightly that can be directly used for testing
 
 # for torch nightly, cuda >=12.6 is required,
 # use 12.8 due to FlashAttention issue with cuda 12.6 (https://github.com/vllm-project/vllm/issues/15435#issuecomment-2775924628)
@@ -78,7 +78,8 @@ ARG torch_cuda_arch_list='8.0;8.6;8.9;9.0'
 ENV TORCH_CUDA_ARCH_LIST=${torch_cuda_arch_list}
 
 # Build xformers with cuda and torch nightly
-ARG max_jobs=64
+# following official xformers guidance: https://github.com/facebookresearch/xformers#build
+ARG max_jobs=16
 ENV MAX_JOBS=${max_jobs}
 ARG XFORMERS_COMMIT=f2de641ef670510cadab099ce6954031f52f191c
 
@@ -134,7 +135,7 @@ RUN --mount=type=bind,source=.git,target=.git \
     if [ "$GIT_REPO_CHECK" != "0" ]; then bash tools/check_repo.sh ; fi
 
 # Max jobs used by Ninja to build extensions
-ARG max_jobs=64
+ARG max_jobs=16
 ENV MAX_JOBS=${max_jobs}
 ARG nvcc_threads=2
 ENV NVCC_THREADS=$nvcc_threads
