@@ -15,7 +15,6 @@ from vllm.attention.backends.utils import (CommonAttentionState,
                                            CommonMetadataBuilder)
 from vllm.attention.ops.paged_attn import (PagedAttention,
                                            PagedAttentionMetadata)
-from vllm.attention.ops.rocm_aiter_paged_attn import AITERPagedAttention
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 
@@ -47,6 +46,9 @@ def _get_paged_attn_module() -> PagedAttention:
     - Otherwise, it defaults to using the original `PagedAttention`.
     """
     if is_rocm_aiter_paged_attn_enabled():
+        # Import AITERPagedAttention only when the flag is enabled
+        from vllm.attention.ops.rocm_aiter_paged_attn import (
+            AITERPagedAttention)
         return AITERPagedAttention()
     return PagedAttention()
 
