@@ -8,6 +8,8 @@ from vllm import _custom_ops as ops
 from vllm.config import CompilationLevel, get_current_vllm_config
 from vllm.platforms import current_platform
 
+import fbgemm_gpu.experimental.gen_ai  # noqa: F401
+
 # Input scaling factors are no longer optional in _scaled_mm starting
 # from pytorch 2.5. Allocating a dummy tensor to pass as input_scale
 TORCH_DEVICE_IDENTITY = None
@@ -247,12 +249,21 @@ class Fp8LinearOp:
                 # For CUDA platform please validate if the
                 # torch._scaled_mm support rowwise scaled GEMM
                 # Fused GEMM_DQ Rowwise GEMM
-                output = torch._scaled_mm(qinput,
-                                          weight,
-                                          out_dtype=out_dtype,
-                                          scale_a=x_scale,
-                                          scale_b=weight_scale.t(),
-                                          bias=bias)
+                # output = torch._scaled_mm(qinput,
+                #                           weight,
+                #                           out_dtype=out_dtype,
+                #                           scale_a=x_scale,
+                #                           scale_b=weight_scale.t(),
+                #                           bias=bias)
+                output = torch.ops.fbgemm.f8f8bf16_rowwise(
+                    qinput,
+                    weight,
+                    x_scale,
+                    weight_scale.t(),
+                    bias=bias,
+                    use_fast_accum=True,
+                )
+
 
                 output = torch.narrow(output, 0, 0, input_2d.shape[0])
                 output = output.view(*output_shape)
