@@ -96,6 +96,9 @@ def main():
     outputs = llm.generate(prompt_token_ids=prompt_ids,
                            sampling_params=sampling_params)
 
+    if not hasattr(outputs, "metrics") or outputs.metrics is None:
+        return
+
     # calculate the average number of accepted tokens per forward pass, +1 is
     # to account for the token from the target model that's always going to be
     # accepted
