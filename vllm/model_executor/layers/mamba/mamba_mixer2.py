@@ -453,24 +453,56 @@ class MambaMixer2(CustomOp):
             dim=-1,
         )
 
-        # 3. State Space Model sequence transformation
-        if mamba2_metadata.has_prefill:
+        # Separate prefill and decode by slicing hidden_states
+        num_prefills = mamba2_metadata.num_prefills  # requests
+        num_decodes = mamba2_metadata.num_decodes  # requests (also tokens)
+        num_prefill_tokens = attn_metadata.num_prefill_tokens  # tokens
+        hidden_states_p, hidden_states_d = torch.split(
+            hidden_states,
+            [num_prefill_tokens, num_decodes],
+            dim=0,
+        )
+        B_p, B_d = torch.split(
+            B,
+            [num_prefill_tokens, num_decodes],
+            dim=0,
+        )
+        C_p, C_d = torch.split(
+            B,
+            [num_prefill_tokens, num_decodes],
+            dim=0,
+        )
+        dt_p, dt_d = torch.split(
+            dt,
+            [num_prefill_tokens, num_decodes],
+            dim=0,
+        )
+
+        hidden_states_list = []
+
+        # Process Prefills
+        if num_prefills > 0:
             initial_states = None
             if (mamba2_metadata.has_initial_states is not None
                     and mamba2_metadata.prep_initial_states):
                 # making a copy of the states
                 initial_states = torch.where(
-                    mamba2_metadata.has_initial_states[:, None, None, None],
+                    mamba2_metadata.has_initial_states[:num_prefills, None,
+                                                       None, None],
                     mamba_cache_params.ssm_state[
-                        mamba_cache_params.state_indices_tensor], 0)
+                        mamba_cache_params.
+                        state_indices_tensor[:num_prefills]], 0)
 
             scan_output, varlen_state = mamba_chunk_scan_combined(
-                hidden_states.view(1, seq_len, self.num_heads // self.tp_size,
-                                   self.head_dim),
-                dt.unsqueeze(0),
+                hidden_states_p.view(1, num_prefill_tokens,
+                                     self.num_heads // self.tp_size,
+                                     self.head_dim),
+                dt_p.unsqueeze(0),
                 self.A,
-                B.view(1, seq_len, self.n_groups // self.tp_size, -1),
-                C.view(1, seq_len, self.n_groups // self.tp_size, -1),
+                B_p.view(1, num_prefill_tokens, self.n_groups // self.tp_size,
+                         -1),
+                C_p.view(1, num_prefill_tokens, self.n_groups // self.tp_size,
+                         -1),
                 chunk_size=mamba2_metadata.chunk_size,
                 D=self.D,
                 z=None,
@@ -478,7 +510,7 @@ class MambaMixer2(CustomOp):
                 seq_idx=mamba2_metadata.seq_idx,
                 chunk_indices=mamba2_metadata.chunk_indices,
                 chunk_offsets=mamba2_metadata.chunk_offsets,
-                cu_seqlens=attn_metadata.query_start_loc,
+                cu_seqlens=attn_metadata.query_start_loc[:num_prefills + 1],
                 initial_states=initial_states,
                 return_varlen_states=True,
                 return_final_states=False,
@@ -487,23 +519,24 @@ class MambaMixer2(CustomOp):
             )
 
             # update ssm states
-            # - varlen state is a (batch, nheads, headdim, dstate) tensor
+            # - varlen state is a (num_prefills, nheads, headdim, dstate) tensor
             mamba_cache_params.ssm_state[
-                mamba_cache_params.state_indices_tensor] = varlen_state
+                mamba_cache_params.
+                state_indices_tensor[:num_prefills]] = varlen_state
 
             # - reshape
-            hidden_states = scan_output.view(seq_len, -1)
-        else:
+            hidden_states_list.append(scan_output.view(num_prefill_tokens, -1))
 
+        if num_decodes > 0:
             n_groups = self.n_groups // self.tp_size
             A = self.A[:, None, ...][:, :, None].expand(
                 -1, self.head_dim, self.ssm_state_size).to(dtype=torch.float32)
-            dt = dt[:, :, None].expand(-1, -1, self.head_dim)
+            dt_d = dt_d[:, :, None].expand(-1, -1, self.head_dim)
             dt_bias = self.dt_bias[:, None, ...].expand(-1, self.head_dim)
             D = self.D[:, None, ...].expand(-1, self.head_dim)
-            B = B.view(-1, n_groups, B.shape[1] // n_groups)
-            C = C.view(-1, n_groups, C.shape[1] // n_groups)
-            hidden_states_reshaped = hidden_states.view(
+            B = B_d.view(-1, n_groups, B.shape[1] // n_groups)
+            C = C_d.view(-1, n_groups, C.shape[1] // n_groups)
+            hidden_states_reshaped = hidden_states_d.view(
                 -1, self.num_heads // self.tp_size, self.head_dim)
 
             # - the hidden is reshaped into number of current batches
@@ -514,10 +547,10 @@ class MambaMixer2(CustomOp):
             #   using "mamba_cache_params.state_indices_tensor", just as
             #   above in the prefill case
 
-            hidden_states = selective_state_update(
+            hidden_states_d = selective_state_update(
                 mamba_cache_params.ssm_state,
                 hidden_states_reshaped,
-                dt,
+                dt_d,
                 A,
                 B,
                 C,
@@ -525,10 +558,15 @@ class MambaMixer2(CustomOp):
                 z=None,
                 dt_bias=dt_bias,
                 dt_softplus=True,
-                state_batch_indices=mamba_cache_params.state_indices_tensor,
+                state_batch_indices=mamba_cache_params.
+                state_indices_tensor[num_prefills:],
             )
-            hidden_states = hidden_states.view(
-                -1, (self.num_heads // self.tp_size) * self.head_dim)
+            hidden_states_list.append(
+                hidden_states_d.view(-1, (self.num_heads // self.tp_size) *
+                                     self.head_dim))
+
+        # Merge states output
+        hidden_states = torch.vstack(hidden_states_list)
 
         # # 4. gated MLP
         hidden_states = self.norm(hidden_states, gate)
