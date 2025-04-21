@@ -7,7 +7,7 @@ steps:
   - label: ":docker: build image"
     depends_on: ~
     commands:
-      - "docker build --build-arg max_jobs=16 --tag {{ docker_image_amd }} -f Dockerfile.rocm  --build-arg ARG_PYTORCH_ROCM_ARCH='gfx90a;gfx942' --target test --progress plain ."
+      - "docker build --build-arg max_jobs=16 --tag {{ docker_image_amd }} -f docker/Dockerfile.rocm  --build-arg ARG_PYTORCH_ROCM_ARCH='gfx90a;gfx942' --target test --progress plain ."
       - "docker push {{ docker_image_amd }}"
     key: "amd-build"
     env:
