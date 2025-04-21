@@ -529,14 +529,14 @@ class MambaMixer2(CustomOp):
 
         if num_decodes > 0:
             n_groups = self.n_groups // self.tp_size
-            A = self.A[:, None, ...][:, :, None].expand(
+            A_d = self.A[:, None, ...][:, :, None].expand(
                 -1, self.head_dim, self.ssm_state_size).to(dtype=torch.float32)
             dt_d = dt_d[:, :, None].expand(-1, -1, self.head_dim)
             dt_bias = self.dt_bias[:, None, ...].expand(-1, self.head_dim)
-            D = self.D[:, None, ...].expand(-1, self.head_dim)
-            B = B_d.view(-1, n_groups, B.shape[1] // n_groups)
-            C = C_d.view(-1, n_groups, C.shape[1] // n_groups)
-            hidden_states_reshaped = hidden_states_d.view(
+            D_d = self.D[:, None, ...].expand(-1, self.head_dim)
+            B_d = B_d.view(-1, n_groups, B.shape[1] // n_groups)
+            C_d = C_d.view(-1, n_groups, C.shape[1] // n_groups)
+            hidden_states_d = hidden_states_d.view(
                 -1, self.num_heads // self.tp_size, self.head_dim)
 
             # - the hidden is reshaped into number of current batches
@@ -549,23 +549,23 @@ class MambaMixer2(CustomOp):
 
             hidden_states_d = selective_state_update(
                 mamba_cache_params.ssm_state,
-                hidden_states_reshaped,
+                hidden_states_d,
                 dt_d,
-                A,
-                B,
-                C,
-                D,
+                A_d,
+                B_d,
+                C_d,
+                D_d,
                 z=None,
                 dt_bias=dt_bias,
                 dt_softplus=True,
                 state_batch_indices=mamba_cache_params.
-                state_indices_tensor[num_prefills:],
+                state_indices_tensor[num_prefills:],  # take decodes only
             )
             hidden_states_list.append(
                 hidden_states_d.view(-1, (self.num_heads // self.tp_size) *
                                      self.head_dim))
 
-        # Merge states output
+        # Merge prefill and decode outputs
         hidden_states = torch.vstack(hidden_states_list)
 
         # # 4. gated MLP

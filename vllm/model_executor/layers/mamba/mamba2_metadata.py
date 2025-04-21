@@ -72,8 +72,6 @@ def prepare_mamba2_metadata(
     num_prefills = attn_metadata.num_prefills
     num_prefill_tokens = attn_metadata.num_prefill_tokens
     num_decodes = attn_metadata.num_decode_tokens
-    # print(f"{num_prefills=}, {num_prefill_tokens=}, {num_decodes=}=")
-    # print(f"{attn_metadata.query_start_loc=}=")
 
     has_prefill = num_prefills > 0
 
@@ -100,19 +98,12 @@ def prepare_mamba2_metadata(
                                           output_size=num_prefill_tokens)
         seq_idx.unsqueeze_(0)
 
-        # compute metadata for chunked prefill.
-        # actually this is only needed if there are initial states,
-        # but this is determinable only from attention metadata yet
-        # unavailable from the top-level model forward. Rather than
-        # complicating things to extract said metadata, we simply just
-        # compute them once at the top level model forward and reuse
-        # them in mamba layers. If not needed, they will be ignored
-        # inside mamba kernels.
-        chunk_indices, chunk_offsets = _seq_idx_to_chunk_indices_offsets(
-            seq_idx, chunk_size)
-        # print(f"{seq_idx=}")
-        # print(f"{chunk_indices=}")
-        # print(f"{chunk_offsets=}")
+        # We compute metadata for chunked prefill once at the top level model
+        # forward and reuse them in mamba layers. If not needed, they will be
+        # ignored inside mamba kernels.
+        if prep_initial_states:
+            chunk_indices, chunk_offsets = _seq_idx_to_chunk_indices_offsets(
+                seq_idx, chunk_size)
 
     return Mamba2Metadata(has_prefill=has_prefill,
                           has_initial_states=has_initial_states,
