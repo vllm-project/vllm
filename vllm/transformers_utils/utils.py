@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
+import json
 from functools import cache
 from os import PathLike
 from pathlib import Path
@@ -51,6 +52,26 @@ def modelscope_list_repo_files(
     return files
 
 
+def _maybe_json_dict(path: Union[str, PathLike]) -> dict[str, str]:
+    with open(path) as f:
+        try:
+            return json.loads(f.read())
+        except Exception:
+            return dict[str, str]()
+
+
+def _maybe_space_split_dict(path: Union[str, PathLike]) -> dict[str, str]:
+    parsed_dict = dict[str, str]()
+    with open(path) as f:
+        for line in f.readlines():
+            try:
+                model_name, redirect_name = line.strip().split()
+                parsed_dict[model_name] = redirect_name
+            except Exception:
+                pass
+    return parsed_dict
+
+
 @cache
 def maybe_model_redirect(model: str) -> str:
     """
@@ -68,16 +89,10 @@ def maybe_model_redirect(model: str) -> str:
     if not Path(model_redirect_path).exists():
         return model
 
-    with open(model_redirect_path) as f:
-        for line in f.readlines():
-            try:
-                model_name, redirect_name = line.split("\t")
-                if model == model_name:
-                    redirect_name = redirect_name.strip()
-                    logger.info("model redirect: [ %s ] -> [ %s ]", model,
-                                redirect_name)
-                    return redirect_name
-            except Exception:
-                pass
+    redirect_dict = (_maybe_json_dict(model_redirect_path)
+                     or _maybe_space_split_dict(model_redirect_path))
+    if (redirect_model := redirect_dict.get(model)):
+        logger.info("model redirect: [ %s ] -> [ %s ]", model, redirect_model)
+        return redirect_model
 
     return model

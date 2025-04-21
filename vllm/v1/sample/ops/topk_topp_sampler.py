@@ -72,14 +72,7 @@ class TopKTopPSampler(nn.Module):
                     "best performance, please install FlashInfer.")
                 self.forward = self.forward_native
         elif current_platform.is_tpu():
-            if envs.VLLM_TPU_DISABLE_TOPK_TOPP_OPTIMIZATION:
-                logger.warning(
-                    "TPU-specific optimization for top-k & top-p sampling are "
-                    "disabled, falling back to PyTorch-native implementation "
-                    "which could be very slow.")
-                self.forward = self.forward_native
-            else:
-                self.forward = self.forward_tpu
+            self.forward = self.forward_tpu
         else:
             self.forward = self.forward_native
 
@@ -146,12 +139,22 @@ def apply_top_k_top_p_tpu(
     chance of being chosen during final sampling, so we can consider the tie
     being broken then.
     """
+    probs = logits.softmax(dim=-1)
+    probs_sort, _ = probs.sort(dim=-1, descending=False)
+
     if k is not None:
-        logits = apply_top_k_only(logits, k)
+        top_k_count = probs_sort.size(1) - k.to(torch.long)  # shape: (batch, )
+        top_k_count = top_k_count.unsqueeze(dim=1)
+        top_k_cutoff = probs_sort.gather(-1, top_k_count)
+
+        # Make sure the no top-k rows are no-op.
+        no_top_k_mask = (k == logits.shape[1]).unsqueeze(dim=1)
+        top_k_cutoff.masked_fill_(no_top_k_mask, -float("inf"))
+
+        elements_to_discard = probs < top_k_cutoff
+        logits.masked_fill_(elements_to_discard, -float("inf"))
 
     if p is not None:
-        probs = logits.softmax(dim=-1)
-        probs_sort, _ = probs.sort(dim=-1, descending=False)
         cumprob = torch.cumsum(probs_sort, dim=-1)
         top_p_mask = cumprob <= 1 - p.unsqueeze(dim=1)
         top_p_mask[:, -1] = False  # at least one
@@ -224,7 +227,7 @@ def apply_top_k_only(
     max_top_k = k.max()
     # topk.values tensor has shape [batch_size, max_top_k].
     # Convert top k to 0-based index in range [0, max_top_k).
-    k_index = k.sub_(1).unsqueeze(1).expand(logits.shape[0], 1)
+    k_index = k.sub_(1).unsqueeze(1)
     top_k_mask = logits.topk(max_top_k, dim=1).values.gather(1, k_index.long())
     # Handle non-topk rows.
     top_k_mask.masked_fill_(no_top_k_mask.unsqueeze(1), -float("inf"))

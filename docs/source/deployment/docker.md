@@ -19,6 +19,18 @@ $ docker run --runtime nvidia --gpus all \
     --model mistralai/Mistral-7B-v0.1
 ```
 
+This image can also be used with other container engines such as [Podman](https://podman.io/).
+
+```console
+$ podman run --gpus all \
+  -v ~/.cache/huggingface:/root/.cache/huggingface \
+  --env "HUGGING_FACE_HUB_TOKEN=$HF_TOKEN" \
+  -p 8000:8000 \
+  --ipc=host \
+  vllm/vllm-openai:latest \
+  --model mistralai/Mistral-7B-v0.1
+```
+
 You can add any other <project:#engine-args> you need after the image tag (`vllm/vllm-openai:latest`).
 
 :::{note}
@@ -34,11 +46,11 @@ If you need to use those dependencies (having accepted the license terms),
 create a custom Dockerfile on top of the base image with an extra layer that installs them:
 
 ```Dockerfile
-FROM vllm/vllm-openai:v0.8.2
+FROM vllm/vllm-openai:v0.8.3
 
-# e.g. install the `audio` and `video` optional dependencies
+# e.g. install the `audio` optional dependencies
 # NOTE: Make sure the version of vLLM matches the base image!
-RUN uv pip install --system vllm[audio,video]==0.8.2
+RUN uv pip install --system vllm[audio]==0.8.3
 ```
 
 :::
