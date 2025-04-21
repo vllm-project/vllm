@@ -1065,9 +1065,11 @@ def torch_moe(a, w1, w2, score, topk, expert_map):
         topk_ids = expert_map[topk_ids]
     for i in range(w1.shape[0]):
         mask = topk_ids == i
+        gemm1 =a[mask] @ w1[i].transpose(0, 1)
+        print(f"{gemm1=}")
         if mask.sum():
             out[mask] = SiluAndMul()(
-                a[mask] @ w1[i].transpose(0, 1)) @ w2[i].transpose(0, 1)
+                gemm1) @ w2[i].transpose(0, 1)
     return (out.view(B, -1, w2.shape[1]) *
             topk_weight.view(B, -1, 1).to(out.dtype)).sum(dim=1)
 

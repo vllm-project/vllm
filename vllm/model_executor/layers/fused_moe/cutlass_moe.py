@@ -180,17 +180,7 @@ def cutlass_moe_fp8(
 from vllm.scalar_type import scalar_types
 
 FLOAT4_E2M1_MAX = scalar_types.float4_e2m1fn.max()
-FLOAT8_E4M3_MAX = torch.finfo(torch.float8_e4m3fn).max
-
-def quantize_x_per_expert(a, expert_size):
-    return
-    
-
-def quantize_replicated_a(a, tokens_per_expert):
-#    ops.scaled_fp4_quant(a, mat_a_gs)
-   
-   return  
-    
+FLOAT8_E4M3_MAX = torch.finfo(torch.float8_e4m3fn).max  
 
 def cutlass_moe_fp4(
     a: torch.Tensor,
@@ -209,29 +199,26 @@ def cutlass_moe_fp4(
     """
     MoE implementation for FP4 Inputs
     
-    # Gemm 1
     a: Input tensor: [m, k] (half/bfloat16)
+    topk_weights: [m, topk] dtype: float8
+    topk_ids: [m, topk] dtype: float8
+    m, n, k: Unquantized weight shapes, dtype: int
+    e: number of experts, dtype: int
+
+    Gemm 1 Arguments: 
     a1_gscale: Activation scale per expert: [e]  (float32)
     w1(gate up) (not an argument to cutlass_moe_fp4): [e, 2 * n, k]
     w1_fp4: [e, 2 * n, k // 2], dtype: torch.uint8 (stacked fp4: E2M1)
     (Note: `n` is the up projection output dim, `k` is the input dim in
      full precision)
     w1_blockscale: [e, 2 * n, k // block_size] (float8_e4m3)
-                   (Block size = 16 for NVFP4)
     
-    # Gemm 2
+    Gemm 2 Arguments:
     a2_gscale: Activation scale per expert: [e]
     w2(down projection) (not an argument to cutlass_moe_fp4): [e, k, n]
     w2_fp4: [e, k, n // 2], dtype: torch.uint8 (stacked E2M1)
     w2_blockscale: [e, k, n // block_size], dtype: float8_e4m3
     
-    topk_weights: [m, topk] dtype: float8
-    topk_ids: [m, topk] dtype: float8
-    
-    m, n, k: Unquantized weight shapes, dtype: int
-    e: number of experts, dtype: int
-
-    assumes that topk < k < n to satisfy - up/down projection expectations.
     """
     assert topk_weights.shape == topk_ids.shape, "topk shape mismatch"
     assert w1_fp4.dtype == torch.uint8, "weight 1 must be uint8"
@@ -242,7 +229,7 @@ def cutlass_moe_fp4(
     m_a, k_a = a.shape
     e_w1, nx2_w1, half_k_w1 = w1_fp4.shape
     e_w2, k_w2, half_n_w2 = w2_fp4.shape
-
+    n =  half_n_w2 * 2
     assert (e_w1 == e_w2 and e_w1 == e), ("Number of experts must match",
                                           " between weights.")
     assert (k_a // 2 == half_k_w1 and k == k_w2), (
@@ -260,10 +247,7 @@ def cutlass_moe_fp4(
     device = a.device
     out_dtype = a.dtype
 
-    # # Step 1: Quantize a to fp4
-    # a_amax = torch.abs(a).amax().to(torch.float32)
-    # mat_a_gs = FLOAT8_E4M3_MAX * FLOAT4_E2M1_MAX / a_amax
-    # a_fp4, a_blockscale = ops.scaled_fp4_quant(a, mat_a_gs)
+    # Step 1: Quantize a to fp4
 
     expert_offsets = torch.empty((e+ 1),
                                  dtype=torch.int32,
@@ -295,140 +279,67 @@ def cutlass_moe_fp4(
     round_up = lambda x, y: (x + y - 1) // y * y
     sf_sizes = round_up(tokens_per_expert, 128)
     sf_k = round_up(k // 16, 4)
-    # sf_sizes = ((tokens_per_expert + 128 - 1) // 128) * 128
 
-    # max_tokens_per_expert = max(tokens_per_expert)
-    # round_up = lambda x, y: (x + y - 1) // y * y
-    # rounded_max_m = round_up(max_tokens_per_expert, 128)
-    # rep_a_fp4 = torch.empty(e, rounded_max_m, k // 2, dtype=torch.uint8, device=a.device)
     rep_a_fp4 = torch.empty(m*num_topk, half_k_w1, dtype=torch.uint8, device=a.device)
-    
     rep_a_blockscale = torch.empty(sum(sf_sizes), sf_k, dtype=torch.float8_e4m3fn, device=a.device)
-    
-    # rep_a_blockscale = torch.empty(e, rounded_max_m, k // 16, dtype=torch.float8_e4m3fn, device=a.device)
     rep_a_gs = torch.empty(e,  dtype=torch.float32, device=a.device)
     sf_offsets = torch.zeros(e+1, dtype=problem_sizes1.dtype, device=problem_sizes1.device)
     sf_offsets[1:] = torch.cumsum(sf_sizes, dim=0) 
     for expert_id in range(e):
         if tokens_per_expert[expert_id] == 0:
-            print(f"expert: {expert_id} has zero psize")
             continue
         sf_slice = slice(sf_offsets[expert_id],sf_offsets[expert_id+1])
         a_slice = slice(expert_offsets[expert_id], expert_offsets[expert_id+1]) 
         a_expert = rep_a[a_slice]
         a_expert_max = torch.abs(a_expert).max().to(torch.float32)
-        rep_a_gs[expert_id] = FLOAT8_E4M3_MAX * FLOAT4_E2M1_MAX / a_expert_max
-        rep_a_fp4[a_slice], rep_a_blockscale[sf_slice] = ops.scaled_fp4_quant(
-                                                a_expert, rep_a_gs[expert_id])
-
-
-    # a_fp4, a_blockscale = ops.scaled_fp4_quant(a, mat_a_gs)
-    # rep_a_fp4 = a_fp4[a_map]
-    # rep_a_blockscale = a_blockscale.view(dtype=torch.uint8)[a_map].view(
-    #                                                  dtype=a_blockscale.dtype)
-    # assert rep_a_fp4.shape[0] == m * num_topk, "map was expanded incorrectly"
+        scale_dequant =  a_expert_max / 448.0 * 6.0
+        rep_a_fp4[a_slice], rep_a_blockscale[sf_slice] = ops.scaled_fp4_quant(a_expert,
+                                                                             1/scale_dequant)
+        rep_a_gs[expert_id] = scale_dequant
     
+    g1_alphas = w1_tensorscale * a1_gscale
+    c1 = ops.cutlass_fp4_moe_mm(rep_a_fp4, w1_fp4, rep_a_blockscale,
+                        w1_blockscale, g1_alphas, problem_sizes1, expert_offsets[:-1],
+                        sf_offsets[:-1], a.dtype)
     
-    # First gemm is up projection. We the contracting dimension is 
-    # smaller than n
-    # X: [m * num_topk, intermediate_partition] 
-    # Y: [E, hidden_size, intermediate_partitions]: hidden_size = hidden_size_gate + hidden_size_up
-    # Y_FP4 = [E, hidden_size, intermediate_partition_size // 2]
-    
-    c1_shape =  (m * num_topk, nx2_w1)
-    c1 = torch.empty(c1_shape, device=device, dtype=out_dtype)
-    a1_sf_layout = torch.empty((e, 5), device=device, dtype=torch.int)
-    w1_sf_layout = torch.empty((e, 5), device=device, dtype=torch.int)
-    c_strides1 = torch.full((e, ),
-                            c1.stride(0),
-                            device="cuda",
-                            dtype=torch.int64)
-    a_strides1 = torch.full((e, ),
-                            rep_a_fp4.stride(0),
-                            device="cuda",
-                            dtype=torch.int64)
-    b_strides1 = torch.full((e, ),
-                            w1_fp4.stride(0),
-                            device="cuda",
-                            dtype=torch.int64)
-    alphas = torch.empty((e, ),
-                         dtype=torch.float32,
-                         device=device)
-    if a1_gscale is not None:
-        alphas = 1 / (a1_gscale * w1_tensorscale)
-    else:
-        alphas = 1 / (rep_a_gs * w1_tensorscale)
-    print(f"{problem_sizes1=},\n{rep_a_fp4.stride()=}\n"
-          f"{rep_a_blockscale.shape=},\n{w1_fp4.shape=}\n"
-          f"{rep_a_blockscale.stride()=},\n{w1_fp4.stride()=}\n"
-          f"{w1_fp4.stride()=}\n{w1_blockscale.stride()=}\n"
-          f"{alphas=}\n{alphas.stride()=}\n"
-          f"{expert_offsets=}")
-    print(f"=========================================================") 
-    print(f"{rep_a_fp4[expert_offsets[0]]=}") 
-    print(f"{rep_a_fp4[expert_offsets[1]]=}")
-    print(f"{rep_a_blockscale[sf_offsets[0]].view(dtype=torch.uint8)=}") 
-    print(f"{rep_a_blockscale[sf_offsets[1]].view(dtype=torch.uint8)=}")
-
-    # To fix the alignment issue, reshape rep_a_blockscale to start
-    # at offsets of `alignment` required for fp4 data
-    # int const tma_alignment_bits = 128;
-    # int const alignment = tma_alignment_bits / cutlass::sizeof_bits<ElementInput>::value;
-    # alignment evaluates to 32
-    
-    ops.cutlass_fp4_moe_mm(c1, rep_a_fp4, w1_fp4, rep_a_blockscale,
-                        w1_blockscale, alphas, a_strides1, b_strides1,
-                        c_strides1,a1_sf_layout, w1_sf_layout, problem_sizes1,
-                        expert_offsets[:-1], sf_offsets[:-1])
-    print(f"{c1}")
-    return
     # hidden size dimension is split to one half sized tensor. 
     intermediate = torch.empty((m * num_topk, w1_fp4.shape[1] // 2),
                                  device=device, dtype=out_dtype)
     
     torch.ops._C.silu_and_mul(intermediate, c1)
 
-    print(f"{intermediate=}")
     
-    # return intermediate
-    intermediate_amax = torch.abs(intermediate).amax().to(torch.float32)
-    mat_int_gs = FLOAT8_E4M3_MAX * FLOAT4_E2M1_MAX / intermediate_amax 
-    int_fp4, int_blockscale = ops.scaled_fp4_quant(intermediate, mat_int_gs)
-    alphas_2 = torch.empty((e, ),
-                         dtype=torch.float32,
-                         device=device)
-
-    if a2_gscale is not None:
-        alphas_2 = (a2_gscale * w2_tensorscale)
-    else:
-        alphas_2 = (mat_int_gs * w2_tensorscale)
-
-    c2_shape = (m * num_topk, w2_fp4.shape[1])
-    c2 = torch.empty(c2_shape, device=device, dtype=out_dtype)
-    c_strides2 = torch.full((e, ),
-                            c2.stride(0),
-                            device="cuda",
-                            dtype=torch.int64)
-    a_strides2 = torch.full((e, ),
-                            int_fp4.stride(0),
-                            device="cuda",
-                            dtype=torch.int64)
-    b_strides2 = torch.full((e, ),
-                            w2_fp4.stride(0),
-                            device="cuda",
-                            dtype=torch.int64)
-    a2_sf_layout = torch.empty((e, 5), device=device, dtype=torch.int)
-    w2_sf_layout = torch.empty((e, 5), device=device, dtype=torch.int)
-    
-    ops.cutlass_fp4_moe_mm(c2, int_fp4, w2_fp4, int_blockscale,
-                        w2_blockscale, alphas_2, a_strides2, b_strides2,
-                        c_strides2,a2_sf_layout, w2_sf_layout, problem_sizes2,
-                        expert_offsets[:-1])
+    # Quantize intermediate tensor
+    sf_n = round_up(n // 16, 4)
+    tokens_per_expert = problem_sizes2[:,0]
+    round_up = lambda x, y: (x + y - 1) // y * y
+    sf_sizes = round_up(tokens_per_expert, 128)
+    sf_k = round_up(k // 16, 4)    
+    sf_offsets = torch.zeros(e+1, dtype=problem_sizes2.dtype, device=problem_sizes2.device)
+    sf_offsets[1:] = torch.cumsum(sf_sizes, dim=0) 
+    int_a_fp4 = torch.empty(m*num_topk, half_n_w2, dtype=torch.uint8, device=a.device)
+    int_a_gs = torch.empty(e,  dtype=torch.float32, device=a.device) 
+    int_a_blockscale = torch.empty(sum(sf_sizes), sf_n, dtype=torch.float8_e4m3fn, device=a.device)
+    for expert_id in range(e):
+        if tokens_per_expert[expert_id] == 0:
+            continue
+        sf_slice = slice(sf_offsets[expert_id],sf_offsets[expert_id+1])
+        int_slice = slice(expert_offsets[expert_id], expert_offsets[expert_id+1]) 
+        int_expert = intermediate[int_slice]
+        int_expert_max = torch.abs(int_expert).max().to(torch.float32)
+        int_a_gs[expert_id] =  int_expert_max / 448.0 * 6.0 
+        int_a_fp4[int_slice], int_a_blockscale[sf_slice] = ops.scaled_fp4_quant(int_expert,
+                                                                            1 / int_a_gs[expert_id])
+     
+    g2_alphas = w2_tensorscale * a2_gscale
    
-    print(f"{c2.to(dtype=a.dtype)=}")
+    c2  = ops.cutlass_fp4_moe_mm(int_a_fp4, w2_fp4,
+                           int_a_blockscale, w2_blockscale,
+                           g2_alphas,
+                           problem_sizes2, expert_offsets[:-1],
+                           sf_offsets[:-1], out_dtype) 
+    assert(torch.isfinite(c2).all()), "expected finite values after gemm 2"
     out =  (c2[c_map].view(m, num_topk, k) *
-            topk_weights.view(m, num_topk, 1).half()).sum(dim=1)
+            topk_weights.view(m, num_topk, 1).to(out_dtype)).sum(dim=1)
     
-    print(f"{out.to(dtype=a.dtype)=}")
-    return out
-    
+    return out.to(out_dtype)

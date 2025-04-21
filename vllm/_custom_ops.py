@@ -772,13 +772,11 @@ def cutlass_moe_mm(out_tensors: torch.Tensor, a_tensors: torch.Tensor,
                                 a_strides, b_strides, c_strides)
 
 
-def cutlass_fp4_moe_mm(out_tensors: torch.Tensor, a_tensors: torch.Tensor, 
+def cutlass_fp4_moe_mm(a_tensors: torch.Tensor, 
                 b_tensors: torch.Tensor, a_scales: torch.Tensor,
                 b_scales: torch.Tensor, alphas: torch.Tensor,
-                a_strides: torch.Tensor, b_strides: torch.Tensor, 
-                c_strides: torch.Tensor, sfa_layouts: torch.Tensor, 
-                sfb_layouts: torch.Tensor, problem_sizes: torch.Tensor,
-                expert_offsets: torch.Tensor, sf_offsets: torch.Tensor):
+                problem_sizes: torch.Tensor, expert_offsets: torch.Tensor,
+                sf_offsets: torch.Tensor, out_dtype: torch.dtype):
     """
     An FP4 Blockscaled Group Gemm that takes in  a_tensors, b_tensors and runs 
     the gemms for each combination based on the specified problem sizes.
@@ -797,10 +795,15 @@ def cutlass_fp4_moe_mm(out_tensors: torch.Tensor, a_tensors: torch.Tensor,
     - problem_sizes: MxNxK sizes of each expert's multiplication in two grouped
                      MMs used in the fused MoE operation.
     """
-    return torch.ops._C.cutlass_blockscaled_fp4_group_mm(out_tensors, a_tensors, 
+    m_topk = a_tensors.shape[0]
+    n = b_tensors.shape[1]
+    c2_shape = (m_topk, n) 
+    c2 = torch.empty(c2_shape, device=a_tensors.device, dtype=out_dtype)
+    assert(n == problem_sizes[0,1])
+    torch.ops._C.cutlass_blockscaled_fp4_group_mm(c2, a_tensors, 
                                 b_tensors, a_scales, b_scales, alphas,
-                                a_strides, b_strides,c_strides, sfa_layouts,
-                                sfb_layouts, problem_sizes, expert_offsets, sf_offsets) 
+                                problem_sizes, expert_offsets, sf_offsets) 
+    return c2.to(out_dtype)
 
 # aqlm
 def aqlm_gemm(input: torch.Tensor, codes: torch.Tensor,

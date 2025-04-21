@@ -524,11 +524,62 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
             num_experts, dtype=torch.float32), weight_loader=weight_loader)
         layer.register_parameter("w2_input_scale", w2_input_scale)
   
+    def swizzle_blockscale(self, scale: torch.tensor):
+        assert (scale.dtype == torch.float8_e4m3fn)
+        # Pad and blockwise interleave weight_scale
+        scale_ndim = scale.ndim
+        if scale.ndim == 2:
+            scale = scale.unsqueeze(0)
+        assert scale.ndim == 3
+        B, M, K = scale.shape
+        round_up_multiple = lambda x, m: (x + m - 1) // m * m
+        M_padded = round_up_multiple(M, 128)
+        K_padded = round_up_multiple(K, 4)
+        padded_scale = torch.zeros((B, M_padded, K_padded), dtype=scale.dtype)
+        padded_scale[:B, :M, :K] = scale
+        batches, rows, cols = padded_scale.shape
+        assert rows % 128 == 0
+        assert cols % 4 == 0
+        padded_scale = padded_scale.reshape(batches, rows // 128, 4, 32,
+                                            cols // 4, 4)
+        swizzled_scale = padded_scale.permute((0, 1, 4, 3, 2, 5))
+        swizzled_scale = swizzled_scale.contiguous().cuda()
+        return (swizzled_scale.reshape(M, K)
+                if scale_ndim == 2 else swizzled_scale.reshape(B, M, K))
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         
-        # swizzle blockscales
-                
+        # GEMM 1  
+        w13_weight_scale_2 = torch.amax(layer.w13_weight_scale_2, dim=-1) 
+        layer.w13_weight_scale_2 = Parameter(w13_weight_scale_2, requires_grad=False)
+
+        layer.g1_alphas = Parameter(layer.w13_input_scale * layer.w13_weight_scale_2,
+                                requires_grad=False)
+
+        assert (layer.w13_weight_scale.shape[2] % 16 == 0), (
+            "Expected weight_scale.dim(1) to be divisible by 16")
+        assert (layer.w13_weight_scale.dtype == torch.float8_e4m3fn), (
+            "Weight Blockscale must be represented as FP8-E4M3")
+        w13_blockscale_swizzled = self.swizzle_blockscale(layer.w13_weight_scale)
+
+        layer.w13_blockscale_swizzled = Parameter(w13_blockscale_swizzled,
+                                                requires_grad=False)
+
+        # GEMM 2
+        w2_weight_scale_2 = torch.amax(layer.w2_weight_scale_2, dim=-1) 
+        layer.w2_weight_scale_2 = Parameter(w2_weight_scale_2, requires_grad=False)
+
+        layer.g2_alphas = Parameter(layer.w2_input_scale * layer.w2_weight_scale_2,
+                                requires_grad=False)
+
+        assert (layer.w2_weight_scale.shape[2] % 16 == 0), (
+            "Expected weight_scale.dim(1) to be divisible by 16")
+        assert (layer.w2_weight_scale.dtype == torch.float8_e4m3fn), (
+            "Weight Blockscale must be represented as FP8-E4M3")
+        w2_blockscale_swizzled = self.swizzle_blockscale(layer.w2_weight_scale)
+
+        layer.w2_blockscale_swizzled = Parameter(w2_blockscale_swizzled,
+                                                requires_grad=False)
         return
           
     def apply(
@@ -546,8 +597,11 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         custom_routing_function: Optional[Callable] = None,
         scoring_func: str = "softmax",
         e_score_correction_bias: Optional[torch.Tensor] = None,
+        apply_router_weight_on_input: bool = False,
         activation: str = "silu",
     ):
+        assert activation == "silu", "Only SiLU activation is supported."
+        
         topk_weights, topk_ids = FusedMoE.select_experts(
             hidden_states=x,
             router_logits=router_logits,
@@ -559,25 +613,21 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
             custom_routing_function=custom_routing_function,
             scoring_func=scoring_func,
             e_score_correction_bias=e_score_correction_bias)
-        
-        
-        return cutlass_fp4_moe(a=x, 
+
+        # Cutlass moe takes in full precision a and fp4 precision weights
+        return cutlass_moe_fp4(a=x, 
                         w1_fp4=layer.w13_weight, 
-                        w1_blockscale=layer.w13_weight_scale,
-                        w1_tensorscale=layer.w13_weight_scale_2,
+                        w1_blockscale=layer.w13_blockscale_swizzled,
+                        w1_tensorscale=layer.w13_weight_scale_2, #Note that this is s_enc
                         w2_fp4=layer.w2_weight, 
-                        w2_blockscale=layer.w2_weight_scale,
-                        w2_tensorscale=layer.w2_weight_scale_2,
+                        w2_blockscale=layer.w2_blockscale_swizzled,
+                        w2_tensorscale=layer.w2_weight_scale_2, #Note that this is s_enc
                         topk_weights=topk_weights,
                         topk_ids=topk_ids,
                         m=x.shape[0],
                         n=layer.w2_weight.shape[1],
                         k=x.shape[1],
                         e=layer.w13_weight.shape[0],
-                        # ab_strides1=self.ab_strides1,
-                        # c_strides1=self.c_strides1,
-                        # ab_strides2=self.ab_strides2,
-                        # c_strides2=self.c_strides2,
-                        gemm1_a_scale=layer.w13_input_scale,
-                        gemm2_a_scale=layer.w2_input_scale,
+                        a1_gscale=layer.w13_input_scale,
+                        a2_gscale=layer.w2_input_scale,
         ).to(x.dtype)
