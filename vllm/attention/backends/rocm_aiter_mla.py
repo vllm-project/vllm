@@ -2,7 +2,7 @@
 
 from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Optional, Tuple, Type
+from typing import TYPE_CHECKING, Any, Optional, Type, Union
 
 import torch
 
@@ -370,7 +370,7 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
     def _flash_attn_varlen_diff_headdims(
             self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor,
             softmax_scale: float, return_softmax_lse: bool,
-            **kwargs) -> Tuple[torch.Tensor, ...] | torch.Tensor:
+            **kwargs) -> Union[tuple[torch.Tensor, ...], torch.Tensor]:
         output = self.flash_attn_varlen_func(
             q=q,
             k=k,
