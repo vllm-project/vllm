@@ -2389,7 +2389,7 @@ class SpeculativeConfig:
                 )
 
                 # Automatically detect the method
-                if self.method == 'eagle' or self.method == 'eagle3':
+                if self.method in ('eagle', 'eagle3'):
                     pass
                 elif "eagle-" in self.draft_model_config.model.lower() or \
                         "eagle3-" in self.draft_model_config.model.lower():
@@ -2403,7 +2403,7 @@ class SpeculativeConfig:
                     self.method = "draft_model"
 
                 # Replace hf_config for EAGLE draft_model
-                if self.method == "eagle" or self.method == "eagle3":
+                if self.method in ("eagle", "eagle3"):
                     if self.enable_chunked_prefill and not envs.VLLM_USE_V1:
                         raise ValueError(
                             "Chunked prefill and EAGLE are not compatible "

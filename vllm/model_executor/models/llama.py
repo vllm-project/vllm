@@ -223,10 +223,6 @@ class LlamaDecoderLayer(nn.Module):
     ) -> None:
         super().__init__()
         self.hidden_size = config.hidden_size
-        # self.input_hidden_size = config.hidden_size
-        # if hasattr(config, "input_hidden_size") and \
-        #     config.input_hidden_size is not None:
-        #     self.input_hidden_size = config.input_hidden_size
         rope_theta = getattr(config, "rope_theta", 10000)
         rope_scaling = getattr(config, "rope_scaling", None)
         if rope_scaling is not None and getattr(

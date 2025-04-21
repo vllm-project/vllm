@@ -236,6 +236,7 @@ class EagleProposer:
                     model_config=draft_model_config,
                     start_layer_id=target_layer_num).to(target_device)
             else:
+                assert self.vllm_config.speculative_config.method == "eagle3"
                 self.model = Eagle3LlamaForCausalLM(
                     model_config=draft_model_config,
                     start_layer_id=target_layer_num).to(target_device)
