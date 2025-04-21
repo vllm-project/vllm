@@ -261,7 +261,7 @@ class SequenceParallelismPass(VllmInductorPass):
         if cls._instance is None:
             cls._instance = SequenceParallelismPass(config)
         else:
-            cls._instance.config = config
+            cls._instance.config = config.compilation_config.pass_config
         return cls._instance
 
     def __init__(self, config: VllmConfig):
@@ -293,5 +293,4 @@ class SequenceParallelismPass(VllmInductorPass):
         self.dump_graph(graph, "before_sequence_parallelism_pass")
         count = self.patterns.apply(graph)
         logger.debug("Replaced %s patterns", count)
-
         self.dump_graph(graph, "after_sequence_parallelism_pass")
