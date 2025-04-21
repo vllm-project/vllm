@@ -55,6 +55,9 @@ class NgramProposer:
         """
         # Do not generate draft tokens beyond the max model length.
         k = min(self.k, self.max_model_len - context_token_ids.shape[0])
+        if k <= 0:
+            return None
+
         # TODO(woosuk): Optimize this.
         for n in range(self.max_n, self.min_n - 1, -1):
             result = _find_subarray_kmp(context_token_ids, n, k)
