@@ -65,12 +65,6 @@ class EmbedsPrompt(TypedDict):
     prompt_embeds: torch.Tensor
     """The embeddings of the prompt."""
 
-    prompt_token_ids: NotRequired[list[int]]
-    """A list of token IDs to pass to the model."""
-
-    prompt: NotRequired[str]
-    """The input text to be tokenized before passing to the model."""
-
 
 SingletonPrompt = Union[str, TextPrompt, TokensPrompt, EmbedsPrompt]
 """
@@ -231,17 +225,6 @@ class EmbedsInputs(TypedDict):
     prompt_embeds: torch.Tensor
     """The embeddings of the prompt."""
 
-    prompt_token_ids: NotRequired[list[int]]
-    """
-    The token IDs of the prompt. Should always be a list of 0 of the same 
-    length as prompt_embeds.
-    """
-
-    prompt: NotRequired[str]
-    """
-    The original prompt text corresponding to the token IDs, if available.
-    """
-
 
 def embeds_inputs(
     prompt_embeds: torch.Tensor,
@@ -251,11 +234,7 @@ def embeds_inputs(
     inputs = EmbedsInputs(
         type="embeds",
         prompt_embeds=prompt_embeds,
-        prompt_token_ids=[0] * len(prompt_embeds),
     )
-
-    if prompt is not None:
-        inputs["prompt"] = prompt
 
     return inputs
 
@@ -309,8 +288,11 @@ class SingletonInputsAdapter:
     def prompt_token_ids(self) -> list[int]:
         inputs = self.inputs
 
-        if inputs["type"] in ("token", "multimodal", "embeds"):
+        if inputs["type"] in ("token", "multimodal"):
             return inputs.get("prompt_token_ids", [])
+
+        if inputs["type"] == "embeds":
+            return [0] * len(inputs["prompt_embeds"])
 
         assert_never(inputs)  # type: ignore[arg-type]
 
