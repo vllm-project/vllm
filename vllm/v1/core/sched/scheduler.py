@@ -185,6 +185,13 @@ class Scheduler(SchedulerInterface):
             num_new_tokens = min(num_new_tokens, token_budget)
             assert num_new_tokens > 0
 
+            # Make sure the input position does not exceed the max model len.
+            # This is necessary when using spec decoding.
+            num_new_tokens = min(
+                num_new_tokens,
+                self.max_model_len - request.num_computed_tokens)
+            assert num_new_tokens > 0
+
             # Schedule encoder inputs.
             if request.has_encoder_inputs:
                 (encoder_inputs_to_schedule, num_new_tokens,
@@ -798,11 +805,13 @@ class Scheduler(SchedulerInterface):
     ) -> Optional[SchedulerStats]:
         if not self.log_stats:
             return None
+        prefix_cache_stats = self.kv_cache_manager.make_prefix_cache_stats()
+        assert prefix_cache_stats is not None
         return SchedulerStats(
             num_running_reqs=len(self.running),
             num_waiting_reqs=len(self.waiting),
             gpu_cache_usage=self.kv_cache_manager.usage,
-            prefix_cache_stats=self.kv_cache_manager.make_prefix_cache_stats(),
+            prefix_cache_stats=prefix_cache_stats,
             spec_decoding_stats=spec_decoding_stats,
         )
 

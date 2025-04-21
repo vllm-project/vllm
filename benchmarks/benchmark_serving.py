@@ -50,7 +50,7 @@ try:
 except ImportError:
     from argparse import ArgumentParser as FlexibleArgumentParser
 
-from benchmark_dataset import (AIMODataset, BurstGPTDataset,
+from benchmark_dataset import (AIMODataset, ASRDataset, BurstGPTDataset,
                                ConversationDataset, HuggingFaceDataset,
                                InstructCoderDataset, RandomDataset,
                                SampleRequest, ShareGPTDataset, SonnetDataset,
@@ -274,10 +274,6 @@ async def benchmark(
         input_requests[0].expected_output_len, \
             input_requests[0].multi_modal_data
 
-    if backend != "openai-chat" and test_mm_content is not None:
-        # multi-modal benchmark is only available on OpenAI Chat backend.
-        raise ValueError(
-            "Multi-modal content is only supported on 'openai-chat' backend.")
     assert test_mm_content is None or isinstance(test_mm_content, dict)
     test_input = RequestFuncInput(
         model=model_id,
@@ -604,6 +600,9 @@ def main(args: argparse.Namespace):
         elif args.dataset_path in AIMODataset.SUPPORTED_DATASET_PATHS:
             dataset_class = AIMODataset
             args.hf_split = "train"
+        elif args.dataset_path in ASRDataset.SUPPORTED_DATASET_PATHS:
+            dataset_class = ASRDataset
+            args.hf_split = "train"
         else:
             supported_datasets = set([
                 dataset_name for cls in HuggingFaceDataset.__subclasses__()
@@ -615,6 +614,13 @@ def main(args: argparse.Namespace):
                 f" from one of following: {supported_datasets}. "
                 "Please consider contributing if you would "
                 "like to add support for additional dataset formats.")
+
+        if (dataset_class.IS_MULTIMODAL and backend not in \
+            ["openai-chat", "openai-audio"]):
+            # multi-modal benchmark is only available on OpenAI Chat backend.
+            raise ValueError(
+                "Multi-modal content is only supported on 'openai-chat' and " \
+                "'openai-audio' backend.")
         input_requests = dataset_class(
             dataset_path=args.dataset_path,
             dataset_subset=args.hf_subset,
