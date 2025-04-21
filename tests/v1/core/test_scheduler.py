@@ -30,6 +30,7 @@ def create_scheduler(
     use_kv_connector: bool = False,
     num_blocks: int = 10000,
     block_size: int = 16,
+    max_model_len: Optional[int] = None,
 ) -> Scheduler:
     '''Create scheduler under test.
 
@@ -44,12 +45,15 @@ def create_scheduler(
     Returns:
       :class:`Scheduler` instance
     '''
+    if max_model_len is None:
+        max_model_len = max_num_batched_tokens
     scheduler_config = SchedulerConfig(
         max_num_seqs=max_num_seqs,
         max_num_batched_tokens=max_num_batched_tokens,
-        max_model_len=max_num_batched_tokens,
+        max_model_len=max_model_len,
         long_prefill_token_threshold=long_prefill_token_threshold,
         disable_chunked_mm_input=disable_chunked_mm_input,
+        enable_chunked_prefill=True,
     )
     model_config = ModelConfig(
         model=model,
@@ -296,6 +300,7 @@ def test_no_mm_input_chunking():
         model="llava-hf/llava-1.5-7b-hf",
         max_num_batched_tokens=1024,
         disable_chunked_mm_input=True,
+        max_model_len=2048,
     )
     mm_positions = [[PlaceholderRange(offset=400, length=800)]]
     requests = create_requests(num_requests=1,
