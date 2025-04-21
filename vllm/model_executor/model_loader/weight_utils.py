@@ -511,7 +511,9 @@ def pt_weights_iterator(
             disable=not enable_tqdm(use_tqdm_on_load),
             bar_format=_BAR_FORMAT,
     ):
-        state = torch.load(bin_file, map_location=pt_load_map_location, weights_only=True)
+        state = torch.load(bin_file,
+                           map_location=pt_load_map_location,
+                           weights_only=True)
         yield from state.items()
         del state
 
