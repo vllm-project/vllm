@@ -1091,14 +1091,7 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
                 q,
                 k,
                 maybe_padded_v,
-                None,  # output
-                kwargs["cu_seqlens_q"],
-                kwargs["cu_seqlens_k"],
-                kwargs["max_seqlen_q"],
-                kwargs["max_seqlen_k"],
-                kwargs["causal"],
-                softmax_scale,
-                None,  # bias
+                **kwargs,
             )
         if is_vllm_fa:
             attn_out = self.flash_attn_varlen_func(
