@@ -6,6 +6,7 @@ torch==2.6.0+rocm6.2.4
 torchvision==0.21.0+rocm6.2.4
 torchaudio==2.6.0+rocm6.2.4
 
+triton==3.2
 cmake>=3.26,<4
 packaging
 setuptools>=61

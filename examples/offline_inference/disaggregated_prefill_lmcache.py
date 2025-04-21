@@ -38,6 +38,10 @@ os.environ["LMCACHE_REMOTE_URL"] = f"lm://localhost:{port}"
 # `naive` indicates using raw bytes of the tensor without any compression
 os.environ["LMCACHE_REMOTE_SERDE"] = "naive"
 
+prompts = [
+    "Hello, how are you?" * 1000,
+]
+
 
 def run_prefill(prefill_done, prompts):
     # We use GPU 0 for prefill node.
@@ -106,12 +110,7 @@ def run_lmcache_server(port):
     return server_proc
 
 
-if __name__ == "__main__":
-
-    prompts = [
-        "Hello, how are you?" * 1000,
-    ]
-
+def main():
     prefill_done = Event()
     prefill_process = Process(target=run_prefill, args=(prefill_done, prompts))
     decode_process = Process(target=run_decode, args=(prefill_done, prompts))
@@ -128,3 +127,7 @@ if __name__ == "__main__":
     prefill_process.terminate()
     lmcache_server_process.terminate()
     lmcache_server_process.wait()
+
+
+if __name__ == "__main__":
+    main()

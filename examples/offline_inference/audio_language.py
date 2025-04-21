@@ -47,7 +47,7 @@ def run_minicpmo(question: str, audio_count: int) -> ModelRequestData:
         model=model_name,
         trust_remote_code=True,
         max_model_len=4096,
-        max_num_seqs=5,
+        max_num_seqs=2,
         limit_mm_per_prompt={"audio": audio_count},
     )
 
@@ -89,7 +89,7 @@ def run_phi4mm(question: str, audio_count: int) -> ModelRequestData:
     engine_args = EngineArgs(
         model=model_path,
         trust_remote_code=True,
-        max_model_len=4096,
+        max_model_len=12800,
         max_num_seqs=2,
         enable_lora=True,
         max_lora_rank=320,
@@ -124,6 +124,36 @@ def run_qwen2_audio(question: str, audio_count: int) -> ModelRequestData:
               f"{audio_in_prompt}{question}<|im_end|>\n"
               "<|im_start|>assistant\n")
 
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompt=prompt,
+    )
+
+
+# Qwen2.5-Omni
+def run_qwen2_5_omni(question: str, audio_count: int):
+    model_name = "Qwen/Qwen2.5-Omni-7B"
+
+    engine_args = EngineArgs(
+        model=model_name,
+        max_model_len=4096,
+        max_num_seqs=5,
+        limit_mm_per_prompt={"audio": audio_count},
+    )
+
+    audio_in_prompt = "".join([
+        "<|audio_bos|><|AUDIO|><|audio_eos|>\n" for idx in range(audio_count)
+    ])
+
+    default_system = (
+        "You are Qwen, a virtual human developed by the Qwen Team, Alibaba "
+        "Group, capable of perceiving auditory and visual inputs, as well as "
+        "generating text and speech.")
+
+    prompt = (f"<|im_start|>system\n{default_system}<|im_end|>\n"
+              "<|im_start|>user\n"
+              f"{audio_in_prompt}{question}<|im_end|>\n"
+              "<|im_start|>assistant\n")
     return ModelRequestData(
         engine_args=engine_args,
         prompt=prompt,
@@ -182,59 +212,13 @@ model_example_map = {
     "minicpmo": run_minicpmo,
     "phi4_mm": run_phi4mm,
     "qwen2_audio": run_qwen2_audio,
+    "qwen2_5_omni": run_qwen2_5_omni,
     "ultravox": run_ultravox,
     "whisper": run_whisper,
 }
 
 
-def main(args):
-    model = args.model_type
-    if model not in model_example_map:
-        raise ValueError(f"Model type {model} is not supported.")
-
-    audio_count = args.num_audios
-    req_data = model_example_map[model](question_per_audio_count[audio_count],
-                                        audio_count)
-
-    engine_args = asdict(req_data.engine_args) | {"seed": args.seed}
-    llm = LLM(**engine_args)
-
-    # To maintain code compatibility in this script, we add LoRA here.
-    # You can also add LoRA using:
-    # llm.generate(prompts, lora_request=lora_request,...)
-    if req_data.lora_requests:
-        for lora_request in req_data.lora_requests:
-            llm.llm_engine.add_lora(lora_request=lora_request)
-
-    # We set temperature to 0.2 so that outputs can be different
-    # even when all prompts are identical when running batch inference.
-    sampling_params = SamplingParams(temperature=0.2,
-                                     max_tokens=64,
-                                     stop_token_ids=req_data.stop_token_ids)
-
-    mm_data = {}
-    if audio_count > 0:
-        mm_data = {
-            "audio": [
-                asset.audio_and_sample_rate
-                for asset in audio_assets[:audio_count]
-            ]
-        }
-
-    assert args.num_prompts > 0
-    inputs = {"prompt": req_data.prompt, "multi_modal_data": mm_data}
-    if args.num_prompts > 1:
-        # Batch inference
-        inputs = [inputs] * args.num_prompts
-
-    outputs = llm.generate(inputs, sampling_params=sampling_params)
-
-    for o in outputs:
-        generated_text = o.outputs[0].text
-        print(generated_text)
-
-
-if __name__ == "__main__":
+def parse_args():
     parser = FlexibleArgumentParser(
         description='Demo on using vLLM for offline inference with '
         'audio language models')
@@ -258,5 +242,61 @@ if __name__ == "__main__":
                         default=None,
                         help="Set the seed when initializing `vllm.LLM`.")
 
-    args = parser.parse_args()
+    return parser.parse_args()
+
+
+def main(args):
+    model = args.model_type
+    if model not in model_example_map:
+        raise ValueError(f"Model type {model} is not supported.")
+
+    audio_count = args.num_audios
+    req_data = model_example_map[model](question_per_audio_count[audio_count],
+                                        audio_count)
+
+    # Disable other modalities to save memory
+    default_limits = {"image": 0, "video": 0, "audio": 0}
+    req_data.engine_args.limit_mm_per_prompt = default_limits | dict(
+        req_data.engine_args.limit_mm_per_prompt or {})
+
+    engine_args = asdict(req_data.engine_args) | {"seed": args.seed}
+    llm = LLM(**engine_args)
+
+    # We set temperature to 0.2 so that outputs can be different
+    # even when all prompts are identical when running batch inference.
+    sampling_params = SamplingParams(temperature=0.2,
+                                     max_tokens=64,
+                                     stop_token_ids=req_data.stop_token_ids)
+
+    mm_data = {}
+    if audio_count > 0:
+        mm_data = {
+            "audio": [
+                asset.audio_and_sample_rate
+                for asset in audio_assets[:audio_count]
+            ]
+        }
+
+    assert args.num_prompts > 0
+    inputs = {"prompt": req_data.prompt, "multi_modal_data": mm_data}
+    if args.num_prompts > 1:
+        # Batch inference
+        inputs = [inputs] * args.num_prompts
+    # Add LoRA request if applicable
+    lora_request = (req_data.lora_requests *
+                    args.num_prompts if req_data.lora_requests else None)
+
+    outputs = llm.generate(
+        inputs,
+        sampling_params=sampling_params,
+        lora_request=lora_request,
+    )
+
+    for o in outputs:
+        generated_text = o.outputs[0].text
+        print(generated_text)
+
+
+if __name__ == "__main__":
+    args = parse_args()
     main(args)

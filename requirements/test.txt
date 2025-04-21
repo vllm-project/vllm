@@ -20,25 +20,35 @@ aiosignal==1.3.1
 annotated-types==0.7.0
     # via pydantic
 anyio==4.6.2.post1
-    # via httpx
+    # via
+    #   httpx
+    #   starlette
 argcomplete==3.5.1
     # via datamodel-code-generator
+arrow==1.3.0
+    # via isoduration
 attrs==24.2.0
     # via
     #   aiohttp
+    #   hypothesis
     #   jsonlines
     #   jsonschema
+    #   pytest-subtests
     #   referencing
 audioread==3.0.1
     # via librosa
 awscli==1.35.23
     # via -r requirements/test.in
 backoff==2.2.1
-    # via -r requirements/test.in
+    # via
+    #   -r requirements/test.in
+    #   schemathesis
 bitsandbytes==0.45.3
     # via -r requirements/test.in
 black==24.10.0
     # via datamodel-code-generator
+blobfile==3.0.0
+    # via -r requirements/test.in
 boto3==1.35.57
     # via tensorizer
 botocore==1.35.57
@@ -67,11 +77,13 @@ click==8.1.7
     #   jiwer
     #   nltk
     #   ray
+    #   schemathesis
     #   typer
 colorama==0.4.6
     # via
     #   awscli
     #   sacrebleu
+    #   schemathesis
     #   tqdm-multiprocess
 contourpy==1.3.0
     # via matplotlib
@@ -101,12 +113,15 @@ dill==0.3.8
     #   multiprocess
 dnspython==2.7.0
     # via email-validator
+docopt==0.6.2
+    # via num2words
 docutils==0.16
     # via awscli
 einops==0.8.0
     # via
     #   -r requirements/test.in
     #   encodec
+    #   mamba-ssm
     #   vector-quantize-pytorch
     #   vocos
 einx==0.3.0
@@ -125,6 +140,7 @@ fastsafetensors==0.1.10
     # via -r requirements/test.in
 filelock==3.16.1
     # via
+    #   blobfile
     #   datasets
     #   huggingface-hub
     #   ray
@@ -132,6 +148,8 @@ filelock==3.16.1
     #   transformers
 fonttools==4.54.1
     # via matplotlib
+fqdn==1.5.1
+    # via jsonschema
 frozendict==2.4.6
     # via einx
 frozenlist==1.5.0
@@ -150,8 +168,12 @@ genai-perf==0.0.8
     # via -r requirements/test.in
 genson==1.3.0
     # via datamodel-code-generator
+graphql-core==3.2.6
+    # via hypothesis-graphql
 h11==0.14.0
     # via httpcore
+harfile==0.3.0
+    # via schemathesis
 hf-xet==0.1.4
     # via huggingface-hub
 hiredis==3.0.0
@@ -159,7 +181,9 @@ hiredis==3.0.0
 httpcore==1.0.6
     # via httpx
 httpx==0.27.2
-    # via -r requirements/test.in
+    # via
+    #   -r requirements/test.in
+    #   schemathesis
 huggingface-hub==0.30.1
     # via
     #   -r requirements/test.in
@@ -174,17 +198,29 @@ huggingface-hub==0.30.1
     #   vocos
 humanize==4.11.0
     # via runai-model-streamer
+hypothesis==6.131.0
+    # via
+    #   hypothesis-graphql
+    #   hypothesis-jsonschema
+    #   schemathesis
+hypothesis-graphql==0.11.1
+    # via schemathesis
+hypothesis-jsonschema==0.23.1
+    # via schemathesis
 idna==3.10
     # via
     #   anyio
     #   email-validator
     #   httpx
+    #   jsonschema
     #   requests
     #   yarl
 inflect==5.6.2
     # via datamodel-code-generator
 iniconfig==2.0.0
     # via pytest
+isoduration==20.11.0
+    # via jsonschema
 isort==5.13.2
     # via datamodel-code-generator
 jinja2==3.1.6
@@ -204,12 +240,18 @@ joblib==1.4.2
     #   scikit-learn
 jsonlines==4.0.0
     # via lm-eval
+jsonpointer==3.0.0
+    # via jsonschema
 jsonschema==4.23.0
     # via
+    #   hypothesis-jsonschema
     #   mistral-common
     #   ray
+    #   schemathesis
 jsonschema-specifications==2024.10.1
     # via jsonschema
+junit-xml==1.9
+    # via schemathesis
 kaleido==0.2.1
     # via genai-perf
 kiwisolver==1.4.7
@@ -225,11 +267,17 @@ llvmlite==0.44.0
 lm-eval==0.4.8
     # via -r requirements/test.in
 lxml==5.3.0
-    # via sacrebleu
+    # via
+    #   blobfile
+    #   sacrebleu
+mamba-ssm==2.2.4
+    # via -r requirements/test.in
 markdown-it-py==3.0.0
     # via rich
 markupsafe==3.0.2
-    # via jinja2
+    # via
+    #   jinja2
+    #   werkzeug
 matplotlib==3.9.2
     # via -r requirements/test.in
 mbstrdecoder==1.1.3
@@ -261,9 +309,13 @@ mypy-extensions==1.0.0
     # via black
 networkx==3.2.1
     # via torch
+ninja==1.11.1.3
+    # via mamba-ssm
 nltk==3.9.1
     # via rouge-score
-numba==0.61.0
+num2words==0.5.14
+    # via -r requirements/test.in
+numba==0.61.2
     # via
     #   -r requirements/test.in
     #   librosa
@@ -351,6 +403,7 @@ packaging==24.1
     #   fastparquet
     #   huggingface-hub
     #   lazy-loader
+    #   mamba-ssm
     #   matplotlib
     #   peft
     #   plotly
@@ -422,6 +475,8 @@ pybind11==2.13.6
     # via lm-eval
 pycparser==2.22
     # via cffi
+pycryptodomex==3.22.0
+    # via blobfile
 pydantic==2.9.2
     # via
     #   datamodel-code-generator
@@ -432,6 +487,8 @@ pygments==2.18.0
     # via rich
 pyparsing==3.2.0
     # via matplotlib
+pyrate-limiter==3.7.0
+    # via schemathesis
 pytablewriter==1.2.0
     # via lm-eval
 pytest==8.3.3
@@ -444,6 +501,9 @@ pytest==8.3.3
     #   pytest-mock
     #   pytest-rerunfailures
     #   pytest-shard
+    #   pytest-subtests
+    #   pytest-timeout
+    #   schemathesis
 pytest-asyncio==0.24.0
     # via -r requirements/test.in
 pytest-forked==1.6.0
@@ -454,8 +514,13 @@ pytest-rerunfailures==14.0
     # via -r requirements/test.in
 pytest-shard==0.1.2
     # via -r requirements/test.in
+pytest-subtests==0.14.1
+    # via schemathesis
+pytest-timeout==2.3.1
+    # via -r requirements/test.in
 python-dateutil==2.9.0.post0
     # via
+    #   arrow
     #   botocore
     #   matplotlib
     #   pandas
@@ -477,6 +542,7 @@ pyyaml==6.0.2
     #   peft
     #   ray
     #   responses
+    #   schemathesis
     #   timm
     #   transformers
     #   vocos
@@ -507,10 +573,16 @@ requests==2.32.3
     #   pooch
     #   ray
     #   responses
+    #   schemathesis
+    #   starlette-testclient
     #   tiktoken
     #   transformers
 responses==0.25.3
     # via genai-perf
+rfc3339-validator==0.1.4
+    # via jsonschema
+rfc3987==1.3.8
+    # via jsonschema
 rich==13.9.4
     # via
     #   genai-perf
@@ -539,6 +611,8 @@ safetensors==0.4.5
     #   peft
     #   timm
     #   transformers
+schemathesis==3.39.15
+    # via -r requirements/test.in
 scikit-learn==1.5.2
     # via
     #   librosa
@@ -557,18 +631,23 @@ sentencepiece==0.2.0
     # via mistral-common
 setuptools==75.8.0
     # via
+    #   mamba-ssm
     #   pytablewriter
     #   torch
 shellingham==1.5.4
     # via typer
 six==1.16.0
     # via
+    #   junit-xml
     #   python-dateutil
+    #   rfc3339-validator
     #   rouge-score
 sniffio==1.3.1
     # via
     #   anyio
     #   httpx
+sortedcontainers==2.4.0
+    # via hypothesis
 soundfile==0.12.1
     # via
     #   -r requirements/test.in
@@ -577,6 +656,12 @@ soxr==0.5.0.post1
     # via librosa
 sqlitedict==2.1.0
     # via lm-eval
+starlette==0.46.2
+    # via
+    #   schemathesis
+    #   starlette-testclient
+starlette-testclient==0.4.1
+    # via schemathesis
 statsmodels==0.14.4
     # via genai-perf
 sympy==1.13.1
@@ -603,8 +688,14 @@ tiktoken==0.7.0
     #   mistral-common
 timm==1.0.11
     # via -r requirements/test.in
-tokenizers==0.21.0
-    # via transformers
+tokenizers==0.21.1
+    # via
+    #   -r requirements/test.in
+    #   transformers
+tomli==2.2.1
+    # via schemathesis
+tomli-w==1.2.0
+    # via schemathesis
 torch==2.6.0
     # via
     #   -r requirements/test.in
@@ -613,6 +704,7 @@ torch==2.6.0
     #   encodec
     #   fastsafetensors
     #   lm-eval
+    #   mamba-ssm
     #   peft
     #   runai-model-streamer
     #   sentence-transformers
@@ -645,11 +737,12 @@ tqdm==4.66.6
     #   transformers
 tqdm-multiprocess==0.0.11
     # via lm-eval
-transformers==4.50.3
+transformers==4.51.1
     # via
     #   -r requirements/test.in
     #   genai-perf
     #   lm-eval
+    #   mamba-ssm
     #   peft
     #   sentence-transformers
     #   transformers-stream-generator
@@ -668,6 +761,8 @@ typepy==1.3.2
     #   tabledata
 typer==0.15.2
     # via fastsafetensors
+types-python-dateutil==2.9.0.20241206
+    # via arrow
 typing-extensions==4.12.2
     # via
     #   huggingface-hub
@@ -680,8 +775,11 @@ typing-extensions==4.12.2
     #   typer
 tzdata==2024.2
     # via pandas
+uri-template==1.3.0
+    # via jsonschema
 urllib3==2.2.3
     # via
+    #   blobfile
     #   botocore
     #   requests
     #   responses
@@ -690,6 +788,10 @@ vector-quantize-pytorch==1.21.2
     # via -r requirements/test.in
 vocos==0.1.0
     # via -r requirements/test.in
+webcolors==24.11.1
+    # via jsonschema
+werkzeug==3.1.3
+    # via schemathesis
 word2number==1.1
     # via lm-eval
 xxhash==3.5.0
@@ -697,6 +799,8 @@ xxhash==3.5.0
     #   datasets
     #   evaluate
 yarl==1.17.1
-    # via aiohttp
+    # via
+    #   aiohttp
+    #   schemathesis
 zstandard==0.23.0
     # via lm-eval
