@@ -30,7 +30,7 @@ pip install -v -r requirements/xpu.txt
 - Then, build and install vLLM XPU backend:
 
 ```console
-VLLM_TARGET_DEVICE=xpu python setup.py install
+VLLM_TARGET_DEVICE=xpu pip install .
 ```
 
 - Finally, due to a known issue of conflict dependency(oneapi related) in torch-xpu 2.6 and ipex-xpu 2.6, we install ipex here. This will be fixed in the ipex-xpu 2.7.

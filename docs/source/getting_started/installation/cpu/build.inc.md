@@ -24,5 +24,5 @@ pip install -v -r requirements/cpu.txt --extra-index-url https://download.pytorc
 Finally, build and install vLLM CPU backend:
 
 ```console
-VLLM_TARGET_DEVICE=cpu python setup.py install
+VLLM_TARGET_DEVICE=cpu pip install .
 ```

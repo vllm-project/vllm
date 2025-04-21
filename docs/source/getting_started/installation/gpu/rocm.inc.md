@@ -65,7 +65,7 @@ Currently, there are no pre-built ROCm wheels.
     cd flash-attention
     git checkout b7d29fb
     git submodule update --init
-    GPU_ARCHS="gfx90a" python3 setup.py install
+    GPU_ARCHS="gfx90a" pip install .
     cd ..
     ```
 
@@ -88,7 +88,7 @@ Currently, there are no pre-built ROCm wheels.
 
     # Build vLLM for MI210/MI250/MI300.
     $ export PYTORCH_ROCM_ARCH="gfx90a;gfx942"
-    $ python3 setup.py develop
+    $ pip install --editable .
     ```
 
     This may take 5-10 minutes. Currently, `pip install .` does not work for ROCm installation.

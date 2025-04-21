@@ -96,7 +96,7 @@ RUN if [ ${BUILD_RPD} -eq "1" ]; then \
     && cd rocmProfileData/rpd_tracer \
     && pip install -r requirements.txt && cd ../ \
     && make && make install \
-    && cd hipMarker && python3 setup.py install ; fi
+    && cd hipMarker && python3 -m pip install . ; fi
 
 # Install vLLM
 RUN --mount=type=bind,from=export_vllm,src=/,target=/install \

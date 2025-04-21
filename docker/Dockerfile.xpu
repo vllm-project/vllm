@@ -38,7 +38,7 @@ ENV VLLM_TARGET_DEVICE=xpu
 
 RUN --mount=type=cache,target=/root/.cache/pip \
     --mount=type=bind,source=.git,target=.git \
-    python3 setup.py install
+    pip install .
 
 # Please refer xpu doc, we need manually install intel-extension-for-pytorch 2.6.10+xpu due to there are some conflict dependencies with torch 2.6.0+xpu
 # FIXME: This will be fix in ipex 2.7. just leave this here for awareness.

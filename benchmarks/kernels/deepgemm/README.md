@@ -11,7 +11,6 @@ You need to install vLLM in your usual fashion, then install DeepGEMM from sourc
 ```
 git clone --recursive https://github.com/deepseek-ai/DeepGEMM
 cd DeepGEMM
-python setup.py install
 uv pip install -e .
 ```
 

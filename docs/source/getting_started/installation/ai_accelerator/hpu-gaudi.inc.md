@@ -64,7 +64,7 @@ To build and install vLLM from source, run:
 git clone https://github.com/vllm-project/vllm.git
 cd vllm
 pip install -r requirements/hpu.txt
-python setup.py develop
+pip install --editable .
 ```
 
 Currently, the latest features and performance optimizations are developed in Gaudi's [vLLM-fork](https://github.com/HabanaAI/vllm-fork) and we periodically upstream them to vLLM main repo. To install latest [HabanaAI/vLLM-fork](https://github.com/HabanaAI/vllm-fork), run the following:
@@ -74,7 +74,7 @@ git clone https://github.com/HabanaAI/vllm-fork.git
 cd vllm-fork
 git checkout habana_main
 pip install -r requirements/hpu.txt
-python setup.py develop
+pip install --editable .
 ```
 
 ## Set up using Docker
