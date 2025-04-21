@@ -37,7 +37,7 @@ class StreamingToolReconstructor:
                 f"{call_delta.type}")
             current_tool_call = self.tool_calls[
                 call_delta.index] if call_delta.index < len(
-                self.tool_calls) else None
+                    self.tool_calls) else None
             if current_tool_call:
                 assert (not call_delta.function.name), (
                     "Streaming tool calls should emit the full function name "
@@ -86,14 +86,11 @@ class StreamingToolReconstructor:
                 f"{call_delta.type}")
             current_tool_call = self.tool_calls[
                 call_delta.index] if call_delta.index < len(
-                self.tool_calls) else None
+                    self.tool_calls) else None
             if current_tool_call:
                 assert (not call_delta.function.name), (
                     "Streaming tool calls should emit the full function name "
                     f"exactly once. Got {call_delta.function.name}")
-                # assert (not call_delta.id), (
-                #     "Streaming tool calls must emit function id only once. Got "
-                #     f"{call_delta.id}")
                 assert (call_delta.index == len(self.tool_calls) - 1), (
                     f"Incorrect index for tool delta. Got {call_delta.index}, "
                     f"expected {len(self.tool_calls) - 1}")
@@ -113,7 +110,7 @@ class StreamingToolReconstructor:
                              function=FunctionCall(
                                  name=call_delta.function.name,
                                  arguments=call_delta.function.arguments
-                                           or "")))
+                                 or "")))
 
 
 def run_tool_extraction(
@@ -176,11 +173,11 @@ def run_tool_extraction_streaming(
 
 
 def run_tool_extraction_hermes(
-            tool_parser: ToolParser,
-            model_output: Iterable[str],
-            request: Union[ChatCompletionRequest, None] = None,
-            streaming: bool = False,
-            assert_one_tool_per_delta: bool = True,
+    tool_parser: ToolParser,
+    model_output: Iterable[str],
+    request: Union[ChatCompletionRequest, None] = None,
+    streaming: bool = False,
+    assert_one_tool_per_delta: bool = True,
 ) -> tuple[Union[str, None], list[ToolCall]]:
     reconstructor = run_tool_extraction_streaming_hermes(
         tool_parser,
@@ -191,10 +188,10 @@ def run_tool_extraction_hermes(
 
 
 def run_tool_extraction_streaming_hermes(
-            tool_parser: ToolParser,
-            model_deltas: Iterable[str],
-            request: Union[ChatCompletionRequest, None] = None,
-            assert_one_tool_per_delta: bool = False,
+    tool_parser: ToolParser,
+    model_deltas: Iterable[str],
+    request: Union[ChatCompletionRequest, None] = None,
+    assert_one_tool_per_delta: bool = False,
 ) -> StreamingToolReconstructor:
     request = request or ChatCompletionRequest(messages=[], model="test-model")
     reconstructor = StreamingToolReconstructor(
