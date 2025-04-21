@@ -339,8 +339,7 @@ class Worker(LocalOrDistributedWorkerBase):
                 self.nixl_connector.read_blocks(worker_input.local_block_ids[i], worker_input.staging_block_ids[i], worker_input.remote_block_ids[i], worker_input.remote_engine_id[i])
 
     def _write_blocks(self, worker_input: WorkerInput) -> None:
-        if not self.is_driver_worker:
-            torch.cuda.synchronize() # to make sure that the blocks are ready, on driver worker we transfer after sampling, so there's no need to synchronize
+        torch.cuda.synchronize() # to make sure that the blocks are ready, on driver worker we transfer after sampling, so there's no need to synchronize
 
         for i, op_type in enumerate(worker_input.op_type):
             if op_type == MemoryOpType.WRITE:
