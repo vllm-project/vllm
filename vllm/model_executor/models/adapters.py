@@ -65,8 +65,10 @@ def _create_pooling_model_cls(
 
             # If the model already defines a pooler instance, don't overwrite it
             if not getattr(self, "_pooler", None):
+                hidden_size = vllm_config.model_config.get_hidden_size()
                 self._pooler = Pooler.from_config_with_defaults(
                     pooler_config,
+                    hidden_size=hidden_size,
                     pooling_type=default_pooling_type,
                     normalize=default_normalize,
                     softmax=default_softmax,

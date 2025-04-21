@@ -198,6 +198,18 @@ def get_field(cls: type[Config], name: str) -> Field:
         f"{cls.__name__}.{name} must have a default value or default factory.")
 
 
+@dataclass
+class ExtraModuleConfig:
+    """Configuration for an extra module to be loaded, e.g., from sentence-transformers.
+
+    Args:
+        type: The class name of the module (e.g., 'Dense').
+        params: A dictionary of parameters to initialize the module.
+    """
+    type: str
+    params: dict[str, Any] = field(default_factory=dict)
+
+
 class ModelConfig:
     """Configuration for the model.
 
@@ -294,6 +306,7 @@ class ModelConfig:
             "transformers" will use the Transformers model implementation.
         override_generation_config: Override the generation config with the
             given config.
+        extra_modules: Extra modules to be loaded, e.g., from sentence-transformers.
     """
 
     def compute_hash(self) -> str:
@@ -368,6 +381,7 @@ class ModelConfig:
         enable_sleep_mode: bool = False,
         override_generation_config: Optional[dict[str, Any]] = None,
         model_impl: Union[str, ModelImpl] = ModelImpl.AUTO,
+        extra_modules: Optional[list[ExtraModuleConfig]] = None,
     ) -> None:
         self.model = maybe_model_redirect(model)
         self.tokenizer = maybe_model_redirect(tokenizer)
