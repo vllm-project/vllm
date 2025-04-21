@@ -20,6 +20,7 @@ steps:
           limit: 5
     agents:
       queue: amd-cpu
+    soft_fail: false
 
 {% for step in steps %}
 {% if step.mirror_hardwares and "amd" in step.mirror_hardwares %}
@@ -37,10 +38,10 @@ steps:
       queue: amd_gpu
 {% endif%}
     commands: 
-      - bash .buildkite/run-amd-test.sh "cd {{ (step.working_dir or default_working_dir) | safe  }} ; {{ step.command  or (step.commands | join(" && ")) | safe }}"
+      - bash .buildkite/scripts/hardware_ci/run-amd-test.sh "cd {{ (step.working_dir or default_working_dir) | safe  }} ; {{ step.command  or (step.commands | join(" && ")) | safe }}"
     env:
       DOCKER_BUILDKIT: "1"
     priority: 100
-    soft_fail: true
+    soft_fail: false
 {% endif %}
 {% endfor %}
