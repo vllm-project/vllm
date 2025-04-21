@@ -221,7 +221,7 @@ vLLM CPU backend supports the following vLLM features:
 
 vLLM CPU backend supports `torch.compile` to reduce runtime overhead and generate better kernels. Using argument `-O[0-3]` to enable the feature:
 
-- `-O0`: eager mode, no optimization.
+- `-O0` (default): eager mode, no optimization.
 - `-O1`: test-only, not recommended.
 - `-O2`: trace compute graph but execute with eager mode, using custom ops. This option can reduce some Python runtime overhead.
 - `-O3`: trace compute graph and generate kernels with the `inductor` backend without using custom ops. This option can bring better performance but requires some time to tune and compile kernels.
