@@ -310,9 +310,11 @@ def mount_metrics(app: FastAPI):
     # We need to set PROMETHEUS_MULTIPROC_DIR environment variable
     # before prometheus_client is imported.
     # See https://prometheus.github.io/client_python/multiprocess/
-    from prometheus_client import (CollectorRegistry, make_asgi_app,
+    from prometheus_client import (REGISTRY, CollectorRegistry, make_asgi_app,
                                    multiprocess)
     from prometheus_fastapi_instrumentator import Instrumentator
+
+    registry = REGISTRY
 
     prometheus_multiproc_dir_path = os.getenv("PROMETHEUS_MULTIPROC_DIR", None)
     if prometheus_multiproc_dir_path is not None:
@@ -320,23 +322,21 @@ def mount_metrics(app: FastAPI):
                      prometheus_multiproc_dir_path)
         registry = CollectorRegistry()
         multiprocess.MultiProcessCollector(registry)
-        Instrumentator(
-            excluded_handlers=[
-                "/metrics",
-                "/health",
-                "/load",
-                "/ping",
-                "/version",
-                "/server_info",
-            ],
-            registry=registry,
-        ).add().instrument(app).expose(app)
 
-        # Add prometheus asgi middleware to route /metrics requests
-        metrics_route = Mount("/metrics", make_asgi_app(registry=registry))
-    else:
-        # Add prometheus asgi middleware to route /metrics requests
-        metrics_route = Mount("/metrics", make_asgi_app())
+    Instrumentator(
+        excluded_handlers=[
+            "/metrics",
+            "/health",
+            "/load",
+            "/ping",
+            "/version",
+            "/server_info",
+        ],
+        registry=registry,
+    ).add().instrument(app).expose(app)
+
+    # Add prometheus asgi middleware to route /metrics requests
+    metrics_route = Mount("/metrics", make_asgi_app(registry=registry))
 
     # Workaround for 307 Redirect for /metrics
     metrics_route.path_regex = re.compile("^/metrics(?P<path>.*)$")

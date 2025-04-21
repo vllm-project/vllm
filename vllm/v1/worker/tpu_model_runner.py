@@ -128,10 +128,16 @@ class TPUModelRunner:
         self.block_size = cache_config.block_size
         self.max_model_len = model_config.max_model_len
         self.max_num_blocks_per_req = cdiv(self.max_model_len, self.block_size)
-        self.max_num_tokens = scheduler_config.max_num_batched_tokens
         # InputBatch needs to work with sampling tensors greater than padding
         # to avoid dynamic shapes. Also, avoid suboptimal alignment.
         self.max_num_reqs = max(scheduler_config.max_num_seqs, MIN_NUM_SEQS)
+        self.num_tokens_paddings = _get_token_paddings(
+            min_token_size=16,
+            max_token_size=scheduler_config.max_num_batched_tokens,
+            padding_gap=envs.VLLM_TPU_BUCKET_PADDING_GAP)
+        # In case `max_num_tokens < max(num_tokens_paddings)` use the actual
+        # padded max value to pre-allocate data structures and pre-compile.
+        self.max_num_tokens = self.num_tokens_paddings[-1]
 
         # Model-related.
         self.num_attn_layers = model_config.get_num_layers_by_block_type(
@@ -211,10 +217,6 @@ class TPUModelRunner:
         # Range tensor with values [0 .. self.max_num_tokens - 1].
         # Used to initialize positions / context_lens / seq_lens
         self.arange_np = np.arange(self.max_num_tokens, dtype=np.int32)
-        self.num_tokens_paddings = _get_token_paddings(
-            min_token_size=16,
-            max_token_size=self.max_num_tokens,
-            padding_gap=envs.VLLM_TPU_BUCKET_PADDING_GAP)
         self.num_reqs_paddings = _get_req_paddings(
             min_req_size=MIN_NUM_SEQS, max_req_size=self.max_num_reqs)
 
@@ -918,14 +920,19 @@ class TPUModelRunner:
                                       device=self.device)
                 torch._dynamo.mark_dynamic(indices, 0)
                 self.select_hidden_states(dummy_hidden, indices)
-            logger.info("  -- num_tokens: %d", num_tokens)
+                logger.info("  -- num_tokens: %d, num_seqs: %d", num_tokens,
+                            num_reqs)
+                # Requests can't be more than tokens. But do compile for the
+                # next bigger value in case num_tokens uses bucketed padding.
+                if num_reqs >= min(num_tokens, self.max_num_reqs):
+                    break
         xm.wait_device_ops()
         end = time.perf_counter()
         logger.info("Compilation finished in in %.2f [secs].", end - start)
         self._update_num_xla_graphs("select_hidden_states")
 
     def _precompile_sample_from_hidden(self) -> None:
-        logger.info("Compiling sampling with different input shapes.")
+        logger.info("Compiling sampling with different num_reqs.")
         start = time.perf_counter()
         hsize = self.model_config.get_hidden_size()
         for num_reqs in self.num_reqs_paddings:

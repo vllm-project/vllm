@@ -37,11 +37,11 @@ def build_llm_with_lmcache():
         '{"kv_connector":"LMCacheConnector", "kv_role":"kv_both"}')
     # Set GPU memory utilization to 0.8 for an A40 GPU with 40GB
     # memory. Reduce the value if your GPU has less memory.
-    # Note that LMCache is not compatible with chunked prefill for now.
+    # Note: LMCache supports chunked prefill (see vLLM#14505, LMCache#392).
     llm = LLM(model="mistralai/Mistral-7B-Instruct-v0.2",
               kv_transfer_config=ktc,
               max_model_len=8000,
-              enable_chunked_prefill=False,
+              enable_chunked_prefill=True,
               gpu_memory_utilization=0.8)
 
     try:
