@@ -37,7 +37,7 @@ class StreamingToolReconstructor:
                 f"{call_delta.type}")
             current_tool_call = self.tool_calls[
                 call_delta.index] if call_delta.index < len(
-                    self.tool_calls) else None
+                self.tool_calls) else None
             if current_tool_call:
                 assert (not call_delta.function.name), (
                     "Streaming tool calls should emit the full function name "
@@ -182,18 +182,12 @@ def run_tool_extraction_hermes(
             streaming: bool = False,
             assert_one_tool_per_delta: bool = True,
 ) -> tuple[Union[str, None], list[ToolCall]]:
-    if streaming:
-        reconstructor = run_tool_extraction_streaming_hermes(
-            tool_parser,
-            model_output,
-            request,
-            assert_one_tool_per_delta=assert_one_tool_per_delta)
-        return reconstructor.other_content or None, reconstructor.tool_calls
-    else:
-        extracted = run_tool_extraction_nonstreaming(tool_parser, model_output,
-                                                     request)
-        assert extracted.tools_called == bool(extracted.tool_calls)
-        return extracted.content, extracted.tool_calls
+    reconstructor = run_tool_extraction_streaming_hermes(
+        tool_parser,
+        model_output,
+        request,
+        assert_one_tool_per_delta=assert_one_tool_per_delta)
+    return reconstructor.other_content or None, reconstructor.tool_calls
 
 
 def run_tool_extraction_streaming_hermes(

@@ -2,7 +2,7 @@
 import pytest
 from transformers import AutoTokenizer
 
-from tests.entrypoints.openai.tool_parsers.utils import (run_tool_extraction_hermes)
+from tests.entrypoints.openai.tool_parsers.utils import (run_tool_extraction_hermes, run_tool_extraction_nonstreaming)
 from vllm.entrypoints.openai.protocol import FunctionCall
 from vllm.entrypoints.openai.tool_parsers import ToolParserManager
 
@@ -78,10 +78,14 @@ STREAM_FUNCTION_OUTPUT_SIMPLIFICATION = ['<tool_call>', '\n', '{"', 'name', '":'
                                          '', ' 转', '速', '', '', ' 燃', '烧', '室', '出口', '温度', '', '', ' 压', '气', '机', '级',
                                          '数', '', ' 支', '点', '布局', '"}', '}\n', '</tool_call>', '']
 
-TEST_CASES = [
+
+TEST_CASES_NO_STREAM = [
     pytest.param(False,
                  NO_STREAM_FUNCTION_OUTPUT, EXPECTED_FUNCTION_CALL,
                  id="lei_test_streaming_01"),
+]
+
+TEST_CASES_STREAM = [
     pytest.param(True,
                  STREAM_FUNCTION_OUTPUT_SIMPLIFICATION, EXPECTED_FUNCTION_CALL,
                  id="lei_test_streaming_02"),
@@ -92,19 +96,38 @@ TEST_CASES = [
 
 
 @pytest.mark.parametrize("streaming, model_output, expected_tool_calls",
-                         TEST_CASES)
-def test_tool_call(streaming: bool, model_output: list,
+                         TEST_CASES_STREAM)
+def test_tool_call_stream(streaming: bool, model_output: list,
                    expected_tool_calls: list[FunctionCall]):
 
     # The tokenizer for the local test is the test file of QwQ-32B. If you want to test other models, you can change the path.
     tokenizer = AutoTokenizer.from_pretrained("./tokenizer/")
 
     tool_parser = ToolParserManager.get_tool_parser("hermes")(tokenizer)
+
     content, tool_calls = run_tool_extraction_hermes(tool_parser,
                                                      model_output,
                                                      streaming=streaming)
-    # print(f"tool_calls: {tool_calls[0].type}")
-    # print(f"expected_tool_calls: {expected_tool_calls}")
 
     assert tool_calls[0].type == "function"
     assert tool_calls[0].function == expected_tool_calls
+
+
+@pytest.mark.parametrize("streaming, model_output, expected_tool_calls",
+                         TEST_CASES_NO_STREAM)
+def test_tool_call_no_stream(streaming: bool, model_output: str,
+                   expected_tool_calls: list[FunctionCall]):
+
+    # The tokenizer for the local test is the test file of QwQ-32B. If you want to test other models, you can change the path.
+    tokenizer = AutoTokenizer.from_pretrained("./tokenizer/")
+
+    tool_parser = ToolParserManager.get_tool_parser("hermes")(tokenizer)
+
+    extracted = run_tool_extraction_nonstreaming(tool_parser, model_output)
+
+
+    assert extracted.tools_called == bool(extracted.tool_calls)
+    assert extracted.tool_calls[0].type == "function"
+    assert extracted.tool_calls[0].function == expected_tool_calls
+
+
