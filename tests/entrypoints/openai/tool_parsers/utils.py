@@ -176,11 +176,11 @@ def run_tool_extraction_streaming(
 
 
 def run_tool_extraction_hermes(
-        tool_parser: ToolParser,
-        model_output: Iterable[str],
-        request: Union[ChatCompletionRequest, None] = None,
-        streaming: bool = False,
-        assert_one_tool_per_delta: bool = True,
+            tool_parser: ToolParser,
+            model_output: Iterable[str],
+            request: Union[ChatCompletionRequest, None] = None,
+            streaming: bool = False,
+            assert_one_tool_per_delta: bool = True,
 ) -> tuple[Union[str, None], list[ToolCall]]:
     if streaming:
         reconstructor = run_tool_extraction_streaming_hermes(
@@ -197,10 +197,10 @@ def run_tool_extraction_hermes(
 
 
 def run_tool_extraction_streaming_hermes(
-        tool_parser: ToolParser,
-        model_deltas: Iterable[str],
-        request: Union[ChatCompletionRequest, None] = None,
-        assert_one_tool_per_delta: bool = False,
+            tool_parser: ToolParser,
+            model_deltas: Iterable[str],
+            request: Union[ChatCompletionRequest, None] = None,
+            assert_one_tool_per_delta: bool = False,
 ) -> StreamingToolReconstructor:
     request = request or ChatCompletionRequest(messages=[], model="test-model")
     reconstructor = StreamingToolReconstructor(
