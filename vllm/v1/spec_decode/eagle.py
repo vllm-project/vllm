@@ -6,12 +6,15 @@ import triton.language as tl
 
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.forward_context import set_forward_context
+from vllm.logger import init_logger
 from vllm.model_executor.model_loader.loader import get_model_loader
 from vllm.model_executor.model_loader.utils import set_default_torch_dtype
 from vllm.model_executor.models.llama_eagle import EagleLlamaForCausalLM
 from vllm.model_executor.models.llama_eagle3 import Eagle3LlamaForCausalLM
 from vllm.v1.attention.backends.flash_attn import FlashAttentionMetadata
 from vllm.v1.sample.metadata import SamplingMetadata
+
+logger = init_logger(__name__)
 
 
 class EagleProposer:
@@ -208,13 +211,17 @@ class EagleProposer:
                     model_config=draft_model_config,
                     start_layer_id=target_layer_num).to(target_device)
 
-        self.model.load_weights(
+        loaded_weights = self.model.load_weights(
             loader.get_all_weights(
                 self.vllm_config.speculative_config.draft_model_config,
                 self.model))
         if self.vllm_config.speculative_config.method == "eagle3":
-            self.model.model.embed_tokens = target_model.model.embed_tokens
+            if "model.embed_tokens.weight" not in loaded_weights:
+                logger.info(
+                    "Loading EAGLE embedding weights from the target model.")
+                self.model.model.embed_tokens = target_model.model.embed_tokens
         else:
+            logger.info("Loading EAGLE LM head weights from the target model.")
             self.model.lm_head = target_model.lm_head
 
 

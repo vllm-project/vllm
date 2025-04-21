@@ -100,9 +100,14 @@ class LlamaModel(nn.Module):
                 prefix=maybe_prefix(prefix, f"layers.{start_layer_id}"),
             )
         ])
-        self.fc = torch.nn.Linear(self.config.hidden_size * 3,
-                                  self.config.hidden_size,
-                                  bias=False)
+        if hasattr(self.config, "target_hidden_size"):
+            self.fc = torch.nn.Linear(self.config.target_hidden_size * 3,
+                                      self.config.hidden_size,
+                                      bias=False)
+        else:
+            self.fc = torch.nn.Linear(self.config.hidden_size * 3,
+                                      self.config.hidden_size,
+                                      bias=False)
         self.norm = RMSNorm(
             self.config.hidden_size,
             eps=self.config.rms_norm_eps,
@@ -225,4 +230,4 @@ class Eagle3LlamaForCausalLM(LlamaForCausalLM):
                 name = "model." + name
             model_weights[name] = loaded_weight
 
-        loader.load_weights(model_weights.items())
+        return loader.load_weights(model_weights.items())
