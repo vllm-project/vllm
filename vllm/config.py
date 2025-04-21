@@ -2685,13 +2685,6 @@ class LoRAConfig:
         elif isinstance(self.lora_dtype, str):
             self.lora_dtype = getattr(torch, self.lora_dtype)
 
-    def verify_with_scheduler_config(self, scheduler_config: SchedulerConfig):
-        # Reminder: Please update docs/source/features/compatibility_matrix.md
-        # If the feature combo become valid
-        if scheduler_config.chunked_prefill_enabled:
-            logger.warning("LoRA with chunked prefill is still experimental "
-                           "and may be unstable.")
-
     def verify_lora_support(self):
         if self.long_lora_scaling_factors is not None and envs.VLLM_USE_V1:
             raise ValueError(
@@ -3819,8 +3812,6 @@ class VllmConfig:
         if self.lora_config:
             self.lora_config.verify_with_cache_config(self.cache_config)
             self.lora_config.verify_with_model_config(self.model_config)
-            self.lora_config.verify_with_scheduler_config(
-                self.scheduler_config)
             self.lora_config.verify_lora_support()
         if self.prompt_adapter_config:
             self.prompt_adapter_config.verify_with_model_config(
