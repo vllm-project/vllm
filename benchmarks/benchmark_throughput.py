@@ -11,10 +11,10 @@ from typing import Any, Optional, Union
 
 import torch
 import uvloop
-from benchmark_dataset import (BurstGPTDataset, ConversationDataset,
-                               InstructCoderDataset, RandomDataset,
-                               SampleRequest, ShareGPTDataset, SonnetDataset,
-                               VisionArenaDataset)
+from benchmark_dataset import (AIMODataset, BurstGPTDataset,
+                               ConversationDataset, InstructCoderDataset,
+                               RandomDataset, SampleRequest, ShareGPTDataset,
+                               SonnetDataset, VisionArenaDataset)
 from benchmark_utils import convert_to_pytorch_benchmark_format, write_to_json
 from tqdm import tqdm
 from transformers import (AutoModelForCausalLM, AutoTokenizer,
@@ -213,14 +213,17 @@ def run_hf(
     max_prompt_len = 0
     max_output_len = 0
     for i in range(len(requests)):
-        prompt, prompt_len, output_len = requests[i]
+        prompt = requests[i].prompt
+        prompt_len = requests[i].prompt_len
+        output_len = requests[i].expected_output_len
         # Add the prompt to the batch.
         batch.append(prompt)
         max_prompt_len = max(max_prompt_len, prompt_len)
         max_output_len = max(max_output_len, output_len)
         if len(batch) < max_batch_size and i != len(requests) - 1:
             # Check if we can add more requests to the batch.
-            _, next_prompt_len, next_output_len = requests[i + 1]
+            next_prompt_len = requests[i + 1].prompt_len
+            next_output_len = requests[i + 1].expected_output_len
             if (max(max_prompt_len, next_prompt_len) +
                     max(max_output_len, next_output_len)) <= 2048:
                 # We can add more requests to the batch.
@@ -332,7 +335,10 @@ def get_requests(args, tokenizer):
             common_kwargs['dataset_subset'] = args.hf_subset
             common_kwargs['dataset_split'] = args.hf_split
             sample_kwargs["enable_multimodal_chat"] = True
-
+        elif args.dataset_path in AIMODataset.SUPPORTED_DATASET_PATHS:
+            dataset_cls = AIMODataset
+            common_kwargs['dataset_subset'] = None
+            common_kwargs['dataset_split'] = "train"
     else:
         raise ValueError(f"Unknown dataset name: {args.dataset_name}")
     # Remove None values
@@ -467,12 +473,13 @@ def validate_args(args):
                 since --dataset-name is not 'hf'.",
                       stacklevel=2)
     elif args.dataset_name == "hf":
-        if args.dataset_path in VisionArenaDataset.SUPPORTED_DATASET_PATHS:
-            assert args.backend == "vllm-chat", "VisionArenaDataset needs to use vllm-chat as the backend."  #noqa: E501
-        elif args.dataset_path in InstructCoderDataset.SUPPORTED_DATASET_PATHS:
-            assert args.backend == "vllm", "InstructCoder dataset needs to use vllm as the backend."  #noqa: E501
-        elif args.dataset_path in ConversationDataset.SUPPORTED_DATASET_PATHS:
-            assert args.backend == "vllm-chat", "ConversationDataset needs to use vllm-chat as the backend."  #noqa: E501
+        if args.dataset_path in (
+                VisionArenaDataset.SUPPORTED_DATASET_PATHS.keys()
+                | ConversationDataset.SUPPORTED_DATASET_PATHS):
+            assert args.backend == "vllm-chat", f"{args.dataset_path} needs to use vllm-chat as the backend."  #noqa: E501
+        elif args.dataset_path in (InstructCoderDataset.SUPPORTED_DATASET_PATHS
+                                   | AIMODataset.SUPPORTED_DATASET_PATHS):
+            assert args.backend == "vllm", f"{args.dataset_path} needs to use vllm as the backend."  #noqa: E501
         else:
             raise ValueError(
                 f"{args.dataset_path} is not supported by hf dataset.")
@@ -587,18 +594,30 @@ if __name__ == "__main__":
         default=None,
         help="Path to the lora adapters to use. This can be an absolute path, "
         "a relative path, or a Hugging Face model identifier.")
-    parser.add_argument("--prefix-len",
-                        type=int,
-                        default=None,
-                        help="Number of prefix tokens per request."
-                        "This is for the RandomDataset and SonnetDataset")
+    parser.add_argument(
+        "--prefix-len",
+        type=int,
+        default=None,
+        help=f"Number of prefix tokens to be used in RandomDataset "
+        "and SonnetDataset. For RandomDataset, the total input "
+        "length is the sum of prefix-len (default: "
+        f"{RandomDataset.DEFAULT_PREFIX_LEN}) and a random context length "
+        "sampled from [input_len * (1 - range_ratio), "
+        "input_len * (1 + range_ratio)]. For SonnetDataset, "
+        f"prefix_len (default: {SonnetDataset.DEFAULT_PREFIX_LEN}) "
+        "controls how much of the input is fixed lines versus "
+        "random lines, but the total input length remains approximately "
+        "input_len tokens.")
     # random dataset
     parser.add_argument(
         "--random-range-ratio",
         type=float,
         default=None,
-        help="Range of sampled ratio of input/output length, "
-        "used only for RandomDataSet.",
+        help=f"Range ratio (default : {RandomDataset.DEFAULT_RANGE_RATIO}) "
+        "for sampling input/output length, "
+        "used only for RandomDataset. Must be in the range [0, 1) to "
+        "define a symmetric sampling range "
+        "[length * (1 - range_ratio), length * (1 + range_ratio)].",
     )
 
     # hf dtaset

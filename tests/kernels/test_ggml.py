@@ -15,7 +15,8 @@ def test_ggml_opcheck(quant_type):
     qweight = torch.randint(0, 100, shape, device='cuda', dtype=torch.uint8)
     m = qweight.shape[0]
     n = qweight.shape[1] // type_size * block_size
-    opcheck(torch.ops._C.ggml_dequantize, (qweight, quant_type, m, n))
+    opcheck(torch.ops._C.ggml_dequantize,
+            (qweight, quant_type, m, n, torch.float16))
 
     x = torch.rand((m, 512), device='cuda', dtype=torch.float16)
     opcheck(torch.ops._C.ggml_mul_mat_a8,

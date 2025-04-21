@@ -104,6 +104,9 @@ class RemoteOpenAIServer:
         self.host = str(args.host or 'localhost')
         self.port = int(args.port)
 
+        self.show_hidden_metrics = \
+            args.show_hidden_metrics_for_version is not None
+
         # download the model before starting the server to avoid timeout
         is_local = os.path.isdir(model)
         if not is_local:
@@ -612,7 +615,16 @@ def multi_process_parallel(
     # as compared to multiprocessing.
     # NOTE: We need to set working_dir for distributed tests,
     # otherwise we may get import errors on ray workers
-    ray.init(runtime_env={"working_dir": VLLM_PATH})
+    # NOTE: Force ray not to use gitignore file as excluding, otherwise
+    # it will not move .so files to working dir.
+    # So we have to manually add some of large directories
+    os.environ["RAY_RUNTIME_ENV_IGNORE_GITIGNORE"] = "1"
+    ray.init(
+        runtime_env={
+            "working_dir": VLLM_PATH,
+            "excludes":
+            ["build", ".git", "cmake-build-*", "shellcheck", "dist"]
+        })
 
     distributed_init_port = get_open_port()
     refs = []

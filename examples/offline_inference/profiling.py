@@ -234,9 +234,8 @@ def run_profile(context: ProfileContext, csv_output: Optional[str],
             sampling_params.max_tokens = next(output_len_generator)
             assert isinstance(sampling_params.max_tokens, int)
 
-            prompt_token_ids = torch.randint(
-                llm.llm_engine.model_config.get_vocab_size(),
-                size=(prompt_len, )).tolist()
+            prompt_token_ids = torch.randint(llm.get_tokenizer().vocab_size,
+                                             size=(prompt_len, )).tolist()
 
             llm.llm_engine.add_request(
                 request_id=f"seq{i}",
@@ -360,7 +359,7 @@ def run_profile(context: ProfileContext, csv_output: Optional[str],
               f" in folder {context.save_chrome_traces_folder}")
 
 
-if __name__ == "__main__":
+def parse_args():
     parser = FlexibleArgumentParser(description="""
 Profile a model
 
@@ -450,7 +449,10 @@ Profile a model
 
     EngineArgs.add_cli_args(parser)
 
-    args = parser.parse_args()
+    return parser.parse_args()
+
+
+def main(args):
     context = ProfileContext(
         engine_args=EngineArgs.from_cli_args(args),
         **{
@@ -459,3 +461,8 @@ Profile a model
             if k in inspect.signature(ProfileContext).parameters
         })
     run_profile(context, csv_output=args.csv, json_output=args.json)
+
+
+if __name__ == "__main__":
+    args = parse_args()
+    main(args)
