@@ -23,6 +23,8 @@ Currently, there are no pre-built XPU wheels.
 - Second, install Python packages for vLLM XPU backend building:
 
 ```console
+git clone https://github.com/vllm-project/vllm.git
+cd vllm
 pip install --upgrade pip
 pip install -v -r requirements/xpu.txt
 ```
