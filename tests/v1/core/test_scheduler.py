@@ -53,6 +53,7 @@ def create_scheduler(
         max_model_len=max_model_len,
         long_prefill_token_threshold=long_prefill_token_threshold,
         disable_chunked_mm_input=disable_chunked_mm_input,
+        enable_chunked_prefill=True,
     )
     model_config = ModelConfig(
         model=model,
