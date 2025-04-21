@@ -404,6 +404,15 @@ class Platform:
     ) -> None:
         """Raises if this request is unsupported on this platform"""
 
+    def __getattr__(self, key: str):
+        device = getattr(torch, self.device_name, None)
+        if device is not None and hasattr(device, key):
+            return getattr(device, key)
+        else:
+            logger.warning("Current platform %s doesn't has '%s' attribute.",
+                           self.device_name, key)
+            return None
+
 
 class UnspecifiedPlatform(Platform):
     _enum = PlatformEnum.UNSPECIFIED
