@@ -2131,6 +2131,7 @@ class SpeculativeConfig:
                         Minimum size of ngram token window when using Ngram
                         proposer, if provided. Defaults to 1.
                 - eagle
+                - eagle3
                 - medusa
                 - mlp_speculator
                 - draft_model
@@ -2370,9 +2371,10 @@ class SpeculativeConfig:
                 )
 
                 # Automatically detect the method
-                if self.method == 'eagle':
+                if self.method == 'eagle' or self.method == 'eagle3':
                     pass
-                elif "eagle-" in self.draft_model_config.model.lower():
+                elif "eagle-" in self.draft_model_config.model.lower() or \
+                        "eagle3-" in self.draft_model_config.model.lower():
                     self.method = "eagle"
                 elif self.draft_model_config.hf_config.model_type == "medusa":
                     self.method = "medusa"
@@ -2383,7 +2385,7 @@ class SpeculativeConfig:
                     self.method = "draft_model"
 
                 # Replace hf_config for EAGLE draft_model
-                if self.method == "eagle":
+                if self.method == "eagle" or self.method == "eagle3":
                     if self.enable_chunked_prefill and not envs.VLLM_USE_V1:
                         raise ValueError(
                             "Chunked prefill and EAGLE are not compatible "

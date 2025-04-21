@@ -115,7 +115,8 @@ class Scheduler(SchedulerInterface):
             cache_size=encoder_cache_size)
 
         self.num_lookahead_tokens = 0
-        if speculative_config and speculative_config.method == "eagle":
+        if speculative_config and (speculative_config.method == "eagle"
+                                   or speculative_config.method == "eagle3"):
             self.num_lookahead_tokens = \
                 speculative_config.num_speculative_tokens
 

@@ -83,8 +83,9 @@ def main():
         max_model_len=max_model_len,
         max_num_seqs=args.max_num_seqs,
         gpu_memory_utilization=0.8,
+        compilation_config=0,
         speculative_config={
-            "method": "eagle",
+            "method": "eagle3" if "eagle3" in eagle_dir.lower() else "eagle",
             "model": eagle_dir,
             "num_speculative_tokens": args.num_spec_tokens,
             "draft_tensor_parallel_size": args.draft_tp,
@@ -120,9 +121,8 @@ def main():
 
     # print acceptance at each token position
     for i in range(len(acceptance_counts)):
-        print(
-            f"acceptance at token {i}: {acceptance_counts[i] / (acceptance_counts[0]):.2f}"
-        )
+        print(f"acceptance at token {i}:"
+              f"{acceptance_counts[i] / (acceptance_counts[0]):.2f}")
 
 
 if __name__ == "__main__":
