@@ -730,7 +730,7 @@ def run_ovis2(questions: list[str], modality: str) -> ModelRequestData:
     assert modality == "image"
 
     model_name = "AIDC-AI/Ovis2-1B"
-    tokenizer = "Isotr0py/Ovis2-1B-dev"
+    tokenizer = "Isotr0py/Ovis2-tokenizer"
 
     engine_args = EngineArgs(
         model=model_name,
