@@ -36,13 +36,14 @@ from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.inputs import MultiModalFieldConfig, MultiModalKwargs
+from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig,
+                                    MultiModalKwargs)
 from vllm.multimodal.parse import (AudioProcessorItems, MultiModalDataItems,
                                    MultiModalDataParser)
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
                                         BaseProcessingInfo, PromptReplacement,
                                         PromptUpdate)
-from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
+from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
 
 from .blip2 import Blip2QFormerModel
@@ -167,13 +168,13 @@ class GraniteSpeechMultiModalProcessor(
 class GraniteSpeechDummyInputsBuilder(
         BaseDummyInputsBuilder[GraniteSpeechMultiModalProcessingInfo]):
 
-    def get_dummy_processor_inputs(
+    def get_dummy_mm_data(
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-    ) -> ProcessorInputs:
+    ) -> MultiModalDataDict:
         num_audios = mm_counts.get("audio", 0)
-        mm_data = {
+        return {
             "audio":
             self._get_dummy_audios(
                 length=self.info.get_max_audio_len(),
@@ -181,13 +182,11 @@ class GraniteSpeechDummyInputsBuilder(
             )
         }
 
+    def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
+        num_audios = mm_counts.get("audio", 0)
         hf_processor = self.info.get_hf_processor()
         audio_token = getattr(hf_processor, "audio_token", "<|audio|>")
-
-        return ProcessorInputs(
-            prompt_text=audio_token * num_audios,
-            mm_data=mm_data,
-        )
+        return audio_token * num_audios
 
 
 ### QFormer Projector
