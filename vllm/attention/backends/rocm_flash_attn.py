@@ -908,7 +908,6 @@ class ROCmFlashAttentionImpl(AttentionImpl):
                     self.kv_cache_dtype,
                     layer._k_scale,
                     layer._v_scale,
-                    _ON_NAVI,
                 )
             else:
                 output[num_prefill_tokens:] = paged_attn.forward_decode(

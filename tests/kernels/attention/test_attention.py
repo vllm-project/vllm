@@ -148,12 +148,7 @@ def test_paged_attention(
             or (version == "rocm" and head_size not in (64, 128))):
         pytest.skip()
 
-    is_rocm_navi = False
-    if current_platform.is_rocm():
-        is_rocm_navi = "gfx1" in torch.cuda.get_device_properties(
-            "cuda").gcnArchName
-
-    if (version == "rocm" and is_rocm_navi
+    if (version == "rocm" and current_platform.is_navi()
             and (kv_cache_dtype == "fp8" or head_size != 128
                  or block_size != 16 or use_alibi)):
         pytest.skip()
@@ -285,20 +280,20 @@ def test_paged_attention(
                 scale,
                 block_tables,
                 seq_lens,
+                None,
                 block_size,
                 max_seq_len,
                 alibi_slopes,
                 kv_cache_dtype,
                 k_scale,
                 v_scale,
-                is_rocm_navi,
             )
 
             opcheck(torch.ops._rocm_C.paged_attention,
                     (output, exp_sums, max_logits, tmp_output, query,
                      key_cache, value_cache, num_kv_heads, scale, block_tables,
-                     seq_lens, block_size, max_seq_len, alibi_slopes,
-                     kv_cache_dtype, k_scale, v_scale, is_rocm_navi),
+                     seq_lens, None, block_size, max_seq_len, alibi_slopes,
+                     kv_cache_dtype, k_scale, v_scale),
                     cond=(head_size == HEAD_SIZES[0]
                           and block_size == BLOCK_SIZES[0]))
 

@@ -1581,6 +1581,7 @@ __device__ __forceinline__ _B16x8 from_floatx8(const floatx8& inp) {
   }
 }
 
+// clang-format off
 template <typename scalar_t, typename cache_t,
           vllm::Fp8KVCacheDataType KV_DTYPE, typename OUTT, int BLOCK_SIZE,
           int HEAD_SIZE, int NUM_THREADS, bool ALIBI_ENABLED, int GQA_RATIO>
@@ -1594,6 +1595,7 @@ __launch_bounds__(NUM_THREADS, 3) void paged_attention_ll4mi_QKV_mfma16_kernel(
     const int num_kv_heads, const float scale,
     const int* __restrict__ block_tables,  // [num_seqs, max_num_blocks_per_seq]
     const int* __restrict__ context_lens,  // [num_seqs]
+    const int* __restrict__ query_start_loc_ptr,   // [num_seqs]
     const int max_num_blocks_per_seq,
     const float* __restrict__ alibi_slopes,  // [num_heads]
     const int q_stride, const int kv_block_stride, const int kv_head_stride,
@@ -1604,6 +1606,7 @@ __launch_bounds__(NUM_THREADS, 3) void paged_attention_ll4mi_QKV_mfma16_kernel(
                                    // head_size]
     OUTT* __restrict__ final_out,  // [num_seqs, num_heads, head_size]
     int max_ctx_blocks, const float* k_scale, const float* v_scale) {
+  // clang-format on
   constexpr int NWARPS = NUM_THREADS / WARP_SIZE;  // 8 warps on gfx11
   const int warpid = threadIdx.x / WARP_SIZE;
   const int laneid = threadIdx.x % WARP_SIZE;
@@ -1613,6 +1616,13 @@ __launch_bounds__(NUM_THREADS, 3) void paged_attention_ll4mi_QKV_mfma16_kernel(
   const int rowid = laneid / 16;
 
   const int seq_idx = blockIdx.x;
+  // NOTE queries with sequence len > 1 are prefills and taken care by another
+  // kernel.
+  if (query_start_loc_ptr != nullptr &&
+      (query_start_loc_ptr[seq_idx + 1] - query_start_loc_ptr[seq_idx]) != 1) {
+    return;
+  }
+
   const int partition_idx = blockIdx.y;
 
   constexpr int T_PAR_SIZE = 256;  // token partition size set to 256
@@ -1671,12 +1681,14 @@ __launch_bounds__(NUM_THREADS, 3) void paged_attention_ll4mi_QKV_mfma16_kernel(
   // output layout from QKwmma : QH16xT8x2 16 qheads across 16 lanes, 16 tokens
   // across 2 rows x 8 tokens per lane
 
+  const int64_t query_start_off = static_cast<int64_t>(
+      query_start_loc_ptr ? query_start_loc_ptr[seq_idx] : seq_idx);
+
   if (GQA_RATIO == 1) {
     const int local_qhead_idx = lane16id % GQA_RATIO;
     const int global_qhead_idx = wg_start_head_idx + local_qhead_idx;
-    const int64_t seq_idx64 = static_cast<int64_t>(seq_idx);
     const scalar_t* q_ptr =
-        q + seq_idx64 * q_stride + global_qhead_idx * HEAD_SIZE;
+        q + query_start_off * q_stride + global_qhead_idx * HEAD_SIZE;
     if (lane16id < GQA_RATIO) {
   #pragma unroll
       for (int qkhe_depth = 0; qkhe_depth < QKHELOOP / 2; qkhe_depth++) {
@@ -1690,9 +1702,8 @@ __launch_bounds__(NUM_THREADS, 3) void paged_attention_ll4mi_QKV_mfma16_kernel(
     // fetch Q in shared across warps and then write to registers
     const int local_qhead_idx = 2 * warpid + rowid;
     const int global_qhead_idx = wg_start_head_idx + local_qhead_idx;
-    const int64_t seq_idx64 = static_cast<int64_t>(seq_idx);
     const scalar_t* q_ptr =
-        q + seq_idx64 * q_stride + global_qhead_idx * HEAD_SIZE;
+        q + query_start_off * q_stride + global_qhead_idx * HEAD_SIZE;
 
     const int qhead_element = lane16id * CONTIGUOUS_SCALAR_ELEMS_16B;
     if ((local_qhead_idx < GQA_RATIO) && (qhead_element < HEAD_SIZE)) {
@@ -2024,6 +2035,7 @@ __launch_bounds__(NUM_THREADS) void paged_attention_ll4mi_QKV_mfma4_kernel(
     const int num_kv_heads, const float scale,
     const int* __restrict__ block_tables,  // [num_seqs, max_num_blocks_per_seq]
     const int* __restrict__ context_lens,  // [num_seqs]
+    const int* __restrict__ query_start_loc_ptr,  // [num_seqs]
     const int max_num_blocks_per_seq,
     const float* __restrict__ alibi_slopes,  // [num_heads]
     const int q_stride, const int kv_block_stride, const int kv_head_stride,
@@ -2050,15 +2062,24 @@ __launch_bounds__(NUM_THREADS) void paged_attention_ll4mi_reduce_kernel(
     const scalar_t* __restrict__ tmp_out,  // [num_seqs, num_heads,
                                            // max_num_partitions, head_size]
     const int* __restrict__ context_lens,  // [num_seqs]
+    const int* __restrict__ query_start_loc_ptr,  // [num_seqs]
     const int max_num_partitions) {
-  const int num_heads = gridDim.x;
-  const int head_idx = blockIdx.x;
-  const int seq_idx = blockIdx.y;
+  const auto num_heads = gridDim.x;
+  const auto head_idx = blockIdx.x;
+  const auto seq_idx = blockIdx.y;
+
+  // NOTE queries with sequence len > 1 are prefills and taken care by another
+  // kernel.
+  if (query_start_loc_ptr != nullptr &&
+      (query_start_loc_ptr[seq_idx + 1] - query_start_loc_ptr[seq_idx] != 1)) {
+    return;
+  }
+
   const int context_len = context_lens[seq_idx];
   const int num_partitions = DIVIDE_ROUND_UP(context_len, PARTITION_SIZE);
-  constexpr int NUM_WARPS = NUM_THREADS / WARP_SIZE;
+  [[maybe_unused]] constexpr int NUM_WARPS = NUM_THREADS / WARP_SIZE;
   const int warpid = threadIdx.x / WARP_SIZE;
-  const int laneid = threadIdx.x % WARP_SIZE;
+  [[maybe_unused]] const int laneid = threadIdx.x % WARP_SIZE;
 
   __shared__ float shared_global_exp_sum;
   // max num partitions supported is warp_size * NPAR_LOOPS
@@ -2221,7 +2242,11 @@ __launch_bounds__(NUM_THREADS) void paged_attention_ll4mi_reduce_kernel(
   const float inv_global_exp_sum =
       __fdividef(1.0f, shared_global_exp_sum + 1e-6f);
   acc *= inv_global_exp_sum;
-  OUTT* out_ptr = out + seq_idx * num_heads * HEAD_SIZE + head_idx * HEAD_SIZE;
+
+  const int64_t query_start_off = static_cast<int64_t>(
+      query_start_loc_ptr ? query_start_loc_ptr[seq_idx] : seq_idx);
+  OUTT* out_ptr = out + query_start_off * num_heads * HEAD_SIZE +
+                  static_cast<int64_t>(head_idx) * HEAD_SIZE;
   out_ptr[threadIdx.x] = from_float<scalar_t>(acc);
 }
 
@@ -2328,6 +2353,7 @@ __device__ __forceinline__ _B16x8 from_floatx8(const floatx8& inp) {
   }
 }
 
+// clang-format off
 template <typename scalar_t, typename cache_t,
           vllm::Fp8KVCacheDataType KV_DTYPE, typename OUTT, int BLOCK_SIZE,
           int HEAD_SIZE, int NUM_THREADS, bool ALIBI_ENABLED, int GQA_RATIO>
@@ -2341,6 +2367,7 @@ __launch_bounds__(NUM_THREADS, 3) void paged_attention_ll4mi_QKV_mfma16_kernel(
     const int num_kv_heads, const float scale,
     const int* __restrict__ block_tables,  // [num_seqs, max_num_blocks_per_seq]
     const int* __restrict__ context_lens,  // [num_seqs]
+    const int* __restrict__ query_start_loc_ptr,   // [num_seqs]
     const int max_num_blocks_per_seq,
     const float* __restrict__ alibi_slopes,  // [num_heads]
     const int q_stride, const int kv_block_stride, const int kv_head_stride,
@@ -2351,6 +2378,7 @@ __launch_bounds__(NUM_THREADS, 3) void paged_attention_ll4mi_QKV_mfma16_kernel(
                                    // head_size]
     OUTT* __restrict__ final_out,  // [num_seqs, num_heads, head_size]
     int max_ctx_blocks, const float* k_scale, const float* v_scale) {
+  // clang-format on
   constexpr int NWARPS = NUM_THREADS / WARP_SIZE;  // 8 warps on gfx11
   const int warpid = threadIdx.x / WARP_SIZE;
   const int laneid = threadIdx.x % WARP_SIZE;
@@ -2360,6 +2388,12 @@ __launch_bounds__(NUM_THREADS, 3) void paged_attention_ll4mi_QKV_mfma16_kernel(
   const int rowid = laneid / 16;
 
   const int seq_idx = blockIdx.x;
+  // NOTE queries with sequence len > 1 are prefills and taken care by another
+  // kernel.
+  if (query_start_loc_ptr != nullptr &&
+      (query_start_loc_ptr[seq_idx + 1] - query_start_loc_ptr[seq_idx] != 1)) {
+    return;
+  }
   const int partition_idx = blockIdx.y;
 
   constexpr int T_PAR_SIZE = 256;  // token partition size set to 256
@@ -2419,11 +2453,13 @@ __launch_bounds__(NUM_THREADS, 3) void paged_attention_ll4mi_QKV_mfma16_kernel(
   // output layout from QKwmma : QH16xT8x2 16 qheads across 16 lanes, 16 tokens
   // across 2 rows x 8 tokens per lane
 
+  const int64_t query_start_off = static_cast<int64_t>(
+      query_start_loc_ptr ? query_start_loc_ptr[seq_idx] : seq_idx);
+
   if (GQA_RATIO == 1) {
     const int local_qhead_idx = lane16id % GQA_RATIO;
     const int global_qhead_idx = wg_start_head_idx + local_qhead_idx;
-    const int64_t seq_idx64 = static_cast<int64_t>(seq_idx);
-    const scalar_t* q_ptr = q + seq_idx64 * q_stride +
+    const scalar_t* q_ptr = q + query_start_off * q_stride +
                             global_qhead_idx * HEAD_SIZE +
                             rowid * CONTIGUOUS_KV_ELEMS_16B_LOAD;
     if (lane16id < GQA_RATIO) {
@@ -2439,9 +2475,8 @@ __launch_bounds__(NUM_THREADS, 3) void paged_attention_ll4mi_QKV_mfma16_kernel(
     // fetch Q in shared across warps and then write to registers
     const int local_qhead_idx = 2 * warpid + rowid;
     const int global_qhead_idx = wg_start_head_idx + local_qhead_idx;
-    const int64_t seq_idx64 = static_cast<int64_t>(seq_idx);
     const scalar_t* q_ptr =
-        q + seq_idx64 * q_stride + global_qhead_idx * HEAD_SIZE;
+        q + query_start_off * q_stride + global_qhead_idx * HEAD_SIZE;
 
     const int qhead_element = lane16id * CONTIGUOUS_SCALAR_ELEMS_16B;
     if ((local_qhead_idx < GQA_RATIO) && (qhead_element < HEAD_SIZE)) {
@@ -2736,6 +2771,7 @@ __launch_bounds__(NUM_THREADS) void paged_attention_ll4mi_QKV_mfma4_kernel(
     const int num_kv_heads, const float scale,
     const int* __restrict__ block_tables,  // [num_seqs, max_num_blocks_per_seq]
     const int* __restrict__ context_lens,  // [num_seqs]
+    const int* __restrict__ query_start_loc_ptr,  // [num_seqs]
     const int max_num_blocks_per_seq,
     const float* __restrict__ alibi_slopes,  // [num_heads]
     const int q_stride, const int kv_block_stride, const int kv_head_stride,
@@ -2762,15 +2798,24 @@ __launch_bounds__(NUM_THREADS) void paged_attention_ll4mi_reduce_kernel(
     const scalar_t* __restrict__ tmp_out,  // [num_seqs, num_heads,
                                            // max_num_partitions, head_size]
     const int* __restrict__ context_lens,  // [num_seqs]
+    const int* __restrict__ query_start_loc_ptr,  // [num_seqs]
     const int max_num_partitions) {
-  const int num_heads = gridDim.x;
-  const int head_idx = blockIdx.x;
-  const int seq_idx = blockIdx.y;
+  const auto num_heads = gridDim.x;
+  const auto head_idx = blockIdx.x;
+  const auto seq_idx = blockIdx.y;
+
+  // NOTE queries with sequence len > 1 are prefills and taken care by another
+  // kernel.
+  if (query_start_loc_ptr != nullptr &&
+      (query_start_loc_ptr[seq_idx + 1] - query_start_loc_ptr[seq_idx] != 1)) {
+    return;
+  }
+
   const int context_len = context_lens[seq_idx];
   const int num_partitions = DIVIDE_ROUND_UP(context_len, PARTITION_SIZE);
-  constexpr int NUM_WARPS = NUM_THREADS / WARP_SIZE;
+  [[maybe_unused]] constexpr int NUM_WARPS = NUM_THREADS / WARP_SIZE;
   const int warpid = threadIdx.x / WARP_SIZE;
-  const int laneid = threadIdx.x % WARP_SIZE;
+  [[maybe_unused]] const int laneid = threadIdx.x % WARP_SIZE;
 
   __shared__ float shared_global_exp_sum;
   // max num partitions supported is warp_size * NPAR_LOOPS
@@ -2933,7 +2978,11 @@ __launch_bounds__(NUM_THREADS) void paged_attention_ll4mi_reduce_kernel(
   const float inv_global_exp_sum =
       __fdividef(1.0f, shared_global_exp_sum + 1e-6f);
   acc *= inv_global_exp_sum;
-  OUTT* out_ptr = out + seq_idx * num_heads * HEAD_SIZE + head_idx * HEAD_SIZE;
+
+  const int64_t query_start_off = static_cast<int64_t>(
+      query_start_loc_ptr ? query_start_loc_ptr[seq_idx] : seq_idx);
+  OUTT* out_ptr = out + query_start_off * num_heads * HEAD_SIZE +
+                  static_cast<int64_t>(head_idx) * HEAD_SIZE;
   out_ptr[threadIdx.x] = from_float<scalar_t>(acc);
 }
 
@@ -3201,15 +3250,23 @@ void paged_attention_custom_launcher_navi(
     torch::Tensor& tmp_out, torch::Tensor& query, torch::Tensor& key_cache,
     torch::Tensor& value_cache, const int num_kv_heads, float scale,
     torch::Tensor& block_tables, torch::Tensor& context_lens,
-    int max_context_len, const std::optional<torch::Tensor>& alibi_slopes,
-    torch::Tensor& k_scale, torch::Tensor& v_scale) {
-  int num_seqs = query.size(0);
+    const std::optional<torch::Tensor>& query_start_loc, int max_context_len,
+    const std::optional<torch::Tensor>& alibi_slopes, torch::Tensor& k_scale,
+    torch::Tensor& v_scale) {
+  int num_seqs = block_tables.size(0);
   int num_heads = query.size(1);
   int head_size = query.size(2);
   int max_num_blocks_per_seq = block_tables.size(1);
   int q_stride = query.stride(0);
   int kv_block_stride = key_cache.stride(0);
   int kv_head_stride = key_cache.stride(1);
+
+  // NOTE: query start location is optional for V0 decode should not be used.
+  // If batch contains mix of prefills and decode, prefills should be skipped.
+  const int* query_start_loc_ptr =
+      query_start_loc
+          ? reinterpret_cast<const int*>(query_start_loc.value().data_ptr())
+          : nullptr;
 
   // NOTE: Navi does not support alibi_slopes.
   const float* alibi_slopes_ptr = nullptr;
@@ -3363,14 +3420,14 @@ void paged_attention_custom_launcher_navi(
     paged_attention_custom_launcher<T, KVT, KV_DTYPE, BLK_SIZE, HEAD_SIZE, T, \
                                     PSIZE, ALIBI_ENABLED>(                    \
         out, exp_sums, max_logits, tmp_out, query, key_cache, value_cache,    \
-        num_kv_heads, scale, block_tables, context_lens, max_context_len,     \
-        alibi_slopes, k_scale, v_scale);                                      \
+        num_kv_heads, scale, block_tables, context_lens, query_start_loc,     \
+        max_context_len, alibi_slopes, k_scale, v_scale);                     \
   } else {                                                                    \
     paged_attention_custom_launcher_navi<T, KVT, KV_DTYPE, BLK_SIZE,          \
                                          HEAD_SIZE, T, PSIZE, ALIBI_ENABLED>( \
         out, exp_sums, max_logits, tmp_out, query, key_cache, value_cache,    \
-        num_kv_heads, scale, block_tables, context_lens, max_context_len,     \
-        alibi_slopes, k_scale, v_scale);                                      \
+        num_kv_heads, scale, block_tables, context_lens, query_start_loc,     \
+        max_context_len, alibi_slopes, k_scale, v_scale);                     \
   }
 
 #define CALL_CUSTOM_LAUNCHER_ALIBI(T, KVT, KV_DTYPE, BLK_SIZE, HEAD_SIZE,      \

@@ -17,8 +17,6 @@ logger = init_logger(__name__)
 NUM_BLOCKS = 128 * 1024
 PARTITION_SIZE = 512
 PARTITION_SIZE_ROCM = 256
-GPU_ARCH = torch.cuda.get_device_properties("cuda").gcnArchName
-ON_NAVI = "gfx1" in GPU_ARCH
 
 
 @torch.inference_mode()
@@ -88,7 +86,7 @@ def main(
     if version == "v2":
         if current_platform.is_rocm():
             global PARTITION_SIZE
-            if not args.custom_paged_attn and not ON_NAVI:
+            if not args.custom_paged_attn and not current_platform.is_navi():
                 PARTITION_SIZE = 1024
             else:
                 PARTITION_SIZE = PARTITION_SIZE_ROCM
@@ -168,13 +166,13 @@ def main(
                         scale,
                         block_tables,
                         seq_lens,
+                        None,
                         block_size,
                         max_seq_len,
                         alibi_slopes,
                         kv_cache_dtype,
                         k_scale,
                         v_scale,
-                        ON_NAVI,
                     )
             else:
                 raise ValueError(f"Invalid version: {version}")
