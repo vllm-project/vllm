@@ -47,10 +47,15 @@ def apply_penalties(logits: torch.Tensor, prompt_tokens_tensor: torch.Tensor,
         output_tokens_tensor, vocab_size, num_seqs)
     repetition_penalties = repetition_penalties.unsqueeze(dim=1).repeat(
         1, vocab_size)
-    logits[logits > 0] /= torch.where(prompt_mask | output_mask,
-                                      repetition_penalties, 1.0)[logits > 0]
-    logits[logits <= 0] *= torch.where(prompt_mask | output_mask,
-                                       repetition_penalties, 1.0)[logits <= 0]
+
+    # If token appears in prompt or output, apply, otherwise use 1.0 for no-op.
+    penalties = torch.where(prompt_mask | output_mask, repetition_penalties,
+                            1.0)
+
+    # If logits are positive, divide by penalty, otherwise multiply by penalty.
+    scaling = torch.where(logits > 0, 1.0 / penalties, penalties)
+    logits *= scaling
+
     # We follow the definition in OpenAI API.
     # Refer to https://platform.openai.com/docs/api-reference/parameter-details
     logits -= frequency_penalties.unsqueeze(dim=1) * output_bin_counts
