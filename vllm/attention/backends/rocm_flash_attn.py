@@ -2,6 +2,7 @@
 """Attention layer ROCm GPUs."""
 import itertools
 from dataclasses import dataclass
+from functools import cache
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Type
 
 import torch
@@ -26,11 +27,13 @@ logger = init_logger(__name__)
 _PARTITION_SIZE_ROCM = 256
 
 
+@cache
 def is_rocm_aiter_paged_attn_enabled() -> bool:
     return envs.VLLM_ROCM_USE_AITER_PAGED_ATTN \
         and envs.VLLM_ROCM_USE_AITER \
 
 
+@cache
 def _get_paged_attn_module() -> PagedAttention:
     """
     Initializes the appropriate PagedAttention module from `attention/ops`, 
