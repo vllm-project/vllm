@@ -535,7 +535,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
              ("true", "1")),
 
     # Whether to use aiter paged attention.
-    # By default is enabled.
+    # By default is diabled.
     "VLLM_ROCM_USE_AITER_PAGED_ATTN":
     lambda: (os.getenv("VLLM_ROCM_USE_AITER_PAGED_ATTN", "False").lower() in
              ("true", "1")),
