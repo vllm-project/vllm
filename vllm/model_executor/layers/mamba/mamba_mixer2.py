@@ -453,7 +453,8 @@ class MambaMixer2(CustomOp):
             dim=-1,
         )
 
-        # Separate prefill and decode by slicing hidden_states
+        # 3. State Space Model sequence transformation
+        #    Separate prefill and decode by slicing varlen input
         num_prefills = mamba2_metadata.num_prefills  # requests
         num_decodes = mamba2_metadata.num_decodes  # requests (also tokens)
         num_prefill_tokens = attn_metadata.num_prefill_tokens  # tokens
@@ -477,10 +478,15 @@ class MambaMixer2(CustomOp):
             [num_prefill_tokens, num_decodes],
             dim=0,
         )
+        state_indices_tensor_p, state_indices_tensor_d = torch.split(
+            mamba_cache_params.state_indices_tensor,
+            [num_prefills, num_decodes],
+            dim=0,
+        )
 
         hidden_states_list = []
 
-        # Process Prefills
+        # Process prefill requests
         if num_prefills > 0:
             initial_states = None
             if (mamba2_metadata.has_initial_states is not None
@@ -489,9 +495,7 @@ class MambaMixer2(CustomOp):
                 initial_states = torch.where(
                     mamba2_metadata.has_initial_states[:num_prefills, None,
                                                        None, None],
-                    mamba_cache_params.ssm_state[
-                        mamba_cache_params.
-                        state_indices_tensor[:num_prefills]], 0)
+                    mamba_cache_params.ssm_state[state_indices_tensor_p], 0)
 
             scan_output, varlen_state = mamba_chunk_scan_combined(
                 hidden_states_p.view(1, num_prefill_tokens,
@@ -520,13 +524,12 @@ class MambaMixer2(CustomOp):
 
             # update ssm states
             # - varlen state is a (num_prefills, nheads, headdim, dstate) tensor
-            mamba_cache_params.ssm_state[
-                mamba_cache_params.
-                state_indices_tensor[:num_prefills]] = varlen_state
+            mamba_cache_params.ssm_state[state_indices_tensor_p] = varlen_state
 
             # - reshape
             hidden_states_list.append(scan_output.view(num_prefill_tokens, -1))
 
+        # Process decode requests
         if num_decodes > 0:
             n_groups = self.n_groups // self.tp_size
             A_d = self.A[:, None, ...][:, :, None].expand(
@@ -558,8 +561,7 @@ class MambaMixer2(CustomOp):
                 z=None,
                 dt_bias=dt_bias,
                 dt_softplus=True,
-                state_batch_indices=mamba_cache_params.
-                state_indices_tensor[num_prefills:],  # take decodes only
+                state_batch_indices=state_indices_tensor_d,
             )
             hidden_states_list.append(
                 hidden_states_d.view(-1, (self.num_heads // self.tp_size) *
