@@ -1,13 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 
-from typing import Optional
+import json
+from typing import Any, Optional
 
 import numpy as np
 import pytest
 import pytest_asyncio
 from transformers import AutoModel, AutoTokenizer
 
-from vllm.multimodal.audio import resample_audio
+from vllm.multimodal.audio import resample_audio_librosa
 from vllm.sequence import SampleLogprobs
 
 from ....conftest import HfRunner, VllmRunner
@@ -42,19 +43,28 @@ def audio(request):
     return AudioAsset(request.param)
 
 
+def params_kwargs_to_cli_args(params_kwargs: dict[str, Any]) -> list[str]:
+    """Convert kwargs to CLI args."""
+    args = []
+    for key, value in params_kwargs.items():
+        if isinstance(value, bool):
+            if value:
+                args.append(f"--{key.replace('_','-')}")
+        else:
+            args.append(f"--{key.replace('_','-')}={value}")
+    return args
+
+
 @pytest.fixture(params=[
     pytest.param({}, marks=pytest.mark.cpu_model),
     pytest.param(CHUNKED_PREFILL_KWARGS),
 ])
 def server(request, audio_assets):
     args = [
-        "--dtype=bfloat16", "--max-model-len=4096", "--enforce-eager",
-        f"--limit-mm-per-prompt=audio={len(audio_assets)}",
-        "--trust-remote-code"
-    ] + [
-        f"--{key.replace('_','-')}={value}"
-        for key, value in request.param.items()
-    ]
+        "--dtype", "bfloat16", "--max-model-len", "4096", "--enforce-eager",
+        "--limit-mm-per-prompt",
+        json.dumps({"audio": len(audio_assets)}), "--trust-remote-code"
+    ] + params_kwargs_to_cli_args(request.param)
 
     with RemoteOpenAIServer(MODEL_NAME,
                             args,
@@ -135,9 +145,9 @@ def run_test(
                 [hf_prompt],
                 max_tokens,
                 num_logprobs=num_logprobs,
-                audios=[(resample_audio(audio[0],
-                                        orig_sr=audio[1],
-                                        target_sr=16000), 16000)])
+                audios=[(resample_audio_librosa(audio[0],
+                                                orig_sr=audio[1],
+                                                target_sr=16000), 16000)])
             for _, hf_prompt, audio in prompts_and_audios
         ]
 
