@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
+# yapf: disable
+# ruff: noqa: E501
 # copied from https://huggingface.co/AIDC-AI/Ovis2-1B/blob/main/configuration_aimv2.py
 # and https://huggingface.co/AIDC-AI/Ovis2-1B/blob/main/configuration_ovis.py
 from typing import Any, Optional, Union

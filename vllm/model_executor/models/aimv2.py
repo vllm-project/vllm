@@ -46,12 +46,12 @@ class Aimv2VisualTokenizer(torch.nn.Module):
                 bias=False,
             ), torch.nn.LayerNorm(head_dim))
 
-        assert all(
-            (self.image_processor.do_resize,
-             not getattr(self.image_processor, 'do_center_crop', False),
-             self.image_processor.do_rescale,
-             self.image_processor.do_normalize)
-        ), f"image_processor `{self.image_processor}` is not supported currently"
+        assert all((self.image_processor.do_resize,
+                    not getattr(self.image_processor, 'do_center_crop', False),
+                    self.image_processor.do_rescale,
+                    self.image_processor.do_normalize)), (
+                        f"image_processor `{self.image_processor}`"
+                        "is not supported currently")
 
     @property
     def dtype(self):
@@ -91,8 +91,8 @@ class Aimv2VisualTokenizer(torch.nn.Module):
             tokens = st_argmax(logits, dim=-1)
         else:
             raise ValueError(
-                f'Invalid `max_type`, expected softmax or gumbel_argmax or st_argmax, but got {self.config.tokenize_function}'
-            )
+                'Invalid `max_type`, expected softmax or gumbel_argmax '
+                f'or st_argmax, but got {self.config.tokenize_function}')
         return tokens
 
     def encode(self, pixel_values):
@@ -100,12 +100,16 @@ class Aimv2VisualTokenizer(torch.nn.Module):
         if self.config.drop_cls_token:
             features = features[:, 1:, :]
 
-        # merge number of `hidden_stride * hidden_stride` hidden states together to reduce token sequence length
-        # e.g., for hidden_stride=2, this leads to a token length reduction: 1024 -> 256 for aimv2
+        # merge number of `hidden_stride * hidden_stride` hidden states together
+        # to reduce token sequence length
+        # e.g., for hidden_stride=2, this leads to a token length reduction:
+        # 1024 -> 256 for aimv2
         if self.config.hidden_stride > 1:
-            n, l, d = features.shape  # this `d` maybe different from the above `d
-            sqrt_l = int(l**0.5)
-            assert sqrt_l**2 == l, "The token sequence length should be a perfect square."
+            # this `d` maybe different from the above `d``
+            n, L, d = features.shape
+            sqrt_l = int(L**0.5)
+            assert sqrt_l**2 == L, (
+                "The token sequence length should be a perfect square.")
             features = features.reshape(n, sqrt_l, sqrt_l, d)
             pl = (self.config.hidden_stride -
                   (sqrt_l %
@@ -133,8 +137,9 @@ class Aimv2VisualTokenizer(torch.nn.Module):
             features)  # we spllit the sequncial here for not throwing an error
         logits = self.head[1](logits)
         tokens = self.tokenize(logits)
-        # tokens' shape is [BatchSize, #Token, VocabSize-5], so padding with [BatchSize, #Token, 5], after
-        # which, tokens' shape should become [BatchSize, #Token, VocabSize]
+        # tokens' shape is [BatchSize, #Token, VocabSize-5], so padding with
+        # [BatchSize, #Token, 5], after which, tokens' shape should become
+        # [BatchSize, #Token, VocabSize]
         batch_size, token_len, _ = tokens.shape
         padding_tensor = torch.zeros(size=(batch_size, token_len,
                                            len(IMAGE_INDICATOR_IDS)),
@@ -316,11 +321,11 @@ class AIMv2Transformer(nn.Module):
         tokens: torch.Tensor,
         mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        #outputs = []
-        for block in self.blocks:  # they take the -1 as the ref embeddings, like a clip skip
+        # they take the -1 as the ref embeddings, like a clip skip
+        for block in self.blocks:
             tokens = block(tokens, mask)
-            #outputs.append(tokens)
-        #tokens = self.post_trunk_norm(tokens) NO NORM IN THE OG IMPLEMENTATION
+        # NO NORM IN THE OG IMPLEMENTATION
+        # tokens = self.post_trunk_norm(tokens)
         return tokens
 
 

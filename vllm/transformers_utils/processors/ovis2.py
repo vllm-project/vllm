@@ -248,7 +248,6 @@ class OvisProcessor(ProcessorMixin):
         image_placeholders.append(self.get_token_value('image_end'))
         # return image_placeholders
 
-        padded_placeholder_tokens = []
         image_atom_token_id = self.get_token_value('image_atom')
         # Extract the padding token ID from tokenizer
         image_padding_token_id = self.get_token_value('image_pad')
