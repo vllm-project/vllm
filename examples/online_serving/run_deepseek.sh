@@ -1,7 +1,7 @@
 # This script provides an example to run DeepSeek V3 or
 # R1 model with vLLM on multiple nodes with ray. 
-# This script lists the individual steps to run on different nodes,
-# alternatively, you can use the `run_cluster.sh` wrapper.
+# This script lists the individual steps to run on different nodes.
+# Alternatively, you can use the `run_cluster.sh` wrapper.
 
 ########################################################
 # Step 1: Prepare nodes and docker images
@@ -60,7 +60,6 @@ docker run -d --gpus all --privileged --ipc=host --network=host --shm-size 10.24
     --entrypoint /bin/bash \
     -e VLLM_HOST_IP=192.168.0.2 --name ray_worker vllm/vllm-openai:0.8.4 \
     -c "ray start --block --address=192.168.0.1:6379"
-
 
 ########################################################
 # Step 3: Start vLLM server
