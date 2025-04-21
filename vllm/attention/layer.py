@@ -207,6 +207,8 @@ class Attention(nn.Module):
                 if value is not None:
                     value = value.view(-1, self.num_kv_heads, self.head_size)
             if self.use_direct_call:
+                wait_for_kv_layer_from_connector(self.layer_name)
+
                 forward_context: ForwardContext = get_forward_context()
                 attn_metadata = forward_context.attn_metadata
                 self_kv_cache = self.kv_cache[forward_context.virtual_engine]
@@ -217,17 +219,26 @@ class Attention(nn.Module):
                                   self_kv_cache,
                                   attn_metadata,
                                   output=output)
+
+                kv_cache = self.kv_cache[forward_context.virtual_engine]
+                maybe_save_kv_layer_to_connector(self.layer_name, kv_cache)
             else:
                 torch.ops.vllm.unified_attention_with_output(
                     query, key, value, output, self.layer_name)
             return output.view(-1, hidden_size)
         else:
             if self.use_direct_call:
+                wait_for_kv_layer_from_connector(self.layer_name)
+
                 forward_context = get_forward_context()
                 attn_metadata = forward_context.attn_metadata
                 self_kv_cache = self.kv_cache[forward_context.virtual_engine]
-                return self.impl.forward(self, query, key, value,
-                                         self_kv_cache, attn_metadata)
+                output = self.impl.forward(self, query, key, value,
+                                           self_kv_cache, attn_metadata)
+
+                kv_cache = self.kv_cache[forward_context.virtual_engine]
+                maybe_save_kv_layer_to_connector(self.layer_name, kv_cache)
+                return output
             else:
                 return torch.ops.vllm.unified_attention(
                     query, key, value, self.layer_name)
