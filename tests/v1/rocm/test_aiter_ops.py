@@ -77,8 +77,8 @@ def test_rocm_aiter_tuned_gemm_torch_compile_fp8_compatibility():
     input_tensor = torch.randn(64, 32, dtype=torch.float16, device='cuda')
     weight_tensor = torch.randn(16, 32, dtype=torch.float16, device='cuda')
 
-    input_fp8 = input_tensor.to(torch.float8_e4m3fnuz)
-    weight_fp8 = weight_tensor.to(torch.float8_e4m3fnuz)
+    input_fp8 = input_tensor.to(current_platform.fp8_dtype())
+    weight_fp8 = weight_tensor.to(current_platform.fp8_dtype())
 
     scale_a = torch.tensor(10.0, device='cuda')
     scale_b = torch.tensor(0.5, device='cuda')
