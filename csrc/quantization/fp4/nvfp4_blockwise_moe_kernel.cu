@@ -43,19 +43,22 @@ static int getSMVersion()
 }
 
 
-template <typename ElementAB, typename ElementC, typename ElementSF, typename ElementAccumulator, typename LayoutSFA, typename LayoutSFB, typename ScaleConfig>
+template <typename ElementAB, typename ElementC, typename ElementSF, typename ElementAccumulator, 
+          typename StrideA, typename StrideB, typename StrideC,        
+          typename LayoutSFA, typename LayoutSFB, typename ScaleConfig>
 __global__ void __get_group_gemm_starts(
     ElementAB **a_offsets, ElementAB **b_offsets,
     ElementC **out_offsets, ElementSF **a_scales_offsets,
     ElementSF **b_scales_offsets, ElementAccumulator **alpha_offsets,
     LayoutSFA *layout_sfa_base_as_int, LayoutSFB *layout_sfb_base_as_int,
-    int64_t *strides_a, int64_t *strides_b, int64_t *strides_c,
+    StrideA *strides_a, StrideB *strides_b, StrideC *strides_c,
     ElementAB *a_base_as_int, ElementAB *b_base_as_int, 
     ElementC *out_base_as_int, ElementSF *a_scales_base_as_int,
     ElementSF *b_scales_base_as_int, ElementAccumulator *alphas_base_as_int, 
     const int32_t *expert_offsets, const int32_t *sf_offsets,
     const int32_t *problem_sizes_as_shapes, const int K, const int N)
 {
+  
   int32_t expert_id = threadIdx.x;
   if (expert_id >= gridDim.x * blockDim.x)
   {
@@ -66,13 +69,13 @@ __global__ void __get_group_gemm_starts(
   // size for block in block scale.
   int32_t group_size = 16;
   int32_t m = problem_sizes_as_shapes[expert_id * 3];
-  int32_t n =  problem_sizes_as_shapes[expert_id * 3 + 1];
-  int32_t k =  problem_sizes_as_shapes[expert_id * 3 + 2];
+  int32_t n = problem_sizes_as_shapes[expert_id * 3 + 1];
+  int32_t k = problem_sizes_as_shapes[expert_id * 3 + 2];
   assert((m >= 0 && n == N && k == K && k % 2 == 0) &&  "unexpected problem sizes");
 
-  strides_a[expert_id] = k;
-  strides_b[expert_id] = k;
-  strides_c[expert_id] = N;
+  strides_a[expert_id] = cutlass::make_cute_packed_stride(StrideA{}, {m, k, 1});
+  strides_b[expert_id] = cutlass::make_cute_packed_stride(StrideB{}, {n, k, 1});
+  strides_c[expert_id] = cutlass::make_cute_packed_stride(StrideC{}, {m, n, 1});
 
   int32_t half_k = static_cast<int>(k / 2);
   int32_t group_k = static_cast<int>(k / group_size);
@@ -101,10 +104,10 @@ __global__ void __get_group_gemm_starts(
   *layout_sfb_ptr = ScaleConfig::tile_atom_to_shape_SFB(cute::make_shape(m, n, k, 1));
 }
 
-#define __CALL_GET_STARTS_KERNEL_BLOCKSCALE(ELEMENT_AB_TYPE, SF_TYPE, TENSOR_C_TYPE, C_TYPE, LayoutSFA, LayoutSFB, ScaleConfig)  \
+#define __CALL_GET_STARTS_KERNEL_BLOCKSCALE(ELEMENT_AB_TYPE, SF_TYPE, TENSOR_C_TYPE, C_TYPE, StrideA, StrideB, StrideC, LayoutSFA, LayoutSFB, ScaleConfig)  \
   else if (out_tensors.dtype() == TENSOR_C_TYPE)                                                        \
   {                                                                                                     \
-    __get_group_gemm_starts<ELEMENT_AB_TYPE, C_TYPE, SF_TYPE, float, LayoutSFA, LayoutSFB, ScaleConfig> \
+    __get_group_gemm_starts<ELEMENT_AB_TYPE, C_TYPE, SF_TYPE, float, StrideA, StrideB, StrideC, LayoutSFA, LayoutSFB, ScaleConfig> \
         <<<1, num_experts, 0, stream>>>(                                                                \
             static_cast<ELEMENT_AB_TYPE **>(a_starts.data_ptr()),                                       \
             static_cast<ELEMENT_AB_TYPE **>(b_starts.data_ptr()),                                       \
@@ -114,9 +117,9 @@ __global__ void __get_group_gemm_starts(
             static_cast<float **>(alpha_starts.data_ptr()),                                             \
             reinterpret_cast<LayoutSFA *>(layout_sfa.data_ptr()),                                       \
             reinterpret_cast<LayoutSFB *>(layout_sfb.data_ptr()),                                       \
-            reinterpret_cast<int64_t *>(strides_a.data_ptr()),                                          \
-            reinterpret_cast<int64_t *>(strides_b.data_ptr()),                                          \
-            reinterpret_cast<int64_t *>(strides_c.data_ptr()),                                          \
+            reinterpret_cast<StrideA *>(strides_a.data_ptr()),                                          \
+            reinterpret_cast<StrideB *>(strides_b.data_ptr()),                                          \
+            reinterpret_cast<StrideC *>(strides_c.data_ptr()),                                          \
             static_cast<ELEMENT_AB_TYPE *>(a_tensors.data_ptr()),                                       \
             static_cast<ELEMENT_AB_TYPE *>(b_tensors.data_ptr()),                                       \
             static_cast<C_TYPE *>(out_tensors.data_ptr()),                                              \
@@ -129,7 +132,7 @@ __global__ void __get_group_gemm_starts(
             K, N);                                                                                      \
   }
 
-template <typename LayoutSFA, typename LayoutSFB, typename ScaleConfig>
+template <typename Gemm>
 void run_get_group_gemm_starts(
       const torch::Tensor &a_starts, const torch::Tensor &b_starts, 
       const torch::Tensor &out_starts, const torch::Tensor &a_scales_starts,
@@ -147,6 +150,12 @@ void run_get_group_gemm_starts(
   int num_experts = (int)expert_offsets.size(0);
   auto stream = at::cuda::getCurrentCUDAStream(a_tensors.device().index());
 
+  using StrideA = typename Gemm::GemmKernel::InternalStrideA;
+  using StrideB = typename Gemm::GemmKernel::InternalStrideB;
+  using StrideD = typename Gemm::GemmKernel::InternalStrideD;
+  using LayoutSFA = typename Gemm::GemmKernel::CollectiveMainloop::InternalLayoutSFA;
+  using LayoutSFB = typename Gemm::GemmKernel::CollectiveMainloop::InternalLayoutSFB;
+  using ScaleConfig =  typename Gemm::GemmKernel::CollectiveMainloop::Sm1xxBlkScaledConfig;
   TORCH_CHECK(out_tensors.size(1) == N, "Output tensor shape doesn't match expected shape");
   TORCH_CHECK(K / 2 == b_tensors.size(2), "b_tensors(dim = 2) and a_tensors(dim = 1) trailing"
                                       " dimension must match");
@@ -154,8 +163,8 @@ void run_get_group_gemm_starts(
   {
   }
   //(ELEMENT_AB_TYPE, BS_TYPE, TENSOR_C_TYPE, C_TYPE, LayoutSFA, LayoutSFB, ScaleConfig)
-  __CALL_GET_STARTS_KERNEL_BLOCKSCALE(cutlass::float_e2m1_t, cutlass::float_ue4m3_t,torch::kBFloat16, cutlass::bfloat16_t,LayoutSFA, LayoutSFB, ScaleConfig)
-  __CALL_GET_STARTS_KERNEL_BLOCKSCALE(cutlass::float_e2m1_t, cutlass::float_ue4m3_t, torch::kFloat16, half, LayoutSFA, LayoutSFB, ScaleConfig)
+  __CALL_GET_STARTS_KERNEL_BLOCKSCALE(cutlass::float_e2m1_t, cutlass::float_ue4m3_t,torch::kBFloat16, cutlass::bfloat16_t, StrideA, StrideB, StrideD, LayoutSFA, LayoutSFB, ScaleConfig)
+  __CALL_GET_STARTS_KERNEL_BLOCKSCALE(cutlass::float_e2m1_t, cutlass::float_ue4m3_t, torch::kFloat16, half, StrideA, StrideB, StrideD, LayoutSFA, LayoutSFB, ScaleConfig)
   else
   {
     TORCH_CHECK(false, "Invalid output type (must be float16 or bfloat16)");
@@ -276,7 +285,7 @@ void run_fp4_blockwise_scaled_group_mm(
   torch::Tensor layout_sfb = torch::empty(num_experts, options_int);
 
 
-  run_get_group_gemm_starts<LayoutSFA, LayoutSFB, ScaleConfig>(
+  run_get_group_gemm_starts<Gemm>(
           a_ptrs, b_ptrs, out_ptrs, a_scales_ptrs,
           b_scales_ptrs, alpha_ptrs, layout_sfa, layout_sfb,
           strides_a, strides_b, strides_c,
