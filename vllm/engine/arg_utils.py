@@ -291,7 +291,9 @@ class EngineArgs:
 
         def is_custom_type(cls: TypeHint) -> bool:
             """Check if the class is a custom type."""
-            return cls.__module__ != "builtins"
+            if isinstance(cls, type):
+                return cls.__module__ != "builtins"
+            return True
 
         def get_kwargs(cls: type[Any]) -> dict[str, Any]:
             cls_docs = get_attr_docs(cls)

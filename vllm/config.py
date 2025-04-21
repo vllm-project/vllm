@@ -28,8 +28,7 @@ from torch.distributed import ProcessGroup, ReduceOp
 import vllm.envs as envs
 from vllm.compilation.inductor_pass import CallableInductorPass, InductorPass
 from vllm.logger import init_logger
-from vllm.model_executor.layers.quantization import (QUANTIZATION_METHODS,
-                                                     get_quantization_config)
+from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS
 from vllm.platforms import CpuArchEnum
 from vllm.sampling_params import GuidedDecodingParams
 from vllm.tracing import is_otel_available, otel_import_error_traceback
@@ -42,8 +41,8 @@ from vllm.transformers_utils.s3_utils import S3Model
 from vllm.transformers_utils.utils import is_s3, maybe_model_redirect
 from vllm.utils import (GiB_bytes, LayerBlockType, LazyLoader,
                         cuda_device_count_stateless, get_cpu_memory,
-                        get_open_port, is_torch_equal_or_newer,
-                        random_uuid, resolve_obj_by_qualname)
+                        get_open_port, is_torch_equal_or_newer, random_uuid,
+                        resolve_obj_by_qualname)
 
 if TYPE_CHECKING:
     from _typeshed import DataclassInstance
@@ -68,7 +67,6 @@ else:
     HfOverrides = None
     QuantizationConfig = None
 
-from packaging.version import Version
 
 logger = init_logger(__name__)
 

@@ -28,39 +28,40 @@ logger = init_logger(__name__)
 # yapf: disable
 if TYPE_CHECKING:
     import huggingface_hub as hfhub
-    import huggingface_hub.utils as hfhub_utils
-    from transformers import GenerationConfig, PretrainedConfig
+    import huggingface_hub.errors as hfhub_errors
+    from transformers.configuration_utils import PretrainedConfig
+    from transformers.generation.configuration_utils import GenerationConfig
 else:
     hfhub = LazyLoader("hfhub", globals(), "huggingface_hub")
-    hfhub_utils = LazyLoader("hfhub_utils", globals(), "huggingface_hub.utils")
+    hfhub_errors = LazyLoader("hfhub_errors", globals(), "huggingface_hub.errors")
 
 _CONFIG_REGISTRY_OVERRIDE_HF: Dict[str, str] = {
     "mllama": "MllamaConfig"
 }
 
-_CONFIG_REGISTRY: Dict[str, Type[PretrainedConfig]] = {
-    "chatglm": ChatGLMConfig,
-    "cohere2": Cohere2Config,
-    "dbrx": DbrxConfig,
-    "deepseek_vl_v2": DeepseekVLV2Config,
-    "kimi_vl": KimiVLConfig,
-    "mpt": MPTConfig,
-    "RefinedWeb": RWConfig,  # For tiiuae/falcon-40b(-instruct)
-    "RefinedWebModel": RWConfig,  # For tiiuae/falcon-7b(-instruct)
-    "jais": JAISConfig,
-    "mlp_speculator": MLPSpeculatorConfig,
-    "medusa": MedusaConfig,
-    "eagle": EAGLEConfig,
-    "exaone": ExaoneConfig,
-    "h2ovl_chat": H2OVLChatConfig,
-    "internvl_chat": InternVLChatConfig,
-    "nemotron": NemotronConfig,
-    "NVLM_D": NVLM_D_Config,
-    "olmo2": Olmo2Config,
-    "solar": SolarConfig,
-    "skywork_chat": SkyworkR1VChatConfig,
-    "telechat": Telechat2Config,
-    "ultravox": UltravoxConfig,
+_CONFIG_REGISTRY: Dict[str, str] = {
+    "chatglm": "ChatGLMConfig",
+    "cohere2": "Cohere2Config",
+    "dbrx": "DbrxConfig",
+    "deepseek_vl_v2": "DeepseekVLV2Config",
+    "kimi_vl": "KimiVLConfig",
+    "mpt": "MPTConfig",
+    "RefinedWeb": "RWConfig",  # For tiiuae/falcon-40b(-instruct)
+    "RefinedWebModel": "RWConfig",  # For tiiuae/falcon-7b(-instruct)
+    "jais": "JAISConfig",
+    "mlp_speculator": "MLPSpeculatorConfig",
+    "medusa": "MedusaConfig",
+    "eagle": "EAGLEConfig",
+    "exaone": "ExaoneConfig",
+    "h2ovl_chat": "H2OVLChatConfig",
+    "internvl_chat": "InternVLChatConfig",
+    "nemotron": "NemotronConfig",
+    "NVLM_D": "NVLM_D_Config",
+    "olmo2": "Olmo2Config",
+    "solar": "SolarConfig",
+    "skywork_chat": "SkyworkR1VChatConfig",
+    "telechat": "Telechat2Config",
+    "ultravox": "UltravoxConfig",
     **_CONFIG_REGISTRY_OVERRIDE_HF
 }
 
@@ -371,7 +372,7 @@ def try_get_local_file(model: Union[str, Path],
                                                      revision=revision)
             if isinstance(cached_filepath, str):
                 return Path(cached_filepath)
-        except hfhub_utils.HFValidationError:
+        except hfhub_errors.HFValidationError:
             ...
     return None
 
