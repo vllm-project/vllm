@@ -112,7 +112,8 @@ NO_STREAM_FUNCTION_OUTPUT = "好的，用户现在要研发一个5MW" \
 
 EXPECTED_FUNCTION_CALL = FunctionCall(
     name='internet_search',
-    arguments='{"question": "5MW燃气轮机设计参数 空气流量 压气机压比 转速 燃烧室出口温度 压气机级数 支点布局"}',
+    arguments='{"question": "5MW燃气轮机设计参数 空气流量 压气机'
+    '压比 转速 燃烧室出口温度 压气机级数 支点布局"}',
 )
 
 # Simulation stream output results
