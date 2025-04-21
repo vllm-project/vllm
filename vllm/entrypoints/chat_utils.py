@@ -6,7 +6,6 @@ import json
 from abc import ABC, abstractmethod
 from collections import Counter, defaultdict, deque
 from collections.abc import Awaitable, Iterable
-from enum import Enum
 from functools import cache, lru_cache, partial
 from pathlib import Path
 from typing import (Any, Callable, Generic, Literal, Optional, TypeVar, Union,
@@ -50,18 +49,10 @@ from vllm.utils import deprecate_kwargs, random_uuid
 
 logger = init_logger(__name__)
 
-
-class Modality(str, Enum):
-    IMAGE = "image"
-    IMAGE_EMBEDS = "image_embeds"
-    AUDIO = "audio"
-    VIDEO = "video"
-
-
 MODALITY_PLACEHOLDERS_MAP = {
-    Modality.IMAGE: "<##IMAGE##>",
-    Modality.AUDIO: "<##AUDIO##>",
-    Modality.VIDEO: "<##VIDEO##>",
+    "image": "<##IMAGE##>",
+    "audio": "<##AUDIO##>",
+    "video": "<##VIDEO##>",
 }
 
 
@@ -345,6 +336,7 @@ def resolve_mistral_chat_template(
             "so it will be ignored.")
     return None
 
+
 @deprecate_kwargs(
     "trust_remote_code",
     additional_message="Please use `model_config.trust_remote_code` instead.",
@@ -483,9 +475,7 @@ def resolve_chat_template_content_format(
 
 
 
-ModalityStr = Literal[
-    Modality.IMAGE, Modality.AUDIO, Modality.VIDEO, Modality.IMAGE_EMBEDS
-]
+ModalityStr = Literal["image", "audio", "video", "image_embeds"]
 _T = TypeVar("_T")
 
 
@@ -528,7 +518,7 @@ class BaseMultiModalItemTracker(ABC, Generic[_T]):
         hf_config = self._model_config.hf_config
         model_type = hf_config.model_type
 
-        if modality in (Modality.IMAGE, Modality.IMAGE_EMBEDS):
+        if modality in ("image", "image_embeds"):
             if model_type == "chatglm":
                 return "<|begin_of_image|><|endoftext|><|end_of_image|>"
             if model_type in ("phi3_v", "phi4mm"):
@@ -565,7 +555,7 @@ class BaseMultiModalItemTracker(ABC, Generic[_T]):
                 return "<|media_start|>image<|media_content|><|media_pad|><|media_end|>" # noqa: E501
 
             raise TypeError(f"Unknown {modality} model type: {model_type}")
-        elif modality == Modality.AUDIO:
+        elif modality == "audio":
             if model_type in ("ultravox", "granite_speech"):
                 return "<|audio|>"
             if model_type == "phi4mm":
@@ -576,7 +566,7 @@ class BaseMultiModalItemTracker(ABC, Generic[_T]):
             if model_type == "minicpmo":
                 return "(<audio>./</audio>)"
             raise TypeError(f"Unknown {modality} model type: {model_type}")
-        elif modality == Modality.VIDEO:
+        elif modality == "video":
             if model_type == "internvl_chat":
                 return "<video>"
             if model_type in ("qwen2_vl", "qwen2_5_vl"):
@@ -590,15 +580,13 @@ class BaseMultiModalItemTracker(ABC, Generic[_T]):
                                               hf_config.video_token_index)
             raise TypeError(f"Unknown {modality} model type: {model_type}")
         else:
-            raise TypeError(f"Unknown {modality}")
+            raise TypeError(f"Unknown modality: {modality}")
 
     def add(self, modality: ModalityStr, item: _T) -> Optional[str]:
         """
         Add a multi-modal item to the current prompt and returns the
         placeholder string to use, if any.
         """
-        modality = Modality(modality).value
-
         mm_registry = self.mm_registry
         model_config = self.model_config
 
@@ -707,7 +695,8 @@ class BaseMultiModalContentParser(ABC):
         # }
         self._placeholder_storage: dict[str, list] = defaultdict(list)
 
-    def _add_placeholder(self, modality: Modality, placeholder: Optional[str]):
+    def _add_placeholder(self, modality: ModalityStr,
+                         placeholder: Optional[str]):
         mod_placeholder = MODALITY_PLACEHOLDERS_MAP[modality]
         if placeholder:
             self._placeholder_storage[mod_placeholder].append(placeholder)
@@ -751,8 +740,8 @@ class MultiModalContentParser(BaseMultiModalContentParser):
     def parse_image(self, image_url: str) -> None:
         image = self._connector.fetch_image(image_url)
 
-        placeholder = self._tracker.add(Modality.IMAGE, image)
-        self._add_placeholder(Modality.IMAGE, placeholder)
+        placeholder = self._tracker.add("image", image)
+        self._add_placeholder("image", placeholder)
 
     def parse_image_embeds(self,
                            image_embeds: Union[str, dict[str, str]]) -> None:
@@ -761,19 +750,19 @@ class MultiModalContentParser(BaseMultiModalContentParser):
                 k: self._connector.fetch_image_embedding(v)
                 for k, v in image_embeds.items()
             }
-            placeholder = self._tracker.add(Modality.IMAGE_EMBEDS, embeds)
+            placeholder = self._tracker.add("image_embeds", embeds)
 
         if isinstance(image_embeds, str):
             embedding = self._connector.fetch_image_embedding(image_embeds)
-            placeholder = self._tracker.add(Modality.IMAGE_EMBEDS, embedding)
+            placeholder = self._tracker.add("image_embeds", embedding)
 
-        self._add_placeholder(Modality.IMAGE, placeholder)
+        self._add_placeholder("image", placeholder)
 
     def parse_audio(self, audio_url: str) -> None:
         audio = self._connector.fetch_audio(audio_url)
 
-        placeholder = self._tracker.add(Modality.AUDIO, audio)
-        self._add_placeholder(Modality.AUDIO, placeholder)
+        placeholder = self._tracker.add("audio", audio)
+        self._add_placeholder("audio", placeholder)
 
     def parse_input_audio(self, input_audio: InputAudio) -> None:
         audio_data = input_audio.get("data", "")
@@ -785,8 +774,8 @@ class MultiModalContentParser(BaseMultiModalContentParser):
     def parse_video(self, video_url: str) -> None:
         video = self._connector.fetch_video(video_url)
 
-        placeholder = self._tracker.add(Modality.VIDEO, video)
-        self._add_placeholder(Modality.VIDEO, placeholder)
+        placeholder = self._tracker.add("video", video)
+        self._add_placeholder("video", placeholder)
 
 
 class AsyncMultiModalContentParser(BaseMultiModalContentParser):
@@ -802,8 +791,8 @@ class AsyncMultiModalContentParser(BaseMultiModalContentParser):
     def parse_image(self, image_url: str) -> None:
         image_coro = self._connector.fetch_image_async(image_url)
 
-        placeholder = self._tracker.add(Modality.IMAGE, image_coro)
-        self._add_placeholder(Modality.IMAGE, placeholder)
+        placeholder = self._tracker.add("image", image_coro)
+        self._add_placeholder("image", placeholder)
 
     def parse_image_embeds(self,
                            image_embeds: Union[str, dict[str, str]]) -> None:
@@ -821,14 +810,14 @@ class AsyncMultiModalContentParser(BaseMultiModalContentParser):
                 fetch_image_embedding(image_embeds)
             future.set_result(embedding)
 
-        placeholder = self._tracker.add(Modality.IMAGE_EMBEDS, future)
-        self._add_placeholder(Modality.IMAGE, placeholder)
+        placeholder = self._tracker.add("image_embeds", future)
+        self._add_placeholder("image", placeholder)
 
     def parse_audio(self, audio_url: str) -> None:
         audio_coro = self._connector.fetch_audio_async(audio_url)
 
-        placeholder = self._tracker.add(Modality.AUDIO, audio_coro)
-        self._add_placeholder(Modality.AUDIO, placeholder)
+        placeholder = self._tracker.add("audio", audio_coro)
+        self._add_placeholder("audio", placeholder)
 
     def parse_input_audio(self, input_audio: InputAudio) -> None:
         audio_data = input_audio.get("data", "")
@@ -840,8 +829,8 @@ class AsyncMultiModalContentParser(BaseMultiModalContentParser):
     def parse_video(self, video_url: str) -> None:
         video = self._connector.fetch_video_async(video_url)
 
-        placeholder = self._tracker.add(Modality.VIDEO, video)
-        self._add_placeholder(Modality.VIDEO, placeholder)
+        placeholder = self._tracker.add("video", video)
+        self._add_placeholder("video", placeholder)
 
 
 def validate_chat_template(chat_template: Optional[Union[Path, str]]):
@@ -959,7 +948,7 @@ def _get_full_multimodal_text_prompt(placeholder_storage: dict[str, list],
                 "(current value: %s) "
                 "when manually placing image placeholders.", interleave_strings
             )
-            logger.debug(text_prompt)
+            logger.debug("Input prompt: %s", text_prompt)
             raise ValueError(
                 f"Found more '{placeholder}' placeholders in input prompt than "
                 "actual multimodal data items.")
@@ -1146,27 +1135,27 @@ def _parse_chat_message_content_part(
     if part_type == "image_url":
         str_content = cast(str, content)
         mm_parser.parse_image(str_content)
-        modality = Modality.IMAGE
+        modality = "image"
     elif part_type == "image_embeds":
         content = cast(Union[str, dict[str, str]], content)
         mm_parser.parse_image_embeds(content)
-        modality = Modality.IMAGE
+        modality = "image"
     elif part_type == "audio_url":
         str_content = cast(str, content)
         mm_parser.parse_audio(str_content)
-        modality = Modality.AUDIO
+        modality = "audio"
     elif part_type == "input_audio":
         dict_content = cast(InputAudio, content)
         mm_parser.parse_input_audio(dict_content)
-        modality = Modality.AUDIO
+        modality = "audio"
     elif part_type == "video_url":
         str_content = cast(str, content)
         mm_parser.parse_video(str_content)
-        modality = Modality.VIDEO
+        modality = "video"
     else:
         raise NotImplementedError(f"Unknown part type: {part_type}")
 
-    return {'type': modality.value} if wrap_dicts else (
+    return {'type': modality} if wrap_dicts else (
         MODALITY_PLACEHOLDERS_MAP[modality] if interleave_strings else None
     )
 
@@ -1251,6 +1240,7 @@ def parse_chat_messages(
             content_format,
             interleave_strings=(
                 content_format == "string"
+                and model_config.multimodal_config is not None
                 and model_config.multimodal_config.interleave_mm_strings
             )
         )
@@ -1278,6 +1268,7 @@ def parse_chat_messages_futures(
             content_format,
             interleave_strings=(
                 content_format == "string"
+                and model_config.multimodal_config is not None
                 and model_config.multimodal_config.interleave_mm_strings
             )
         )
