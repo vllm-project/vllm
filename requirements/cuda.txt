@@ -7,7 +7,7 @@ numba == 0.61.2; python_version > '3.9'
 # Dependencies for NVIDIA GPUs
 ray[cgraph]>=2.43.0, !=2.44.* # Ray Compiled Graph, required for pipeline parallelism in V1.
 # 2.7.0 final RC
---extra-index-url https://download.pytorch.org/whl/test/cu126
+--extra-index-url https://download.pytorch.org/whl/test/cu128
 torch==2.7.0
 torchaudio==2.7.0
 # These must be updated alongside torch

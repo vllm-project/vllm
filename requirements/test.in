@@ -24,7 +24,7 @@ soundfile # required for audio tests
 jiwer # required for audio tests
 timm # required for internvl test
 # 2.7.0 final RC
---extra-index-url https://download.pytorch.org/whl/test/cu126
+--extra-index-url https://download.pytorch.org/whl/test/cu128
 torch==2.7.0
 torchaudio==2.7.0
 torchvision==0.22.0
