@@ -143,6 +143,13 @@ class GraniteSpeechMultiModalProcessor(
         mm_data: Mapping[str, object],
         mm_kwargs: Mapping[str, object],
     ) -> BatchFeature:
+        mm_data = dict(mm_data)
+        audios = mm_data.pop("audios", [])
+
+        if audios:
+            # GraniteSpeechFeatureExtractor processor accepts "audio"
+            mm_data["audio"] = audios
+
         processed_outputs = super()._call_hf_processor(
             prompt=prompt,
             mm_data=mm_data,
