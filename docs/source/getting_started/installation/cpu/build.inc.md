@@ -26,3 +26,9 @@ Finally, build and install vLLM CPU backend:
 ```console
 VLLM_TARGET_DEVICE=cpu python setup.py install
 ```
+
+If you want to develop vllm, install it in editable mode instead.
+
+```console
+VLLM_TARGET_DEVICE=cpu python setup.py develop
+```
