@@ -23,6 +23,8 @@ It is similar to [its counterpart in HF Transformers](https://huggingface.co/doc
 except that tokenization and detokenization are also performed automatically.
 
 ```python
+from vllm import LLM
+
 llm = LLM(model="facebook/opt-125m")
 outputs = llm.generate("Hello, my name is")
 
@@ -36,6 +38,8 @@ You can optionally control the language generation by passing {class}`~vllm.Samp
 For example, you can use greedy sampling by setting `temperature=0`:
 
 ```python
+from vllm import LLM, SamplingParams
+
 llm = LLM(model="facebook/opt-125m")
 params = SamplingParams(temperature=0)
 outputs = llm.generate("Hello, my name is", params)
@@ -83,6 +87,8 @@ Base models may perform poorly as they are not trained to respond to the chat co
 :::
 
 ```python
+from vllm import LLM
+
 llm = LLM(model="meta-llama/Meta-Llama-3-8B-Instruct")
 conversation = [
     {

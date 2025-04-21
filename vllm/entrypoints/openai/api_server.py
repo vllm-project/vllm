@@ -24,12 +24,13 @@ from fastapi import APIRouter, Depends, FastAPI, Form, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response, StreamingResponse
+from starlette.concurrency import iterate_in_threadpool
 from starlette.datastructures import State
 from starlette.routing import Mount
 from typing_extensions import assert_never
 
 import vllm.envs as envs
-from vllm.config import ModelConfig
+from vllm.config import VllmConfig
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.async_llm_engine import AsyncLLMEngine  # type: ignore
 from vllm.engine.multiprocessing.client import MQLLMEngineClient
@@ -67,7 +68,6 @@ from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
                                               TranscriptionRequest,
                                               TranscriptionResponse,
                                               UnloadLoRAAdapterRequest)
-from vllm.entrypoints.openai.reasoning_parsers import ReasoningParserManager
 # yapf: enable
 from vllm.entrypoints.openai.serving_chat import OpenAIServingChat
 from vllm.entrypoints.openai.serving_completion import OpenAIServingCompletion
@@ -82,8 +82,10 @@ from vllm.entrypoints.openai.serving_tokenization import (
 from vllm.entrypoints.openai.serving_transcription import (
     OpenAIServingTranscription)
 from vllm.entrypoints.openai.tool_parsers import ToolParserManager
-from vllm.entrypoints.utils import load_aware_call, with_cancellation
+from vllm.entrypoints.utils import (cli_env_setup, load_aware_call,
+                                    with_cancellation)
 from vllm.logger import init_logger
+from vllm.reasoning import ReasoningParserManager
 from vllm.transformers_utils.config import (
     maybe_register_config_serialize_by_value)
 from vllm.transformers_utils.tokenizer import MistralTokenizer
@@ -308,8 +310,11 @@ def mount_metrics(app: FastAPI):
     # We need to set PROMETHEUS_MULTIPROC_DIR environment variable
     # before prometheus_client is imported.
     # See https://prometheus.github.io/client_python/multiprocess/
-    from prometheus_client import (CollectorRegistry, make_asgi_app,
+    from prometheus_client import (REGISTRY, CollectorRegistry, make_asgi_app,
                                    multiprocess)
+    from prometheus_fastapi_instrumentator import Instrumentator
+
+    registry = REGISTRY
 
     prometheus_multiproc_dir_path = os.getenv("PROMETHEUS_MULTIPROC_DIR", None)
     if prometheus_multiproc_dir_path is not None:
@@ -318,11 +323,20 @@ def mount_metrics(app: FastAPI):
         registry = CollectorRegistry()
         multiprocess.MultiProcessCollector(registry)
 
-        # Add prometheus asgi middleware to route /metrics requests
-        metrics_route = Mount("/metrics", make_asgi_app(registry=registry))
-    else:
-        # Add prometheus asgi middleware to route /metrics requests
-        metrics_route = Mount("/metrics", make_asgi_app())
+    Instrumentator(
+        excluded_handlers=[
+            "/metrics",
+            "/health",
+            "/load",
+            "/ping",
+            "/version",
+            "/server_info",
+        ],
+        registry=registry,
+    ).add().instrument(app).expose(app)
+
+    # Add prometheus asgi middleware to route /metrics requests
+    metrics_route = Mount("/metrics", make_asgi_app(registry=registry))
 
     # Workaround for 307 Redirect for /metrics
     metrics_route.path_regex = re.compile("^/metrics(?P<path>.*)$")
@@ -674,6 +688,11 @@ TASK_HANDLERS: dict[str, dict[str, tuple]] = {
 
 if envs.VLLM_SERVER_DEV_MODE:
 
+    @router.get("/server_info")
+    async def show_server_info(raw_request: Request):
+        server_info = {"vllm_config": str(raw_request.app.state.vllm_config)}
+        return JSONResponse(content=server_info)
+
     @router.post("/reset_prefix_cache")
     async def reset_prefix_cache(raw_request: Request):
         """
@@ -692,7 +711,6 @@ if envs.VLLM_SERVER_DEV_MODE:
     async def sleep(raw_request: Request):
         # get POST params
         level = raw_request.query_params.get("level", "1")
-        logger.info("sleep the engine with level %s", level)
         await engine_client(raw_request).sleep(int(level))
         # FIXME: in v0 with frontend multiprocessing, the sleep command
         # is sent but does not finish yet when we return a response.
@@ -700,8 +718,12 @@ if envs.VLLM_SERVER_DEV_MODE:
 
     @router.post("/wake_up")
     async def wake_up(raw_request: Request):
-        logger.info("wake up the engine")
-        await engine_client(raw_request).wake_up()
+        tags = raw_request.query_params.getlist("tags")
+        if tags == []:
+            # set to None to wake up all tags if no tags are provided
+            tags = None
+        logger.info("wake up the engine with tags: %s", tags)
+        await engine_client(raw_request).wake_up(tags)
         # FIXME: in v0 with frontend multiprocessing, the wake-up command
         # is sent but does not finish yet when we return a response.
         return Response(status_code=200)
@@ -817,7 +839,8 @@ def build_app(args: Namespace) -> FastAPI:
         return JSONResponse(err.model_dump(),
                             status_code=HTTPStatus.BAD_REQUEST)
 
-    if token := envs.VLLM_API_KEY or args.api_key:
+    # Ensure --api-key option from CLI takes precedence over VLLM_API_KEY
+    if token := args.api_key or envs.VLLM_API_KEY:
 
         @app.middleware("http")
         async def authentication(request: Request, call_next):
@@ -846,6 +869,22 @@ def build_app(args: Namespace) -> FastAPI:
             response.headers["X-Request-Id"] = request_id
             return response
 
+    if envs.VLLM_DEBUG_LOG_API_SERVER_RESPONSE:
+        logger.warning("CAUTION: Enabling log response in the API Server. "
+                       "This can include sensitive information and should be "
+                       "avoided in production.")
+
+        @app.middleware("http")
+        async def log_response(request: Request, call_next):
+            response = await call_next(request)
+            response_body = [
+                section async for section in response.body_iterator
+            ]
+            response.body_iterator = iterate_in_threadpool(iter(response_body))
+            logger.info("response_body={%s}",
+                        response_body[0].decode() if response_body else None)
+            return response
+
     for middleware in args.middleware:
         module_path, object_name = middleware.rsplit(".", 1)
         imported = getattr(importlib.import_module(module_path), object_name)
@@ -862,7 +901,7 @@ def build_app(args: Namespace) -> FastAPI:
 
 async def init_app_state(
     engine_client: EngineClient,
-    model_config: ModelConfig,
+    vllm_config: VllmConfig,
     state: State,
     args: Namespace,
 ) -> None:
@@ -883,6 +922,8 @@ async def init_app_state(
 
     state.engine_client = engine_client
     state.log_stats = not args.disable_log_stats
+    state.vllm_config = vllm_config
+    model_config = vllm_config.model_config
 
     resolved_chat_template = load_chat_template(args.chat_template)
     if resolved_chat_template is not None:
@@ -1037,8 +1078,8 @@ async def run_server(args, **uvicorn_kwargs) -> None:
     async with build_async_engine_client(args) as engine_client:
         app = build_app(args)
 
-        model_config = await engine_client.get_model_config()
-        await init_app_state(engine_client, model_config, app.state, args)
+        vllm_config = await engine_client.get_vllm_config()
+        await init_app_state(engine_client, vllm_config, app.state, args)
 
         def _listen_addr(a: str) -> str:
             if is_valid_ipv6_address(a):
@@ -1069,15 +1110,17 @@ async def run_server(args, **uvicorn_kwargs) -> None:
         )
 
     # NB: Await server shutdown only after the backend context is exited
-    await shutdown_task
-
-    sock.close()
+    try:
+        await shutdown_task
+    finally:
+        sock.close()
 
 
 if __name__ == "__main__":
     # NOTE(simon):
     # This section should be in sync with vllm/entrypoints/cli/main.py for CLI
     # entrypoints.
+    cli_env_setup()
     parser = FlexibleArgumentParser(
         description="vLLM OpenAI-Compatible RESTful API server.")
     parser = make_arg_parser(parser)

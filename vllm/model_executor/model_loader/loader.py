@@ -33,11 +33,15 @@ from vllm.distributed import (get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size)
 from vllm.envs import VLLM_USE_MODELSCOPE
 from vllm.logger import init_logger
+# yapf conflicts with isort for this block
+# yapf: disable
 from vllm.model_executor.layers.linear import (LinearBase,
                                                MergedColumnParallelLinear,
+                                               QKVCrossParallelLinear,
                                                QKVParallelLinear,
                                                ReplicatedLinear,
                                                RowParallelLinear)
+# yapf: enable
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizeMethodBase)
 from vllm.model_executor.model_loader.tensorizer import (
@@ -111,10 +115,12 @@ def _initialize_model(
     vllm_config: VllmConfig,
     *,
     prefix: str = "",
+    model_class: Optional[type[nn.Module]] = None,
 ) -> nn.Module:
     """Initialize a model with the given configurations."""
     model_config = vllm_config.model_config
-    model_class, _ = get_model_architecture(model_config)
+    if model_class is None:
+        model_class, _ = get_model_architecture(model_config)
 
     if vllm_config.quant_config is not None:
         configure_quant_config(vllm_config.quant_config, model_class)
@@ -158,6 +164,11 @@ def _initialize_model(
 def _process_weights_after_loading(model: nn.Module, model_config: ModelConfig,
                                    target_device: torch.device) -> None:
     for _, module in model.named_modules():
+        if isinstance(module, QKVCrossParallelLinear):
+            # NOTE(Isotr0py): special case for cross QKV layer because
+            # q and kv proj aren't registered as submodules intentionally
+            module.process_weights_after_loading()
+            continue
         quant_method = getattr(module, "quant_method", None)
         if isinstance(quant_method, QuantizeMethodBase):
             # When quant methods need to process weights after loading
@@ -403,7 +414,7 @@ class DefaultModelLoader(BaseModelLoader):
         return ((source.prefix + name, tensor)
                 for (name, tensor) in weights_iterator)
 
-    def _get_all_weights(
+    def get_all_weights(
         self,
         model_config: ModelConfig,
         model: nn.Module,
@@ -442,7 +453,7 @@ class DefaultModelLoader(BaseModelLoader):
 
             weights_to_load = {name for name, _ in model.named_parameters()}
             loaded_weights = model.load_weights(
-                self._get_all_weights(model_config, model))
+                self.get_all_weights(model_config, model))
             self.counter_after_loading_weights = time.perf_counter()
             logger.info(
                 "Loading weights took %.2f seconds",
@@ -1259,6 +1270,8 @@ class BitsAndBytesModelLoader(BaseModelLoader):
                                          pack_ratio)
 
                 offsets = np.concatenate(([0], np.cumsum(num_elements)))
+                # Make torch infer_schema happy
+                offsets = torch.tensor(offsets).cpu()
                 set_weight_attrs(param, {"bnb_shard_offsets": offsets})
 
                 if load_8bit:

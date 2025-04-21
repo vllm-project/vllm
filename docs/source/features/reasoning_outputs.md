@@ -136,7 +136,14 @@ Remember to check whether the `reasoning_content` exists in the response before 
 
 ## Structured output
 
-The reasoning content is also available in the structured output. The structured output engine like `xgrammar` will use the reasoning content to generate structured output.
+The reasoning content is also available in the structured output. The structured output engine like `xgrammar` will use the reasoning content to generate structured output. It is only supported in v0 engine now.
+
+```bash
+VLLM_USE_V1=0 vllm serve deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B \
+    --enable-reasoning --reasoning-parser deepseek_r1
+```
+
+Please note that the `VLLM_USE_V1` environment variable must be set to `0` to use the v0 engine.
 
 ```python
 from openai import OpenAI

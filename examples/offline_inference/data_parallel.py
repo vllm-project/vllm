@@ -28,22 +28,56 @@ Multi-node:
                     --master-port=13345
 """
 import os
+from time import sleep
 
 from vllm import LLM, SamplingParams
 from vllm.utils import get_open_port
 
 
+def parse_args():
+    import argparse
+    parser = argparse.ArgumentParser(description="Data Parallel Inference")
+    parser.add_argument("--model",
+                        type=str,
+                        default="ibm-research/PowerMoE-3b",
+                        help="Model name or path")
+    parser.add_argument("--dp-size",
+                        type=int,
+                        default=2,
+                        help="Data parallel size")
+    parser.add_argument("--tp-size",
+                        type=int,
+                        default=2,
+                        help="Tensor parallel size")
+    parser.add_argument("--node-size",
+                        type=int,
+                        default=1,
+                        help="Total number of nodes")
+    parser.add_argument("--node-rank",
+                        type=int,
+                        default=0,
+                        help="Rank of the current node")
+    parser.add_argument("--master-addr",
+                        type=str,
+                        default="",
+                        help="Master node IP address")
+    parser.add_argument("--master-port",
+                        type=int,
+                        default=0,
+                        help="Master node port")
+    return parser.parse_args()
+
+
 def main(model, dp_size, local_dp_rank, global_dp_rank, dp_master_ip,
          dp_master_port, GPUs_per_dp_rank):
     os.environ["VLLM_DP_RANK"] = str(global_dp_rank)
+    os.environ["VLLM_DP_RANK_LOCAL"] = str(local_dp_rank)
     os.environ["VLLM_DP_SIZE"] = str(dp_size)
     os.environ["VLLM_DP_MASTER_IP"] = dp_master_ip
     os.environ["VLLM_DP_MASTER_PORT"] = str(dp_master_port)
-    # set devices for each dp_rank
-    os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(
-        str(i)
-        for i in range(local_dp_rank * GPUs_per_dp_rank, (local_dp_rank + 1) *
-                       GPUs_per_dp_rank))
+
+    # CUDA_VISIBLE_DEVICES for each DP rank is set automatically inside the
+    # engine processes.
 
     # Sample prompts.
     prompts = [
@@ -90,39 +124,13 @@ def main(model, dp_size, local_dp_rank, global_dp_rank, dp_master_ip,
         print(f"DP rank {global_dp_rank}, Prompt: {prompt!r}, "
               f"Generated text: {generated_text!r}")
 
+    # Give engines time to pause their processing loops before exiting.
+    sleep(1)
+
 
 if __name__ == "__main__":
-    import argparse
-    parser = argparse.ArgumentParser(description="Data Parallel Inference")
-    parser.add_argument("--model",
-                        type=str,
-                        default="ibm-research/PowerMoE-3b",
-                        help="Model name or path")
-    parser.add_argument("--dp-size",
-                        type=int,
-                        default=2,
-                        help="Data parallel size")
-    parser.add_argument("--tp-size",
-                        type=int,
-                        default=2,
-                        help="Tensor parallel size")
-    parser.add_argument("--node-size",
-                        type=int,
-                        default=1,
-                        help="Total number of nodes")
-    parser.add_argument("--node-rank",
-                        type=int,
-                        default=0,
-                        help="Rank of the current node")
-    parser.add_argument("--master-addr",
-                        type=str,
-                        default="",
-                        help="Master node IP address")
-    parser.add_argument("--master-port",
-                        type=int,
-                        default=0,
-                        help="Master node port")
-    args = parser.parse_args()
+
+    args = parse_args()
 
     dp_size = args.dp_size
     tp_size = args.tp_size
@@ -152,8 +160,13 @@ if __name__ == "__main__":
         procs.append(proc)
     exit_code = 0
     for proc in procs:
-        proc.join()
-        if proc.exitcode:
+        proc.join(timeout=300)
+        if proc.exitcode is None:
+            print(f"Killing process {proc.pid} that "
+                  f"didn't stop within 5 minutes.")
+            proc.kill()
+            exit_code = 1
+        elif proc.exitcode:
             exit_code = proc.exitcode
 
     exit(exit_code)

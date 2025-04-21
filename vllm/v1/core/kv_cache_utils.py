@@ -8,9 +8,10 @@ from typing import Any, Callable, NamedTuple, Optional
 
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
-from vllm.utils import sha256
-from vllm.v1.kv_cache_interface import (KVCacheConfig, KVCacheGroupSpec,
-                                        KVCacheSpec, KVCacheTensor)
+from vllm.utils import GiB_bytes, sha256
+from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
+                                        KVCacheGroupSpec, KVCacheSpec,
+                                        KVCacheTensor, SlidingWindowSpec)
 from vllm.v1.metrics.stats import PrefixCacheStats
 from vllm.v1.request import Request
 
@@ -309,8 +310,7 @@ def _gen_mm_extra_hash_keys(request: Request, start_token_idx: int,
     # Note that we assume mm_positions is sorted by offset.
     # We do not need to check all mm inputs if the start token index is out of
     # range. This usually happens in the late prefill phase and decoding phase.
-    if mm_positions[-1]["offset"] + mm_positions[-1][
-            "length"] < start_token_idx:
+    if mm_positions[-1].offset + mm_positions[-1].length < start_token_idx:
         return extra_keys, start_mm_idx
 
     # Support start_mm_idx == -1 to indicate the last mm input.
@@ -321,8 +321,8 @@ def _gen_mm_extra_hash_keys(request: Request, start_token_idx: int,
     curr_mm_idx = start_mm_idx
     while mm_positions and curr_mm_idx < len(mm_positions):
         assert mm_hashes[curr_mm_idx] is not None
-        offset = mm_positions[curr_mm_idx]["offset"]
-        length = mm_positions[curr_mm_idx]["length"]
+        offset = mm_positions[curr_mm_idx].offset
+        length = mm_positions[curr_mm_idx].length
         if end_token_idx > offset:
             if start_token_idx > offset + length:
                 # This block has passed the current mm input.
@@ -459,6 +459,54 @@ def hash_request_tokens(hash_function: Any, block_size: int,
     return ret
 
 
+def estimate_max_model_len(vllm_config: VllmConfig,
+                           kv_cache_spec: dict[str, KVCacheSpec],
+                           available_memory: int) -> int:
+    """
+    Estimates the maximum model length that can fit in the available memory
+    using binary search.
+
+    Args:
+        vllm_config: The global VllmConfig
+        kv_cache_spec: The kv cache spec of each attention layer in the model
+        available_memory: Memory available for KV cache in bytes.
+
+    Returns:
+        The estimated maximum model length that can fit in the available memory.
+    """
+
+    # Define a function to check if a given model length fits in memory
+    def fits_in_memory(model_len: int) -> bool:
+        # Modify the max_model_len for this calculation
+        vllm_config.model_config.max_model_len = model_len
+        # Calculate memory needed for the given model length
+        memory_needed = sum(
+            (layer_spec.max_memory_usage_bytes(vllm_config)
+             for layer_spec in kv_cache_spec.values()),
+            start=0,
+        )
+        return memory_needed <= available_memory
+
+    # Binary search for the maximum model length
+    current_max = vllm_config.model_config.max_model_len
+    left, right = 1, current_max
+
+    # If even the smallest model length doesn't fit, return 0
+    if not fits_in_memory(left):
+        return 0
+
+    # Binary search for the maximum model length that fits
+    result = 1
+    while left <= right:
+        mid = (left + right) // 2
+        if fits_in_memory(mid):
+            result = mid
+            left = mid + 1
+        else:
+            right = mid - 1
+    return result
+
+
 def check_enough_kv_cache_memory(vllm_config: VllmConfig,
                                  kv_cache_spec: dict[str, KVCacheSpec],
                                  available_memory: int):
@@ -483,15 +531,24 @@ def check_enough_kv_cache_memory(vllm_config: VllmConfig,
     max_model_len = vllm_config.model_config.max_model_len
     needed_memory = 0
     for layer_spec in kv_cache_spec.values():
-        needed_memory += layer_spec.bytes_for_tokens(max_model_len)
+        needed_memory += layer_spec.max_memory_usage_bytes(vllm_config)
 
     if needed_memory > available_memory:
+        # Estimate the maximum model length that can fit in the available memory
+        estimated_max_len = estimate_max_model_len(vllm_config, kv_cache_spec,
+                                                   available_memory)
+        estimated_msg = ""
+        if estimated_max_len > 0:
+            estimated_msg = " Based on the available memory,"
+            f" the estimated maximum model length is {estimated_max_len}."
+
         raise ValueError(
             f"To serve at least one request with the models's max seq len "
-            f"({max_model_len}), ({needed_memory/1024/1024/1024:.2f} GB KV "
+            f"({max_model_len}), ({needed_memory/GiB_bytes:.2f} GiB KV "
             f"cache is needed, which is larger than the available KV cache "
-            f"memory ({available_memory/1024/1024/1024:.2f} GB). Try "
-            f"increasing `gpu_memory_utilization` or decreasing "
+            f"memory ({available_memory/GiB_bytes:.2f} GiB)."
+            f"{estimated_msg} "
+            f" Try increasing `gpu_memory_utilization` or decreasing "
             f"`max_model_len` when initializing the engine.")
 
 
@@ -597,6 +654,33 @@ def _get_kv_cache_config_uniform_type(vllm_config: VllmConfig,
     return kv_cache_config
 
 
+def unify_hybrid_kv_cache_specs(kv_cache_spec: dict[str, KVCacheSpec]):
+    """
+    Only models with one type of KV cache are supported yet. This function tries
+    to convert the KV cache specs to one type if the model is a hybrid model 
+    with multiple type of KV cache. It will convert all SlidingWindowSpec to
+    FullAttentionSpec if both types are present.
+    
+    Args:
+        kv_cache_spec: The kv cache spec of each attention layer in the model
+    """
+
+    has_full_attention = any(
+        isinstance(spec, FullAttentionSpec) for spec in kv_cache_spec.values())
+    has_sliding_window = any(
+        isinstance(spec, SlidingWindowSpec) for spec in kv_cache_spec.values())
+    if has_full_attention and has_sliding_window:
+        for layer_name, spec in kv_cache_spec.items():
+            if isinstance(spec, SlidingWindowSpec):
+                kv_cache_spec[layer_name] = FullAttentionSpec(
+                    block_size=spec.block_size,
+                    num_kv_heads=spec.num_kv_heads,
+                    head_size=spec.head_size,
+                    dtype=spec.dtype,
+                    use_mla=spec.use_mla,
+                )
+
+
 def get_kv_cache_config(vllm_config: VllmConfig,
                         kv_cache_spec: dict[str, KVCacheSpec],
                         available_memory: int) -> KVCacheConfig:
@@ -613,6 +697,7 @@ def get_kv_cache_config(vllm_config: VllmConfig,
         The generated KVCacheConfigs
     """
     check_enough_kv_cache_memory(vllm_config, kv_cache_spec, available_memory)
+    unify_hybrid_kv_cache_specs(kv_cache_spec)
     if is_kv_cache_type_uniform(kv_cache_spec):
         # KV cache of all layers are the same, which is true for
         # most models. Allocate the same amount of memory for

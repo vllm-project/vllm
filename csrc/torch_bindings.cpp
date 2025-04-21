@@ -31,6 +31,10 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   ops.def("weak_ref_tensor(Tensor input) -> Tensor");
   ops.impl("weak_ref_tensor", torch::kCUDA, &weak_ref_tensor);
 
+  ops.def("get_cuda_view_from_cpu_tensor(Tensor cpu_tensor) -> Tensor");
+  ops.impl("get_cuda_view_from_cpu_tensor", torch::kCPU,
+           &get_cuda_view_from_cpu_tensor);
+
   // Attention ops
   // Compute the attention between an input query and the cached
   // keys/values using PagedAttention.
@@ -59,6 +63,21 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "    int blocksparse_vert_stride, int blocksparse_block_size,"
       "    int blocksparse_head_sliding_step) -> ()");
   ops.impl("paged_attention_v2", torch::kCUDA, &paged_attention_v2);
+
+#ifndef USE_ROCM
+  // Merge attn states
+  // Implements section 2.2 of https://www.arxiv.org/pdf/2501.01005
+  // can be used to combine partial attention results (in the split-KV case)
+  ops.def(
+      "merge_attn_states("
+      "    Tensor! output,"
+      "    Tensor!? output_lse,"
+      "    Tensor prefix_output,"
+      "    Tensor prefix_lse,"
+      "    Tensor suffix_output,"
+      "    Tensor suffix_lse) -> ()");
+  ops.impl("merge_attn_states", torch::kCUDA, &merge_attn_states);
+#endif
 
   // Activation ops
   // Activation function used in SwiGLU.
@@ -291,7 +310,9 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
 #endif
 
   // Dequantization for GGML.
-  ops.def("ggml_dequantize(Tensor W, int type, SymInt m, SymInt n) -> Tensor");
+  ops.def(
+      "ggml_dequantize(Tensor W, int type, SymInt m, SymInt n, ScalarType? "
+      "dtype) -> Tensor");
   ops.impl("ggml_dequantize", torch::kCUDA, &ggml_dequantize);
 
   // mmvq kernel for GGML.
@@ -610,12 +631,11 @@ TORCH_LIBRARY_EXPAND(CONCAT(TORCH_EXTENSION_NAME, _cuda_utils), cuda_utils) {
                   &get_max_shared_memory_per_block_device_attribute);
 }
 
-#ifndef USE_ROCM
 TORCH_LIBRARY_EXPAND(CONCAT(TORCH_EXTENSION_NAME, _custom_ar), custom_ar) {
   // Custom all-reduce kernels
   custom_ar.def(
       "init_custom_ar(int[] ipc_tensors, Tensor rank_data, "
-      "int rank, bool full_nvlink) -> int");
+      "int rank, bool fully_connected) -> int");
   custom_ar.impl("init_custom_ar", torch::kCUDA, &init_custom_ar);
   custom_ar.def(
       "all_reduce(int fa, Tensor inp, Tensor! out, int reg_buffer, "
@@ -628,7 +648,13 @@ TORCH_LIBRARY_EXPAND(CONCAT(TORCH_EXTENSION_NAME, _custom_ar), custom_ar) {
   custom_ar.def("register_buffer", &register_buffer);
   custom_ar.def("get_graph_buffer_ipc_meta", &get_graph_buffer_ipc_meta);
   custom_ar.def("register_graph_buffers", &register_graph_buffers);
+
+  custom_ar.def("allocate_shared_buffer_and_handle",
+                &allocate_shared_buffer_and_handle);
+  custom_ar.def("open_mem_handle(Tensor mem_handle) -> int", &open_mem_handle);
+  custom_ar.impl("open_mem_handle", torch::kCPU, &open_mem_handle);
+
+  custom_ar.def("free_shared_buffer", &free_shared_buffer);
 }
-#endif
 
 REGISTER_EXTENSION(TORCH_EXTENSION_NAME)

@@ -103,6 +103,11 @@ myst_url_schemes = {
         "title": "Pull Request #{{path}}",
         "classes": ["github"],
     },
+    "gh-project": {
+        "url": "https://github.com/orgs/vllm-project/projects/{{path}}",
+        "title": "Project #{{path}}",
+        "classes": ["github"],
+    },
     "gh-dir": {
         "url": "https://github.com/vllm-project/vllm/tree/main/{{path}}",
         "title": "{{path}}",

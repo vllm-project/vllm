@@ -8,7 +8,7 @@ Here are the main features of {class}`~vllm.multimodal.processing.BaseMultiModal
 
 ## Prompt Update Detection
 
-One of the main responsibilies of HF processor is to update the prompt with placeholder tokens. For example:
+One of the main responsibilities of HF processor is to update the prompt with placeholder tokens. For example:
 
 - Insert feature placeholder tokens (e.g. `<image><image>...<image>`, the number of which equals to the feature size) at the start of the string.
 - Replace existing input placeholder tokens (e.g. `<image>` for a single image) with feature placeholder tokens (e.g. `<image><image>...<image>`, the number of which equals to the feature size).
@@ -47,7 +47,7 @@ Moreover, since the tokenized text has not passed through the HF processor, we h
 
 ### Dummy text
 
-We work around the first issue by requiring each model to define how to generate dummy text based on the number of multi-modal inputs, via {meth}`~vllm.multimodal.profiling.BaseDummyInputsBuilder.get_dummy_processor_inputs`. This lets us generate dummy text corresponding to the multi-modal inputs and input them together to obtain the processed multi-modal data.
+We work around the first issue by requiring each model to define how to generate dummy text based on the number of multi-modal inputs, via {meth}`~vllm.multimodal.profiling.BaseDummyInputsBuilder.get_dummy_text`. This lets us generate dummy text corresponding to the multi-modal inputs and input them together to obtain the processed multi-modal data.
 
 (mm-automatic-prompt-updating)=
 

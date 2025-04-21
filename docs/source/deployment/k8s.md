@@ -46,6 +46,7 @@ metadata:
 type: Opaque
 data:
   token: $(HF_TOKEN)
+EOF
 ```
 
 Next, start the vLLM server as a Kubernetes Deployment and Service:
