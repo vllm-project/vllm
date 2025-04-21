@@ -134,15 +134,13 @@ class RequestOutput:
         self.encoder_prompt_token_ids = encoder_prompt_token_ids
         self.num_cached_tokens = num_cached_tokens
 
-    def add(self,
-            next_output: "RequestOutput",
-            aggregate: bool = True) -> None:
+    def add(self, next_output: "RequestOutput", aggregate: bool) -> None:
         """Merge subsequent RequestOutput into this one"""
 
         self.finished |= next_output.finished
 
         for next_completion in next_output.outputs:
-            for completion in self.outputs:
+            for i, completion in enumerate(self.outputs):
                 if completion.index == next_completion.index:
                     if aggregate:
                         # Merge outputs with same index
@@ -159,18 +157,10 @@ class RequestOutput:
                             next_completion.cumulative_logprob)
                         completion.finish_reason = next_completion.finish_reason
                         completion.stop_reason = next_completion.stop_reason
-                        break
                     else:
                         # Replace the output with the new one
-                        completion.text = next_completion.text
-                        completion.token_ids = next_completion.token_ids
-                        completion.cumulative_logprob = (
-                            next_completion.cumulative_logprob)
-                        completion.logprobs = next_completion.logprobs
-                        completion.finish_reason = next_completion.finish_reason
-                        completion.stop_reason = next_completion.stop_reason
-                        completion.lora_request = next_completion.lora_request
-                        break
+                        self.outputs[i] = next_completion
+                    break
             else:
                 self.outputs.append(next_completion)
 
