@@ -727,10 +727,19 @@ class TPUModelRunner:
                                                   logits_indices)
         tpu_sampling_metadata = TPUSupportedSamplingMetadata.\
             from_input_batch(self.input_batch, padded_num_reqs, self.device)
+        ### start: this works ###
         selected_token_ids = self.sample_from_hidden(hidden_states,
                                                      tpu_sampling_metadata)
+        ### end: this works
+        ### start: this doesn't work
+        logits = self.model.compute_logits(hidden_states, None)
+        selected_token_ids2 = self.sample_from_logits(logits, tpu_sampling_metadata)
+        ### end: this doesn't work
+        
         # Remove padding on cpu and keep dynamic op outside of xla graph.
         selected_token_ids = selected_token_ids.cpu()[:num_reqs]
+        ### besides the selected_token_ids aren't always the same. 
+        print(f"{torch.equal(selected_token_ids[:num_reqs], selected_token_ids2[:num_reqs])=}")
 
         # Update the cache state concurrently. Code above will not block until
         # we use `selected_token_ids`. Add mark_step if post-processing changes
@@ -1032,6 +1041,15 @@ class TPUModelRunner:
         separately from `forward` for lighter compilation overhead.
         """
         logits = self.model.compute_logits(sample_hidden_states, None)
+        if sampling_metadata.all_greedy:
+            out_tokens = torch.argmax(logits, dim=-1, keepdim=True)
+        else:
+            out_tokens = self.sampler(logits,
+                                      sampling_metadata).sampled_token_ids
+        return out_tokens
+    
+    @torch.compile(backend="openxla", fullgraph=True, dynamic=False)
+    def sample_from_logits(self, logits, sampling_metadata):
         if sampling_metadata.all_greedy:
             out_tokens = torch.argmax(logits, dim=-1, keepdim=True)
         else:

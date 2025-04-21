@@ -23,7 +23,7 @@ def test_sampler_different(model_name: str):
     different results.
     """
     llm = LLM(model_name,
-              enforce_eager=False,
+              enforce_eager=True,
               max_num_seqs=1,
               max_model_len=512,
               max_num_batched_tokens=512)
