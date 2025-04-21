@@ -10,10 +10,10 @@ import torch.distributed
 import vllm.envs as envs
 from vllm.config import VllmConfig
 from vllm.device_allocator.cumem import CuMemAllocator
-from vllm.distributed import (ensure_kv_transfer_initialized,
-                              ensure_model_parallel_initialized,
+from vllm.distributed import (ensure_model_parallel_initialized,
                               init_distributed_environment,
                               set_custom_all_reduce)
+from vllm.distributed.kv_transfer import ensure_kv_transfer_initialized
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.model_executor import set_random_seed
@@ -135,9 +135,9 @@ class Worker(LocalOrDistributedWorkerBase):
             "%.2f GiB memory is still in use.", freed_bytes / GiB_bytes,
             used_bytes / GiB_bytes)
 
-    def wake_up(self) -> None:
+    def wake_up(self, tags: Optional[list[str]] = None) -> None:
         allocator = CuMemAllocator.get_instance()
-        allocator.wake_up()
+        allocator.wake_up(tags=tags)
 
     def init_device(self) -> None:
         if self.device_config.device.type == "cuda":

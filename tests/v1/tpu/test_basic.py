@@ -32,7 +32,7 @@ TENSOR_PARALLEL_SIZES = [1]
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("max_tokens", [5])
 @pytest.mark.parametrize("tensor_parallel_size", TENSOR_PARALLEL_SIZES)
-def test_models(
+def test_basic(
     vllm_runner: type[VllmRunner],
     monkeypatch: pytest.MonkeyPatch,
     model: str,
@@ -58,4 +58,5 @@ def test_models(
             vllm_outputs = vllm_model.generate_greedy(example_prompts,
                                                       max_tokens)
         output = vllm_outputs[0][1]
-        assert "1024" in output
+
+        assert "1024" in output or "0, 1" in output

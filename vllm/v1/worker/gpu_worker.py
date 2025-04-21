@@ -9,11 +9,12 @@ import torch.distributed
 import torch.nn as nn
 
 import vllm.envs as envs
-from vllm.config import ParallelConfig, VllmConfig
+from vllm.config import VllmConfig
 from vllm.device_allocator.cumem import CuMemAllocator
 from vllm.distributed import (ensure_model_parallel_initialized,
                               init_distributed_environment,
                               set_custom_all_reduce)
+from vllm.distributed.kv_transfer import ensure_kv_transfer_initialized
 from vllm.distributed.parallel_state import get_pp_group
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
@@ -83,9 +84,9 @@ class Worker(WorkerBase):
             "%.2f GiB memory is still in use.", freed_bytes / GiB_bytes,
             used_bytes / GiB_bytes)
 
-    def wake_up(self) -> None:
+    def wake_up(self, tags: Optional[list[str]] = None) -> None:
         allocator = CuMemAllocator.get_instance()
-        allocator.wake_up()
+        allocator.wake_up(tags)
 
     def init_device(self):
         if self.device_config.device.type == "cuda":
@@ -110,7 +111,7 @@ class Worker(WorkerBase):
             raise RuntimeError(
                 f"Not support device type: {self.device_config.device}")
         # Initialize the distributed environment.
-        init_worker_distributed_environment(self.parallel_config, self.rank,
+        init_worker_distributed_environment(self.vllm_config, self.rank,
                                             self.distributed_init_method,
                                             self.local_rank)
         # Set random seed.
@@ -269,14 +270,29 @@ class Worker(WorkerBase):
         # worker will always be healthy as long as it's running.
         return
 
+    def save_sharded_state(
+        self,
+        path: str,
+        pattern: Optional[str] = None,
+        max_size: Optional[int] = None,
+    ) -> None:
+        from vllm.model_executor.model_loader.loader import ShardedStateLoader
+        ShardedStateLoader.save_model(
+            self.model_runner.model,
+            path,
+            pattern=pattern,
+            max_size=max_size,
+        )
+
 
 def init_worker_distributed_environment(
-    parallel_config: ParallelConfig,
+    vllm_config: VllmConfig,
     rank: int,
     distributed_init_method: Optional[str] = None,
     local_rank: int = -1,
 ) -> None:
     """Initialize the distributed environment."""
+    parallel_config = vllm_config.parallel_config
     set_custom_all_reduce(not parallel_config.disable_custom_all_reduce)
 
     init_distributed_environment(parallel_config.world_size, rank,
@@ -284,6 +300,8 @@ def init_worker_distributed_environment(
 
     ensure_model_parallel_initialized(parallel_config.tensor_parallel_size,
                                       parallel_config.pipeline_parallel_size)
+
+    ensure_kv_transfer_initialized(vllm_config)
 
 
 def _check_if_gpu_supports_dtype(torch_dtype: torch.dtype):

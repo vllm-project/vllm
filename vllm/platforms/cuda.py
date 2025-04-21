@@ -101,7 +101,7 @@ class CudaPlatformBase(Platform):
         return True
 
     @classmethod
-    def is_full_nvlink(cls, device_ids: List[int]) -> bool:
+    def is_fully_connected(cls, device_ids: List[int]) -> bool:
         raise NotImplementedError
 
     @classmethod
@@ -308,6 +308,10 @@ class CudaPlatformBase(Platform):
     def supports_v1(cls, model_config: ModelConfig) -> bool:
         return True
 
+    @classmethod
+    def use_custom_allreduce(cls) -> bool:
+        return True
+
 
 # NVML utils
 # Note that NVML is not affected by `CUDA_VISIBLE_DEVICES`,
@@ -362,7 +366,7 @@ class NvmlCudaPlatform(CudaPlatformBase):
 
     @classmethod
     @with_nvml_context
-    def is_full_nvlink(cls, physical_device_ids: List[int]) -> bool:
+    def is_fully_connected(cls, physical_device_ids: List[int]) -> bool:
         """
         query if the set of gpus are fully connected by nvlink (1 hop)
         """
@@ -427,7 +431,7 @@ class NonNvmlCudaPlatform(CudaPlatformBase):
         return device_props.total_memory
 
     @classmethod
-    def is_full_nvlink(cls, physical_device_ids: List[int]) -> bool:
+    def is_fully_connected(cls, physical_device_ids: List[int]) -> bool:
         logger.exception(
             "NVLink detection not possible, as context support was"
             " not found. Assuming no NVLink available.")
