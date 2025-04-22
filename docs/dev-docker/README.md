@@ -26,6 +26,9 @@ Pull the most recent validated docker image with `docker pull rocm/vllm-dev:main
 - Detokenizer disablement
 - Torch.compile support
 
+## Known Issues and Workarounds
+- Mem fault encountered when running the model meta 405 fp8. To workaround this issue, set PYTORCH_TUNABLEOP_ENABLED=0
+
 ## Performance Results
 
 The data in the following tables is a reference point to help users validate observed performance. It should not be considered as the peak performance that can be delivered by AMD Instinct™ MI300X accelerator with vLLM. See the MLPerf section in this document for information about MLPerf 4.1 inference results. The performance numbers above were collected using the steps below.
