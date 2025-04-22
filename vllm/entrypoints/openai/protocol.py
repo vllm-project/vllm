@@ -242,8 +242,8 @@ class ChatCompletionRequest(OpenAIBaseModel):
         ChatCompletionNamedToolChoiceParam,
     ]] = "none"
 
-    # Custom args param
-    extra_args: Optional[dict[str, Any]] = Field(
+    # Custom sampling params
+    extra_sampling_params: Optional[dict[str, Any]] = Field(
         default=None,
         description=("Additional kwargs to pass to sampling."),
     )
@@ -521,7 +521,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
                 else RequestOutputKind.FINAL_ONLY,
             guided_decoding=guided_decoding,
             logit_bias=self.logit_bias,
-            extra_args=self.extra_args)
+            extra_args=self.extra_sampling_params)
 
     def _get_guided_json_from_tool(
             self) -> Optional[Union[str, dict, BaseModel]]:
@@ -726,7 +726,7 @@ class CompletionRequest(OpenAIBaseModel):
     user: Optional[str] = None
 
     # Custom args param
-    extra_args: Optional[dict[str, Any]] = Field(
+    extra_sampling_params: Optional[dict[str, Any]] = Field(
         default=None,
         description=("Additional kwargs to pass to sampling."),
     )
@@ -946,7 +946,7 @@ class CompletionRequest(OpenAIBaseModel):
             guided_decoding=guided_decoding,
             logit_bias=self.logit_bias,
             allowed_token_ids=self.allowed_token_ids,
-            extra_args=self.extra_args)
+            extra_args=self.extra_sampling_params)
 
     @model_validator(mode="before")
     @classmethod
