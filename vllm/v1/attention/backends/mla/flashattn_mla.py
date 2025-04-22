@@ -55,6 +55,8 @@ class FlashAttnMLAMetadata(MLACommonMetadata[FlashAttnMLADecodeMetadata]):
 
 class FlashAttnMLAMetadataBuilder(
         MLACommonMetadataBuilder[FlashAttnMLAMetadata]):
+    # TODO(lucas): tune this value
+    decode_threshold: int = 64
 
     def __init__(self, runner):
         super().__init__(runner)

@@ -237,6 +237,19 @@ class CudaPlatformBase(Platform):
             use_triton = selected_backend == _Backend.TRITON_MLA or (
                 selected_backend is None)
 
+            print("use_cutlassmla", use_cutlassmla)
+            print("use_flashmla", use_flashmla)
+            print("use_flashattn", use_flashattn)
+            print("use_triton", use_triton)
+
+            def _get_version(name, import_suffix) -> str:
+                if use_v1:
+                    logger.info_once("Using %s backend on V1 engine.", name)
+                    return f"vllm.v1.attention.backends.mla.{import_suffix}"
+                else:
+                    logger.info("Using %s backend.", name)
+                    return f"vllm.attention.backends.mla.{import_suffix}"
+
             if use_cutlassmla:
                 if use_v1:
                     logger.info_once("Using Cutlass MLA backend on V1 engine.")
@@ -246,15 +259,8 @@ class CudaPlatformBase(Platform):
                     logger.warning(
                         "Cutlass MLA backend is only supported on V1 engine")
             if use_flashattn:
-                if use_v1:
-                    logger.info_once(
-                        "Using FlashAttention MLA backend on V1 engine.")
-                    return ("vllm.v1.attention.backends.mla."
-                            "flashattn_mla.FlashAttnMLABackend")
-                else:
-                    logger.warning(
-                        "FlashAttention MLA backend is only supported on "
-                        "V1 engine.")
+                return _get_version("FlashAttention MLA",
+                                    "flashattn_mla.FlashAttnMLABackend")
             if use_flashmla:
                 if block_size != 64:
                     logger.warning(
@@ -262,24 +268,10 @@ class CudaPlatformBase(Platform):
                         " (currently only supports block size 64).",
                         block_size)
                 else:
-                    if use_v1:
-                        logger.info_once(
-                            "Using FlashMLA backend on V1 engine.")
-                        return ("vllm.v1.attention.backends.mla."
-                                "flashmla.FlashMLABackend")
-                    else:
-                        logger.info("Using FlashMLA backend.")
-                        return ("vllm.attention.backends."
-                                "flashmla.FlashMLABackend")
+                    return _get_version("FlashMLA", "flashmla.FlashMLABackend")
             if use_triton:
-                if use_v1:
-                    logger.info_once("Using Triton MLA backend on V1 engine.")
-                    return ("vllm.v1.attention.backends.mla."
-                            "triton_mla.TritonMLABackend")
-                else:
-                    logger.info("Using Triton MLA backend.")
-                    return "vllm.attention.backends.triton_mla.TritonMLABackend"
-
+                return _get_version("Triton MLA",
+                                    "triton_mla.TritonMLABackend")
         if use_v1:
             FLASHINFER_V1 = "vllm.v1.attention.backends.flashinfer.FlashInferBackend"  # noqa: E501
             FLEX_ATTENTION_V1 = "vllm.v1.attention.backends.flex_attention.FlexAttentionBackend"  # noqa: E501

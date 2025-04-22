@@ -1,22 +1,25 @@
 # SPDX-License-Identifier: Apache-2.0
 
+from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Any, List, Optional
 
 import torch
 
 from vllm.attention.backends.abstract import AttentionType
 from vllm.attention.backends.mla.common import (MLACommonBackend,
-                                                MLACommonDecodeMetadata,
                                                 MLACommonImpl,
                                                 MLACommonMetadata,
-                                                MLACommonMetadataBuilder)
+                                                MLACommonMetadataBuilder,
+                                                MLACommonState)
+from vllm.attention.backends.utils import get_mla_dims
 from vllm.logger import init_logger
 from vllm.vllm_flash_attn import flash_attn_varlen_func, get_scheduler_metadata
-from vllm.vllm_flash_attn.fa_utils import flash_attn_supports_mla
+from vllm.vllm_flash_attn.fa_utils import (flash_attn_supports_mla,
+                                           get_flash_attn_version)
 
 if TYPE_CHECKING:
-    pass
+    from vllm.worker.model_runner import ModelInputForGPUWithSamplingMetadata
 
 logger = init_logger(__name__)
 
@@ -25,7 +28,7 @@ class FlashAttnMLABackend(MLACommonBackend):
 
     @staticmethod
     def get_name() -> str:
-        return "FLASHATTN_MLA_VLLM_V1"
+        return "FLASHATTN_MLA"
 
     @staticmethod
     def get_metadata_cls() -> type["FlashAttnMLAMetadata"]:
@@ -41,70 +44,142 @@ class FlashAttnMLABackend(MLACommonBackend):
 
 
 @dataclass
-class FlashAttnMLADecodeMetadata(MLACommonDecodeMetadata):
-    query_start_loc: torch.Tensor
-    max_query_len: int
-    max_seq_len: int
+class FlashAttnMLAMetadata(MLACommonMetadata):
+    decode_scheduler_metadata: Optional[torch.Tensor] = None
 
+    @property
+    def decode_metadata(self):
+        decode_metadata = super().decode_metadata
+        # TODO: cache assignment?
+        if decode_metadata is not None:
+            decode_metadata.decode_scheduler_metadata=\
+                self.decode_scheduler_metadata
+        return decode_metadata
 
-@dataclass
-class FlashAttnMLAMetadata(MLACommonMetadata[FlashAttnMLADecodeMetadata]):
-    pass
+    def advance_step(self,
+                     model_input: "ModelInputForGPUWithSamplingMetadata",
+                     sampled_token_ids: Optional[torch.Tensor],
+                     block_size: int,
+                     num_seqs: int,
+                     num_queries: int,
+                     turn_prefills_into_decodes: bool = False):
+        raise NotImplementedError(
+            "advance_step is not implemented for FlashAttnMLA")
 
 
 class FlashAttnMLAMetadataBuilder(
         MLACommonMetadataBuilder[FlashAttnMLAMetadata]):
 
-    def __init__(self, runner):
-        super().__init__(runner)
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
 
-    def _schedule_decode(self, num_reqs, cu_query_lens, max_query_len, seqlens,
-                         max_seq_len, causal):
-        if self.fa_aot_schedule:
-            return get_scheduler_metadata(
-                batch_size=num_reqs,
-                max_seqlen_q=max_query_len,
-                max_seqlen_k=max_seq_len,
-                cache_seqlens=seqlens,
-                num_heads_q=self.num_heads,
+        self.num_heads_q = self.runner.model_config.get_num_attention_heads(
+            self.runner.parallel_config)
+        self.fa_aot_schedule = (get_flash_attn_version() == 3)
+        self.mla_dims = get_mla_dims(self.runner.model_config)
+
+    def build(self, seq_lens: List[int], query_lens: List[int],
+              cuda_graph_pad_size: int, batch_size: int):
+        m = super().build(seq_lens, query_lens, cuda_graph_pad_size,
+                          batch_size)
+
+        decode_cu_seqlens_q = m.query_start_loc[
+            m.num_prefills:] - m.query_start_loc[m.num_prefills]
+
+        if m.num_decode_tokens > 0 and self.fa_aot_schedule:
+            m.decode_scheduler_metadata = get_scheduler_metadata(
+                batch_size=batch_size,
+                max_seqlen_q=m.max_decode_query_len,
+                max_seqlen_k=m.max_decode_seq_len,
+                cache_seqlens=m.seq_start_loc[m.num_prefills:],
+                num_heads_q=self.num_heads_q,
                 num_heads_kv=1,
                 headdim=self.mla_dims.qk_rope_head_dim,
                 headdim_v=self.mla_dims.kv_lora_rank,
                 page_size=self.page_size,
-                cu_seqlens_q=cu_query_lens,
-                causal=causal,
-            )
+                cu_seqlens_q=decode_cu_seqlens_q,
+                causal=True)
+        return m
+
+
+class FlashAttnMLAState(MLACommonState[FlashAttnMLAMetadata]):
+
+    def __init__(self, *args, **kwds):
+        super().__init__(*args, **kwds)
+
+        self.fa_aot_schedule = (get_flash_attn_version() == 3)
+        self.num_heads_q = self.runner.model_config.get_num_attention_heads(
+            self.runner.parallel_config)
+        self.mla_dims = get_mla_dims(self.runner.model_config)
+        self.page_size = self.runner.block_size
+
+    def _dummy_scheduler_metadata(self, max_batch_size: int):
+        if self.fa_aot_schedule:
+            return get_scheduler_metadata(
+                batch_size=max_batch_size,
+                max_seqlen_q=1,
+                max_seqlen_k=1,
+                cache_seqlens=torch.ones(max_batch_size,
+                                         dtype=torch.int32,
+                                         device=self.runner.device),
+                num_heads_q=self.num_heads_q,
+                num_heads_kv=1,
+                headdim=self.mla_dims.qk_rope_head_dim,
+                headdim_v=self.mla_dims.kv_lora_rank,
+                page_size=self.page_size,
+                cu_seqlens_q=torch.arange(max_batch_size + 1,
+                                          dtype=torch.int32,
+                                          device=self.runner.device),
+                causal=True)
         return None
 
-    def _build_decode(self, seq_lens_cpu: torch.Tensor,
-                      seq_lens_device: torch.Tensor,
-                      query_start_loc_cpu: torch.Tensor,
-                      query_start_loc_device: torch.Tensor,
-                      input_positions: torch.Tensor,
-                      block_table: torch.Tensor) -> FlashAttnMLADecodeMetadata:
+    @contextmanager
+    def graph_capture(self, max_batch_size: int):
+        # Run a dummy `get_scheduler_metadata` so we can get the right shapes
+        self._graph_scheduler_metadata = self._dummy_scheduler_metadata(
+            max_batch_size)
 
-        query_lens_cpu = (query_start_loc_cpu[1:] - query_start_loc_cpu[:-1])
-        max_query_len = query_lens_cpu.max().item()
-        max_seq_len = seq_lens_cpu.max().item()
+        with super().graph_capture(max_batch_size):
+            yield
 
-        scheduler_metadata = self._schedule_decode(
-            num_reqs=seq_lens_cpu.numel(),
-            cu_query_lens=query_start_loc_device,
-            max_query_len=max_query_len,
-            seqlens=seq_lens_device,
-            max_seq_len=max_seq_len,
-            causal=True,
-        )
+        del self._graph_scheduler_metadata
 
-        return FlashAttnMLADecodeMetadata(
-            input_positions=input_positions,
-            block_table=block_table,
-            seq_lens=seq_lens_device,
-            query_start_loc=query_start_loc_device,
-            max_query_len=max_query_len,
-            max_seq_len=max_seq_len,
-            scheduler_metadata=scheduler_metadata,
-        )
+    def graph_capture_get_metadata_for_batch(
+            self, batch_size: int, is_encoder_decoder_model: bool = False):
+        metadata = super().graph_capture_get_metadata_for_batch(
+            batch_size, is_encoder_decoder_model)
+        assert metadata.num_decode_tokens > 0
+
+        decoder_scheduler_metadata = self._dummy_scheduler_metadata(batch_size)
+
+        metadata_size = decoder_scheduler_metadata.numel()
+        self._graph_scheduler_metadata[:metadata_size].copy_(
+            decoder_scheduler_metadata)
+
+        metadata.decode_scheduler_metadata=\
+            self._graph_scheduler_metadata[:metadata_size]
+
+        return metadata
+
+    def get_graph_input_buffers(self,
+                                attn_metadata,
+                                is_encoder_decoder_model: bool = False):
+        input_buffers = super().get_graph_input_buffers(
+            attn_metadata, is_encoder_decoder_model)
+        input_buffers["decode_scheduler_metadata"] = \
+                attn_metadata.decode_metadata.decode_scheduler_metadata
+
+        return input_buffers
+
+    def prepare_graph_input_buffers(self,
+                                    input_buffers,
+                                    attn_metadata,
+                                    is_encoder_decoder_model: bool = False):
+        super().prepare_graph_input_buffers(input_buffers, attn_metadata,
+                                            is_encoder_decoder_model)
+
+        input_buffers["decode_scheduler_metadata"].copy_(
+            attn_metadata.decode_metadata.decode_scheduler_metadata)
 
 
 class FlashAttnMLAImpl(MLACommonImpl[MLACommonMetadata]):
@@ -136,7 +211,7 @@ class FlashAttnMLAImpl(MLACommonImpl[MLACommonMetadata]):
         ]
         if any(unsupported_features):
             raise NotImplementedError(
-                "FlashMLAImpl does not support one of the following: "
+                "FlashAttnMLAImpl does not support one of the following: "
                 "alibi_slopes, sliding_window, blocksparse_params, "
                 "logits_soft_cap")
 
@@ -175,8 +250,8 @@ class FlashAttnMLAImpl(MLACommonImpl[MLACommonMetadata]):
             block_table=decode_meta.block_table,
             softmax_scale=self.scale,
             causal=True,
+            fa_version=3,  # only version 3 is supported
             scheduler_metadata=decode_meta.scheduler_metadata,
-            fa_version=3  # only version 3 is supported
         )
 
         return self._v_up_proj_and_o_proj(o)
