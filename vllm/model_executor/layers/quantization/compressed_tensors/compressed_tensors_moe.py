@@ -67,7 +67,7 @@ class CompressedTensorsMoEMethod(FusedMoEMethodBase):
             else:
                 return CompressedTensorsWNA16MarlinMoEMethod(quant_config)
         elif (quant_config._is_fp8_w8a8_sm90(weight_quant, input_quant)
-              and layer.activation == "silu" and layer.expert_map is None):
+              and layer.activation == "silu"):
             return CompressedTensorsW8A8Fp8MoECutlassMethod(quant_config)
         elif quant_config._is_fp8_w8a8(weight_quant, input_quant):
             return CompressedTensorsW8A8Fp8MoEMethod(quant_config)
@@ -250,6 +250,28 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
             layer.w13_weight_scale = torch.nn.Parameter(max_w13_scales,
                                                         requires_grad=False)
 
+        from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
+            is_rocm_aiter_moe_enabled)
+
+        # Property to determine if AITER is used
+        if is_rocm_aiter_moe_enabled():
+            from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (  # noqa E501
+                rocm_aiter_fused_experts, shuffle_weights)
+
+            # reshaping weights is required for aiter moe kernel.
+            shuffled_w13, shuffled_w2 = shuffle_weights(
+                layer.w13_weight.data, layer.w2_weight.data)
+
+            layer.w13_weight = torch.nn.Parameter(shuffled_w13,
+                                                  requires_grad=False)
+            layer.w2_weight = torch.nn.Parameter(shuffled_w2,
+                                                 requires_grad=False)
+
+            self.fused_experts_func = rocm_aiter_fused_experts
+        else:
+            from vllm.model_executor.layers.fused_moe import fused_experts
+            self.fused_experts_func = fused_experts
+
     def apply(
         self,
         layer: torch.nn.Module,
@@ -268,7 +290,6 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
         apply_router_weight_on_input: bool = False,
         activation: str = "silu",
     ) -> torch.Tensor:
-        from vllm.model_executor.layers.fused_moe import fused_experts
 
         topk_weights, topk_ids = FusedMoE.select_experts(
             hidden_states=x,
@@ -282,7 +303,7 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
             scoring_func=scoring_func,
             e_score_correction_bias=e_score_correction_bias)
 
-        return fused_experts(
+        return self.fused_experts_func(
             x,
             layer.w13_weight,
             layer.w2_weight,
@@ -489,8 +510,6 @@ class CompressedTensorsW8A8Fp8MoECutlassMethod(CompressedTensorsMoEMethod):
     ) -> torch.Tensor:
 
         assert activation == "silu"
-        assert global_num_experts == layer.w13_weight.shape[0]
-        assert expert_map is None
 
         topk_weights, topk_ids = FusedMoE.select_experts(
             hidden_states=x,
@@ -521,6 +540,7 @@ class CompressedTensorsW8A8Fp8MoECutlassMethod(CompressedTensorsMoEMethod):
             a1_scale=layer.w13_input_scale,
             a2_scale=layer.w2_input_scale,
             out_dtype=x.dtype,
+            expert_map=expert_map,
             apply_router_weight_on_input=apply_router_weight_on_input,
         )
 
