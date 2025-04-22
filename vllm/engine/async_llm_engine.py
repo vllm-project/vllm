@@ -1246,8 +1246,8 @@ class AsyncLLMEngine(EngineClient):
         """
         Perform a collective RPC call to the given path.
         """
-        return await self.engine_core.collective_rpc_async(
-            method, timeout, args, kwargs)
+        return await self.engine.collective_rpc_async(method, timeout, args,
+                                                      kwargs)
 
 
 # TODO(v1): Remove this class proxy when V1 goes default.
