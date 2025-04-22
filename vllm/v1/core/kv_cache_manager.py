@@ -145,24 +145,11 @@ class KVCacheManager:
             # we shouldn't modify it directly.
             block_hashes.append(last_block_hash)
 
-            computed_blocks = (
-                self.specialized_manager.find_longest_cache_hit(block_hashes))
-
-            if last_block_hash is not None:
-                # Add back the last block hash if it was removed.
-                block_hashes.append(last_block_hash)
-
-            self.prefix_cache_stats.queries += len(block_hashes)
-            self.prefix_cache_stats.hits += len(computed_blocks)
-
-            # NOTE(woosuk): Since incomplete blocks are not eligible for
-            # sharing, `num_computed_tokens` is always a multiple of
-            # `block_size`.
-            num_computed_tokens = len(computed_blocks) * self.block_size
-            return computed_blocks, num_computed_tokens
-        else:
-            # Skip cache hits for prompt logprobs
-            return [], 0
+        # NOTE(woosuk): Since incomplete blocks are not eligible for
+        # sharing, `num_computed_tokens` is always a multiple of
+        # `block_size`.
+        num_computed_tokens = len(computed_blocks) * self.block_size
+        return computed_blocks, num_computed_tokens
 
     def allocate_slots(
         self,
