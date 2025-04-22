@@ -1120,11 +1120,18 @@ def test_tool_call_stream(
     model_output: list,
     expected_tool_calls: list[FunctionCall]
 ):
-    # The tokenizer for the local
-    # test is the test file of QwQ-32B.
-    # If you want to test other
-    # models, you can change the path.
-    tokenizer = AutoTokenizer.from_pretrained("./tokenizer/")
+    # model_path requires setting the absolute path
+    # of the large model, which requires loading
+    # two files: tokenizer.json and tokenizer_config.json. I
+    # tested using the QwQ-32B large model and originally
+    # intended to include these two files in
+    # the code, but the codespell check did
+    # not pass, so I deleted them.
+    model_path = ""
+    if len(model_path) == 0:
+        raise AssertionError('model_path requires setting the '
+                             'absolute path of the large model')
+    tokenizer = AutoTokenizer.from_pretrained(model_path)
 
     tool_parser = ToolParserManager.\
         get_tool_parser("hermes")(tokenizer)
@@ -1148,11 +1155,19 @@ def test_tool_call_no_stream(
     model_output: str,
     expected_tool_calls: list[FunctionCall]
 ):
-    # The tokenizer for the local
-    # test is the test file of QwQ-32B.
-    # If you want to test other
-    # models, you can change the path.
-    tokenizer = AutoTokenizer.from_pretrained("./tokenizer/")
+
+    # model_path requires setting the absolute path
+    # of the large model, which requires loading
+    # two files: tokenizer.json and tokenizer_config.json. I
+    # tested using the QwQ-32B large model and originally
+    # intended to include these two files in
+    # the code, but the codespell check did
+    # not pass, so I deleted them.
+    model_path = ""
+    if len(model_path) == 0:
+        raise AssertionError('model_path requires setting the '
+                             'absolute path of the large model')
+    tokenizer = AutoTokenizer.from_pretrained(model_path)
 
     tool_parser = ToolParserManager.\
         get_tool_parser("hermes")(tokenizer)
