@@ -1564,7 +1564,7 @@ class LoadConfig:
     use_tqdm_on_load: bool = True
     """Whether to enable tqdm for showing progress bar when loading model
     weights."""
-    pt_load_map_location: str = "cpu"
+    pt_load_map_location: Union[str, Dict[str, str]] = "cpu"
     """
     pt_load_map_location: the map location for loading pytorch checkpoint, to
     support loading checkpoints can only be loaded on certain devices like cuda.
