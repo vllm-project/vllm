@@ -211,7 +211,6 @@ class GraniteSpeechEncoderProjector(nn.Module):
         self.query = nn.Parameter(
             torch.zeros(1, self.num_queries,
                         config.projector_config.hidden_size))
-        self.query.data.normal_(mean=0.0, std=1.0)
 
         # NOTE - this is implemented generically in transformers,
         # but for now we create the QFormer model directly since
