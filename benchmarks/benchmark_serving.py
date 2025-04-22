@@ -755,7 +755,9 @@ def main(args: argparse.Namespace):
             file_name = args.result_filename
         if args.result_dir:
             file_name = os.path.join(args.result_dir, file_name)
-        with open(file_name, mode="a+" if args.append_result else "w", encoding='utf-8') as outfile:
+        with open(file_name,
+                  mode="a+" if args.append_result else "w",
+                  encoding='utf-8') as outfile:
             # Append a newline.
             if args.append_result and outfile.tell() != 0:
                 outfile.write("\n")
