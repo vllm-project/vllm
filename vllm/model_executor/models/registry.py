@@ -230,7 +230,7 @@ _VLLM_MODELS = {
 # when we use par format to pack things together, sys.executable
 # might not be the target we want to run.
 _SUBPROCESS_COMMAND = [
-    sys.executable, "-m", "vllm.model_executor.models.registry",
+    sys.executable, "-m", "vllm.model_executor.models.registry"
 ]
 
 
@@ -306,7 +306,6 @@ class _LazyRegisteredModel(_BaseRegisteredModel):
     """
     Represents a model that has not been imported in the main process.
     """
-
     module_name: str
     class_name: str
 

@@ -128,7 +128,6 @@ def list_repo_files(
             if VLLM_USE_MODELSCOPE:
                 from vllm.transformers_utils.utils import (
                     modelscope_list_repo_files)
-
                 return modelscope_list_repo_files(repo_id,
                                                   revision=revision,
                                                   token=token)
@@ -399,7 +398,7 @@ def get_hf_file_to_dict(file_name: str,
             hf_hub_file = hf_hub_download(model, file_name, revision=revision)
         except huggingface_hub.errors.OfflineModeIsEnabled:
             return None
-        except (RepositoryNotFoundError, RevisionNotFoundError, 
+        except (RepositoryNotFoundError, RevisionNotFoundError,
                 EntryNotFoundError, LocalEntryNotFoundError) as e:
             logger.debug("File or repository not found in hf_hub_download", e)
             return None
@@ -454,8 +453,8 @@ def get_pooling_config(model: str, revision: Optional[str] = 'main'):
                    None)
     normalize = bool(
         next((item for item in modules_dict
-             if item["type"] == "sentence_transformers.models.Normalize"),
-            False))
+              if item["type"] == "sentence_transformers.models.Normalize"),
+             False))
 
     if pooling:
 
@@ -600,7 +599,6 @@ def maybe_register_config_serialize_by_value() -> None:
 
         # ray vendors its own version of cloudpickle
         from vllm.executor.ray_utils import ray
-
         if ray:
             ray.cloudpickle.register_pickle_by_value(transformers_modules)
 
