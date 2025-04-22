@@ -37,7 +37,7 @@ from vllm.attention.backends.utils import (PAD_SLOT_ID, compute_slot_mapping,
                                            is_block_tables_empty)
 from vllm.attention.layer import Attention
 from vllm.attention.ops.paged_attn import PagedAttention
-from vllm.config import VllmConfig, get_current_vllm_config
+from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.utils import (async_tensor_h2d, get_kv_cache_torch_dtype,
                         make_tensor_with_pad)
@@ -187,7 +187,7 @@ class FlashInferState(AttentionState):
         # Global hyperparameters shared by all attention layers
         self.global_hyperparameters: Optional[PerLayerParameters] = None
 
-        self.vllm_config = get_current_vllm_config()
+        self.vllm_config = self.runner.vllm_config
 
     def _get_workspace_buffer(self):
         if self._workspace_buffer is None:
@@ -613,7 +613,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         # Global hyperparameters shared by all attention layers
         self.global_hyperparameters: Optional[PerLayerParameters] = None
 
-        self.vllm_config = get_current_vllm_config()
+        self.vllm_config = self.runner.vllm_config
 
     def prepare(self):
         self.slot_mapping: List[int] = []
