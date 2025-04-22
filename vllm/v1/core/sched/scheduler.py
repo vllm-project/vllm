@@ -127,6 +127,12 @@ class Scheduler(SchedulerInterface):
         self.encoder_cache_manager = EncoderCacheManager(
             cache_size=encoder_cache_size)
 
+        self.num_lookahead_tokens = 0
+        speculative_config = vllm_config.speculative_config
+        if speculative_config and speculative_config.method == "eagle":
+            self.num_lookahead_tokens = \
+                speculative_config.num_speculative_tokens
+
     def _get_request_total_tokens(self, request: Request) -> int:
         """Calculate total tokens (prompt + decode) for a request.
 
@@ -138,12 +144,6 @@ class Scheduler(SchedulerInterface):
         max_new_tokens = 0 if request.max_tokens is None\
             else request.max_tokens
         return prompt_tokens + max_new_tokens
-
-        self.num_lookahead_tokens = 0
-        speculative_config = vllm_config.speculative_config
-        if speculative_config and speculative_config.method == "eagle":
-            self.num_lookahead_tokens = \
-                speculative_config.num_speculative_tokens
 
     def schedule(self) -> SchedulerOutput:
 
@@ -384,7 +384,7 @@ class Scheduler(SchedulerInterface):
                     break
 
                 tokens = self._get_request_total_tokens(request)
-                
+
                 # KVConnector: update internal state after allocation.
                 # This information is used to determine if a load is
                 # needed for this request.
@@ -393,7 +393,6 @@ class Scheduler(SchedulerInterface):
                         request,
                         num_external_tokens,
                     )
-
 
                 self.waiting.popleft()
                 self._waiting_tokens -= tokens
