@@ -918,13 +918,9 @@ class MiniMaxText01Model(nn.Module):
     ) -> torch.Tensor:
         return self.embed_tokens(input_ids)
 
-    # def get_input_embeddings(self):
-    #     return self.embed_tokens
-
     def forward(self,
                 input_ids: Optional[torch.Tensor],
                 positions: torch.Tensor,
-                kv_caches: List[torch.Tensor],
                 intermediate_tensors=None,
                 inputs_embeds: Optional[torch.Tensor] = None,
                 **kwargs) -> torch.Tensor:
@@ -936,9 +932,6 @@ class MiniMaxText01Model(nn.Module):
             kwargs["request_ids_to_seq_ids"] = {}
         if "finished_requests_ids" not in kwargs:
             kwargs["finished_requests_ids"] = []
-
-        if kv_caches is None:
-            kv_caches = []
 
         (
             minimax_cache_tensors,
@@ -961,16 +954,11 @@ class MiniMaxText01Model(nn.Module):
             hidden_states = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
 
-        kv_cache_index = 0
         minimax_cache_index = 0
         attn_metadata.rotary_emb = self.rotary_emb
         for i in range(self.start_layer, self.end_layer):
             layer = self.layers[i]
             _caches = None
-            if isinstance(layer.self_attn, MiniMaxText01Attention
-                          ) and kv_caches and kv_cache_index < len(kv_caches):
-                _caches = kv_caches[kv_cache_index]
-                kv_cache_index += 1
             if isinstance(layer.self_attn, MiniMaxText01LinearAttention):
                 current_state_layer = minimax_cache_index
                 _caches = minimax_cache_params.at_layer_idx(

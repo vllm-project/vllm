@@ -42,6 +42,8 @@ __all__ = [
     "MedusaConfig",
     "EAGLEConfig",
     "ExaoneConfig",
+    "MiniMaxText01Config",
+    "MiniMaxVL01Config",
     "MllamaConfig",
     "MLPSpeculatorConfig",
     "MoonViTConfig",
@@ -53,6 +55,4 @@ __all__ = [
     "SolarConfig",
     "Telechat2Config",
     "UltravoxConfig",
-    "MiniMaxText01Config",
-    "MiniMaxVL01Config",
 ]

@@ -274,6 +274,7 @@ def _test_processing_correctness_mistral(
     "nvidia/NVLM-D-72B",
     "google/paligemma-3b-mix-224",
     "google/paligemma2-3b-ft-docci-448",
+    "MiniMaxAi/MiniMax-VL-01",
     "mistralai/Pixtral-12B-2409",
     "mistral-community/pixtral-12b",
     "Qwen/Qwen-VL-Chat",
@@ -283,7 +284,6 @@ def _test_processing_correctness_mistral(
     "Skywork/Skywork-R1V-38B",
     "fixie-ai/ultravox-v0_5-llama-3_2-1b",
     "openai/whisper-large-v3",
-    "MiniMaxAi/MiniMax-VL-01",
 ])
 @pytest.mark.parametrize("hit_rate", [0.3, 0.5, 1.0])
 @pytest.mark.parametrize("num_batches", [32])

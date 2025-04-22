@@ -23,13 +23,12 @@ from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import MultiModalFieldConfig, MultiModalKwargs
 from vllm.multimodal.parse import (ImageEmbeddingItems, ImageProcessorItems,
-                                   ImageSize, MultiModalDataItems)
+                                   MultiModalDataItems)
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
                                         BaseProcessingInfo, PromptReplacement,
                                         PromptUpdate)
 from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
 from vllm.sequence import IntermediateTensors
-from vllm.transformers_utils.configs.minimax_vl_01 import MiniMaxVL01Config
 
 from .clip import CLIPVisionModel
 from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsPP
@@ -37,7 +36,6 @@ from .pixtral import PixtralHFVisionModel
 from .siglip import SiglipVisionModel
 from .utils import (AutoWeightsLoader, init_vllm_registered_model,
                     maybe_prefix, merge_multimodal_embeddings)
-from .vision import get_vision_encoder_info
 
 
 class MiniMaxVL01ImagePixelInputs(TypedDict):
@@ -187,73 +185,7 @@ class MiniMaxVL01LikeProcessor(Protocol):
     image_token: Final[str]
 
 
-class BaseMiniMaxVL01ProcessingInfo(BaseProcessingInfo):
-
-    def get_hf_config(self) -> MiniMaxVL01LikeConfig:
-        return self.ctx.get_hf_config(MiniMaxVL01Config)
-
-    def get_vision_encoder_info(self):
-        return get_vision_encoder_info(self.get_hf_config())
-
-    @abstractmethod
-    def get_hf_processor(self, **kwargs: object) -> MiniMaxVL01LikeProcessor:
-        raise NotImplementedError
-
-    def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
-        return {"image": None}
-
-    def get_mm_max_tokens_per_item(
-        self,
-        seq_len: int,
-        mm_counts: Mapping[str, int],
-    ) -> Mapping[str, int]:
-        return {"image": self.get_max_image_tokens()}
-
-    def _apply_feature_select_strategy(
-        self,
-        strategy: str,
-        encoder_num_image_tokens: int,
-    ) -> int:
-        if strategy == "default":
-            return encoder_num_image_tokens - 1
-        if strategy == "full":
-            return encoder_num_image_tokens
-
-        msg = f"Unexpected feature select strategy: {strategy!r}"
-        raise NotImplementedError(msg)
-
-    def get_num_image_tokens(
-        self,
-        *,
-        image_width: int,
-        image_height: int,
-    ) -> int:
-        hf_config = self.get_hf_config()
-        vision_encoder_info = self.get_vision_encoder_info()
-
-        return self._apply_feature_select_strategy(
-            hf_config.vision_feature_select_strategy,
-            vision_encoder_info.get_num_image_tokens(
-                image_width=image_width,
-                image_height=image_height,
-            ),
-        )
-
-    def get_image_size_with_most_features(self) -> ImageSize:
-        vision_encoder_info = self.get_vision_encoder_info()
-        width = height = vision_encoder_info.get_image_size()
-        return ImageSize(width=width, height=height)
-
-    def get_max_image_tokens(self) -> int:
-        target_width, target_height = self.get_image_size_with_most_features()
-
-        return self.get_num_image_tokens(
-            image_width=target_width,
-            image_height=target_height,
-        )
-
-
-_I = TypeVar("_I", bound=BaseMiniMaxVL01ProcessingInfo)
+_I = TypeVar("_I", bound=BaseProcessingInfo)
 
 
 class MiniMaxVL01DummyInputsBuilder(BaseDummyInputsBuilder[_I]):
@@ -264,6 +196,7 @@ class MiniMaxVL01DummyInputsBuilder(BaseDummyInputsBuilder[_I]):
         mm_counts: Mapping[str, int],
     ) -> ProcessorInputs:
         num_images = mm_counts.get("image", 0)
+        num_images = 0
         processor = self.info.get_hf_processor()
         image_token = processor.image_token
         target_width, target_height = \
@@ -282,7 +215,7 @@ class MiniMaxVL01DummyInputsBuilder(BaseDummyInputsBuilder[_I]):
         )
 
 
-class MiniMaxVL01ProcessingInfo(BaseMiniMaxVL01ProcessingInfo):
+class MiniMaxVL01ProcessingInfo(BaseProcessingInfo):
 
     def get_hf_processor(self, **kwargs: object):
         hf_processor = self.ctx.get_hf_processor(**kwargs)
@@ -567,6 +500,63 @@ class MiniMaxVL01ForConditionalGeneration(nn.Module, SupportsMultiModal,
                                     device=image_features.device)
         return image_features, feature_lens
 
+    def _process_vision_features(
+        self,
+        pixel_values: torch.Tensor,
+        image_sizes: Optional[list],
+        inputs_embeds: torch.Tensor,
+        input_ids: torch.Tensor,
+    ) -> torch.Tensor:
+        vision_feature_select_strategy = (
+            self.config.vision_feature_select_strategy)
+
+        if image_sizes is not None:
+            image_num_patches = [
+                image_size_to_num_patches(
+                    image_size=imsize,
+                    grid_pinpoints=self.config.image_grid_pinpoints,
+                    patch_size=self.config.vision_config.image_size,
+                ) for imsize in image_sizes
+            ]
+
+        image_features = self.vision_tower(pixel_values,
+                                           output_hidden_states=True)
+        selected_image_feature = image_features.hidden_states[
+            self.vision_feature_layer]
+
+        selected_image_feature = torch.chunk(selected_image_feature,
+                                             len(pixel_values),
+                                             dim=1)
+        selected_image_feature = torch.cat(selected_image_feature, dim=0)
+
+        if vision_feature_select_strategy == "default":
+            selected_image_feature = selected_image_feature[:, 1:]
+        elif vision_feature_select_strategy == "full":
+            selected_image_feature = selected_image_feature
+
+        image_features = self.multi_modal_projector(selected_image_feature)
+
+        if image_sizes is not None:
+            image_features = torch.split(image_features,
+                                         image_num_patches,
+                                         dim=0)
+            image_features, feature_lens = self.pack_image_features(
+                image_features,
+                image_sizes,
+                image_newline=self.image_newline,
+            )
+
+        inputs_embeds = inputs_embeds.to(image_features.dtype)
+        special_image_mask = ((input_ids == self.config.image_token_index
+                               ).unsqueeze(-1).expand_as(inputs_embeds).to(
+                                   inputs_embeds.device))
+        image_features = image_features.to(inputs_embeds.device,
+                                           inputs_embeds.dtype)
+        inputs_embeds = inputs_embeds.masked_scatter(special_image_mask,
+                                                     image_features)
+
+        return inputs_embeds
+
     def forward(
         self,
         input_ids: torch.Tensor,
@@ -577,11 +567,6 @@ class MiniMaxVL01ForConditionalGeneration(nn.Module, SupportsMultiModal,
     ) -> Union[torch.Tensor, IntermediateTensors]:
         pixel_values = kwargs.pop("pixel_values", None)
         image_sizes = kwargs.pop("image_sizes", None)
-        past_key_values = kwargs.pop("past_key_values", None)
-        use_cache = kwargs.pop("use_cache", False)
-        output_hidden_states = kwargs.pop("output_hidden_states", True)
-        vision_feature_select_strategy = (
-            self.config.vision_feature_select_strategy)
         attention_mask = kwargs.pop("attention_mask", None)
         position_ids = kwargs.pop("position_ids", None)
         kv_caches = kwargs.pop("kv_caches", None)
@@ -595,94 +580,17 @@ class MiniMaxVL01ForConditionalGeneration(nn.Module, SupportsMultiModal,
             # 2. Merge text and images
             if pixel_values is not None and input_ids.shape[
                     1] != 1 and pixel_values.size(0) > 0:
-                # ! infer image_num_patches from image_sizes
-                if image_sizes is not None:
-                    image_num_patches = [
-                        image_size_to_num_patches(
-                            image_size=imsize,
-                            grid_pinpoints=self.config.image_grid_pinpoints,
-                            patch_size=self.config.vision_config.image_size,
-                        ) for imsize in image_sizes
-                    ]
-
-                image_features = self.vision_tower(pixel_values,
-                                                   output_hidden_states=True)
-                selected_image_feature = image_features.hidden_states[
-                    self.vision_feature_layer]
-
-                selected_image_feature = torch.chunk(selected_image_feature,
-                                                     len(pixel_values),
-                                                     dim=1)
-                selected_image_feature = torch.cat(selected_image_feature,
-                                                   dim=0)
-
-                if vision_feature_select_strategy == "default":
-                    selected_image_feature = selected_image_feature[:, 1:]
-                elif vision_feature_select_strategy == "full":
-                    selected_image_feature = selected_image_feature
-
-                image_features = self.multi_modal_projector(
-                    selected_image_feature)
-                if image_sizes is not None:
-                    image_features = torch.split(image_features,
-                                                 image_num_patches,
-                                                 dim=0)
-
-                    image_features, feature_lens = self.pack_image_features(
-                        image_features,
-                        image_sizes,
-                        image_newline=self.image_newline,
-                    )
-
-                inputs_embeds = inputs_embeds.to(image_features.dtype)
-                special_image_mask = (
-                    (input_ids == self.config.image_token_index
-                     ).unsqueeze(-1).expand_as(inputs_embeds).to(
-                         inputs_embeds.device))
-                image_features = image_features.to(inputs_embeds.device,
-                                                   inputs_embeds.dtype)
-                inputs_embeds = inputs_embeds.masked_scatter(
-                    special_image_mask, image_features)
-
+                inputs_embeds = self._process_vision_features(
+                    pixel_values=pixel_values,
+                    image_sizes=image_sizes,
+                    inputs_embeds=inputs_embeds,
+                    input_ids=input_ids,
+                )
             # pixel_values is not None but is empty ---> text only cases
             elif pixel_values is not None and input_ids.shape[
                     1] != 1 and pixel_values.size(0) == 0:
                 # there are no images
                 pass
-
-            elif (past_key_values is not None and pixel_values is not None
-                  and input_ids.shape[1] == 1):
-                first_layer_past_key_value = past_key_values[0][0][:, :, :, 0]
-
-                batch_index, non_attended_tokens = torch.where(
-                    first_layer_past_key_value.float().sum(-2) == 0)
-
-                # Get the target length
-                target_length = input_ids.shape[1]
-                past_length = first_layer_past_key_value.shape[-1]
-
-                extended_attention_mask = torch.ones(
-                    (attention_mask.shape[0], past_length),
-                    dtype=attention_mask.dtype,
-                    device=attention_mask.device,
-                )
-
-                valid_indices = non_attended_tokens < (
-                    extended_attention_mask.size(-1))
-                new_batch_index = batch_index[valid_indices]
-                new_non_attended_tokens = non_attended_tokens[valid_indices]
-
-                # Zero-out the places where we don't need to attend
-                extended_attention_mask[new_batch_index,
-                                        new_non_attended_tokens] = 0
-
-                attention_mask = torch.cat(
-                    (extended_attention_mask, attention_mask[:,
-                                                             -target_length:]),
-                    dim=1)
-
-                position_ids = torch.sum(attention_mask,
-                                         dim=1).unsqueeze(-1) - 1
 
         hidden_states = self.language_model.model(
             input_ids=input_ids,
@@ -691,10 +599,7 @@ class MiniMaxVL01ForConditionalGeneration(nn.Module, SupportsMultiModal,
             kv_caches=kv_caches,
             attention_mask=attention_mask,
             position_ids=position_ids,
-            past_key_values=past_key_values,
             inputs_embeds=inputs_embeds,
-            use_cache=use_cache,
-            output_hidden_states=output_hidden_states,
         )
 
         return hidden_states

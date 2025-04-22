@@ -75,6 +75,8 @@ _CONFIG_REGISTRY: Dict[str, Type[PretrainedConfig]] = {
     "exaone": ExaoneConfig,
     "h2ovl_chat": H2OVLChatConfig,
     "internvl_chat": InternVLChatConfig,
+    "minimax_text_01": MiniMaxText01Config,
+    "minimax_vl_01": MiniMaxVL01Config,
     "nemotron": NemotronConfig,
     "NVLM_D": NVLM_D_Config,
     "olmo2": Olmo2Config,
@@ -82,8 +84,6 @@ _CONFIG_REGISTRY: Dict[str, Type[PretrainedConfig]] = {
     "skywork_chat": SkyworkR1VChatConfig,
     "telechat": Telechat2Config,
     "ultravox": UltravoxConfig,
-    "minimax_text_01": MiniMaxText01Config,
-    "minimax_vl_01": MiniMaxVL01Config,
     **_CONFIG_REGISTRY_OVERRIDE_HF
 }
 
