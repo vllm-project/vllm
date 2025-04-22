@@ -43,6 +43,7 @@ from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
 
 from .utils import (gather_mm_placeholders, sanity_check_mm_encoder_outputs,
                     scatter_mm_placeholders)
+from vllm.lora.layers import BaseLayerWithLoRA
 
 if TYPE_CHECKING:
     from vllm.v1.core.sched.output import SchedulerOutput
@@ -827,6 +828,7 @@ class TPUModelRunner(LoRAModelRunnerMixin):
             model = self.load_lora_model(model, self.model_config,
                                          self.scheduler_config,
                                          self.lora_config, self.device)
+            replace_set_lora(model)
             punica_wrapper = self.lora_manager._adapter_manager.punica_wrapper
             if not self.enforce_eager:
                 punica_wrapper.mark_compiled()
@@ -1182,3 +1184,28 @@ def _create_dummy_scheduled_tokens(total_tokens: int,
     tokens[-1] += leftover_tokens
 
     return tokens
+
+def replace_set_lora(model):
+    def _tpu_set_lora(
+        self,
+        idx: int, 
+        lora_a: torch.Tensor,
+        lora_b: torch.Tensor,
+        embeddings_tensor: Optional[torch.Tensor],
+        bias: Optional[torch.Tensor] = None
+    ):
+        xm.mark_step()
+        index = torch.tensor([idx], dtype=torch.int32, device="xla")
+        self._original_set_lora(index, lora_a, lora_b, embeddings_tensor, bias)
+        xm.mark_step()
+
+    def _tpu_reset_lora(self, idx: int):
+        index = torch.tensor([idx], dtype=torch.int32, device="xla")
+        self._original_reset_lora(index)
+
+    for _, module in model.named_modules():
+        if isinstance(module, BaseLayerWithLoRA):
+            module._original_set_lora = module.set_lora
+            module._original_reset_lora = module.reset_lora
+            module.set_lora = _tpu_set_lora.__get__(module, module.__class__)
+            module.reset_lora = _tpu_reset_lora.__get__(module, module.__class__)
