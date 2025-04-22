@@ -654,8 +654,6 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[T], Generic[T]):
                 attn_state.context_chunk_workspace_size
             self.page_size = self.runner.block_size
 
-        self.fa_aot_schedule = (get_flash_attn_version() == 3)
-
     def prepare(self):
         self.slot_mapping: List[int] = []
         self.prefill_seq_lens: List[int] = []
