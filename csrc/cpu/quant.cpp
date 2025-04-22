@@ -323,8 +323,7 @@ template <bool AZP, typename scalar_t>
 void static_scaled_int8_quant_impl(const scalar_t* input, int8_t* output,
                                    const float* scale, const int32_t* azp,
                                    const int num_tokens,
-                                   const int hidden_size){
-
+                                   const int hidden_size) {
   using load_vec_t = typename KernelVecType<scalar_t>::load_vec_type;
   using cvt_vec_t = typename KernelVecType<scalar_t>::cvt_vec_type;
   constexpr int vec_elem_num = load_vec_t::VEC_ELEM_NUM;
@@ -337,7 +336,6 @@ void static_scaled_int8_quant_impl(const scalar_t* input, int8_t* output,
   const cvt_vec_t inv_scale(1.0 / *scale);
   const cvt_vec_t i8_min_vec(i8_min);
   const cvt_vec_t i8_max_vec(i8_max);
-
 
   cvt_vec_t zp_vec;
   if constexpr (AZP) {
@@ -471,9 +469,7 @@ template <bool PerChannel, typename scalar_t>
 void static_quant_epilogue(const float* input, scalar_t* output,
                            const float a_scale, const float* b_scale,
                            const int32_t* azp_with_adj, const int num_tokens,
-                           const int hidden_size){
-
-
+                           const int hidden_size) {
   CPU_KERNEL_GUARD_IN(dynamic_output_scale_impl)
   using load_vec_t = typename KernelVecType<scalar_t>::load_vec_type;
   using azp_adj_load_vec_t =
@@ -481,20 +477,17 @@ void static_quant_epilogue(const float* input, scalar_t* output,
   using cvt_vec_t = typename KernelVecType<scalar_t>::cvt_vec_type;
   constexpr int vec_elem_num = load_vec_t::VEC_ELEM_NUM;
 
-
   #pragma omp parallel for
   for (int i = 0; i < num_tokens; ++i) {
     cvt_vec_t a_scale_vec(a_scale);
     cvt_vec_t b_scale_vec(*b_scale);
     cvt_vec_t scale_vec = a_scale_vec * b_scale_vec;
 
-
     int j = 0;
     for (; j < hidden_size - vec_elem_num; j += vec_elem_num) {
       cvt_vec_t elems_fp32(input + i * hidden_size + j);
       azp_adj_load_vec_t azp_adj_vec(azp_with_adj + j);
       cvt_vec_t azp_adj_fp32(azp_adj_vec);
-
 
       if constexpr (PerChannel) {
         b_scale_vec = cvt_vec_t(b_scale + j);
@@ -525,7 +518,7 @@ void dynamic_quant_epilogue(const float* input, scalar_t* output,
                             const float* a_scale, const float* b_scale,
                             const int32_t* azp, const int32_t* azp_adj,
                             const scalar_t* bias, const int num_tokens,
-                            const int hidden_size){
+                            const int hidden_size) {
   CPU_KERNEL_GUARD_IN(dynamic_quant_epilogue)
   using load_vec_t = typename KernelVecType<scalar_t>::load_vec_type;
   using azp_adj_load_vec_t =
@@ -605,7 +598,8 @@ void static_scaled_int8_quant_impl(const scalar_t* input, int8_t* output,
                                    const float* scale, const int32_t* azp,
                                    const int num_tokens,
                                    const int hidden_size) {
-  TORCH_CHECK(false, "static_scaled_int8_quant_impl requires AVX512/powerpc64 support.")
+  TORCH_CHECK(
+      false, "static_scaled_int8_quant_impl requires AVX512/powerpc64 support.")
 }
 
 template <typename scalar_t>
@@ -613,7 +607,9 @@ void dynamic_scaled_int8_quant_impl(const scalar_t* input, int8_t* output,
                                     float* scale, int32_t* azp,
                                     const int num_tokens,
                                     const int hidden_size) {
-  TORCH_CHECK(false, "dynamic_scaled_int8_quant_impl requires AVX512/powerpc64 support.")
+  TORCH_CHECK(
+      false,
+      "dynamic_scaled_int8_quant_impl requires AVX512/powerpc64 support.")
 }
 
 template <bool PerChannel, typename scalar_t>
@@ -630,7 +626,8 @@ void dynamic_quant_epilogue(const float* input, scalar_t* output,
                             const int32_t* azp, const int32_t* azp_with_adj,
                             const scalar_t* bias, const int num_tokens,
                             const int hidden_size) {
-  TORCH_CHECK(false, "dynamic_quant_epilogue requires AVX512/powerpc64 support.")
+  TORCH_CHECK(false,
+              "dynamic_quant_epilogue requires AVX512/powerpc64 support.")
 }
 #endif
 }  // namespace
@@ -894,21 +891,21 @@ void dynamic_scaled_int8_quant(
 }
 
 #if defined(__powerpc64__)
-void int8_scaled_mm_ppc64le(torch::Tensor& c,               // [M, OC], row-major
-  const torch::Tensor& a,         // [M, IC], row-major
-  const torch::Tensor& b,         // [IC, OC], column-major
-  const torch::Tensor& a_scales, 
-  const torch::Tensor& b_scales,  
-  const std::optional<torch::Tensor>& bias  // [OC]
-){
+void int8_scaled_mm_ppc64le(torch::Tensor& c,        // [M, OC], row-major
+                            const torch::Tensor& a,  // [M, IC], row-major
+                            const torch::Tensor& b,  // [IC, OC], column-major
+                            const torch::Tensor& a_scales,
+                            const torch::Tensor& b_scales,
+                            const std::optional<torch::Tensor>& bias  // [OC]
+) {
   CPU_KERNEL_GUARD_IN(cutlass_scaled_mm)
   // Checks for conformality
   TORCH_CHECK(a.dtype() == torch::kInt8 && b.dtype() == torch::kInt8,
-  "int8_scaled_mm_ppc64le only supports INT8 inputs.");
+              "int8_scaled_mm_ppc64le only supports INT8 inputs.");
   TORCH_CHECK(a.dim() == 2 && b.dim() == 2 && c.dim() == 2);
   TORCH_CHECK(c.size(0) == a.size(0) && a.size(1) == b.size(0) &&
-  b.size(1) == c.size(1));
-  //We dont need this
+              b.size(1) == c.size(1));
+  // We dont need this
   TORCH_CHECK(a_scales.numel() == 1 || a_scales.numel() == a.size(0));
   TORCH_CHECK(b_scales.numel() == 1 || b_scales.numel() == b.size(1));
 
@@ -916,36 +913,34 @@ void int8_scaled_mm_ppc64le(torch::Tensor& c,               // [M, OC], row-majo
   TORCH_CHECK(a.stride(1) == 1 && c.stride(1) == 1);  // Row-major
   TORCH_CHECK(b.stride(0) == 1);                      // Column-major
   TORCH_CHECK(c.stride(0) % 16 == 0 &&
-  b.stride(1) % 16 == 0);  // 16 Byte Alignment
+              b.stride(1) % 16 == 0);  // 16 Byte Alignment
   TORCH_CHECK(a_scales.is_contiguous() && b_scales.is_contiguous());
 
   if (bias) {
-  TORCH_CHECK(bias->numel() == b.size(1) && bias->is_contiguous() &&
-  bias->dim() == 1);
+    TORCH_CHECK(bias->numel() == b.size(1) && bias->is_contiguous() &&
+                bias->dim() == 1);
   }
   VLLM_DISPATCH_FLOATING_TYPES(c.scalar_type(), "int8_scaled_mm_ppc64le", [&] {
-    torch::Tensor tmp_fp32_out =
-    torch::empty_like(c, ::at::ScalarType::Float);
+    torch::Tensor tmp_fp32_out = torch::empty_like(c, ::at::ScalarType::Float);
     // Compute C_inter=s_b * (A@B)
     DNNLPrimitiveHelper<true>::gemm_s8s8_jit<float, void>(
-    a.data_ptr<int8_t>(), b.data_ptr<int8_t>(),
-    tmp_fp32_out.data_ptr<float>(), nullptr, a.size(0), b.size(1),
-    a.size(1), nullptr, b_scales.data_ptr<float>(), 0, b_scales.numel());
+        a.data_ptr<int8_t>(), b.data_ptr<int8_t>(),
+        tmp_fp32_out.data_ptr<float>(), nullptr, a.size(0), b.size(1),
+        a.size(1), nullptr, b_scales.data_ptr<float>(), 0, b_scales.numel());
     if (bias.has_value()) {
-    // Compute C=s_a * C_inter + bias
-    dynamic_quant_epilogue<false, true, true>(
-    tmp_fp32_out.data_ptr<float>(), c.data_ptr<scalar_t>(),
-    a_scales.data_ptr<float>(), nullptr, nullptr, nullptr,
-    bias->data_ptr<scalar_t>(), c.size(0), c.size(1));
+      // Compute C=s_a * C_inter + bias
+      dynamic_quant_epilogue<false, true, true>(
+          tmp_fp32_out.data_ptr<float>(), c.data_ptr<scalar_t>(),
+          a_scales.data_ptr<float>(), nullptr, nullptr, nullptr,
+          bias->data_ptr<scalar_t>(), c.size(0), c.size(1));
     } else {
-    // Compute C=s_a * C_inter
-    dynamic_quant_epilogue<false, true, false, scalar_t>(
-    tmp_fp32_out.data_ptr<float>(), c.data_ptr<scalar_t>(),
-    a_scales.data_ptr<float>(), nullptr, nullptr, nullptr, nullptr,
-    c.size(0), c.size(1));
+      // Compute C=s_a * C_inter
+      dynamic_quant_epilogue<false, true, false, scalar_t>(
+          tmp_fp32_out.data_ptr<float>(), c.data_ptr<scalar_t>(),
+          a_scales.data_ptr<float>(), nullptr, nullptr, nullptr, nullptr,
+          c.size(0), c.size(1));
     }
   });
 }
 
 #endif
-

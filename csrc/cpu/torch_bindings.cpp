@@ -20,9 +20,10 @@ void int8_scaled_mm_azp(torch::Tensor& c, const torch::Tensor& a,
 
 #if defined(__powerpc64__)
 void int8_scaled_mm_ppc64le(torch::Tensor& c, const torch::Tensor& a,
-    const torch::Tensor& b, const torch::Tensor& a_scales,
-    const torch::Tensor& b_scales,
-    const std::optional<torch::Tensor>& bias);
+                            const torch::Tensor& b,
+                            const torch::Tensor& a_scales,
+                            const torch::Tensor& b_scales,
+                            const std::optional<torch::Tensor>& bias);
 #endif
 
 void mla_decode_kvcache(torch::Tensor& out, torch::Tensor& query,
