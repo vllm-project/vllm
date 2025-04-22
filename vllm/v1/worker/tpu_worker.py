@@ -157,8 +157,9 @@ class TPUWorker:
             self.vllm_config.compilation_config.static_forward_context,
             runner_kv_caches)
 
-        self.model_runner._dummy_run(
-            self.scheduler_config.max_num_batched_tokens)
+        with self.model_runner.maybe_setup_dummy_loras(self.lora_config):
+            self.model_runner._dummy_run(
+                self.scheduler_config.max_num_batched_tokens)
 
         # Synchronize before measuring the memory usage.
         xm.wait_device_ops()

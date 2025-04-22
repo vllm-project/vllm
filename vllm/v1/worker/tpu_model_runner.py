@@ -889,7 +889,7 @@ class TPUModelRunner(LoRAModelRunnerMixin):
         torch._dynamo.mark_dynamic(position_ids, 0)
         torch._dynamo.mark_dynamic(attn_metadata.slot_mapping, 0)
 
-        with self.maybe_dummy_run_with_lora(
+        with self.maybe_select_dummy_loras(
                 self.lora_config,
                 np.array([num_tokens], dtype=np.int32)), set_forward_context(
                     attn_metadata, self.vllm_config, 0):
@@ -961,7 +961,7 @@ class TPUModelRunner(LoRAModelRunnerMixin):
                         generate_params_if_all_greedy,
                     ))
                 sampling_metadata.all_greedy = all_greedy
-                with self.maybe_dummy_run_with_lora(
+                with self.maybe_select_dummy_loras(
                         self.lora_config, np.array([num_reqs],
                                                    dtype=np.int32)):
                     self.sample_from_hidden(dummy_hidden, sampling_metadata)
@@ -976,9 +976,10 @@ class TPUModelRunner(LoRAModelRunnerMixin):
         Precompile all the subgraphs with possible input shapes.
         """
         # TODO: precompile encoder
-        self._precompile_backbone()
-        self._precompile_select_hidden_states()
-        self._precompile_sample_from_hidden()
+        with self.maybe_setup_dummy_loras(self.lora_config):
+            self._precompile_backbone()
+            self._precompile_select_hidden_states()
+            self._precompile_sample_from_hidden()
 
     def initialize_kv_cache(self, kv_cache_config: KVCacheConfig) -> None:
         """
