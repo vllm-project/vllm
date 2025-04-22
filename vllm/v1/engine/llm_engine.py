@@ -21,7 +21,8 @@ from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import SamplingParams
 from vllm.transformers_utils.tokenizer_group import (
     BaseTokenizerGroup, init_tokenizer_from_configs)
-from vllm.usage.usage_lib import UsageContext
+from vllm.usage.usage_lib import (UsageContext, is_usage_stats_enabled,
+                                  usage_message)
 from vllm.utils import Device
 from vllm.v1.engine.core_client import EngineCoreClient
 from vllm.v1.engine.output_processor import OutputProcessor
@@ -98,6 +99,44 @@ class LLMEngine:
         if not multiprocess_mode:
             # for v0 compatibility
             self.model_executor = self.engine_core.engine_core.model_executor  # type: ignore
+        
+        # If usage stat is enabled, collect relevant info.
+        if is_usage_stats_enabled():
+            from vllm.model_executor.model_loader import (
+                get_architecture_class_name)
+            usage_message.report_usage(
+                get_architecture_class_name(self.model_config),
+                usage_context,
+                extra_kvs={
+                    # Common configuration
+                    "dtype":
+                    str(self.model_config.dtype),
+                    "tensor_parallel_size":
+                    parallel_config.tensor_parallel_size,
+                    "block_size":
+                    self.cache_config.block_size,
+                    "gpu_memory_utilization":
+                    self.cache_config.gpu_memory_utilization,
+
+                    # Quantization
+                    "quantization":
+                    self.model_config.quantization,
+                    "kv_cache_dtype":
+                    str(self.cache_config.cache_dtype),
+
+                    # Feature flags
+                    "enable_lora":
+                    bool(vllm_config.lora_config),
+                    "enable_prompt_adapter":
+                    bool(vllm_config.prompt_adapter_config),
+                    "enable_prefix_caching":
+                    self.cache_config.enable_prefix_caching,
+                    "enforce_eager":
+                    self.model_config.enforce_eager,
+                    "disable_custom_all_reduce":
+                    parallel_config.disable_custom_all_reduce,
+                })
+
 
     @classmethod
     def from_vllm_config(
