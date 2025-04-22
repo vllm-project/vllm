@@ -930,7 +930,6 @@ def attn_fwd(
                             p_descale_ptrs = p_descale_ptr + off_h_q
 
                 if USE_BIAS:
-                    # Note: might get large enough to overflow on some configs
                     bias_offset = off_h_q * tl.cast(stride_bh, tl.int64)
                     bias_ptrs = (
                         bias + bias_offset +
