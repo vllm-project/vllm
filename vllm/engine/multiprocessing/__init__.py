@@ -133,8 +133,9 @@ class RPCSleepRequest(Enum):
     SLEEP_LEVEL_2 = 2
 
 
-class RPCWakeUpRequest(Enum):
-    WAKE_UP = 1
+@dataclass
+class RPCWakeUpRequest:
+    tags: Optional[list[str]] = None
 
 
 @dataclass

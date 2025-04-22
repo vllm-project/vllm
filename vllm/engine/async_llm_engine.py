@@ -1167,6 +1167,10 @@ class AsyncLLMEngine(EngineClient):
                                             exception=asyncio.CancelledError,
                                             verbose=self.log_requests)
 
+    async def get_vllm_config(self) -> VllmConfig:
+        """Get the vllm configuration of the vLLM engine."""
+        return self.engine.get_vllm_config()
+
     async def get_model_config(self) -> ModelConfig:
         """Get the model configuration of the vLLM engine."""
         return self.engine.get_model_config()
@@ -1225,8 +1229,8 @@ class AsyncLLMEngine(EngineClient):
     async def sleep(self, level: int = 1) -> None:
         self.engine.sleep(level)
 
-    async def wake_up(self) -> None:
-        self.engine.wake_up()
+    async def wake_up(self, tags: Optional[list[str]] = None) -> None:
+        self.engine.wake_up(tags)
 
     async def is_sleeping(self) -> bool:
         return self.engine.is_sleeping()
