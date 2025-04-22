@@ -141,8 +141,36 @@ class RocmPlatform(Platform):
                              kv_cache_dtype, block_size, use_v1,
                              use_mla) -> str:
         if use_mla:
-            logger.info("Using Triton MLA backend.")
-            return "vllm.attention.backends.triton_mla.TritonMLABackend"
+            from vllm.attention.backends.rocm_aiter_mla import (
+                is_aiter_mla_enabled)
+
+            if selected_backend is None:
+                selected_backend = (_Backend.ROCM_AITER_MLA if
+                                    is_aiter_mla_enabled() or block_size == 1
+                                    else _Backend.TRITON_MLA)
+
+            if selected_backend == _Backend.TRITON_MLA:
+                if block_size != 1:
+                    logger.info("Using Triton MLA backend.")
+                    return "vllm.attention.backends.triton_mla.TritonMLABackend"  # noqa: E501
+                else:
+                    raise ValueError(
+                        f" The selected backend, {selected_backend.name},"
+                        f"does not support block size {block_size}.")
+            elif selected_backend == _Backend.ROCM_AITER_MLA:
+                if block_size == 1:
+                    logger.info("Using AITER MLA backend.")
+                    return "vllm.attention.backends.rocm_aiter_mla.AiterMLABackend"  # noqa: E501
+                else:
+                    raise ValueError(
+                        f" The selected backend, {selected_backend.name},"
+                        f"does not support block size {block_size}."
+                        "(currently only supports block size 1)")
+            else:
+                raise ValueError(
+                    f" The selected backend, {selected_backend.name},"
+                    f"is not MLA type while requested for MLA backend.")
+
         selected_backend = (_Backend.ROCM_FLASH if selected_backend
                             == _Backend.FLASH_ATTN else selected_backend)
         if envs.VLLM_USE_V1:

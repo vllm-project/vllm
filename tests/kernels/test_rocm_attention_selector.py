@@ -28,7 +28,34 @@ def test_selector(monkeypatch: pytest.MonkeyPatch):
         assert (backend.get_name() == "ROCM_FLASH"
                 or backend.get_name() == "TRITON_ATTN_VLLM_V1")
 
-        # mla test for deepseek related
+        # MLA test for deepseek related
+
+        # change the attention backend to triton MLA
+        m.setenv(STR_BACKEND_ENV_VAR, "TRITON_MLA")
         backend = get_attn_backend(576, torch.bfloat16, "auto", 16, False,
                                    False, True)
         assert backend.get_name() == "TRITON_MLA"
+
+        # If attention backend is None
+        # If use_mla is true
+        # The selected backend is triton MLA
+        m.setenv(STR_BACKEND_ENV_VAR, None)
+        backend = get_attn_backend(576, torch.bfloat16, "auto", 16, False,
+                                   False, True)
+        assert backend.get_name() == "TRITON_MLA"
+
+        # change the attention backend to AITER MLA
+        m.setenv(STR_BACKEND_ENV_VAR, "ROCM_AITER_MLA")
+        backend = get_attn_backend(576, torch.bfloat16, "auto", 1, False,
+                                   False, True)
+        assert backend.get_name() == "ROCM_AITER_MLA"
+
+        # If attention backend is None
+        # If use_mla is true
+        # If VLLM_ROCM_USE_AITER is enabled
+        # The selected backend is ROCM_AITER_MLA
+        m.setenv(STR_BACKEND_ENV_VAR, None)
+        m.setenv("VLLM_ROCM_USE_AITER", "1")
+        backend = get_attn_backend(576, torch.bfloat16, "auto", 1, False,
+                                   False, True)
+        assert backend.get_name() == "ROCM_AITER_MLA"
