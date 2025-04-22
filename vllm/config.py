@@ -1248,7 +1248,7 @@ class ModelConfig:
                 or getattr(self.hf_config, "is_matryoshka", False))
 
 
-BlockSize = Literal[8, 16, 32, 64, 128]
+BlockSize = Literal[1, 8, 16, 32, 64, 128]
 CacheDType = Literal["auto", "fp8", "fp8_e4m3", "fp8_e5m2"]
 PrefixCachingHashAlgo = Literal["builtin", "sha256"]
 
