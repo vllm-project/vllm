@@ -6,6 +6,7 @@ import os
 from transformers import AutoTokenizer
 
 from vllm import LLM, SamplingParams
+from vllm.v1.metrics.reader import Counter, Vector
 
 
 def load_prompts(dataset_path, num_prompts):
@@ -92,30 +93,37 @@ def main():
 
     sampling_params = SamplingParams(temperature=args.temp, max_tokens=256)
 
-    outputs = llm.generate(prompt_token_ids=prompt_ids,
-                           sampling_params=sampling_params)
+    _ = llm.generate(prompt_token_ids=prompt_ids,
+                     sampling_params=sampling_params)
 
-    if not hasattr(outputs, "metrics") or outputs.metrics is None:
+    try:
+        metrics = llm.get_metrics()
+    except AssertionError:
+        # Presumably V0 engine, metrics not supported
         return
 
-    # calculate the average number of accepted tokens per forward pass, +1 is
-    # to account for the token from the target model that's always going to be
-    # accepted
-    acceptance_counts = [0] * (args.num_spec_tokens + 1)
-    for output in outputs:
-        for step, count in enumerate(
-                output.metrics.spec_token_acceptance_counts):
-            acceptance_counts[step] += count
+    num_drafts = num_accepted = 0
+    acceptance_counts = [0] * args.num_spec_tokens
+    for metric in metrics:
+        if metric.name == "vllm:spec_decode_num_drafts":
+            assert isinstance(metric, Counter)
+            num_drafts += metric.value
+        elif metric.name == "vllm:spec_decode_num_accepted_tokens":
+            assert isinstance(metric, Counter)
+            num_accepted += metric.value
+        elif metric.name == "vllm:spec_decode_num_accepted_tokens_per_pos":
+            assert isinstance(metric, Vector)
+            for pos in range(len(metric.values)):
+                acceptance_counts[pos] += metric.values[pos]
 
     print("-" * 50)
-    print(f"mean acceptance length: \
-        {sum(acceptance_counts) / acceptance_counts[0]:.2f}")
+    print(f"mean acceptance length: {num_accepted / num_drafts:.2f}")
     print("-" * 50)
 
     # print acceptance at each token position
     for i in range(len(acceptance_counts)):
-        print(f"acceptance at token {i}:"
-              f"{acceptance_counts[i] / (acceptance_counts[0]):.2f}")
+        print(f"acceptance at token {i}: "
+              f"{acceptance_counts[i] / num_drafts:.2f}")
 
 
 if __name__ == "__main__":
