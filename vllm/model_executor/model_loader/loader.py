@@ -703,7 +703,7 @@ class ShardedStateLoader(BaseModelLoader):
 
             filepaths = []
             if is_s3(local_model_path):
-                file_pattern = f"*{self.pattern.format(rank=rank, part=" * ")}"
+                file_pattern = f"*{self.pattern.format(rank=rank, part=' * ')}"
                 filepaths = s3_glob(path=local_model_path,
                                     allow_pattern=[file_pattern])
             else:
