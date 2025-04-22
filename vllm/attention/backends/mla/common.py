@@ -786,8 +786,8 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[T], Generic[T]):
         num_seqs = len(seq_lens)
         if use_captured_graph:
             self.slot_mapping.extend([PAD_SLOT_ID] * cuda_graph_pad_size)
-            self.block_tables.extend(self.__class__.BLOCK_TABLE_EXTENDER *
-                                     cuda_graph_pad_size)
+            self.block_tables.extend([] * cuda_graph_pad_size)
+            query_start_loc.extend([query_start_loc[-1]] * cuda_graph_pad_size)
             num_decode_tokens = batch_size - self.num_prefill_tokens
 
             block_tables = self._get_graph_runner_block_tables(

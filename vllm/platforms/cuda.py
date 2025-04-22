@@ -237,11 +237,6 @@ class CudaPlatformBase(Platform):
             use_triton = selected_backend == _Backend.TRITON_MLA or (
                 selected_backend is None)
 
-            print("use_cutlassmla", use_cutlassmla)
-            print("use_flashmla", use_flashmla)
-            print("use_flashattn", use_flashattn)
-            print("use_triton", use_triton)
-
             def _get_version(name, import_suffix) -> str:
                 if use_v1:
                     logger.info_once("Using %s backend on V1 engine.", name)

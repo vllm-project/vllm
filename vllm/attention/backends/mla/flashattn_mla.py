@@ -42,6 +42,10 @@ class FlashAttnMLABackend(MLACommonBackend):
     def get_impl_cls() -> type["FlashAttnMLAImpl"]:
         return FlashAttnMLAImpl
 
+    @staticmethod
+    def get_state_cls() -> type["FlashAttnMLAState"]:
+        return FlashAttnMLAState
+
 
 @dataclass
 class FlashAttnMLAMetadata(MLACommonMetadata):
@@ -77,6 +81,7 @@ class FlashAttnMLAMetadataBuilder(
             self.runner.parallel_config)
         self.fa_aot_schedule = (get_flash_attn_version() == 3)
         self.mla_dims = get_mla_dims(self.runner.model_config)
+        self.page_size = self.runner.block_size
 
     def build(self, seq_lens: List[int], query_lens: List[int],
               cuda_graph_pad_size: int, batch_size: int):
@@ -138,6 +143,9 @@ class FlashAttnMLAState(MLACommonState[FlashAttnMLAMetadata]):
         # Run a dummy `get_scheduler_metadata` so we can get the right shapes
         self._graph_scheduler_metadata = self._dummy_scheduler_metadata(
             max_batch_size)
+        self._graph_query_start_loc = torch.arange(max_batch_size + 1,
+                                                   dtype=torch.int32,
+                                                   device=self.runner.device)
 
         with super().graph_capture(max_batch_size):
             yield
@@ -158,6 +166,8 @@ class FlashAttnMLAState(MLACommonState[FlashAttnMLAMetadata]):
 
         metadata.decode_scheduler_metadata=\
             self._graph_scheduler_metadata[:metadata_size]
+        metadata.query_start_loc=\
+            self._graph_query_start_loc[:batch_size + 1]
 
         return metadata
 
@@ -168,6 +178,8 @@ class FlashAttnMLAState(MLACommonState[FlashAttnMLAMetadata]):
             attn_metadata, is_encoder_decoder_model)
         input_buffers["decode_scheduler_metadata"] = \
                 attn_metadata.decode_metadata.decode_scheduler_metadata
+        input_buffers["query_start_loc"] = \
+                attn_metadata.decode_metadata.query_start_loc
 
         return input_buffers
 
@@ -180,6 +192,8 @@ class FlashAttnMLAState(MLACommonState[FlashAttnMLAMetadata]):
 
         input_buffers["decode_scheduler_metadata"].copy_(
             attn_metadata.decode_metadata.decode_scheduler_metadata)
+        input_buffers["query_start_loc"].copy_(
+            attn_metadata.decode_metadata.query_start_loc)
 
 
 class FlashAttnMLAImpl(MLACommonImpl[MLACommonMetadata]):
@@ -232,7 +246,7 @@ class FlashAttnMLAImpl(MLACommonImpl[MLACommonMetadata]):
         if self.kv_cache_dtype.startswith("fp8"):
             raise NotImplementedError("FP8 FlashMLA not yet supported")
 
-        decode_meta = attn_metadata.decode
+        decode_meta = attn_metadata.decode_metadata
         assert decode_meta is not None
 
         kv_c_cache = kv_c_and_k_pe_cache[..., :self.kv_lora_rank]
@@ -243,15 +257,15 @@ class FlashAttnMLAImpl(MLACommonImpl[MLACommonMetadata]):
             k=kv_pe_cache.unsqueeze(-2),  # Add head dim of 1
             v=kv_c_cache.unsqueeze(-2),  # Add head dim of 1
             q_v=q_nope,
-            max_seqlen_q=decode_meta.max_query_len,
+            max_seqlen_q=decode_meta.max_decode_query_len,
             cu_seqlens_q=decode_meta.query_start_loc,
-            max_seqlen_k=decode_meta.max_seq_len,
-            seqused_k=decode_meta.seq_lens,
-            block_table=decode_meta.block_table,
+            max_seqlen_k=decode_meta.max_decode_seq_len,
+            seqused_k=decode_meta.seq_lens_tensor,
+            block_table=decode_meta.block_tables,
             softmax_scale=self.scale,
             causal=True,
             fa_version=3,  # only version 3 is supported
-            scheduler_metadata=decode_meta.scheduler_metadata,
+            scheduler_metadata=decode_meta.decode_scheduler_metadata,
         )
 
         return self._v_up_proj_and_o_proj(o)
