@@ -766,7 +766,7 @@ class EngineArgs:
                             help=('Maximum number of forward steps per '
                                   'scheduler call.'))
 
-        # Sppeculative arguments
+        # Speculative arguments
         speculative_group = parser.add_argument_group(
             title="SpeculativeConfig",
             description=SpeculativeConfig.__doc__,
