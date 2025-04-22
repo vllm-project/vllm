@@ -17,7 +17,7 @@ The following parameters are supported, which must be added as extra parameters:
 - `guided_grammar`: the output will follow the context free grammar.
 - `guided_whitespace_pattern`: used to override the default whitespace pattern for guided json decoding.
 - `guided_decoding_backend`: used to select the guided decoding backend to use.
-- `guided_decofing_backend_options`: backend-specific options can be supplied in a list. For example `["no-fallback"]` will not allow vLLM to fallback to a different backend on error.
+- `guided_decoding_backend_options`: backend-specific options can be supplied in a list. For example `["no-fallback"]` will not allow vLLM to fallback to a different backend on error.
 
 You can see the complete list of supported parameters on the [OpenAI-Compatible Server](#openai-compatible-server)page.
 
