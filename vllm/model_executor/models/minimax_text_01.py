@@ -923,7 +923,7 @@ class MiniMaxText01Model(nn.Module):
                 positions: torch.Tensor,
                 intermediate_tensors: Optional[IntermediateTensors] = None,
                 inputs_embeds: Optional[torch.Tensor] = None,
-                **kwargs) -> Union[torch.Tensor, IntermediateTensors, None]:
+                **kwargs) -> Union[torch.Tensor, IntermediateTensors]:
         forward_context = get_forward_context()
         attn_metadata = forward_context.attn_metadata
         if attn_metadata is None:
