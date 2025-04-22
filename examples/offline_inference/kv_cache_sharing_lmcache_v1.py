@@ -5,7 +5,7 @@ with LMCache.
 We will launch 2 vllm instances, and launch an additional LMCache server.
 KV cache is transferred in the following manner: 
 (1) vLLM instance 1 -> LMCache server (KV cache store).
-(2) LMCache server -> vLLM instance 2 (KV cache reuse).
+(2) LMCache server -> vLLM instance 2 (KV cache reuse/retrieve).
 
 Note that lmcache needs to be installed to run this example.
 Learn more about LMCache in https://github.com/LMCache/LMCache.
@@ -44,7 +44,7 @@ prompts = [
 
 
 def run_store(store_done, prompts):
-    # We use GPU 0 for prefill node.
+    # We use GPU 0 for KV cache store process.
     os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 
     sampling_params = SamplingParams(temperature=0, top_p=0.95, max_tokens=10)
@@ -72,7 +72,7 @@ def run_store(store_done, prompts):
 
 
 def run_retrieve(store_done, prompts, timeout=1):
-    # We use GPU 1 for decode node.
+    # We use GPU 1 for KV cache retrieve process.
     os.environ["CUDA_VISIBLE_DEVICES"] = "1"
 
     sampling_params = SamplingParams(temperature=0, top_p=0.95, max_tokens=10)
@@ -115,10 +115,10 @@ def main():
     retrieve_process = Process(target=run_retrieve, args=(store_done, prompts))
     lmcache_server_process = run_lmcache_server(port)
 
-    # Start prefill node
+    # Start KV cache store process
     store_process.start()
 
-    # Start decode node
+    # Start KV cache retrieve process
     retrieve_process.start()
 
     # Clean up the processes
