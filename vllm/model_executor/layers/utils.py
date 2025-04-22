@@ -1,8 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 """Utility methods for model layers."""
-from typing import Tuple
+from typing import Callable, Optional, Tuple
 
 import torch
+
+from vllm import _custom_ops as ops
+from vllm import envs
+from vllm.platforms import current_platform
 
 
 def get_token_bin_counts_and_mask(
@@ -61,3 +65,34 @@ def apply_penalties(logits: torch.Tensor, prompt_tokens_tensor: torch.Tensor,
     logits -= frequency_penalties.unsqueeze(dim=1) * output_bin_counts
     logits -= presence_penalties.unsqueeze(dim=1) * output_mask
     return logits
+
+
+def rocm_unquantized_gemm(x: torch.Tensor,
+                          weight: torch.Tensor,
+                          bias: Optional[torch.Tensor] = None):
+    k = weight.shape[1]
+    use_skinny = (envs.VLLM_ROCM_USE_SKINNY_GEMM and \
+                    x.dtype in [torch.float16, torch.bfloat16] \
+                    and k % 8 == 0 and bias is None)
+
+    if use_skinny is not True:
+        return torch.nn.functional.linear(x, weight, bias)
+
+    x_view = x.view(-1, x.size(-1))
+    n = x_view.shape[0]
+    m = weight.shape[0]
+    cu_count = current_platform.get_cu_count()
+
+    if m > 8 and n < 4:
+        out = ops.wvSplitK(weight, x_view, cu_count)
+        return out.view(*x.shape[:-1], weight.shape[0])
+    elif m % 4 == 0 and n == 1 and k <= 8192:
+        out = ops.LLMM1(weight, x_view, out, 4)
+        return out.view(*x.shape[:-1], weight.shape[0])
+    return torch.nn.functional.linear(x, weight, bias)
+
+
+def dispatch_unquantized_gemm() -> Callable[..., torch.Tensor]:
+    if current_platform.is_rocm():
+        return rocm_unquantized_gemm
+    return torch.nn.functional.linear
