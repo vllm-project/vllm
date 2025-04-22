@@ -23,21 +23,23 @@ class Mamba2Metadata:
     chunk_offsets: torch.Tensor
 
 
-def _seq_idx_to_chunk_indices_offsets(seq_idx, chunk_size: int):
+def _query_start_loc_to_chunk_indices_offsets(query_start_loc: torch.Tensor,
+                                              chunk_size: int,
+                                              total_seqlens: int):
 
-    # convert seq_idx to chunk indices and offsets
-    # - derive the cu_seqlens
-    _, cu_seqlens = torch.where(seq_idx.diff())
-    cu_seqlens += 1
+    cu_seqlens = query_start_loc[1:]  # remove prepended 0
 
     # outputs will have length expansion of chunks that do not divide
     # chunk_size
-    N = math.ceil(seq_idx.shape[-1] / chunk_size) + (cu_seqlens % chunk_size
-                                                     > 0).sum()
-    chunk_indices = torch.arange(N, dtype=torch.int, device=seq_idx.device)
-    chunk_offsets = torch.zeros((N, ), dtype=torch.int, device=seq_idx.device)
+    N = math.ceil(total_seqlens / chunk_size) + (cu_seqlens[:-1] % chunk_size
+                                                 > 0).sum()
+    chunk_indices = torch.arange(N,
+                                 dtype=torch.int,
+                                 device=query_start_loc.device)
+    chunk_offsets = torch.zeros((N, ),
+                                dtype=torch.int,
+                                device=query_start_loc.device)
 
-    cu_seqlens = cu_seqlens.tolist() + [seq_idx.shape[-1]]
     p = 0  # num of insertions
     for s, e in zip(cu_seqlens[:-1], cu_seqlens[1:]):
 
@@ -96,8 +98,9 @@ def prepare_mamba2_metadata(
         # forward and reuse them in mamba layers. If not needed, they will be
         # ignored inside mamba kernels.
         if prep_initial_states:
-            chunk_indices, chunk_offsets = _seq_idx_to_chunk_indices_offsets(
-                seq_idx, chunk_size)
+            chunk_indices, chunk_offsets = \
+                _query_start_loc_to_chunk_indices_offsets(
+                query_start_loc, chunk_size, num_prefill_tokens)
 
     return Mamba2Metadata(has_initial_states=has_initial_states,
                           prep_initial_states=prep_initial_states,
