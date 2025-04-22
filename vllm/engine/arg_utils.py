@@ -766,11 +766,18 @@ class EngineArgs:
                             help=('Maximum number of forward steps per '
                                   'scheduler call.'))
 
-        parser.add_argument('--speculative-config',
-                            type=json.loads,
-                            default=None,
-                            help='The configurations for speculative decoding.'
-                            ' Should be a JSON string.')
+        # Sppeculative arguments
+        speculative_group = parser.add_argument_group(
+            title="SpeculativeConfig",
+            description=SpeculativeConfig.__doc__,
+        )
+        speculative_group.add_argument(
+            '--speculative-config',
+            type=json.loads,
+            default=None,
+            help='The configurations for speculative decoding.'
+            ' Should be a JSON string.')
+
         parser.add_argument(
             '--ignore-patterns',
             action="append",
