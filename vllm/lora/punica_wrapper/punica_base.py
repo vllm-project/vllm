@@ -196,6 +196,11 @@ class PunicaWrapperBase(PunicaWrapperABC):
         )
         self._token_lora_indices[:base_indices.shape[0]].copy_(base_indices)
         self._sampler_indices[:sampler_indices.shape[0]].copy_(sampler_indices)
+        if self.is_prompt_logprobs:
+            assert sampler_indices_padded.size(0) == 1
+            sampler_indices_padded = sampler_indices_padded.repeat(
+                base_indices.shape[0])
+            indices_len[2] = sampler_indices_padded.size(0)
         self._sampler_indices_padded[:sampler_indices_padded.shape[0]].copy_(
             sampler_indices_padded)
         self._embeddings_indices[:embeddings_indices.
