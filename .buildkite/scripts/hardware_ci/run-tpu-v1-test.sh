@@ -17,7 +17,7 @@ source /etc/environment
 docker run --privileged --net host --shm-size=16G -it \
     -e "HF_TOKEN=$HF_TOKEN" --name tpu-test \
     vllm-tpu /bin/bash -c "python3 -m pip install git+https://github.com/thuml/depyf.git \
-    && python3 -m pip install pytest tpu-info \
+    && python3 -m pip install pytest pytest-asyncio tpu-info \
     && python3 -m pip install lm_eval[api]==0.4.4 \
     && export VLLM_USE_V1=1 \
     && export VLLM_XLA_CHECK_RECOMPILATION=1 \
@@ -42,6 +42,8 @@ docker run --privileged --net host --shm-size=16G -it \
     && echo TEST_8 \
     && pytest -s -v /workspace/vllm/tests/v1/tpu/test_topk_topp_sampler.py \
     && echo TEST_9 \
+    && pytest -s -v /workspace/vllm/tests/v1/tpu/test_multimodal.py \
+    && echo TEST_10 \
     && pytest -s -v /workspace/vllm/tests/v1/tpu/test_pallas.py" \
 
 
