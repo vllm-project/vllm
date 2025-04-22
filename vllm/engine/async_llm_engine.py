@@ -1238,6 +1238,12 @@ class AsyncLLMEngine(EngineClient):
     async def add_lora(self, lora_request: LoRARequest) -> None:
         self.engine.add_lora(lora_request)
 
+    async def collective_rpc(self, method: str, timeout: float | None = None, args: tuple = (), kwargs: dict | None = None):
+        """
+        Perform a collective RPC call to the given path.
+        """
+        return await self.engine_core.collective_rpc_async(method, timeout, args, kwargs)
+
 
 # TODO(v1): Remove this class proxy when V1 goes default.
 if envs.is_set("VLLM_USE_V1") and envs.VLLM_USE_V1:
