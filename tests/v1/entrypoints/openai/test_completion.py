@@ -85,6 +85,38 @@ async def test_single_completion(client: openai.AsyncOpenAI,
     "model_name",
     [MODEL_NAME],
 )
+async def test_custom_arg(client: openai.AsyncOpenAI, model_name: str) -> None:
+    """Test that custom arg works and does not break completion.
+    Issue a request with a contradictory `max_tokens` setting
+    in `extra_body`; test that the value in `extra_body` was
+    applied.
+    """
+    completion = await client.completions.create(
+        model=model_name,
+        prompt="Hello, my name is",
+        max_tokens=10,
+        temperature=0.0,
+        # Contradictory `max_tokens`
+        extra_body={
+            "max_tokens": 5,
+            "ignore_eos": True
+        })
+
+    # Assert: valid completion with `extra_body["max_tokens"]` tokens
+    assert completion.id is not None
+    assert completion.choices is not None and len(completion.choices) == 1
+    choice = completion.choices[0]
+    assert len(choice.text) >= 5
+    assert choice.finish_reason == "length"
+    assert completion.usage == openai.types.CompletionUsage(
+        completion_tokens=5, prompt_tokens=6, total_tokens=11)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "model_name",
+    [MODEL_NAME],
+)
 async def test_no_logprobs(client: openai.AsyncOpenAI, model_name: str):
     # test using token IDs
     completion = await client.completions.create(
