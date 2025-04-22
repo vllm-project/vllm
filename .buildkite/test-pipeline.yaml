@@ -314,7 +314,7 @@ steps:
   - pytest -v -s compile/test_full_graph.py
 
 - label: Kernels Test %N # 1h each
-  # mirror_hardwares: [amd]
+  mirror_hardwares: [amd]
   source_file_dependencies:
   - csrc/
   - vllm/attention
