@@ -200,24 +200,24 @@ class PrometheusStatLogger(StatLoggerBase):
         # Counters
         #
         self.counter_num_preempted_reqs = self._counter_cls(
-            name="vllm:num_preemptions_total",
+            name="vllm:num_preemptions",
             documentation="Cumulative number of preemption from the engine.",
             labelnames=labelnames).labels(*labelvalues)
 
         self.counter_prompt_tokens = self._counter_cls(
-            name="vllm:prompt_tokens_total",
+            name="vllm:prompt_tokens",
             documentation="Number of prefill tokens processed.",
             labelnames=labelnames).labels(*labelvalues)
 
         self.counter_generation_tokens = self._counter_cls(
-            name="vllm:generation_tokens_total",
+            name="vllm:generation_tokens",
             documentation="Number of generation tokens processed.",
             labelnames=labelnames).labels(*labelvalues)
 
         self.counter_request_success: dict[FinishReason,
                                            prometheus_client.Counter] = {}
         counter_request_success_base = self._counter_cls(
-            name="vllm:request_success_total",
+            name="vllm:request_success",
             documentation="Count of successfully processed requests.",
             labelnames=labelnames + ["finished_reason"])
         for reason in FinishReason:
