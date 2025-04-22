@@ -17,7 +17,7 @@ from typing_extensions import TypeIs
 import vllm.envs as envs
 from vllm import version
 from vllm.config import (BlockSize, CacheConfig, CacheDType, CompilationConfig,
-                         Config, ConfigFormat, DecodingConfig, Device,
+                         ConfigFormat, ConfigType, DecodingConfig, Device,
                          DeviceConfig, DistributedExecutorBackend, HfOverrides,
                          KVTransferConfig, LoadConfig, LoadFormat, LoRAConfig,
                          ModelConfig, ModelImpl, MultiModalConfig,
@@ -304,7 +304,7 @@ class EngineArgs:
             """Check if the class is a custom type."""
             return cls.__module__ != "builtins"
 
-        def get_kwargs(cls: type[Config]) -> dict[str, Any]:
+        def get_kwargs(cls: ConfigType) -> dict[str, Any]:
             cls_docs = get_attr_docs(cls)
             kwargs = {}
             for field in fields(cls):
@@ -678,13 +678,15 @@ class EngineArgs:
             '--mm-processor-kwargs',
             default=None,
             type=json.loads,
-            help=('Overrides for the multimodal input mapping/processing, '
-                  'e.g., image processor. For example: ``{"num_crops": 4}``.'))
+            help=('Overrides for the multi-modal processor obtained from '
+                  '``AutoProcessor.from_pretrained``. The available overrides '
+                  'depend on the model that is being run.'
+                  'For example, for Phi-3-Vision: ``{"num_crops": 4}``.'))
         parser.add_argument(
             '--disable-mm-preprocessor-cache',
             action='store_true',
-            help='If true, then disables caching of the multi-modal '
-            'preprocessor/mapper. (not recommended)')
+            help='If True, disable caching of the processed multi-modal '
+            'inputs.')
 
         # LoRA related configs
         parser.add_argument('--enable-lora',
