@@ -79,7 +79,8 @@ class P2pNcclConnector(KVConnectorBase_V1):
                  role: KVConnectorRole,
                  rank: int = 0,
                  local_rank: int = 0):
-        super().__init__(vllm_config=vllm_config, role=role)
+        super().__init__(vllm_config=vllm_config, role=role,
+                         rank=rank, local_rank=local_rank)
         self._block_size = vllm_config.cache_config.block_size
         self._requests_need_load: dict[str, Request] = {}
         self.config = vllm_config.kv_transfer_config
@@ -90,7 +91,7 @@ class P2pNcclConnector(KVConnectorBase_V1):
             config=self.config,
             hostname="",
             port_offset=rank,
-        )
+        ) if role == KVConnectorRole.WORKER else None
 
     def start_load_kv(self, forward_context: "ForwardContext",
                       **kwargs) -> None:
@@ -323,7 +324,7 @@ class P2pNcclConnector(KVConnectorBase_V1):
 
     @staticmethod
     def parse_request_id(request_id: str, is_prefill=True) -> Tuple[str, int]:
-        logger.info("parse_request_id, request_id: %s, is_prefill: %s",
+        logger.debug("parse_request_id, request_id: %s, is_prefill: %s",
                     request_id, is_prefill)
         # Regular expression to match the string hostname and integer port
         if is_prefill:
@@ -338,7 +339,7 @@ class P2pNcclConnector(KVConnectorBase_V1):
             ip = match.group(1)
             port = int(match.group(2))
 
-            logger.info("parse_request_id, request_id: %s, ip: %s, port: %s",
+            logger.debug("parse_request_id, request_id: %s, ip: %s, port: %s",
                         request_id, ip, str(port))
             return ip, port
         raise ValueError(
