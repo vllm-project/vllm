@@ -388,8 +388,14 @@ class MambaMixer2(CustomOp):
         # mamba2_metadata contains metadata necessary for the mamba2 triton
         # kernels to operate in continuous batching and in chunked prefill
         # modes; they are computed at top-level model forward since they
-        # are the same and reused for all mamba layers in the same iteration
+        # stay the same and reused for all mamba layers in the same iteration
         attn_metadata: AttentionMetadata = get_forward_context().attn_metadata
+
+        num_prefills = attn_metadata.num_prefills  # #requests
+        num_decodes = attn_metadata.num_decode_tokens  # #tokens==#requests
+        num_prefill_tokens = attn_metadata.num_prefill_tokens  # #tokens
+        has_prefill = num_prefills > 0
+        has_decode = num_decodes > 0
 
         seq_len, _ = hidden_states.shape
         groups_time_state_size = self.n_groups * self.ssm_state_size
@@ -410,7 +416,9 @@ class MambaMixer2(CustomOp):
         conv_weights = self.conv1d.weight.view(self.conv1d.weight.size(0),
                                                self.conv1d.weight.size(2))
 
-        if mamba2_metadata.has_prefill:
+        # causal_conv1d_fn deals with both prefill and decode if input
+        # has prefill requests.
+        if has_prefill:
             # |---------- N-1 iteration --------|
             # |---------------- N iteration ---------------------|
             # |- tokenA -|......................|-- newTokens ---|
@@ -454,10 +462,9 @@ class MambaMixer2(CustomOp):
         )
 
         # 3. State Space Model sequence transformation
-        #    Separate prefill and decode by slicing varlen input
-        num_prefills = mamba2_metadata.num_prefills  # requests
-        num_decodes = mamba2_metadata.num_decodes  # requests (also tokens)
-        num_prefill_tokens = attn_metadata.num_prefill_tokens  # tokens
+
+        # Separate prefill and decode by splitting varlen input
+        # Split along token dimension
         hidden_states_p, hidden_states_d = torch.split(
             hidden_states,
             [num_prefill_tokens, num_decodes],
@@ -478,6 +485,7 @@ class MambaMixer2(CustomOp):
             [num_prefill_tokens, num_decodes],
             dim=0,
         )
+        # Split along batch dimension
         state_indices_tensor_p, state_indices_tensor_d = torch.split(
             mamba_cache_params.state_indices_tensor,
             [num_prefills, num_decodes],
@@ -487,7 +495,7 @@ class MambaMixer2(CustomOp):
         hidden_states_list = []
 
         # Process prefill requests
-        if num_prefills > 0:
+        if has_prefill:
             initial_states = None
             if (mamba2_metadata.has_initial_states is not None
                     and mamba2_metadata.prep_initial_states):
@@ -530,7 +538,7 @@ class MambaMixer2(CustomOp):
             hidden_states_list.append(scan_output.view(num_prefill_tokens, -1))
 
         # Process decode requests
-        if num_decodes > 0:
+        if has_decode:
             n_groups = self.n_groups // self.tp_size
             A_d = self.A[:, None, ...][:, :, None].expand(
                 -1, self.head_dim, self.ssm_state_size).to(dtype=torch.float32)
@@ -542,13 +550,9 @@ class MambaMixer2(CustomOp):
             hidden_states_d = hidden_states_d.view(
                 -1, self.num_heads // self.tp_size, self.head_dim)
 
-            # - the hidden is reshaped into number of current batches
-            # - in this case there is no more prefill, so the batches gen
-            #   1 token at a time
-            # - thus hidden will be (bs, num_heads, head_dim)
+            # - the hidden is reshaped into (bs, num_heads, head_dim)
             # - mamba_cache_params.ssm_state's slots will be selected
-            #   using "mamba_cache_params.state_indices_tensor", just as
-            #   above in the prefill case
+            #   using state_indices_tensor_d
 
             hidden_states_d = selective_state_update(
                 mamba_cache_params.ssm_state,
@@ -567,12 +571,12 @@ class MambaMixer2(CustomOp):
                 hidden_states_d.view(-1, (self.num_heads // self.tp_size) *
                                      self.head_dim))
 
-        # Merge prefill and decode outputs
+        # Merge prefill and decode outputs before passing to gated MLP
         hidden_states = torch.vstack(hidden_states_list)
 
-        # # 4. gated MLP
+        # 4. gated MLP
         hidden_states = self.norm(hidden_states, gate)
 
-        # # 5. Final linear projection
+        # 5. Final linear projection
         out, _ = self.out_proj(hidden_states)
         return out
