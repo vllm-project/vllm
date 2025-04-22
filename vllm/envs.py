@@ -75,7 +75,7 @@ if TYPE_CHECKING:
     VLLM_DISABLED_KERNELS: list[str] = []
     VLLM_USE_V1: bool = True
     VLLM_ROCM_USE_AITER: bool = False
-    VLLM_ROCM_USE_AITER_GEMM_W8A8_BLOCKSCALE: bool = False
+    VLLM_ROCM_USE_AITER_PAGED_ATTN: bool = False
     VLLM_ROCM_USE_AITER_LINEAR: bool = True
     VLLM_ROCM_USE_AITER_MOE: bool = True
     VLLM_ROCM_USE_AITER_RMSNORM: bool = True
@@ -534,12 +534,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     lambda: (os.getenv("VLLM_ROCM_USE_AITER", "False").lower() in
              ("true", "1")),
 
-    # Use aiter w8a8 block gemm kernel if aiter ops are enabled.
-    # This is disabled by default.
-    "VLLM_ROCM_USE_AITER_GEMM_W8A8_BLOCKSCALE":
-    lambda:
-    (os.getenv("VLLM_ROCM_USE_AITER_GEMM_W8A8_BLOCKSCALE", "False").lower() in
-     ("true", "1")),
+    # Whether to use aiter paged attention.
+    # By default is disabled.
+    "VLLM_ROCM_USE_AITER_PAGED_ATTN":
+    lambda: (os.getenv("VLLM_ROCM_USE_AITER_PAGED_ATTN", "False").lower() in
+             ("true", "1")),
+
     # use aiter linear op if aiter ops are enabled
     # The following list of related ops
     # - scaled_mm (per-tensor / rowwise)
