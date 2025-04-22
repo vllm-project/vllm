@@ -42,7 +42,7 @@ def test_sampler_different(model_name: str):
         sampling_params = SamplingParams(temperature=0.3, seed=42)
         output2 = llm.generate(prompts, sampling_params)
 
-    # Batch-case with TopK
+    # Batch-case with TopK/P
     for B in [4, 16]:
         p = prompts * B
         sampling_params = [
@@ -51,9 +51,10 @@ def test_sampler_different(model_name: str):
                 min_p=0.8,
                 max_tokens=64,
                 # Vary number of ks
-                top_k=random.randint(4, 12)) for _ in range(B)
+                top_k=random.randint(4, 12),
+                top_p=random.random()) for _ in range(B)
         ]
-        # Make sure first two reqs have the same K
+        # Make sure first two reqs have the same K/P
         sampling_params[0] = sampling_params[1]
         output = llm.generate(p, sampling_params)
         assert output[0].outputs[0].text == output[1].outputs[0].text

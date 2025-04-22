@@ -11,7 +11,7 @@ DEFAULT_SAMPLING_PARAMS = dict(
     min_p=0.0,
     # strictly disabled for now
     top_k=0,
-    # top_p=0.0,
+    top_p=1.0,
     # frequency_penalties=0.0,
     # presence_penalties=0.0,
     # repetition_penalties=0.0,
@@ -26,11 +26,9 @@ class TPUSupportedSamplingMetadata:
     temperature: torch.Tensor = None
 
     min_p: torch.Tensor = None
-    # Still too slow on forward_native!
     top_k: torch.Tensor = None
     top_p: torch.Tensor = None
 
-    # Greedy sampling flag for compiling single xla graph.
     all_greedy: bool = True
 
     # unsupported, you need to return an extra tensor of static size BxV
@@ -103,9 +101,8 @@ class TPUSupportedSamplingMetadata:
                    DEFAULT_SAMPLING_PARAMS["min_p"])
         fill_slice(input_batch.top_k_cpu_tensor,
                    DEFAULT_SAMPLING_PARAMS["top_k"])
-        # TODO Temporarily disabled until sampling options are enabled
-        # fill_slice(input_batch.top_p_cpu_tensor,
-        #            DEFAULT_SAMPLING_PARAMS["top_p"])
+        fill_slice(input_batch.top_p_cpu_tensor,
+                   DEFAULT_SAMPLING_PARAMS["top_p"])
 
         # Slice persistent device tensors to a fixed pre-compiled padded shape.
         return cls(
@@ -113,7 +110,8 @@ class TPUSupportedSamplingMetadata:
             to(xla_device),
             all_greedy=input_batch.all_greedy,
             # TODO enable more and avoid returning None values
-            top_p=None,  # input_batch.top_p[:padded_num_reqs],
+            top_p=input_batch.top_p_cpu_tensor[:padded_num_reqs].to(
+                xla_device),
             top_k=input_batch.top_k_cpu_tensor[:padded_num_reqs].to(
                 xla_device),
             min_p=input_batch.min_p_cpu_tensor[:padded_num_reqs].to(
