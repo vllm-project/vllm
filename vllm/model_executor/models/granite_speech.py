@@ -156,12 +156,16 @@ class GraniteSpeechMultiModalProcessor(
             mm_data=mm_data,
             mm_kwargs=mm_kwargs,
         )
-        audio_token_index = self.info.get_hf_config().audio_token_index
-        # Calculate the number of audio tokens per entry in the batch
-        processed_outputs["audio_embed_sizes"] = [
-            torch.sum(indices == audio_token_index).item()
-            for indices in processed_outputs["input_ids"]
-        ]
+
+        if "audio" in mm_data:
+            # Calculate the number of audio tokens per entry in the batch;
+            # This is used to split the batch back out after padding.
+            audio_token_index = self.info.get_hf_config().audio_token_index
+            processed_outputs["audio_embed_sizes"] = [
+                torch.sum(indices == audio_token_index).item()
+                for indices in processed_outputs["input_ids"]
+            ]
+
         return processed_outputs
 
 
@@ -526,6 +530,8 @@ class GraniteSpeechForConditionalGeneration(
         # to mask the features; usually we would get an input_features_mask
         # from the processor, but we handle rebuilding it here since
         # vLLM generally processes everything independently + batches.
+
+        # TODO - make sure mixed batches fail gracefully
         if input_features_mask is None:
             input_features_mask = self._build_input_features_mask(
                 audio_embed_sizes)

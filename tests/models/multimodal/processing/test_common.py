@@ -303,12 +303,6 @@ def test_processing_correctness(
         # The slight difference should not be a problem though, since
         # attention_mask lets us ignore the difference.
         ignore_mm_keys = {"audio_features"}
-    elif 'granite-speech' in model_id:
-        # Similarly, for granite speech, audio features are variable length
-        # and can be a bit different due to padding prior to calculating
-        # audio features. In vLLM, we pass the sizes so that we can split
-        # the features back out after.
-        ignore_mm_keys = {"audio_embed_sizes"}
 
     _test_processing_correctness(
         model_id,
@@ -364,17 +358,6 @@ def _assert_inputs_equal(
     for key in ignore_mm_keys:
         a["mm_kwargs"].pop(key, None)
         b["mm_kwargs"].pop(key, None)
-
-    if ignore_mm_keys:
-        # Popping the mm_kwargs may result in a modality key mapping to an
-        # empty list in _items_by_modality; if this is the case,
-        # we should also pop the _items_by_modality to keep it comparable.
-        diff_keys = set(a["mm_kwargs"].modalities).symmetric_difference(
-            set(b["mm_kwargs"].modalities))
-
-        for modality_key in diff_keys:
-            a["mm_kwargs"]._items_by_modality.pop(modality_key, None)
-            b["mm_kwargs"]._items_by_modality.pop(modality_key, None)
 
     if msg is None:
         assert a == b
