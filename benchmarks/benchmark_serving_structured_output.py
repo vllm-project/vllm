@@ -11,7 +11,7 @@ On the client side, run:
         --model <your_model> \
         --dataset json \
         --structured-output-ratio 1.0 \
-        --structured-output-backend xgrammar \
+        --structured-output-backend auto \
         --request-rate 10 \
         --num-prompts 1000
 
@@ -130,10 +130,11 @@ def sample_requests(tokenizer: PreTrainedTokenizerBase,
                         "description":
                         "An unique optional field to avoid cached schemas"
                     }
+        else:
+            json_schemas = [schema] * args.num_prompts
 
         def gen_prompt(index: int):
-            schema = json_schemas[index % len(json_schemas)]
-            return f"Generate an example of a user profile given the following schema: {json.dumps(schema)}"  # noqa: E501
+            return f"Generate an example of a user profile given the following schema: {json.dumps(get_schema(index))}"  # noqa: E501
 
         def get_schema(index: int):
             return json_schemas[index % len(json_schemas)]
@@ -996,12 +997,14 @@ if __name__ == "__main__":
                         type=float,
                         default=1.0,
                         help="Ratio of Structured Outputs requests")
-    parser.add_argument(
-        "--structured-output-backend",
-        type=str,
-        choices=["outlines", "lm-format-enforcer", "xgrammar", "guidance"],
-        default="xgrammar",
-        help="Backend to use for structured outputs")
+    parser.add_argument("--structured-output-backend",
+                        type=str,
+                        choices=[
+                            "outlines", "lm-format-enforcer", "xgrammar",
+                            "guidance", "auto"
+                        ],
+                        default="auto",
+                        help="Backend to use for structured outputs")
 
     args = parser.parse_args()
     main(args)

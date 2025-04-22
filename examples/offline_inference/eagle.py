@@ -27,7 +27,7 @@ def load_prompts(dataset_path, num_prompts):
     return prompts[:num_prompts]
 
 
-def main():
+def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--dataset",
@@ -45,7 +45,12 @@ def main():
     parser.add_argument("--enable_chunked_prefill", action='store_true')
     parser.add_argument("--max_num_batched_tokens", type=int, default=2048)
     parser.add_argument("--temp", type=float, default=0)
-    args = parser.parse_args()
+    return parser.parse_args()
+
+
+def main():
+
+    args = parse_args()
 
     model_dir = "meta-llama/Meta-Llama-3-8B-Instruct"
     eagle_dir = "abhigoyal/EAGLE-LLaMA3-Instruct-8B-vllm"
@@ -76,6 +81,7 @@ def main():
         max_num_seqs=args.max_num_seqs,
         gpu_memory_utilization=0.8,
         speculative_config={
+            "method": "eagle",
             "model": eagle_dir,
             "num_speculative_tokens": args.num_spec_tokens,
             "draft_tensor_parallel_size": args.draft_tp,
