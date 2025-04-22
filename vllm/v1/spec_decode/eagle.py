@@ -12,6 +12,8 @@ from vllm.model_executor.models.llama_eagle import EagleLlamaForCausalLM
 from vllm.v1.attention.backends.flash_attn import FlashAttentionMetadata
 from vllm.v1.sample.metadata import SamplingMetadata
 
+PADDING_SLOT_ID = -1
+
 
 class EagleProposer:
 
@@ -23,6 +25,7 @@ class EagleProposer:
         self.vllm_config = vllm_config
         self.num_speculative_tokens = (
             vllm_config.speculative_config.num_speculative_tokens)
+        self.max_model_len = vllm_config.model_config.max_model_len
         self.block_size = vllm_config.cache_config.block_size
         # We need +1 here because the arange is used to set query_start_loc,
         # which has one more element than batch_size.
@@ -112,22 +115,48 @@ class EagleProposer:
             # Update the inputs.
             input_ids = draft_token_ids_list[-1]
             positions += 1
+
+            # NOTE(woosuk): We should handle the case where the draft model
+            # generates tokens beyond the max model length. Since it is complex
+            # to remove such requests from the batch, we keep them in the batch
+            # but adjust the position ids and slot mappings to avoid the
+            # out-of-range access during the model execution. The draft tokens
+            # generated with this adjustment should be ignored.
+            exceeds_max_model_len = positions >= self.max_model_len
+            # Mask out the position ids that exceed the max model length.
+            # Otherwise, we may get out-of-range error in RoPE.
+            clamped_positions = torch.where(exceeds_max_model_len, 0,
+                                            positions)
+
+            # Increment the sequence lengths.
             attn_metadata.max_seq_len += 1
             attn_metadata.seq_lens += 1
+            # Consider max model length.
+            attn_metadata.max_seq_len = min(attn_metadata.max_seq_len,
+                                            self.max_model_len)
+            # For the requests that exceed the max model length, we set the
+            # sequence length to 1 to minimize their overheads in attention.
+            attn_metadata.seq_lens.masked_fill_(exceeds_max_model_len, 1)
+
             # Compute the slot mapping.
-            block_numbers = positions // self.block_size
+            block_numbers = clamped_positions // self.block_size
             block_ids = block_table.gather(dim=1,
                                            index=block_numbers.view(-1, 1))
             block_ids = block_ids.view(-1)
             attn_metadata.slot_mapping = (block_ids * self.block_size +
-                                          positions % self.block_size)
+                                          clamped_positions % self.block_size)
+            # Mask out the slot mappings that exceed the max model length.
+            # Otherwise, the KV cache will be inadvertently updated with the
+            # padding tokens.
+            attn_metadata.slot_mapping.masked_fill_(exceeds_max_model_len,
+                                                    PADDING_SLOT_ID)
 
             # Run the model.
             with set_forward_context(attn_metadata, self.vllm_config):
                 hidden_states = self.model(
                     input_ids=input_ids,
                     hidden_states=hidden_states,
-                    positions=positions,
+                    positions=clamped_positions,
                 )
             logits = self.model.compute_logits(hidden_states, None)
             draft_token_ids, probs = compute_probs_and_sample_next_token(
@@ -235,7 +264,9 @@ def compute_probs_and_sample_next_token(
     # TODO(woosuk): Consider seeds.
     q = torch.empty_like(probs)
     q.exponential_()
-    next_token_ids = probs.div_(q).argmax(dim=-1).view(-1)
+    # NOTE(woosuk): We shouldn't use `probs.div_(q)` because the draft_probs
+    # will be used later for rejection sampling.
+    next_token_ids = probs.div(q).argmax(dim=-1).view(-1)
     if not sampling_metadata.all_random:
         greedy_token_ids = probs.argmax(dim=-1)
         next_token_ids = torch.where(

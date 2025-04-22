@@ -120,7 +120,7 @@ def get_attr_docs(cls: type[Any]) -> dict[str, str]:
     def pairwise(iterable):
         """
         Manually implement https://docs.python.org/3/library/itertools.html#itertools.pairwise
-        
+
         Can be removed when Python 3.9 support is dropped.
         """
         iterator = iter(iterable)
@@ -266,7 +266,7 @@ class ModelConfig:
         config_format: The config format which shall be loaded.
             Defaults to 'auto' which defaults to 'hf'.
         hf_token: The token to use as HTTP bearer authorization for remote files
-            . If `True`, will use the token generated when running 
+            . If `True`, will use the token generated when running
             `huggingface-cli login` (stored in `~/.huggingface`).
         hf_overrides: If a dictionary, contains arguments to be forwarded to the
             HuggingFace config. If a callable, it is called to update the
@@ -1489,6 +1489,7 @@ class LoadFormat(str, enum.Enum):
     BITSANDBYTES = "bitsandbytes"
     MISTRAL = "mistral"
     RUNAI_STREAMER = "runai_streamer"
+    RUNAI_STREAMER_SHARDED = "runai_streamer_sharded"
     FASTSAFETENSORS = "fastsafetensors"
 
 
@@ -1624,7 +1625,7 @@ class ParallelConfig:
     """The full name of the worker class to use. If "auto", the worker class
     will be determined based on the platform."""
     sd_worker_cls: str = "auto"
-    """The full name of the worker class to use for speculative decofing. 
+    """The full name of the worker class to use for speculative decofing.
     If "auto", the worker class will be determined based on the platform."""
     worker_extension_cls: str = ""
     """The full name of the worker extension class to use. The worker extension
@@ -1693,6 +1694,7 @@ class ParallelConfig:
         factors: list[Any] = []
         factors.append(self.pipeline_parallel_size)
         factors.append(self.tensor_parallel_size)
+        factors.append(self.enable_expert_parallel)
         return hashlib.sha256(str(factors).encode()).hexdigest()
 
     def __post_init__(self) -> None:
@@ -1815,13 +1817,13 @@ class SchedulerConfig:
 
     max_num_batched_tokens: int = None  # type: ignore
     """Maximum number of tokens to be processed in a single iteration.
-    
+
     This config has no static default. If left unspecified by the user, it will
     be set in `EngineArgs.create_engine_config` based on the usage context."""
 
     max_num_seqs: int = None  # type: ignore
     """Maximum number of sequences to be processed in a single iteration.
-    
+
     This config has no static default. If left unspecified by the user, it will
     be set in `EngineArgs.create_engine_config` based on the usage context."""
 
@@ -1867,7 +1869,7 @@ class SchedulerConfig:
     # TODO (ywang96): Make this configurable.
     max_num_encoder_input_tokens: int = field(init=False)
     """Multimodal encoder compute budget, only used in V1.
-    
+
     NOTE: This is not currently configurable. It will be overridden by
     max_num_batched_tokens in case max multimodal embedding size is larger."""
 
@@ -2306,7 +2308,8 @@ class SpeculativeConfig:
         if self.model is None and self.num_speculative_tokens is not None:
             # TODO(Shangming): Refactor mtp configuration logic when supporting
             # mtp acceleration for more models besides deepseek_v3
-            if self.target_model_config.hf_text_config.model_type \
+            if self.target_model_config and \
+                self.target_model_config.hf_text_config.model_type \
                         == "deepseek_v3":
                 # use the draft model from the same model:
                 self.model = self.target_model_config.model
@@ -2684,13 +2687,6 @@ class LoRAConfig:
             self.lora_dtype = model_config.dtype
         elif isinstance(self.lora_dtype, str):
             self.lora_dtype = getattr(torch, self.lora_dtype)
-
-    def verify_with_scheduler_config(self, scheduler_config: SchedulerConfig):
-        # Reminder: Please update docs/source/features/compatibility_matrix.md
-        # If the feature combo become valid
-        if scheduler_config.chunked_prefill_enabled:
-            logger.warning("LoRA with chunked prefill is still experimental "
-                           "and may be unstable.")
 
     def verify_lora_support(self):
         if self.long_lora_scaling_factors is not None and envs.VLLM_USE_V1:
@@ -3819,8 +3815,6 @@ class VllmConfig:
         if self.lora_config:
             self.lora_config.verify_with_cache_config(self.cache_config)
             self.lora_config.verify_with_model_config(self.model_config)
-            self.lora_config.verify_with_scheduler_config(
-                self.scheduler_config)
             self.lora_config.verify_lora_support()
         if self.prompt_adapter_config:
             self.prompt_adapter_config.verify_with_model_config(
