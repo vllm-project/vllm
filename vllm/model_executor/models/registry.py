@@ -230,9 +230,7 @@ _VLLM_MODELS = {
 # when we use par format to pack things together, sys.executable
 # might not be the target we want to run.
 _SUBPROCESS_COMMAND = [
-    sys.executable,
-    "-m",
-    "vllm.model_executor.models.registry",
+    sys.executable, "-m", "vllm.model_executor.models.registry",
 ]
 
 
@@ -328,7 +326,6 @@ def _try_load_model_cls(
     model: _BaseRegisteredModel,
 ) -> Optional[Type[nn.Module]]:
     from vllm.platforms import current_platform
-
     current_platform.verify_model_arch(model_arch)
     try:
         return model.load_model_cls()
@@ -382,10 +379,8 @@ class _ModelRegistry:
         if model_arch in self.models:
             logger.warning(
                 "Model architecture %s is already registered, and will be "
-                "overwritten by the new model class %s.",
-                model_arch,
-                model_cls,
-            )
+                "overwritten by the new model class %s.", model_arch,
+                model_cls)
 
         if isinstance(model_cls, str):
             split_str = model_cls.split(":")
@@ -593,7 +588,6 @@ def _run_in_subprocess(fn: Callable[[], _T]) -> _T:
 def _run() -> None:
     # Setup plugins
     from vllm.plugins import load_general_plugins
-
     load_general_plugins()
 
     fn, output_file = pickle.loads(sys.stdin.buffer.read())
