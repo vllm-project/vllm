@@ -371,7 +371,7 @@ class Fp8LinearOp:
 
         return w8a8_scaled_mm_func(qinput=qinput,
                                    weight=weight,
-                                   out_dtype=input.dtype,
+                                   out_dtype=out_dtype,
                                    scale_a=x_scale,
                                    scale_b=weight_scale,
                                    bias=bias,
