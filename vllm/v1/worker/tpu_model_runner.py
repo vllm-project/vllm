@@ -881,9 +881,6 @@ class TPUModelRunner(LoRAModelRunnerMixin):
             model = self.load_lora_model(model, self.model_config,
                                          self.scheduler_config,
                                          self.lora_config, self.device)
-            punica_wrapper = self.lora_manager._adapter_manager.punica_wrapper
-            if not self.enforce_eager:
-                punica_wrapper.mark_compiled()
 
         # Sync all pending XLA execution during model initialization and weight
         # loading.
