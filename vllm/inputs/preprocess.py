@@ -179,6 +179,27 @@ class InputPreprocessor:
 
         return prompt_token_ids
 
+    def _should_add_special_tokens(self, prompt: str,
+                                   lora_request: Optional[LoRARequest],
+                                   tokenizer) -> Optional[bool]:
+        """Determine whether to add special tokens during tokenization."""
+        # Handle whisper model type
+        if self.model_config.hf_config.model_type == "whisper":
+            # For Whisper, special tokens should be provided by the user based
+            # on the task and language of their request. Also needed to avoid
+            # appending an EOS token to the prompt which disrupts generation.
+            return False
+
+        # Prevent doubling BOS token if already in prompt
+        bos_id = self.get_bos_token_id(lora_request=lora_request)
+        without_special = tokenizer.encode(prompt, add_special_tokens=False)
+        if bos_id is not None and without_special and without_special[
+                0] == bos_id:
+            # BOS already exists in given prompt (e.g. via chat template)
+            return False
+
+        return None
+
     def _tokenize_prompt(
         self,
         prompt: str,
@@ -189,12 +210,8 @@ class InputPreprocessor:
         corresponding token IDs.
         """
         tokenizer = self.get_tokenizer_group()
-        add_special_tokens = None
-        if self.model_config.hf_config.model_type == "whisper":
-            # For Whisper, special tokens should be provided by the user based
-            # on the task and language of their request. Also needed to avoid
-            # appending an EOS token to the prompt which disrupts generation.
-            add_special_tokens = False
+        add_special_tokens = self._should_add_special_tokens(
+            prompt, lora_request, tokenizer)
 
         if (self.model_config.encoder_config is not None
                 and self.model_config.encoder_config.get(
@@ -212,12 +229,9 @@ class InputPreprocessor:
     ) -> list[int]:
         """Async version of :meth:`_tokenize_prompt`."""
         tokenizer = self.get_tokenizer_group()
-        add_special_tokens = None
-        if self.model_config.hf_config.model_type == "whisper":
-            # For Whisper, special tokens should be provided by the user based
-            # on the task and language of their request. Also needed to avoid
-            # appending an EOS token to the prompt which disrupts generation.
-            add_special_tokens = False
+        add_special_tokens = self._should_add_special_tokens(
+            prompt, lora_request, tokenizer)
+
         return await tokenizer.encode_async(
             prompt=prompt,
             lora_request=lora_request,
