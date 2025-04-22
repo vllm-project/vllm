@@ -313,14 +313,14 @@ steps:
   commands:
   - pytest -v -s compile/test_full_graph.py
 
-- label: Core Operation Kernels Test
+- label: Kernels Core Operation Test
   source_file_dependencies:
   - csrc/
   - tests/kernels/core
   commands:
     - pytest -v -s kernels/core
 
-- label: Attention Kernels Test %N
+- label: Kernels Attention Test %N
   source_file_dependencies:
   - csrc/attention/
   - vllm/attention
@@ -330,15 +330,16 @@ steps:
     - pytest -v -s kernels/attention --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
   parallelism: 2
 
-- label: Quantization Kernels Test
+- label: Kernels Quantization Test %N
   source_file_dependencies:
   - csrc/quantization/
   - vllm/model_executor/layers/quantization
   - tests/kernels/quantization
   commands:
-    - pytest -v -s kernels/quantization
+    - pytest -v -s kernels/quantization  --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
+  parallelism: 2
 
-- label: MoE Kernels Test
+- label: Kernels MoE Test
   source_file_dependencies:
   - csrc/moe/
   - tests/kernels/moe
@@ -346,7 +347,7 @@ steps:
   commands:
     - pytest -v -s kernels/moe
 
-- label: Mamba Kernels Test
+- label: Kernels Mamba Test
   source_file_dependencies:
   - csrc/mamba/
   - tests/kernels/mamba
