@@ -2217,6 +2217,8 @@ class SpeculativeConfig:
     `TypicalAcceptanceSampler`."""
 
     speculative_token_tree: Optional[str] = None
+    """Specifies the tree structure for speculative token generation. 
+    """
     # required configuration params passed from engine
     target_model_config: ModelConfig = field(default=None,
                                              init=True)  # type: ignore
