@@ -8,6 +8,7 @@
 # Documentation
 # label(str): the name of the test. emoji allowed.
 # fast_check(bool): whether to run this on each commit on fastcheck pipeline.
+# torch_nightly(bool): whether to run this on vllm against torch nightly pipeline.
 # fast_check_only(bool): run this test on fastcheck pipeline only
 # optional(bool): never run this test by default (i.e. need to unblock manually) unless it's scheduled nightly run.
 # command(str): the single command to run for tests. incompatible with commands.
@@ -70,6 +71,7 @@ steps:
 - label: Basic Correctness Test # 30min
   #mirror_hardwares: [amd]
   fast_check: true
+  torch_nightly: true
   source_file_dependencies:
   - vllm/
   - tests/basic_correctness/test_basic_correctness
@@ -104,6 +106,7 @@ steps:
 - label: Entrypoints Test # 40min
   working_dir: "/vllm-workspace/tests"
   fast_check: true
+  torch_nightly: true
   #mirror_hardwares: [amd]
   source_file_dependencies:
   - vllm/
