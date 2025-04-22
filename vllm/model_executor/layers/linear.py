@@ -1107,9 +1107,6 @@ class QKVParallelLinear(ColumnParallelLinear):
         param_data.copy_(loaded_weight)
 
 
-backup_stream = torch.cuda.Stream()
-
-
 class RowParallelLinear(LinearBase):
     """Linear layer with row parallelism.
 
@@ -1183,6 +1180,7 @@ class RowParallelLinear(LinearBase):
             raise ValueError("When not reduce the results, adding bias to the "
                              "results can lead to incorrect results")
 
+        self.backup_stream = torch.cuda.Stream()
         if bias:
             self.bias = Parameter(
                 torch.empty(self.output_size, dtype=params_dtype))
@@ -1260,7 +1258,7 @@ class RowParallelLinear(LinearBase):
         bias_ = None if (self.tp_rank > 0 or self.skip_bias_add) else self.bias
         event = torch.cuda.Event()
         m_over_two = input_parallel.shape[0] // 2
-        if m_over_two > 1024:
+        if m_over_two > 16:
             first_output_parallel = self.quant_method.apply(
                 self, input_parallel[:m_over_two], bias=bias_)
             event.record()
@@ -1270,7 +1268,7 @@ class RowParallelLinear(LinearBase):
             else:
                 first_output = first_output_parallel
 
-            with torch.cuda.stream(backup_stream):
+            with torch.cuda.stream(self.backup_stream):
                 event.wait()
                 second_output_parallel = self.quant_method.apply(
                     self, input_parallel[m_over_two:], bias=bias_)
