@@ -804,20 +804,17 @@ def _assert_right_kv_cache_manager(
     """Check whether KVCacheManager is correct after allocate."""
 
     # Make sure the request stats are right.
-    EXPECTED_ACTUAL_BLOCKS = num_tokens // block_size
-    EXPECTED_TOTAL_BLOCKS = (EXPECTED_ACTUAL_BLOCKS +
-                             scheduler.kv_cache_manager.num_preallocate_blocks)
+    EXPECTED_TOTAL_BLOCKS = num_tokens // block_size
     for req_id in req_ids:
         blocks = scheduler.kv_cache_manager.req_to_blocks[req_id]
         hashes = scheduler.kv_cache_manager.req_to_block_hashes[req_id]
         assert (scheduler.kv_cache_manager.num_cached_block[req_id] ==
-                EXPECTED_ACTUAL_BLOCKS)
+                EXPECTED_TOTAL_BLOCKS)
         assert len(blocks) == EXPECTED_TOTAL_BLOCKS
-        assert len(hashes) == EXPECTED_ACTUAL_BLOCKS
+        assert len(hashes) == EXPECTED_TOTAL_BLOCKS
 
     # Make sure we actually touched all the blocks.
-    BLOCKS_PER_REQ = (num_tokens / block_size +
-                      scheduler.kv_cache_manager.num_preallocate_blocks)
+    BLOCKS_PER_REQ = num_tokens / block_size
     assert (scheduler.kv_cache_manager.block_pool.get_num_free_blocks() ==
             num_total_blocks - num_requests * BLOCKS_PER_REQ)
 
@@ -1052,7 +1049,6 @@ def test_kv_connector_handles_preemption():
         block_size=BLOCK_SIZE,
         num_blocks=NUM_BLOCKS,
     )
-    scheduler.kv_cache_manager.num_preallocate_blocks = 0
 
     NUM_MATCHED_NEW_TOKENS = BLOCK_SIZE
     scheduler.connector.get_num_new_matched_tokens = Mock(name="method")
