@@ -589,8 +589,9 @@ class FusedMoE(torch.nn.Module):
         # Index the loaded weight for tp sharding.
         # gate_up_proj: "MergedColumnParallel", so tp sharding on output_dim
         shard_size = expert_data.shape[shard_dim] // 2
-        if not self.use_presharded_weights: 
-            loaded_weight = loaded_weight.narrow(shard_dim, shard_size * tp_rank,
+        if not self.use_presharded_weights:
+            loaded_weight = loaded_weight.narrow(shard_dim,
+                                                 shard_size * tp_rank,
                                                  shard_size)
         # Narrow parameter and load.
         # w1, gate_proj: Load into first logical weight of w13.
