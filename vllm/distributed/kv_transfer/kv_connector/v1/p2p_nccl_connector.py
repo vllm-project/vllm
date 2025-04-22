@@ -30,12 +30,10 @@ class ReqMeta:
     token_ids: torch.Tensor
     # Slot mappings, should have the same length as token_ids
     slot_mapping: torch.Tensor
-    # Is store or load
-    is_store: bool
 
     @staticmethod
     def make_meta(request_id: str, token_ids: list[int], block_ids: list[int],
-                  block_size: int, is_store: bool) -> "ReqMeta":
+                  block_size: int) -> "ReqMeta":
         valid_num_tokens = align_to_block_size(len(token_ids), block_size)
         token_ids_tensor = torch.tensor(token_ids)[:valid_num_tokens]
         block_ids_tensor = torch.tensor(block_ids)
@@ -48,7 +46,6 @@ class ReqMeta:
             request_id=request_id,
             token_ids=token_ids_tensor,
             slot_mapping=slot_mapping,
-            is_store=is_store,
         )
 
 
@@ -65,11 +62,9 @@ class P2pNcclConnectorMetadata(KVConnectorMetadata):
         token_ids: list[int],
         block_ids: list[int],
         block_size: int,
-        is_store: bool,
     ) -> None:
         self.requests.append(
-            ReqMeta.make_meta(request_id, token_ids, block_ids, block_size,
-                              is_store))
+            ReqMeta.make_meta(request_id, token_ids, block_ids, block_size))
 
 
 class P2pNcclConnector(KVConnectorBase_V1):
@@ -85,6 +80,7 @@ class P2pNcclConnector(KVConnectorBase_V1):
         self._requests_need_load: dict[str, Request] = {}
         self.config = vllm_config.kv_transfer_config
         self.rank = rank
+        self.is_producer = self.config.is_kv_producer
 
         self.p2p_nccl_pipe = P2pNcclPipe(
             local_rank=local_rank,
@@ -160,7 +156,7 @@ class P2pNcclConnector(KVConnectorBase_V1):
 
         # Load the KV for each request each layer
         for request in metadata.requests:
-            if request.is_store:
+            if self.is_producer:
                 continue
             logger.info("Inject KV cache of %d tokens to the paged memory",
                         len(request.slot_mapping))
@@ -219,7 +215,7 @@ class P2pNcclConnector(KVConnectorBase_V1):
         connector_metadata = self._get_connector_metadata()
         assert isinstance(connector_metadata, P2pNcclConnectorMetadata)
         for request in connector_metadata.requests:
-            if request.is_store:
+            if self.is_producer:
                 request_id = request.request_id
                 ip, port = self.parse_request_id(request_id, True)
                 remote_address = ip + ":" + str(port + self._rank)
@@ -260,7 +256,7 @@ class P2pNcclConnector(KVConnectorBase_V1):
         If blocks were allocated, add to _requests_need_load,
         such that we load the KVs in the next forward pass.
         """
-        if num_external_tokens > 0:
+        if not self.is_producer:
             self._requests_need_load[request.request_id] = request
 
     def build_connector_meta(
@@ -283,15 +279,14 @@ class P2pNcclConnector(KVConnectorBase_V1):
                 meta.add_request(request_id=new_req.req_id,
                                  token_ids=new_req.prompt_token_ids,
                                  block_ids=new_req.block_ids,
-                                 block_size=self._block_size,
-                                 is_store=False)
+                                 block_size=self._block_size)
                 total_need_load += 1
             else:
-                meta.add_request(request_id=new_req.req_id,
-                                 token_ids=new_req.prompt_token_ids,
-                                 block_ids=new_req.block_ids,
-                                 block_size=self._block_size,
-                                 is_store=True)
+                if self.is_producer:
+                    meta.add_request(request_id=new_req.req_id,
+                                     token_ids=new_req.prompt_token_ids,
+                                     block_ids=new_req.block_ids,
+                                     block_size=self._block_size)
 
         for cached_req in scheduler_output.scheduled_cached_reqs:
             # NOTE(rob): here we rely on the resumed requests being
@@ -314,8 +309,7 @@ class P2pNcclConnector(KVConnectorBase_V1):
                 meta.add_request(request_id=cached_req.req_id,
                                  token_ids=token_ids,
                                  block_ids=block_ids,
-                                 block_size=self._block_size,
-                                 is_store=False)
+                                 block_size=self._block_size)
                 total_need_load += 1
 
         assert total_need_load == len(self._requests_need_load)
