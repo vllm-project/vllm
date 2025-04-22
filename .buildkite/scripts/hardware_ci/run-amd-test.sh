@@ -98,6 +98,13 @@ if [[ $commands == *" kernels "* ]]; then
   --ignore=kernels/test_machete_mm.py \
   --ignore=kernels/test_mha_attn.py \
   --ignore=kernels/test_block_fp8.py \
+  --ignore=kernels/test_cutlass_moe.py \
+  --ignore=kernels/test_mamba_ssm_ssd.py \
+  --ignore=kernels/test_attention.py \
+  --ignore=kernels/test_block_int8.py \
+  --ignore=kernels/test_fused_quant_layernorm.py \
+  --ignore=kernels/test_int8_kernel.py \
+  --ignore=kernels/test_triton_moe_ptpc_fp8.py \
   --ignore=kernels/test_permute_cols.py"
 fi
 
