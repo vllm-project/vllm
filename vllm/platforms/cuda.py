@@ -239,10 +239,10 @@ class CudaPlatformBase(Platform):
 
             def _get_version(name, import_suffix) -> str:
                 if use_v1:
-                    logger.info_once("Using %s backend on V1 engine.", name)
+                    logger.info_once(f"Using {name} backend on V1 engine.")
                     return f"vllm.v1.attention.backends.mla.{import_suffix}"
                 else:
-                    logger.info("Using %s backend.", name)
+                    logger.info_once(f"Using {name} backend.")
                     return f"vllm.attention.backends.mla.{import_suffix}"
 
             if use_cutlassmla:
