@@ -3,8 +3,7 @@
 from abc import abstractmethod
 from collections.abc import Iterable, Mapping, Sequence
 from functools import cached_property
-from typing import (Final, Literal, Optional, Protocol, Set, Tuple, TypedDict,
-                    TypeVar, Union)
+from typing import Final, Optional, Protocol, Set, Tuple, TypeVar, Union
 
 import numpy as np
 import torch
@@ -36,45 +35,6 @@ from .pixtral import PixtralHFVisionModel
 from .siglip import SiglipVisionModel
 from .utils import (AutoWeightsLoader, init_vllm_registered_model,
                     maybe_prefix, merge_multimodal_embeddings)
-
-
-class MiniMaxVL01ImagePixelInputs(TypedDict):
-    type: Literal["pixel_values"]
-    pixel_values: torch.Tensor
-    """
-    Shape: `(batch_size * num_images, num_channels, height, width)`
-
-    Note that `height` or `width` may be different per batch and image,
-    in which case the data is passed as a list instead of a batched tensor.
-    """
-
-
-class MiniMaxVL01HFImagePixelInputs(TypedDict):
-    type: Literal["pixel_values_pixtral"]
-    pixel_values: Union[torch.Tensor, list[torch.Tensor]]
-    """
-    Shape: `(batch_size * num_images, num_channels, height, width)`
-
-    Note that `height` or `width` may be different per batch and image,
-    in which case the data is passed as a list instead of a batched tensor.
-    """
-
-    embed_is_patch: Union[torch.Tensor, list[torch.Tensor]]
-    """
-    A boolean mask indicating which image embeddings correspond
-    to patch tokens.
-    
-    Shape: `(batch_size * num_images, num_embeds)`
-    """
-
-
-class MiniMaxVL01ImageEmbeddingInputs(TypedDict):
-    type: Literal["image_embeds"]
-    data: torch.Tensor
-    """Shape: `(batch_size * num_images, image_feature_size, hidden_size)`
-
-    `hidden_size` must match the hidden size of language model backbone.
-    """
 
 
 def image_size_to_num_patches(image_size, grid_pinpoints, patch_size: int):
@@ -137,11 +97,6 @@ def unpad_image(tensor, original_size):
         unpadded_tensor = tensor[:, :, padding:current_width - padding]
 
     return unpadded_tensor
-
-
-MiniMaxVL01ImageInputs = Union[MiniMaxVL01ImagePixelInputs,
-                               MiniMaxVL01HFImagePixelInputs,
-                               MiniMaxVL01ImageEmbeddingInputs]
 
 
 class MiniMaxVL01MultiModalProjector(nn.Module):
