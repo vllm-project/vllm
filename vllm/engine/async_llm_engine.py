@@ -597,6 +597,7 @@ class AsyncLLMEngine(EngineClient):
                  *args,
                  log_requests: bool = True,
                  start_engine_loop: bool = True,
+                 usage_context: UsageContext = UsageContext.ENGINE_CONTEXT,
                  **kwargs) -> None:
         if envs.VLLM_USE_V1:
             raise ValueError(
@@ -627,6 +628,7 @@ class AsyncLLMEngine(EngineClient):
         self._errored_with: Optional[BaseException] = None
 
         # Lazy initialized fields
+        self.usage_context = usage_context
         self._request_tracker: RequestTracker
 
         # If usage stat is enabled, collect relevant info.
@@ -635,7 +637,7 @@ class AsyncLLMEngine(EngineClient):
                 get_architecture_class_name)
             usage_message.report_usage(
                 get_architecture_class_name(self.engine.model_config),
-                usage_context,
+                self.usage_context,
                 extra_kvs={
                     # Common configuration
                     "dtype":
