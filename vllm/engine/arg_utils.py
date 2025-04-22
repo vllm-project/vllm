@@ -346,10 +346,20 @@ class EngineArgs:
                     kwargs[name]["choices"] = choices
                     choice_type = type(choices[0])
                     assert all(type(c) is choice_type for c in choices), (
-                        f"All choices must be of the same type. "
+                        "All choices must be of the same type. "
                         f"Got {choices} with types {[type(c) for c in choices]}"
                     )
                     kwargs[name]["type"] = choice_type
+                elif can_be_type(field_type, tuple):
+                    if is_type_in_union(field_type, tuple):
+                        field_type = get_type_from_union(field_type, tuple)
+                    dtypes = get_args(field_type)
+                    dtype = dtypes[0]
+                    assert all(d is dtype for d in dtypes), (
+                        "All tuple elements must be of the same type. "
+                        f"Got {dtypes}.")
+                    kwargs[name]["type"] = dtype
+                    kwargs[name]["nargs"] = "+"
                 elif can_be_type(field_type, int):
                     kwargs[name]["type"] = optional_int if optional else int
                 elif can_be_type(field_type, float):
