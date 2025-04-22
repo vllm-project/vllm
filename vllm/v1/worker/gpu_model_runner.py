@@ -1007,6 +1007,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 and num_scheduled_tokens <= self.cudagraph_batch_sizes[-1]):
             # Use piecewise CUDA graphs.
             # Add padding to the batch size.
+            # todo: need update
             num_input_tokens = self.vllm_config.pad_for_cudagraph(
                 num_scheduled_tokens)
         else:
@@ -1619,6 +1620,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # Trigger CUDA graph capture for specific shapes.
         # Capture the large shapes first so that the smaller shapes
         # can reuse the memory pool allocated for the large shapes.
+        # todo: need to update here.
         with graph_capture(device=self.device):
             for num_tokens in reversed(self.cudagraph_batch_sizes):
                 for _ in range(self.vllm_config.compilation_config.

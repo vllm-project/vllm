@@ -21,7 +21,7 @@ from vllm.config import (CacheConfig, CompilationConfig, Config, ConfigFormat,
                          DistributedExecutorBackend, HfOverrides,
                          KVTransferConfig, LoadConfig, LoadFormat, LoRAConfig,
                          ModelConfig, ModelImpl, MultiModalConfig,
-                         ObservabilityConfig, ParallelConfig, PoolerConfig,
+                         ObservabilityConfig, PaddingConfig, ParallelConfig, PoolerConfig,
                          PoolType, PromptAdapterConfig, SchedulerConfig,
                          SchedulerPolicy, SpeculativeConfig, TaskOption,
                          TokenizerPoolConfig, VllmConfig, get_attr_docs,
@@ -251,6 +251,10 @@ class EngineArgs:
     model_impl: str = "auto"
 
     calculate_kv_scales: Optional[bool] = None
+
+    # padding_max_token_size: Optional[int] = None
+    # padding_min_token_size: Optional[int] = None
+    padding_gap: Optional[int] = None
 
     additional_config: Optional[Dict[str, Any]] = None
     enable_reasoning: Optional[bool] = None
@@ -1003,6 +1007,26 @@ class EngineArgs:
             'be loaded from the model checkpoint if available. '
             'Otherwise, the scales will default to 1.0.')
 
+        # parser.add_argument(
+        #     '--padding-max-token-size',
+        #     type=int,
+        #     default=EngineArgs.padding_max_token_size,
+        #     help='max token size for padding, we pad the request into a list of fixed length to save compilation time'
+        #     'in tpu by default it is same with max-num-batched-tokens, in gpu the default value is 512. ')
+        # parser.add_argument(
+        #     '--padding-min-token-size',
+        #     type=int,
+        #     default=EngineArgs.padding_min_token_size,
+        #     help='min token size for padding, we pad the request into a list of fixed length to save compilation time'
+        #     'in tpu by default it is 16, in gpu the default value is 8. ')
+        parser.add_argument(
+            '--padding-gap',
+            type=int,
+            default=EngineArgs.padding_gap,
+            help='the padding gap between fixed token lengths, we pad the request into a list of fixed length to save compilation time'
+            'if set to 0, we do exponential padding (always pad to the power of 2), if set to other numbers, we do incremental padding with padding_gap')
+
+
         parser.add_argument(
             "--additional-config",
             type=json.loads,
@@ -1343,6 +1367,8 @@ class EngineArgs:
             or "all" in detailed_trace_modules,
         )
 
+        padding_config = PaddingConfig(padding_gap=self.padding_gap)
+
         config = VllmConfig(
             model_config=model_config,
             cache_config=cache_config,
@@ -1355,6 +1381,7 @@ class EngineArgs:
             decoding_config=decoding_config,
             observability_config=observability_config,
             prompt_adapter_config=prompt_adapter_config,
+            padding_config=padding_config,
             compilation_config=self.compilation_config,
             kv_transfer_config=self.kv_transfer_config,
             additional_config=self.additional_config,

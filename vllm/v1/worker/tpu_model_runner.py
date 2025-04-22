@@ -131,10 +131,11 @@ class TPUModelRunner:
         # InputBatch needs to work with sampling tensors greater than padding
         # to avoid dynamic shapes. Also, avoid suboptimal alignment.
         self.max_num_reqs = max(scheduler_config.max_num_seqs, MIN_NUM_SEQS)
-        self.num_tokens_paddings = _get_token_paddings(
-            min_token_size=16,
-            max_token_size=scheduler_config.max_num_batched_tokens,
-            padding_gap=envs.VLLM_TPU_BUCKET_PADDING_GAP)
+        # self.num_tokens_paddings = _get_token_paddings(
+        #     min_token_size=16,
+        #     max_token_size=scheduler_config.max_num_batched_tokens,
+        #     padding_gap=envs.VLLM_TPU_BUCKET_PADDING_GAP)
+        self.num_tokens_paddings = self.vllm_config.padding_config.num_token_paddings
         # In case `max_num_tokens < max(num_tokens_paddings)` use the actual
         # padded max value to pre-allocate data structures and pre-compile.
         self.max_num_tokens = self.num_tokens_paddings[-1]
@@ -323,8 +324,7 @@ class TPUModelRunner:
         # Update the states of the running/resumed requests.
         for req_data in scheduler_output.scheduled_cached_reqs:
             req_id = req_data.req_id
-            req_state = self.requests[req_id]
-
+            req_state = self.requests[req_id]   # increase prompt_size in prefill and 1 in decode.
             # Update the cached states.
             req_state.num_computed_tokens = req_data.num_computed_tokens
             if not req_data.resumed_from_preemption:

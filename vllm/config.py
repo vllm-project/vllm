@@ -3614,6 +3614,79 @@ class CompilationConfig(BaseModel):
                 "vllm.unified_attention_with_output",
             ]
 
+@dataclass
+class PaddingConfig:
+    padding_gap: int
+    
+    # not configurable, set after init.
+    min_token_size: int = PrivateAttr
+    max_token_size: int = PrivateAttr
+    num_token_paddings: list[int] = PrivateAttr
+
+    def compute_hash(self) -> str:
+        """
+        WARNING: Whenever a new field is added to this config,
+        ensure that it is included in the factors list if
+        it affects the computation graph.
+
+        Provide a hash that uniquely identifies all the configs
+        that affect the structure of the computation
+        graph from input ids/embeddings to the final hidden states,
+        excluding anything before input ids/embeddings and after
+        the final hidden states.
+        """
+        # no factors to consider.
+        # this config will not affect the computation graph.
+        factors: list[Any] = []
+        hash_str = hashlib.md5(str(factors).encode(),
+                                usedforsecurity=False).hexdigest()
+        return hash_str
+
+    def __post_init__(self):
+        # Set default values.
+        # For GPU, by default we capture cudagraphs starting from 1, 2, 4, 8 and with an increment of 8, ending in max-num-
+        # For TPU, by default we start with 16 and capture the power of 2, ending in max-num-batched-tokens (to be set later).
+        from vllm.platforms import current_platform
+        if current_platform.is_cuda():
+            self.padding_gap = 8 if self.padding_gap is None else self.padding_gap
+            self.min_token_size = 8
+            self.num_token_paddings = [1, 2, 4]
+        elif current_platform.is_tpu():
+            self.padding_gap = 0 if self.padding_gap is None else self.padding_gap
+            self.min_token_size = 16 
+            self.num_token_paddings = []
+        print(f"use padding_gap: {self.padding_gap}, min_token_size: {self.min_token_size}")
+
+    def get_token_paddings(self, max_num_batched_tokens):
+        self.max_token_size = max_num_batched_tokens
+        num = self.min_token_size
+        if self.padding_gap == 0:
+            while True:
+                self.num_token_paddings.append(num)
+                if num >= self.max_token_size:
+                    break
+                num *= 2
+        else:
+            padding_gap = self.padding_gap
+
+            # adjust padding gap, the max number of graphs we want to compile is 16.
+            from vllm.platforms import current_platform
+            if current_platform.is_tpu():
+                while True:
+                    if (self.max_token_size - self.min_token_size) // padding_gap <= 16:
+                        break
+                    padding_gap *= 2
+                if (padding_gap != self.padding_gap):
+                    print(f"adjust padding_gap from {self.padding_gap} to {padding_gap}")
+                    self.padding_gap = padding_gap
+            while num <= padding_gap:
+                self.num_token_paddings.append(num)
+                num *= 2
+            num //= 2
+            while num < self.max_token_size:
+                num += padding_gap
+                self.num_token_paddings.append(num)
+
 
 @dataclass
 class VllmConfig:
@@ -3641,6 +3714,7 @@ class VllmConfig:
                                                   init=True)  # type: ignore
     kv_transfer_config: KVTransferConfig = field(default=None,
                                                  init=True)  # type: ignore
+    padding_config: PaddingConfig = field(default=None, init=True)  # type: ignore
     # some opaque config, only used to provide additional information
     # for the hash computation, mainly used for testing, debugging or out of
     # tree config registration.
@@ -3726,6 +3800,10 @@ class VllmConfig:
             vllm_factors.append(self.kv_transfer_config.compute_hash())
         else:
             vllm_factors.append("None")
+        if self.padding_config:
+            vllm_factors.append(self.padding_config.compute_hash())
+        else:
+            vllm_factors.append("None")
         if self.additional_config:
             vllm_factors.append(self.additional_config.compute_hash())
         else:
@@ -3736,6 +3814,7 @@ class VllmConfig:
                                usedforsecurity=False).hexdigest()[:10]
         return hash_str
 
+    # todo: change func name and move it to padding config
     def pad_for_cudagraph(self, batch_size: int) -> int:
         # if batch_size > self.compilation_config.max_capture_size,
         # it should raise an IndexError.
@@ -3841,7 +3920,10 @@ class VllmConfig:
             self.compilation_config.pass_config.enable_noop = False
             self.compilation_config.level = CompilationLevel.PIECEWISE
             self.compilation_config.set_splitting_ops_for_v1()
-
+        
+        self.padding_config.get_token_paddings(self.scheduler_config.max_num_batched_tokens)
+        
+        # todo: use paddingconfig.size to update cuda graph size.
         self._set_cudagraph_sizes()
 
         if self.cache_config is not None and \
@@ -3909,46 +3991,47 @@ class VllmConfig:
         looking up `vllm_config.compilation_config.bs_to_padded_graph_size`.
         """
 
-        # calculate the default `batch_size_capture_list`
-        if not envs.VLLM_USE_V1:
-            batch_size_capture_list = []
-            max_batchsize_to_capture = 0
-            if self.scheduler_config is not None and \
-                self.model_config is not None and \
-                    not self.model_config.enforce_eager:
+        # # calculate the default `batch_size_capture_list`
+        # if not envs.VLLM_USE_V1:
+        #     batch_size_capture_list = []
+        #     max_batchsize_to_capture = 0
+        #     if self.scheduler_config is not None and \
+        #         self.model_config is not None and \
+        #             not self.model_config.enforce_eager:
 
-                possible_sizes = [1, 2, 4] + [8 * i for i in range(1, 1025)]
-                # find the minimum size that is larger than max_num_seqs,
-                # which then becomes the max_batchsize_to_capture
-                larger_sizes = [
-                    x for x in possible_sizes
-                    if x >= self.scheduler_config.max_num_seqs
-                ]
-                if larger_sizes:
-                    max_batchsize_to_capture = larger_sizes[0]
-                else:
-                    max_batchsize_to_capture = possible_sizes[-1]
+        #         possible_sizes = [1, 2, 4] + [8 * i for i in range(1, 1025)]
+        #         # find the minimum size that is larger than max_num_seqs,
+        #         # which then becomes the max_batchsize_to_capture
+        #         larger_sizes = [
+        #             x for x in possible_sizes
+        #             if x >= self.scheduler_config.max_num_seqs
+        #         ]
+        #         if larger_sizes:
+        #             max_batchsize_to_capture = larger_sizes[0]
+        #         else:
+        #             max_batchsize_to_capture = possible_sizes[-1]
 
-                # filter out the sizes that are
-                # larger than max_batchsize_to_capture
-                batch_size_capture_list = [
-                    size for size in possible_sizes
-                    if size <= max_batchsize_to_capture
-                ]
-        else:
-            batch_size_capture_list = []
-            if self.model_config is not None and \
-                not self.model_config.enforce_eager:
-                batch_size_capture_list = [1, 2, 4
-                                           ] + [i for i in range(8, 513, 8)]
-                max_num_tokens = self.scheduler_config.max_num_batched_tokens
-                batch_size_capture_list = [
-                    size for size in batch_size_capture_list
-                    if size <= max_num_tokens
-                ]
+        #         # filter out the sizes that are
+        #         # larger than max_batchsize_to_capture
+        #         batch_size_capture_list = [
+        #             size for size in possible_sizes
+        #             if size <= max_batchsize_to_capture
+        #         ]
+        # else:
+        #     batch_size_capture_list = []
+        #     if self.model_config is not None and \
+        #         not self.model_config.enforce_eager:
+        #         batch_size_capture_list = [1, 2, 4
+        #                                    ] + [i for i in range(8, 513, 8)]
+        #         max_num_tokens = self.scheduler_config.max_num_batched_tokens
+        #         batch_size_capture_list = [
+        #             size for size in batch_size_capture_list
+        #             if size <= max_num_tokens
+        #         ]
 
-        self.compilation_config.init_with_cudagraph_sizes(
-            batch_size_capture_list)
+        # self.compilation_config.init_with_cudagraph_sizes(
+        #     batch_size_capture_list)
+        self.compilation_config.init_with_cudagraph_sizes(copy.deepcopy(self.padding_config.num_token_paddings))
 
     def __str__(self):
         return (
