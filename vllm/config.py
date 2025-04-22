@@ -2125,7 +2125,7 @@ class DeviceConfig:
             self.device = torch.device(self.device_type)
 
 
-SpecilativeMethod = Literal["ngram", "eagle", "medusa", "mlp_speculator",
+SpeculativeMethod = Literal["ngram", "eagle", "medusa", "mlp_speculator",
                             "draft_model"]
 SpeculativeAcceptanceMethod = Literal["rejection_sampler",
                                       "typical_acceptance_sampler"]
@@ -2144,7 +2144,7 @@ class SpeculativeConfig:
     model: Optional[str] = None
     """The name of the draft model, eagle head, or additional weights, if
     provided."""
-    method: Optional[SpecilativeMethod] = None
+    method: Optional[SpeculativeMethod] = None
     """The name of the speculative method to use. If users provide and set the
     `model` param, the speculative method type will be detected automatically
     if possible, if `model` param is not provided, the method name must be
