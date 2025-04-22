@@ -77,7 +77,9 @@ def prepare_mamba2_metadata(
             and attn_metadata.context_lens_tensor is not None):
         has_initial_states = attn_metadata.context_lens_tensor > 0  # [batch,]
         # precompute flag to avoid device syncs later in mamba2 forwards
-        prep_initial_states = torch.any(has_initial_states).item()
+        # prep is only needed for mamba2 ssd prefill processing
+        prep_initial_states = torch.any(
+            has_initial_states[:num_prefills]).item()
 
     # Compute seq_idx, chunk_indices and chunk_offsets for prefill only
     seq_idx = None
