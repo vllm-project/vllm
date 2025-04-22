@@ -25,7 +25,6 @@ class KVCacheManager:
         max_model_len: int,
         enable_caching: bool = True,
         caching_hash_algo: str = "builtin",
-        num_preallocate_tokens: int = 64,
         log_stats: bool = False,
     ) -> None:
         assert len(kv_cache_config.kv_cache_groups) == 1, (
@@ -42,22 +41,8 @@ class KVCacheManager:
         self.log_stats = log_stats
         # FIXME: make prefix cache stats conditional on log_stats
         self.prefix_cache_stats = PrefixCacheStats() if log_stats else None
-        # NOTE(woosuk): To avoid frequent block allocation, we preallocate some
-        # blocks for each request. For example, when a request reaches the end
-        # of its block table, we preallocate N blocks in advance. This way, we
-        # reduce the overhead of updating free_block_ids and ref_cnts for each
-        # request every step (at the cost of some memory waste).
-        # NOTE(woosuk): This is different from the "lookahead" slots since this
-        # does not guarantee that the request always has N empty blocks. After
-        # the request gets N empty blocks, it starts to use the blocks without
-        # further allocation. When it uses up all the N empty blocks, it gets
-        # N new empty blocks.
-        self.num_preallocate_tokens = num_preallocate_tokens
-        self.num_preallocate_blocks = cdiv(num_preallocate_tokens,
-                                           self.block_size)
 
         self.block_pool = BlockPool(self.num_gpu_blocks, enable_caching)
-
         self.specialized_manager = get_specialized_manager(
             kv_cache_spec=kv_cache_spec,
             block_pool=self.block_pool,
@@ -256,13 +241,9 @@ class KVCacheManager:
             # No new block is needed.
             new_blocks = []
         else:
-            # Get new blocks from the free block pool considering
-            # preallocated blocks.
-            num_preallocate_blocks = max(
-                0, self.num_preallocate_blocks -
-                num_lookahead_tokens // self.block_size)
+            # Get new blocks from the free block pool.
             num_new_blocks = min(
-                num_new_blocks + num_preallocate_blocks,
+                num_new_blocks,
                 self.block_pool.get_num_free_blocks(),
                 # Should not exceed the maximum number of blocks per request.
                 # This is especially because the block table has the shape
