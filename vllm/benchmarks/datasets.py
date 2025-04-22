@@ -834,6 +834,8 @@ class AIMODataset(HuggingFaceDataset):
 # -----------------------------------------------------------------------------
 # Next Edit Prediction Dataset Implementation
 # -----------------------------------------------------------------------------
+
+
 zeta_prompt = """### Instruction:
 You are a code completion assistant and your task is to analyze user edits and then rewrite an excerpt that the user provides, suggesting the appropriate edits within the excerpt, taking into account the cursor location.
 
@@ -852,6 +854,7 @@ You are a code completion assistant and your task is to analyze user edits and t
 
 def _format_zeta_prompt(
         examples: dict,
+        num_requests: int,
         original_start_marker: str = "<|editable_region_start|>") -> dict:
     """Format the zeta prompt for the Next Edit Prediction (NEP) dataset.
     
@@ -873,7 +876,7 @@ def _format_zeta_prompt(
     inputs = examples["input"]
     outputs = examples["output"]
     prompts, expected_outputs = [], []
-    for event, input, output in zip(events, inputs, outputs):
+    for i, (event, input, output) in enumerate(zip(events, inputs, outputs)):
         # create the final prompt
         prompts.append(zeta_prompt.format(event, input))
 
@@ -883,6 +886,8 @@ def _format_zeta_prompt(
         output_focused_region = output[output_start_index:]
         output = output_focused_region
         expected_outputs.append(output)
+        if i >= num_requests:
+            break
 
     return {"prompt": prompts, "expected_output": expected_outputs}
 
@@ -891,6 +896,7 @@ class NextEditPredictionDataset(HuggingFaceDataset):
     """
     Dataset class for processing a Next Edit Prediction dataset.
     """
+    from datasets import Dataset
 
     SUPPORTED_DATASET_PATHS = {
         "zed-industries/zeta",
@@ -899,27 +905,21 @@ class NextEditPredictionDataset(HuggingFaceDataset):
         "zed-industries/zeta": _format_zeta_prompt,
     }
 
-    def preprocess_data(self, num_requests: int) -> "Dataset":  # noqa: F821
+    def preprocess_data(self, num_requests: int) -> Dataset:
         """Preprocess the data to format the prompts and expected outputs."""
-        data = self.data[:num_requests]
         formatting_prompt_func = self.MAPPING_PROMPT_FUNCS.get(
             self.dataset_path)
         if formatting_prompt_func is None:
             raise ValueError(f"Unsupported dataset path: {self.dataset_path}")
-        data = data.map(formatting_prompt_func, batched=True)
+        data = self.data.map(formatting_prompt_func,
+                             batched=True,
+                             fn_kwargs={'num_requests': num_requests})
         return data
 
     def sample(self, tokenizer: PreTrainedTokenizerBase, num_requests: int,
                **kwargs):
         # lazily preprocess only "num_requests" samples
         data = self.preprocess_data(num_requests)
-        if len(data) < num_requests:
-            logger.info(
-                "Requested %d samples, but the dataset %s only has %d",
-                num_requests,
-                self.dataset_path,
-                len(data),
-            )
         samples = [
             SampleRequest(
                 prompt=item["prompt"],
@@ -928,4 +928,11 @@ class NextEditPredictionDataset(HuggingFaceDataset):
                     tokenizer(item["expected_output"]).input_ids),
             ) for item in data
         ]
+        if len(samples) < num_requests:
+            logger.info(
+                "Requested %d samples, but the dataset %s only has %d",
+                num_requests,
+                self.dataset_path,
+                len(samples),
+            )
         return samples
