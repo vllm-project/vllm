@@ -5,7 +5,7 @@ from typing import Dict, List, Optional, Tuple
 try:
     import intel_extension_for_pytorch.llm.modules as ipex_modules
     _use_ipex = True
-except ImportError:
+except (ImportError, AttributeError):
     _use_ipex = False
 
 import torch
