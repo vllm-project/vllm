@@ -39,8 +39,9 @@ class KVCacheManager:
 
         self.enable_caching = enable_caching
         self.caching_hash_fn = sha256 if caching_hash_algo == "sha256" else hash
-        # FIXME: make prefix cache stats conditional on log_stats
         self.log_stats = log_stats
+        # FIXME: make prefix cache stats conditional on log_stats
+        self.prefix_cache_stats = PrefixCacheStats() if log_stats else None
         # NOTE(woosuk): To avoid frequent block allocation, we preallocate some
         # blocks for each request. For example, when a request reaches the end
         # of its block table, we preallocate N blocks in advance. This way, we
@@ -79,7 +80,6 @@ class KVCacheManager:
         # This is only used to track the RUNNING requests, we do not track the
         # data for reempted ones.
         self.num_cached_block: dict[str, int] = {}
-        self.prefix_cache_stats = PrefixCacheStats()
 
     @property
     def usage(self) -> float:
@@ -90,12 +90,14 @@ class KVCacheManager:
         """
         return self.block_pool.get_usage()
 
-    def make_prefix_cache_stats(self) -> PrefixCacheStats:
+    def make_prefix_cache_stats(self) -> Optional[PrefixCacheStats]:
         """Get (and reset) the prefix cache stats.
 
         Returns:
-            The current prefix caching stats.
+            The current prefix caching stats, or None if logging is disabled.
         """
+        if not self.log_stats:
+            return None
         stats = self.prefix_cache_stats
         self.prefix_cache_stats = PrefixCacheStats()
         return stats
@@ -125,7 +127,9 @@ class KVCacheManager:
                                                self.block_size, request)
             self.req_to_block_hashes[request.request_id] = block_hashes
 
-        self.prefix_cache_stats.requests += 1
+        if self.log_stats:
+            assert self.prefix_cache_stats is not None
+            self.prefix_cache_stats.requests += 1
         # When the request requires prompt logprobs, we skip prefix caching.
         if request.sampling_params.prompt_logprobs is not None:
             return [], 0
@@ -145,8 +149,10 @@ class KVCacheManager:
 
         computed_blocks = (
             self.specialized_manager.find_longest_cache_hit(block_hashes))
-        self.prefix_cache_stats.queries += len(block_hashes)
-        self.prefix_cache_stats.hits += len(computed_blocks)
+        if self.log_stats:
+            assert self.prefix_cache_stats is not None
+            self.prefix_cache_stats.queries += len(block_hashes)
+            self.prefix_cache_stats.hits += len(computed_blocks)
 
         if last_block_hash is not None:
             # Add back the last block hash if it was removed.
@@ -171,8 +177,9 @@ class KVCacheManager:
 
         Args:
             request: The request to allocate slots.
-            num_tokens: The number of tokens to allocate. Note that this does
-                not include the tokens that have already been computed.
+            num_tokens: The number of tokens to allocate, including external
+                tokens. Note that this does not include tokens that have
+                already been computed locally (i.e. new_computed_blocks).
             new_computed_blocks: A list of new computed blocks just hitting the
                 prefix caching.
             num_lookahead_tokens: The number of speculative tokens to allocate.
@@ -316,17 +323,19 @@ class KVCacheManager:
 
     def reset_prefix_cache(self) -> bool:
         """Reset prefix cache. This function may be used in RLHF
-        flows to invalid prefix caching after the weights are updated,
+        flows to invalidate prefix caching after the weights are updated,
         or used for resetting prefix caching status for benchmarking.
 
         Returns:
             bool: True if the prefix cache is successfully reset,
             False otherwise.
         """
-        if self.block_pool.reset_prefix_cache():
+        if not self.block_pool.reset_prefix_cache():
+            return False
+        if self.log_stats:
+            assert self.prefix_cache_stats is not None
             self.prefix_cache_stats.reset = True
-            return True
-        return False
+        return True
 
     def get_num_common_prefix_blocks(
         self,

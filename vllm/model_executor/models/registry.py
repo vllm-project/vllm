@@ -122,13 +122,11 @@ _TEXT_GENERATION_MODELS = {
 _EMBEDDING_MODELS = {
     # [Text-only]
     "BertModel": ("bert", "BertEmbeddingModel"),
-    "RobertaModel": ("roberta", "RobertaEmbeddingModel"),
-    "RobertaForMaskedLM": ("roberta", "RobertaEmbeddingModel"),
-    "XLMRobertaModel": ("roberta", "RobertaEmbeddingModel"),
     "DeciLMForCausalLM": ("nemotron_nas", "DeciLMForCausalLM"),
     "Gemma2Model": ("gemma2", "Gemma2ForCausalLM"),
     "GlmForCausalLM": ("glm", "GlmForCausalLM"),
     "GritLM": ("gritlm", "GritLM"),
+    "GteModel": ("bert", "GteEmbeddingModel"),
     "InternLM2ForRewardModel": ("internlm2", "InternLM2ForRewardModel"),
     "JambaForSequenceClassification": ("jamba", "JambaForSequenceClassification"),  # noqa: E501
     "LlamaModel": ("llama", "LlamaForCausalLM"),
@@ -138,12 +136,16 @@ _EMBEDDING_MODELS = {
         if arch == "LlamaForCausalLM"
     },
     "MistralModel": ("llama", "LlamaForCausalLM"),
+    "NomicBertModel": ("bert", "NomicBertEmbeddingModel"),
     "Phi3ForCausalLM": ("phi3", "Phi3ForCausalLM"),
     "Qwen2Model": ("qwen2", "Qwen2EmbeddingModel"),
     "Qwen2ForCausalLM": ("qwen2", "Qwen2ForCausalLM"),
     "Qwen2ForRewardModel": ("qwen2_rm", "Qwen2ForRewardModel"),
     "Qwen2ForProcessRewardModel": ("qwen2_rm", "Qwen2ForProcessRewardModel"),
+    "RobertaForMaskedLM": ("roberta", "RobertaEmbeddingModel"),
+    "RobertaModel": ("roberta", "RobertaEmbeddingModel"),
     "TeleChat2ForCausalLM": ("telechat2", "TeleChat2ForCausalLM"),
+    "XLMRobertaModel": ("roberta", "RobertaEmbeddingModel"),
     # [Multimodal]
     "LlavaNextForConditionalGeneration": ("llava_next", "LlavaNextForConditionalGeneration"),  # noqa: E501
     "Phi3VForCausalLM": ("phi3v", "Phi3VForCausalLM"),
@@ -162,6 +164,8 @@ _CROSS_ENCODER_MODELS = {
                                          "RobertaForSequenceClassification"),
     "XLMRobertaForSequenceClassification": ("roberta",
                                             "RobertaForSequenceClassification"),
+    "ModernBertForSequenceClassification": ("modernbert",
+                                            "ModernBertForSequenceClassification"),
 }
 
 _MULTIMODAL_MODELS = {
@@ -196,6 +200,7 @@ _MULTIMODAL_MODELS = {
     "Qwen2VLForConditionalGeneration": ("qwen2_vl", "Qwen2VLForConditionalGeneration"),  # noqa: E501
     "Qwen2_5_VLForConditionalGeneration": ("qwen2_5_vl", "Qwen2_5_VLForConditionalGeneration"),  # noqa: E501
     "Qwen2AudioForConditionalGeneration": ("qwen2_audio", "Qwen2AudioForConditionalGeneration"),  # noqa: E501
+    "Qwen2_5OmniModel": ("qwen2_5_omni_thinker", "Qwen2_5OmniThinkerForConditionalGeneration"),  # noqa: E501
     "UltravoxModel": ("ultravox", "UltravoxModel"),
     "Phi4MMForCausalLM": ("phi4mm", "Phi4MMForCausalLM"),
     # [Encoder-decoder]

@@ -10,14 +10,13 @@ import sys
 import textwrap
 import warnings
 from collections import Counter
-from collections.abc import Mapping
 from contextlib import contextmanager
 from dataclasses import (MISSING, dataclass, field, fields, is_dataclass,
                          replace)
 from importlib.util import find_spec
 from pathlib import Path
 from typing import (TYPE_CHECKING, Any, Callable, ClassVar, Final, Literal,
-                    Optional, Protocol, TypeVar, Union)
+                    Optional, Protocol, TypeVar, Union, get_args)
 
 import torch
 from pydantic import BaseModel, Field, PrivateAttr
@@ -121,7 +120,7 @@ def get_attr_docs(cls: type[Any]) -> dict[str, str]:
     def pairwise(iterable):
         """
         Manually implement https://docs.python.org/3/library/itertools.html#itertools.pairwise
-        
+
         Can be removed when Python 3.9 support is dropped.
         """
         iterator = iter(iterable)
@@ -180,6 +179,23 @@ def config(cls: type[Config]) -> type[Config]:
             raise ValueError(
                 f"Field '{f.name}' in {cls.__name__} must have a docstring.")
     return cls
+
+
+def get_field(cls: type[Config], name: str) -> Field:
+    """Get the default factory field of a dataclass by name. Used for getting
+    default factory fields in `EngineArgs`."""
+    if not is_dataclass(cls):
+        raise TypeError("The given class is not a dataclass.")
+    cls_fields = {f.name: f for f in fields(cls)}
+    if name not in cls_fields:
+        raise ValueError(f"Field '{name}' not found in {cls.__name__}.")
+    named_field: Field = cls_fields.get(name)
+    if (default_factory := named_field.default_factory) is not MISSING:
+        return field(default_factory=default_factory)
+    if (default := named_field.default) is not MISSING:
+        return field(default=default)
+    raise ValueError(
+        f"{cls.__name__}.{name} must have a default value or default factory.")
 
 
 class ModelConfig:
@@ -250,7 +266,7 @@ class ModelConfig:
         config_format: The config format which shall be loaded.
             Defaults to 'auto' which defaults to 'hf'.
         hf_token: The token to use as HTTP bearer authorization for remote files
-            . If `True`, will use the token generated when running 
+            . If `True`, will use the token generated when running
             `huggingface-cli login` (stored in `~/.huggingface`).
         hf_overrides: If a dictionary, contains arguments to be forwarded to the
             HuggingFace config. If a callable, it is called to update the
@@ -338,7 +354,7 @@ class ModelConfig:
         disable_cascade_attn: bool = False,
         skip_tokenizer_init: bool = False,
         served_model_name: Optional[Union[str, list[str]]] = None,
-        limit_mm_per_prompt: Optional[Mapping[str, int]] = None,
+        limit_mm_per_prompt: Optional[dict[str, int]] = None,
         use_async_output_proc: bool = True,
         config_format: ConfigFormat = ConfigFormat.AUTO,
         hf_token: Optional[Union[bool, str]] = None,
@@ -561,7 +577,7 @@ class ModelConfig:
                 self.tokenizer = s3_tokenizer.dir
 
     def _init_multimodal_config(
-        self, limit_mm_per_prompt: Optional[Mapping[str, int]]
+        self, limit_mm_per_prompt: Optional[dict[str, int]]
     ) -> Optional["MultiModalConfig"]:
         if self.registry.is_multimodal_model(self.architectures):
             return MultiModalConfig(limit_per_prompt=limit_mm_per_prompt or {})
@@ -1229,22 +1245,70 @@ class ModelConfig:
                 or getattr(self.hf_config, "is_matryoshka", False))
 
 
-class CacheConfig:
-    """Configuration for the KV cache.
+BlockSize = Literal[8, 16, 32, 64, 128]
+CacheDType = Literal["auto", "fp8", "fp8_e4m3", "fp8_e5m2"]
+PrefixCachingHashAlgo = Literal["builtin", "sha256"]
 
-    Args:
-        block_size: Size of a cache block in number of tokens.
-        gpu_memory_utilization: Fraction of GPU memory to use for the
-            vLLM execution.
-        swap_space: Size of the CPU swap space per GPU (in GiB).
-        cache_dtype: Data type for kv cache storage.
-        is_attention_free: Whether the model is attention-free.
-        num_gpu_blocks_override: Number of GPU blocks to use. This overrides the
-            profiled num_gpu_blocks if specified. Does nothing if None.
-        sliding_window: Sliding window size for the KV cache.
-        enable_prefix_caching: Whether to enable prefix caching.
-        cpu_offload_gb: Size of the CPU offload buffer in GiB.
+
+@config
+@dataclass
+class CacheConfig:
+    """Configuration for the KV cache."""
+
+    block_size: Optional[BlockSize] = None
+    """Size of a contiguous cache block in number of tokens. This is ignored on
+    neuron devices and set to `--max-model-len`. On CUDA devices, only block
+    sizes up to 32 are supported. On HPU devices, block size defaults to 128.
     """
+    gpu_memory_utilization: float = 0.9
+    """The fraction of GPU memory to be used for the model executor, which can
+    range from 0 to 1. For example, a value of 0.5 would imply 50% GPU memory
+    utilization. If unspecified, will use the default value of 0.9. This is a
+    per-instance limit, and only applies to the current vLLM instance. It does
+    not matter if you have another vLLM instance running on the same GPU. For
+    example, if you have two vLLM instances running on the same GPU, you can
+    set the GPU memory utilization to 0.5 for each instance."""
+    swap_space: float = 4
+    """Size of the CPU swap space per GPU (in GiB)."""
+    cache_dtype: CacheDType = "auto"
+    """Data type for kv cache storage. If "auto", will use model data type.
+    CUDA 11.8+ supports fp8 (=fp8_e4m3) and fp8_e5m2. ROCm (AMD GPU) supports
+    fp8 (=fp8_e4m3)."""
+    is_attention_free: bool = False
+    """Whether the model is attention-free. This is primarily set in
+    `ModelConfig` and that value should be manually duplicated here."""
+    num_gpu_blocks_override: Optional[int] = None
+    """Number of GPU blocks to use. This overrides the profiled `num_gpu_blocks`
+    if specified. Does nothing if `None`. Used for testing preemption."""
+    sliding_window: Optional[int] = None
+    """Sliding window size for the KV cache. This is primarily set in
+    `ModelConfig` and that value should be manually duplicated here."""
+    enable_prefix_caching: Optional[bool] = None
+    """Whether to enable prefix caching. Disabled by default for V0. Enabled by
+    default for V1."""
+    prefix_caching_hash_algo: PrefixCachingHashAlgo = "builtin"
+    """Set the hash algorithm for prefix caching:\n
+    - "builtin" is Python's built-in hash.\n
+    - "sha256" is collision resistant but with certain overheads."""
+    cpu_offload_gb: float = 0
+    """The space in GiB to offload to CPU, per GPU. Default is 0, which means
+    no offloading. Intuitively, this argument can be seen as a virtual way to
+    increase the GPU memory size. For example, if you have one 24 GB GPU and
+    set this to 10, virtually you can think of it as a 34 GB GPU. Then you can
+    load a 13B model with BF16 weight, which requires at least 26GB GPU memory.
+    Note that this requires fast CPU-GPU interconnect, as part of the model is
+    loaded from CPU memory to GPU memory on the fly in each model forward pass.
+    """
+    calculate_kv_scales: bool = False
+    """This enables dynamic calculation of `k_scale` and `v_scale` when
+    kv_cache_dtype is fp8. If `False`, the scales will be loaded from the model
+    checkpoint if available. Otherwise, the scales will default to 1.0."""
+
+    # Will be set after profiling.
+    num_gpu_blocks: Optional[int] = field(default=None, init=False)
+    """The number of blocks to allocate for GPU memory."""
+    num_cpu_blocks: Optional[int] = field(default=None, init=False)
+    """The number of blocks to allocate for CPU memory."""
 
     def compute_hash(self) -> str:
         """
@@ -1265,42 +1329,12 @@ class CacheConfig:
                                usedforsecurity=False).hexdigest()
         return hash_str
 
-    def __init__(
-        self,
-        block_size: int,
-        gpu_memory_utilization: float,
-        swap_space: float,
-        cache_dtype: str,
-        is_attention_free: bool = False,
-        num_gpu_blocks_override: Optional[int] = None,
-        sliding_window: Optional[int] = None,
-        enable_prefix_caching: bool = False,
-        prefix_caching_hash_algo: str = "builtin",
-        cpu_offload_gb: float = 0,
-        calculate_kv_scales: Optional[bool] = None,
-    ) -> None:
-        self.block_size = block_size
-        self.gpu_memory_utilization = gpu_memory_utilization
-        self.swap_space_bytes = swap_space * GiB_bytes
-        self.num_gpu_blocks_override = num_gpu_blocks_override
-        self.cache_dtype = cache_dtype
-        self.is_attention_free = is_attention_free
-        self.sliding_window = sliding_window
-        self.enable_prefix_caching = enable_prefix_caching
-        self.prefix_caching_hash_algo = prefix_caching_hash_algo
-        self.cpu_offload_gb = cpu_offload_gb
-        self.calculate_kv_scales = calculate_kv_scales
+    def __post_init__(self) -> None:
+        self.swap_space_bytes = self.swap_space * GiB_bytes
+
         self._verify_args()
         self._verify_cache_dtype()
         self._verify_prefix_caching()
-
-        # Will be set after profiling.
-        self.num_gpu_blocks: Optional[int] = None
-        self.num_cpu_blocks: Optional[int] = None
-
-        # Set calculate_kv_scales to False if the value is unset.
-        if self.calculate_kv_scales is None:
-            self.calculate_kv_scales = False
 
     def metrics_info(self):
         # convert cache_config to dict(key: str, value: str) for prometheus
@@ -1320,7 +1354,7 @@ class CacheConfig:
     def _verify_cache_dtype(self) -> None:
         if self.cache_dtype == "auto":
             pass
-        elif self.cache_dtype in ("fp8", "fp8_e4m3", "fp8_e5m2"):
+        elif self.cache_dtype in get_args(CacheDType):
             logger.info(
                 "Using fp8 data type to store kv cache. It reduces the GPU "
                 "memory footprint and boosts the performance. "
@@ -1338,12 +1372,12 @@ class CacheConfig:
                 "Prefix caching is not supported with sliding window. "
                 "Run with --disable-sliding-window to use prefix caching.")
 
-        if self.enable_prefix_caching and self.prefix_caching_hash_algo not in (
-                "builtin", "sha256"):
+        if (self.enable_prefix_caching and self.prefix_caching_hash_algo
+                not in get_args(PrefixCachingHashAlgo)):
             raise ValueError(
                 "Unknown prefix caching hash algorithm: "
-                f"{self.prefix_caching_hash_algo}. Must be either "
-                "'builtin' or 'sha256'.")
+                f"{self.prefix_caching_hash_algo}. Must be one of "
+                f"{get_args(PrefixCachingHashAlgo)}.")
 
     def verify_with_parallel_config(
         self,
@@ -1364,20 +1398,26 @@ class CacheConfig:
             logger.warning("Possibly too large swap space. %s", msg)
 
 
+PoolType = Literal["ray"]
+
+
+@config
 @dataclass
 class TokenizerPoolConfig:
-    """Configuration for the tokenizer pool.
+    """Configuration for the tokenizer pool."""
 
-    Args:
-        pool_size: Number of tokenizer workers in the pool.
-        pool_type: Type of the pool.
-        extra_config: Additional config for the pool.
-            The way the config will be used depends on the
-            pool type.
-    """
-    pool_size: int
-    pool_type: Union[str, type["BaseTokenizerGroup"]]
-    extra_config: dict
+    pool_size: int = 0
+    """Number of tokenizer workers in the pool to use for asynchronous
+    tokenization. If 0, will use synchronous tokenization."""
+
+    pool_type: Union[PoolType, type["BaseTokenizerGroup"]] = "ray"
+    """Type of tokenizer pool to use for asynchronous tokenization. Ignored if
+    tokenizer_pool_size is 0."""
+
+    extra_config: dict = field(default_factory=dict)
+    """Additional config for the pool. The way the config will be used depends
+    on the pool type. This should be a JSON string that will be parsed into a
+    dictionary. Ignored if tokenizer_pool_size is 0."""
 
     def compute_hash(self) -> str:
         """
@@ -1408,7 +1448,7 @@ class TokenizerPoolConfig:
     @classmethod
     def create_config(
         cls, tokenizer_pool_size: int,
-        tokenizer_pool_type: Union[str, type["BaseTokenizerGroup"]],
+        tokenizer_pool_type: Union[PoolType, type["BaseTokenizerGroup"]],
         tokenizer_pool_extra_config: Optional[Union[str, dict]]
     ) -> Optional["TokenizerPoolConfig"]:
         """Create a TokenizerPoolConfig from the given parameters.
@@ -1449,6 +1489,7 @@ class LoadFormat(str, enum.Enum):
     BITSANDBYTES = "bitsandbytes"
     MISTRAL = "mistral"
     RUNAI_STREAMER = "runai_streamer"
+    RUNAI_STREAMER_SHARDED = "runai_streamer_sharded"
     FASTSAFETENSORS = "fastsafetensors"
 
 
@@ -1483,7 +1524,7 @@ class LoadConfig:
     download_dir: Optional[str] = None
     """Directory to download and load the weights, default to the default
     cache directory of Hugging Face."""
-    model_loader_extra_config: Optional[Union[str, dict]] = None
+    model_loader_extra_config: dict = field(default_factory=dict)
     """Extra config for model loader. This will be passed to the model loader
     corresponding to the chosen load_format. This should be a JSON string that
     will be parsed into a dictionary."""
@@ -1514,10 +1555,6 @@ class LoadConfig:
         return hash_str
 
     def __post_init__(self):
-        model_loader_extra_config = self.model_loader_extra_config or {}
-        if isinstance(model_loader_extra_config, str):
-            self.model_loader_extra_config = json.loads(
-                model_loader_extra_config)
         if isinstance(self.load_format, str):
             load_format = self.load_format.lower()
             self.load_format = LoadFormat(load_format)
@@ -1588,7 +1625,7 @@ class ParallelConfig:
     """The full name of the worker class to use. If "auto", the worker class
     will be determined based on the platform."""
     sd_worker_cls: str = "auto"
-    """The full name of the worker class to use for speculative decofing. 
+    """The full name of the worker class to use for speculative decofing.
     If "auto", the worker class will be determined based on the platform."""
     worker_extension_cls: str = ""
     """The full name of the worker extension class to use. The worker extension
@@ -1657,6 +1694,7 @@ class ParallelConfig:
         factors: list[Any] = []
         factors.append(self.pipeline_parallel_size)
         factors.append(self.tensor_parallel_size)
+        factors.append(self.enable_expert_parallel)
         return hashlib.sha256(str(factors).encode()).hexdigest()
 
     def __post_init__(self) -> None:
@@ -1779,13 +1817,13 @@ class SchedulerConfig:
 
     max_num_batched_tokens: int = None  # type: ignore
     """Maximum number of tokens to be processed in a single iteration.
-    
+
     This config has no static default. If left unspecified by the user, it will
     be set in `EngineArgs.create_engine_config` based on the usage context."""
 
     max_num_seqs: int = None  # type: ignore
     """Maximum number of sequences to be processed in a single iteration.
-    
+
     This config has no static default. If left unspecified by the user, it will
     be set in `EngineArgs.create_engine_config` based on the usage context."""
 
@@ -1831,7 +1869,7 @@ class SchedulerConfig:
     # TODO (ywang96): Make this configurable.
     max_num_encoder_input_tokens: int = field(init=False)
     """Multimodal encoder compute budget, only used in V1.
-    
+
     NOTE: This is not currently configurable. It will be overridden by
     max_num_batched_tokens in case max multimodal embedding size is larger."""
 
@@ -2029,9 +2067,19 @@ class SchedulerConfig:
         return self.num_scheduler_steps > 1
 
 
+Device = Literal["auto", "cuda", "neuron", "cpu", "tpu", "xpu", "hpu"]
+
+
+@config
+@dataclass
 class DeviceConfig:
-    device: Optional[torch.device]
-    device_type: str
+    """Configuration for the device to use for vLLM execution."""
+
+    device: Union[Device, torch.device] = "auto"
+    """Device type for vLLM execution."""
+    device_type: str = field(init=False)
+    """Device type from the current platform. This is set in
+    `__post_init__`."""
 
     def compute_hash(self) -> str:
         """
@@ -2053,8 +2101,8 @@ class DeviceConfig:
                                usedforsecurity=False).hexdigest()
         return hash_str
 
-    def __init__(self, device: str = "auto") -> None:
-        if device == "auto":
+    def __post_init__(self):
+        if self.device == "auto":
             # Automated device type detection
             from vllm.platforms import current_platform
             self.device_type = current_platform.device_type
@@ -2065,7 +2113,7 @@ class DeviceConfig:
                     "to turn on verbose logging to help debug the issue.")
         else:
             # Device type is assigned explicitly
-            self.device_type = device
+            self.device_type = self.device
 
         # Some device types require processing inputs on CPU
         if self.device_type in ["neuron"]:
@@ -2260,7 +2308,8 @@ class SpeculativeConfig:
         if self.model is None and self.num_speculative_tokens is not None:
             # TODO(Shangming): Refactor mtp configuration logic when supporting
             # mtp acceleration for more models besides deepseek_v3
-            if self.target_model_config.hf_text_config.model_type \
+            if self.target_model_config and \
+                self.target_model_config.hf_text_config.model_type \
                         == "deepseek_v3":
                 # use the draft model from the same model:
                 self.model = self.target_model_config.model
@@ -2341,7 +2390,9 @@ class SpeculativeConfig:
                 )
 
                 # Automatically detect the method
-                if "eagle-" in self.draft_model_config.model.lower():
+                if self.method == 'eagle':
+                    pass
+                elif "eagle-" in self.draft_model_config.model.lower():
                     self.method = "eagle"
                 elif self.draft_model_config.hf_config.model_type == "medusa":
                     self.method = "medusa"
@@ -2637,13 +2688,6 @@ class LoRAConfig:
         elif isinstance(self.lora_dtype, str):
             self.lora_dtype = getattr(torch, self.lora_dtype)
 
-    def verify_with_scheduler_config(self, scheduler_config: SchedulerConfig):
-        # Reminder: Please update docs/source/features/compatibility_matrix.md
-        # If the feature combo become valid
-        if scheduler_config.chunked_prefill_enabled:
-            logger.warning("LoRA with chunked prefill is still experimental "
-                           "and may be unstable.")
-
     def verify_lora_support(self):
         if self.long_lora_scaling_factors is not None and envs.VLLM_USE_V1:
             raise ValueError(
@@ -2694,13 +2738,16 @@ class PromptAdapterConfig:
                                                 self.prompt_adapter_dtype)
 
 
+@config
 @dataclass
 class MultiModalConfig:
     """Controls the behavior of multimodal models."""
 
-    limit_per_prompt: Mapping[str, int] = field(default_factory=dict)
+    limit_per_prompt: dict[str, int] = field(default_factory=dict)
     """
     The maximum number of input items allowed per prompt for each modality.
+    This should be a JSON string that will be parsed into a dictionary.
+    Defaults to 1 (V0) or 999 (V1) for each modality.
     """
 
     def compute_hash(self) -> str:
@@ -2722,24 +2769,20 @@ class MultiModalConfig:
                                usedforsecurity=False).hexdigest()
         return hash_str
 
-    def get_default_limit_per_prompt(self) -> int:
-        """
-        Return the default number of input items allowed per prompt
-        for any modality if not specified by the user.
-        """
-        return 999 if envs.VLLM_USE_V1 else 1
-
     def get_limit_per_prompt(self, modality: str) -> int:
         """
         Get the maximum number of input items allowed per prompt
         for the given modality.
         """
-        default = self.get_default_limit_per_prompt()
-        return self.limit_per_prompt.get(modality, default)
+        return self.limit_per_prompt.get(
+            modality,
+            999 if envs.VLLM_USE_V1 else 1,
+        )
 
     # TODO: Add configs to init vision tower or not.
 
 
+@config
 @dataclass
 class PoolerConfig:
     """Controls the behavior of output pooling in pooling models."""
@@ -3064,15 +3107,28 @@ def get_served_model_name(model: str,
     return served_model_name
 
 
+GuidedDecodingBackendV0 = Literal["auto", "outlines", "lm-format-enforcer",
+                                  "xgrammar"]
+GuidedDecodingBackendV1 = Literal["auto", "xgrammar", "guidance"]
+
+
+@config
 @dataclass
 class DecodingConfig:
-    """Dataclass which contains the decoding strategy of the engine"""
+    """Dataclass which contains the decoding strategy of the engine."""
 
-    # Which guided decoding algo to use.
-    # 'outlines' / 'lm-format-enforcer' / 'xgrammar'
-    guided_decoding_backend: str = "auto" if envs.VLLM_USE_V1 else "xgrammar"
+    guided_decoding_backend: Union[
+        GuidedDecodingBackendV0,
+        GuidedDecodingBackendV1] = "auto" if envs.VLLM_USE_V1 else "xgrammar"
+    """Which engine will be used for guided decoding (JSON schema / regex etc)
+    by default. With "auto", we will make opinionated choices based on request
+    contents and what the backend libraries currently support, so the behavior
+    is subject to change in each release."""
 
     reasoning_backend: Optional[str] = None
+    """Select the reasoning parser depending on the model that you're using.
+    This is used to parse the reasoning content into OpenAI API format.
+    Required for `--enable-reasoning`."""
 
     def compute_hash(self) -> str:
         """
@@ -3094,17 +3150,12 @@ class DecodingConfig:
         return hash_str
 
     def __post_init__(self):
-        v0_valid_guided_backends = [
-            'outlines', 'lm-format-enforcer', 'xgrammar', 'auto'
-        ]
-        v1_valid_guided_backends = ['xgrammar', 'guidance', 'auto']
-
         backend = GuidedDecodingParams(
             backend=self.guided_decoding_backend).backend_name
         if envs.VLLM_USE_V1:
-            valid_guided_backends = v1_valid_guided_backends
+            valid_guided_backends = get_args(GuidedDecodingBackendV1)
         else:
-            valid_guided_backends = v0_valid_guided_backends
+            valid_guided_backends = get_args(GuidedDecodingBackendV0)
         if backend not in valid_guided_backends:
             raise ValueError(f"Invalid guided_decoding_backend '{backend}',"
                              f" must be one of {valid_guided_backends}")
@@ -3764,8 +3815,6 @@ class VllmConfig:
         if self.lora_config:
             self.lora_config.verify_with_cache_config(self.cache_config)
             self.lora_config.verify_with_model_config(self.model_config)
-            self.lora_config.verify_with_scheduler_config(
-                self.scheduler_config)
             self.lora_config.verify_lora_support()
         if self.prompt_adapter_config:
             self.prompt_adapter_config.verify_with_model_config(

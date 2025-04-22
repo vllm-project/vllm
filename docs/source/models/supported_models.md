@@ -55,6 +55,10 @@ If your model is neither supported natively by vLLM or Transformers, you can sti
 Simply set `trust_remote_code=True` and vLLM will run any model on the Model Hub that is compatible with Transformers.
 Provided that the model writer implements their model in a compatible way, this means that you can run new models before they are officially supported in Transformers or vLLM!
 
+:::{tip}
+If you have not yet created your custom model, you can follow this guide on [customising models in Transformers](https://huggingface.co/docs/transformers/en/custom_models).
+:::
+
 ```python
 from vllm import LLM
 llm = LLM(model=..., task="generate", trust_remote_code=True)  # Name or path of your model
@@ -334,7 +338,7 @@ See [this page](#generative-models) for more information on how to use generativ
   * ✅︎
 - * `Glm4ForCausalLM`
   * GLM-4-0414
-  * `THUDM/GLM-4-32B-Chat-0414`, etc.
+  * `THUDM/GLM-4-32B-0414`, etc.
   * ✅︎
   * ✅︎
 - * `GPT2LMHeadModel`
@@ -740,6 +744,11 @@ If your model is not in the above list, we will try to automatically convert the
   * `BAAI/bge-reranker-v2-m3`, etc.
   *
   *
+- * `ModernBertForSequenceClassification`
+  * ModernBert-based
+  * `Alibaba-NLP/gte-reranker-modernbert-base`, etc.
+  *
+  *
 :::
 
 (supported-mm-models)=
@@ -779,7 +788,7 @@ llm = LLM(
 Online serving:
 
 ```bash
-vllm serve Qwen/Qwen2-VL-7B-Instruct --limit-mm-per-prompt image=4
+vllm serve Qwen/Qwen2-VL-7B-Instruct --limit-mm-per-prompt '{"image":4}'
 ```
 
 **This is no longer required if you are using vLLM V1.**
@@ -995,7 +1004,7 @@ See [this page](#generative-models) for more information on how to use generativ
   * `microsoft/Phi-4-multimodal-instruct`, etc.
   * ✅︎
   *
-  *
+  * ✅︎
 - * `PixtralForConditionalGeneration`
   * Pixtral
   * T + I<sup>+</sup>
@@ -1031,6 +1040,13 @@ See [this page](#generative-models) for more information on how to use generativ
   * ✅︎
   * ✅︎
   * ✅︎
+- * `Qwen2_5OmniThinkerForConditionalGeneration`
+  * Qwen2.5-Omni
+  * T + I<sup>E+</sup> + V<sup>E+</sup> + A<sup>+</sup>
+  * `Qwen/Qwen2.5-Omni-7B`
+  *
+  * ✅︎
+  * ✅︎\*
 - * `SkyworkR1VChatModel`
   * Skywork-R1V-38B
   * T + I
@@ -1098,6 +1114,14 @@ For more details, please see: <gh-pr:4087#issuecomment-2250397630>
 
 :::{warning}
 Our PaliGemma implementations have the same problem as Gemma 3 (see above) for both V0 and V1.
+:::
+
+:::{note}
+To use Qwen2.5-Omni, you have to install Hugging Face Transformers library from source via
+`pip install git+https://github.com/huggingface/transformers.git`.
+
+Read audio from video pre-processing is currently supported on V0 (but not V1), because overlapping modalities is not yet supported in V1.
+`--mm-processor-kwargs '{"use_audio_in_video": True}'`.
 :::
 
 ### Pooling Models
