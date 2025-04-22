@@ -8,109 +8,107 @@ from vllm.entrypoints.openai.protocol import FunctionCall
 from vllm.entrypoints.openai.tool_parsers import ToolParserManager
 
 # Content that is not streamed
-NO_STREAM_FUNCTION_OUTPUT = (
-    "好的，用户现在要研发一个5MW"
-    "的燃气轮机，需要确定总体"
-    "参数，比如空气流量、压气机压比、转速、"
-    "燃烧室出口温度、压气机级数和支点布"
-    "局。首先，我需要回忆一下燃气轮机的基本"
-    "设计参数和它们之间的关系。\n\n首"
-    "先，燃气轮机的功率主要由"
-    "热力学循环参数决定，比如压比、"
-    "温度和空气流量。5MW属于"
-    "中小型燃气轮机，可能用于分"
-    "布式能源或航改型发动机。我"
-    "需要先确定这些参数的大"
-    "致范围。\n\n空气流量方面，通"
-    "常燃气轮机的空气流量"
-    "（ṁa）可以通过功率"
-    "估算。根据经验"
-    "，每兆瓦大约需要1-3 kg/s"
-    "的空气流量。假设5MW的话，"
-    "可能在5-15 kg/s之间。但具体"
-    "数值需要结合其他参数。\n\n压气机"
-    "压比（πc）是关键参数，通常"
-    "中小型燃气轮机的压比在8-20之间。"
-    "假设选择12的压比，这样可以在"
-    "效率和结构之间取得平衡。\n\n转"
-    "速方面，燃气轮机的转速较"
-    "高，通常在8000-15000 rpm之间。"
-    "考虑到5MW的规模，可能选"
-    "择10000 rpm左右，这样可以平衡"
-    "机械强度和效率。\n\n燃"
-    "烧室出口温度（T3）是涡轮入"
-    "口温度，直接影响效率和"
-    "材料选择。现代燃气轮机的涡轮"
-    "前温度可能在1400-1600K"
-    "左右。假设1500K，但需要考虑"
-    "材料限制，比如镍基合金的"
-    "耐温能力。\n\n压气机级数需要"
-    "根据压比和压气机的级效"
-    "率来确定。假设每级的压比"
-    "约为1.3，那么总级数大约是"
-    "log(πc)/log(1.3) ≈ "
-    "log(12)/log(1.3) ≈ 7-8级。"
-    "可能需要8级压气机。\n\n"
-    "支点布局方面，燃气轮机的支点"
-    "通常布置在压气机和涡轮"
-    "之间，以减少振动。常见的布局"
-    "是两端支撑，或者中间"
-    "加一个支点。对于中小型机，可能采"
-    "用双支撑结构，比如在"
-    "压气机端和涡轮端各一个，或者"
-    "中间加一个中间支点来提"
-    "高刚度。\n\n不过，这些数值"
-    "可能需要进一步验证。比"
-    "如，是否需要调用互联网搜索"
-    "来确认这些参数的典型"
-    "值？比如，5MW燃气轮机的空气"
-    "流量、压比等是否有标准"
-    "数据？或者是否有类似"
-    "案例？\n\n用户"
-    "可能希望得到一个具体"
-    "的例子，所以可能需要结合典型"
-    "设计参数。例如，参考现有"
-    "的5MW级燃气轮机，如GE的LM2500或"
-    "类似型号，但LM2500可能"
-    "更大，需要调整。或者查找学术"
-    "资料中的设计案例。\n\n可"
-    "能需要调用互联网搜索工具来查找"
-    "5MW燃气轮机的设计参数，"
-    "比如空气流量、压比等，确保给出"
-    "的数值合理。例如，搜索"
-    "“5MW燃气轮机设计参数”或“中小型燃"
-    "气轮机典型参数”。\n\n假设"
-    "搜索结果给出类似参数，比如空气"
-    "流量约10 kg/s，压比12，"
-    "转速10000 rpm，涡轮前温度1500K，"
-    "压气机8级，支点双支撑。这样"
-    "可以形成一个范例。\n\n需要确保"
-    "各参数之间的热力学一致性，"
-    "比如通过理想循环计算验证。"
-    "例如，使用布雷顿循环公式计"
-    "算理论功率，再调整效率参数"
-    "得到实际功率是否接近5MW。"
-    "\n\n可能还需要考虑压气机效率、涡"
-    "轮效率等因素。例如，假设压"
-    "气机效率0.85，涡轮效率0.9，燃"
-    "烧效率0.98，散热损失等，"
-    "但用户可能只需要总体参数，不需"
-    "要详细热力计算。\n\n总"
-    "结下来，给出一个范例参数，同时"
-    "说明这些参数的选择依据，"
-    "并建议进一步详细设计时进行"
-    "热力循环分析和结构强度校核"
-    "。\n</think>\n\n<tool_call>"
-    '\n{"name": '
-    '"internet_search",'
-    ' "arguments":'
-    ' {"question": "'
-    "5MW燃气轮机"
-    "设计参数 空气流量 压气机"
-    "压比 转速 燃烧室出口"
-    "温度 压气机级数"
-    ' 支点布局"}}\n</tool_call>\n\n '
-)
+NO_STREAM_FUNCTION_OUTPUT = ("好的，用户现在要研发一个5MW"
+                             "的燃气轮机，需要确定总体"
+                             "参数，比如空气流量、压气机压比、转速、"
+                             "燃烧室出口温度、压气机级数和支点布"
+                             "局。首先，我需要回忆一下燃气轮机的基本"
+                             "设计参数和它们之间的关系。\n\n首"
+                             "先，燃气轮机的功率主要由"
+                             "热力学循环参数决定，比如压比、"
+                             "温度和空气流量。5MW属于"
+                             "中小型燃气轮机，可能用于分"
+                             "布式能源或航改型发动机。我"
+                             "需要先确定这些参数的大"
+                             "致范围。\n\n空气流量方面，通"
+                             "常燃气轮机的空气流量"
+                             "（ṁa）可以通过功率"
+                             "估算。根据经验"
+                             "，每兆瓦大约需要1-3 kg/s"
+                             "的空气流量。假设5MW的话，"
+                             "可能在5-15 kg/s之间。但具体"
+                             "数值需要结合其他参数。\n\n压气机"
+                             "压比（πc）是关键参数，通常"
+                             "中小型燃气轮机的压比在8-20之间。"
+                             "假设选择12的压比，这样可以在"
+                             "效率和结构之间取得平衡。\n\n转"
+                             "速方面，燃气轮机的转速较"
+                             "高，通常在8000-15000 rpm之间。"
+                             "考虑到5MW的规模，可能选"
+                             "择10000 rpm左右，这样可以平衡"
+                             "机械强度和效率。\n\n燃"
+                             "烧室出口温度（T3）是涡轮入"
+                             "口温度，直接影响效率和"
+                             "材料选择。现代燃气轮机的涡轮"
+                             "前温度可能在1400-1600K"
+                             "左右。假设1500K，但需要考虑"
+                             "材料限制，比如镍基合金的"
+                             "耐温能力。\n\n压气机级数需要"
+                             "根据压比和压气机的级效"
+                             "率来确定。假设每级的压比"
+                             "约为1.3，那么总级数大约是"
+                             "log(πc)/log(1.3) ≈ "
+                             "log(12)/log(1.3) ≈ 7-8级。"
+                             "可能需要8级压气机。\n\n"
+                             "支点布局方面，燃气轮机的支点"
+                             "通常布置在压气机和涡轮"
+                             "之间，以减少振动。常见的布局"
+                             "是两端支撑，或者中间"
+                             "加一个支点。对于中小型机，可能采"
+                             "用双支撑结构，比如在"
+                             "压气机端和涡轮端各一个，或者"
+                             "中间加一个中间支点来提"
+                             "高刚度。\n\n不过，这些数值"
+                             "可能需要进一步验证。比"
+                             "如，是否需要调用互联网搜索"
+                             "来确认这些参数的典型"
+                             "值？比如，5MW燃气轮机的空气"
+                             "流量、压比等是否有标准"
+                             "数据？或者是否有类似"
+                             "案例？\n\n用户"
+                             "可能希望得到一个具体"
+                             "的例子，所以可能需要结合典型"
+                             "设计参数。例如，参考现有"
+                             "的5MW级燃气轮机，如GE的LM2500或"
+                             "类似型号，但LM2500可能"
+                             "更大，需要调整。或者查找学术"
+                             "资料中的设计案例。\n\n可"
+                             "能需要调用互联网搜索工具来查找"
+                             "5MW燃气轮机的设计参数，"
+                             "比如空气流量、压比等，确保给出"
+                             "的数值合理。例如，搜索"
+                             "“5MW燃气轮机设计参数”或“中小型燃"
+                             "气轮机典型参数”。\n\n假设"
+                             "搜索结果给出类似参数，比如空气"
+                             "流量约10 kg/s，压比12，"
+                             "转速10000 rpm，涡轮前温度1500K，"
+                             "压气机8级，支点双支撑。这样"
+                             "可以形成一个范例。\n\n需要确保"
+                             "各参数之间的热力学一致性，"
+                             "比如通过理想循环计算验证。"
+                             "例如，使用布雷顿循环公式计"
+                             "算理论功率，再调整效率参数"
+                             "得到实际功率是否接近5MW。"
+                             "\n\n可能还需要考虑压气机效率、涡"
+                             "轮效率等因素。例如，假设压"
+                             "气机效率0.85，涡轮效率0.9，燃"
+                             "烧效率0.98，散热损失等，"
+                             "但用户可能只需要总体参数，不需"
+                             "要详细热力计算。\n\n总"
+                             "结下来，给出一个范例参数，同时"
+                             "说明这些参数的选择依据，"
+                             "并建议进一步详细设计时进行"
+                             "热力循环分析和结构强度校核"
+                             "。\n</think>\n\n<tool_call>"
+                             '\n{"name": '
+                             '"internet_search",'
+                             ' "arguments":'
+                             ' {"question": "'
+                             "5MW燃气轮机"
+                             "设计参数 空气流量 压气机"
+                             "压比 转速 燃烧室出口"
+                             "温度 压气机级数"
+                             ' 支点布局"}}\n</tool_call>\n\n ')
 
 EXPECTED_FUNCTION_CALL = FunctionCall(
     name="internet_search",
@@ -1107,16 +1105,10 @@ TEST_CASES_STREAM = [
 ]
 
 
-@pytest.mark.parametrize(
-    "streaming, model_output, "
-    "expected_tool_calls",
-    TEST_CASES_STREAM
-)
-def test_tool_call_stream(
-    streaming: bool,
-    model_output: list,
-    expected_tool_calls: list[FunctionCall]
-):
+@pytest.mark.parametrize("streaming, model_output, "
+                         "expected_tool_calls", TEST_CASES_STREAM)
+def test_tool_call_stream(streaming: bool, model_output: list,
+                          expected_tool_calls: list[FunctionCall]):
     # model_path requires setting the absolute path
     # of the large model, which requires loading
     # two files: tokenizer.json and tokenizer_config.json. I
@@ -1133,25 +1125,19 @@ def test_tool_call_stream(
     tool_parser = ToolParserManager.\
         get_tool_parser("hermes")(tokenizer)
 
-    content, tool_calls = run_tool_extraction_hermes(
-        tool_parser, model_output, streaming=streaming
-    )
+    content, tool_calls = run_tool_extraction_hermes(tool_parser,
+                                                     model_output,
+                                                     streaming=streaming)
 
     assert tool_calls[0].type == "function"
     assert tool_calls[0].function == expected_tool_calls
 
 
-@pytest.mark.parametrize(
-    "streaming, "
-    "model_output,"
-    "expected_tool_calls",
-    TEST_CASES_NO_STREAM
-)
-def test_tool_call_no_stream(
-    streaming: bool,
-    model_output: str,
-    expected_tool_calls: list[FunctionCall]
-):
+@pytest.mark.parametrize("streaming, "
+                         "model_output,"
+                         "expected_tool_calls", TEST_CASES_NO_STREAM)
+def test_tool_call_no_stream(streaming: bool, model_output: str,
+                             expected_tool_calls: list[FunctionCall]):
 
     # model_path requires setting the absolute path
     # of the large model, which requires loading
@@ -1169,8 +1155,7 @@ def test_tool_call_no_stream(
     tool_parser = ToolParserManager.\
         get_tool_parser("hermes")(tokenizer)
 
-    extracted = run_tool_extraction_nonstreaming(tool_parser,
-                                                 model_output)
+    extracted = run_tool_extraction_nonstreaming(tool_parser, model_output)
 
     assert extracted.tools_called == bool(extracted.tool_calls)
     assert extracted.tool_calls[0].type == "function"
