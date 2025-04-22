@@ -79,6 +79,7 @@ if TYPE_CHECKING:
     VLLM_ROCM_USE_AITER_LINEAR: bool = True
     VLLM_ROCM_USE_AITER_MOE: bool = True
     VLLM_ROCM_USE_AITER_RMSNORM: bool = True
+    VLLM_ROCM_USE_AITER_MLA: bool = True
     VLLM_ROCM_USE_SKINNY_GEMM: bool = True
     VLLM_ROCM_FP8_PADDING: bool = True
     VLLM_ROCM_MOE_PADDING: bool = True
@@ -558,6 +559,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     lambda: (os.getenv("VLLM_ROCM_USE_AITER_RMSNORM", "True").lower() in
              ("true", "1")),
 
+    # Whether to use aiter mla ops.
+    # By default is enabled.
+    "VLLM_ROCM_USE_AITER_MLA":
+    lambda: (os.getenv("VLLM_ROCM_USE_AITER_MLA", "True").lower() in
+             ("true", "1")),
     # use rocm skinny gemms
     "VLLM_ROCM_USE_SKINNY_GEMM":
     lambda: (os.getenv("VLLM_ROCM_USE_SKINNY_GEMM", "True").lower() in
