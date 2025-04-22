@@ -378,15 +378,6 @@ class MiniMaxVL01ForConditionalGeneration(nn.Module, SupportsMultiModal,
         self.config = config
         self.multimodal_config = multimodal_config
 
-        # NOTE: These are special cases for Pixtral-12B in the HF-format
-        # https://huggingface.co/mistral-community/pixtral-12b/blob/main/config.json  # noqa
-        if (config.text_config.architectures is None
-                and config.text_config.model_type == "mistral"):
-            config.text_config.architectures = ["MistralForCausalLM"]
-        if (config.projector_hidden_act is None
-                and config.vision_config.hidden_act == "gelu"):
-            config.projector_hidden_act = "gelu"
-
         # TODO: Optionally initializes this for supporting embeddings.
         self.vision_tower = init_vision_tower_for_MiniMaxVL01(
             config,
@@ -412,7 +403,6 @@ class MiniMaxVL01ForConditionalGeneration(nn.Module, SupportsMultiModal,
         self.pad_token_id = -1
         if self.config.pad_token_id is not None:
             self.pad_token_id = self.config.pad_token_id
-        self._padding_side = "left"
 
         self.make_empty_intermediate_tensors = (
             self.language_model.make_empty_intermediate_tensors)
@@ -438,16 +428,6 @@ class MiniMaxVL01ForConditionalGeneration(nn.Module, SupportsMultiModal,
                 self.config.image_token_index,
             )
         return inputs_embeds
-
-    @property
-    def padding_side(self):
-        return self._padding_side
-
-    @padding_side.setter
-    def padding_side(self, padding_side: str):
-        if padding_side not in ["left", "right"]:
-            raise ValueError(f"{padding_side} is not `left` or `right`.")
-        self._padding_side = padding_side
 
     def pack_image_features(self,
                             image_features,
