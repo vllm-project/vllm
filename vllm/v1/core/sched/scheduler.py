@@ -185,6 +185,13 @@ class Scheduler(SchedulerInterface):
             num_new_tokens = min(num_new_tokens, token_budget)
             assert num_new_tokens > 0
 
+            # Make sure the input position does not exceed the max model len.
+            # This is necessary when using spec decoding.
+            num_new_tokens = min(
+                num_new_tokens,
+                self.max_model_len - request.num_computed_tokens)
+            assert num_new_tokens > 0
+
             # Schedule encoder inputs.
             if request.has_encoder_inputs:
                 (encoder_inputs_to_schedule, num_new_tokens,
@@ -351,8 +358,11 @@ class Scheduler(SchedulerInterface):
                     new_encoder_budget = encoder_budget
 
                 new_blocks = self.kv_cache_manager.allocate_slots(
-                    request, num_new_tokens + num_external_tokens,
-                    computed_blocks)
+                    request,
+                    num_new_tokens + num_external_tokens,
+                    computed_blocks,
+                    num_lookahead_tokens=self.num_lookahead_tokens,
+                )
                 if new_blocks is None:
                     # The request cannot be scheduled.
                     break

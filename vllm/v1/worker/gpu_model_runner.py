@@ -454,7 +454,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         # Add the new or resumed requests to the persistent batch.
         # The smaller empty indices are filled first.
-        removed_req_indices = sorted(removed_req_indices, reverse=True)
+        removed_req_indices.sort(reverse=True)
         for req_id in req_ids_to_add:
             req_state = self.requests[req_id]
             if removed_req_indices:
@@ -696,7 +696,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # common_prefix_len should be a multiple of the block size.
         common_prefix_len = (common_prefix_len // self.block_size *
                              self.block_size)
-        use_cascade = self.attn_backend.use_cascade_attention(
+        use_cascade = self.attn_metadata_builder.use_cascade_attention(
             common_prefix_len=common_prefix_len,
             query_lens=num_scheduled_tokens,
             num_query_heads=self.num_query_heads,
@@ -1271,7 +1271,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 draft_token_ids.append([])
                 continue
 
-            # Skip requests that require top-p, top-k, etc.
+            # Skip requests that require sampling parameters that are not
+            # supported with speculative decoding.
             req_id = self.input_batch.req_ids[i]
             if not is_spec_decode_supported(req_id, self.input_batch):
                 draft_token_ids.append([])
@@ -1280,6 +1281,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # Add sampled_token_ids to token_ids_cpu.
             start_idx = self.input_batch.num_tokens_no_spec[i]
             end_idx = start_idx + num_sampled_ids
+            if end_idx >= self.max_model_len:
+                # Skip requests that have already reached the max model length.
+                draft_token_ids.append([])
+                continue
+
             self.input_batch.token_ids_cpu[i, start_idx:end_idx] = sampled_ids
             drafter_output = self.drafter.propose(
                 self.input_batch.token_ids_cpu[i, :end_idx])
