@@ -6,6 +6,7 @@ import enum
 import hashlib
 import inspect
 import json
+import re
 import sys
 import textwrap
 import warnings
@@ -328,6 +329,8 @@ class ModelConfig:
         factors.append(self.rope_theta)
         # hf_config can control how the model looks!
         factors.append(self.hf_config.to_json_string())
+        str_factors = str(factors)
+        assert_hashable(str_factors)
         return hashlib.sha256(str(factors).encode()).hexdigest()
 
     def __init__(
@@ -4031,3 +4034,30 @@ def get_current_vllm_config() -> VllmConfig:
         from vllm.config import VllmConfig
         return VllmConfig()
     return _current_vllm_config
+
+
+def contains_object_print(text):
+    """
+    Check if the text looks like a printed Python object, e.g.
+    contains any substring matching the pattern: "at 0xFFFFFFF>"
+    We match against 0x followed by 2-16 hex chars (there's
+    a max of 16 on a 64 bit system).
+
+    Args:
+        text (str): The text to check
+
+    Returns:
+        bool: True if a match is found, False otherwise
+    """
+    pattern = r'at 0x[a-fA-F0-9]{2,16}>'
+    match = re.search(pattern, text)
+    return match is not None
+
+
+def assert_hashable(text):
+    if not contains_object_print(text):
+        return True
+    raise AssertionError(
+        f"vLLM tried to hash some configs that may have Python objects ids "
+        f"in them. This is a bug, please file an issue. "
+        f"Text being hashed: {text}")
