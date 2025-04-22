@@ -99,6 +99,8 @@ class AsyncMetricsCollector:
         # Skip for any platform that doesn't have device Event
         if current_platform.Event is None:
             return None
+        if not current_platform.is_cuda_alike():
+            return None
 
         # If a copy was initiated in the previous call, collect and return.
         if self._in_flight_copy is not None:

@@ -390,11 +390,14 @@ class VocabParallelEmbedding(torch.nn.Module):
             # FIXME(kzawora): Weight copy with slicing bugs out on Gaudi here,
             # so we're using a workaround. Remove this when fixed in
             # HPU PT bridge.
-            padded_weight = torch.cat([
-                loaded_weight,
-                torch.zeros(param.shape[0] - loaded_weight.shape[0],
-                            *loaded_weight.shape[1:])
-            ])
+            if param.shape[0] > loaded_weight.shape[0]:
+                padded_weight = torch.cat([
+                    loaded_weight,
+                    torch.zeros(param.shape[0] - loaded_weight.shape[0],
+                                *loaded_weight.shape[1:])
+                ])
+            else:
+                padded_weight = loaded_weight
             param.data.copy_(padded_weight)
         else:
             param[:loaded_weight.shape[0]].data.copy_(loaded_weight)

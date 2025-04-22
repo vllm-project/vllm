@@ -450,6 +450,9 @@ class HpuModelAdapter:
                                                        selected_token_indices)
         return hidden_states
 
+    def __getattr__(self, attr: str):
+        return getattr(self.model, attr)
+
     def compute_logits(self, *args, **kwargs):
         return self.model.compute_logits(*args, **kwargs)
 
@@ -543,6 +546,7 @@ class ModelInputForHPU(ModelRunnerInputBase):
     async_callback: Optional[Callable] = None
     is_first_multi_step: bool = True
     is_last_step: bool = True
+    previous_hidden_states: Optional[torch.Tensor] = None
 
     def as_broadcastable_tensor_dict(self) -> Dict[str, Any]:
         tensor_dict = {
@@ -645,13 +649,17 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
         self.pin_memory = is_pin_memory_available()
         self.kv_cache_dtype = self.cache_config.cache_dtype
 
+        num_attn_heads = self.model_config.get_num_attention_heads(
+            self.parallel_config)
+        needs_attn_backend = (num_attn_heads != 0
+                              or self.model_config.is_attention_free)
         self.attn_backend = get_attn_backend(
             self.model_config.get_head_size(),
             self.model_config.dtype,
             self.kv_cache_dtype,
             self.block_size,
             self.model_config.is_attention_free,
-        )
+        ) if needs_attn_backend else None
 
         # Lazy initialization
         self.lora_manager: LRUCacheWorkerLoRAManager = None
@@ -666,13 +674,29 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
         self.bucketing_global_state = HPUBucketingGlobalState()
         self._setup_buckets()
         self._set_gc_threshold()
+        if vllm_config.speculative_config is not None \
+            and vllm_config.scheduler_config.num_scheduler_steps != 1:
+            # Speculative decoding is not supported with multi-step scheduling
+            raise ValueError(
+                "Speculative decoding is not supported with multi-step "
+                "scheduling. Please set num_scheduler_steps to 1.")
         self.use_contiguous_pa = envs.VLLM_USE_HPU_CONTIGUOUS_CACHE_FETCH
+        if vllm_config.speculative_config is not None \
+             and self.use_contiguous_pa:
+            logger.warning("Speculative decoding is not supported with "
+                           "contiguous PA, set VLLM_CONTIGUOUS_PA to false")
+            self.use_contiguous_pa = False
+        self.model_type = self.model_config.hf_config.model_type
+        if self.model_type in ("medusa", "mlp_speculator", "eagle"):
+            self.skip_warmup = True
 
         # For multi-step scheduling
         self.cached_step_outputs: List[torch.Tensor] = []
         # For delayed sampling
         self.cached_step_inputs: List[
             ModelInputForHPUWithSamplingMetadata] = []
+        self.spec_decode_enabled = \
+            self.vllm_config.speculative_config is not None
 
     def _set_gc_threshold(self) -> None:
         # Read https://docs.python.org/3/library/gc.html#gc.set_threshold
@@ -1496,10 +1520,30 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
             profiler.start()
         for _ in range(times):
             inputs = self.prepare_model_input(seqs)
+            # in case spec decode, prepare dummy previous_hidden_states
+            additional_inputs = {}
+            if self.model_type in ("medusa", "mlp_speculator", "eagle",
+                                   "deepseek_mtp"):
+                input_tokens = inputs.input_tokens
+                assert input_tokens is not None
+                bs = input_tokens.shape[0]
+                hidden_size = self.model_config.get_hidden_size()
+
+                previous_hidden_states = torch.zeros(
+                    (bs, hidden_size),
+                    device=input_tokens.device,
+                    dtype=self.model_config.dtype)
+                additional_inputs = {
+                    "previous_hidden_states": previous_hidden_states
+                }
+
             is_single_step = \
                 self.vllm_config.scheduler_config.num_scheduler_steps == 1
             if is_prompt or is_single_step:
-                self.execute_model(inputs, None, warmup_mode=True)
+                self.execute_model(inputs,
+                                   None,
+                                   warmup_mode=True,
+                                   **additional_inputs)
             else:  # decode with multi-step
                 inputs = dataclasses.replace(inputs,
                                              is_first_multi_step=True,
@@ -2055,11 +2099,14 @@ class HPUModelRunner(HPUModelRunnerBase[ModelInputForHPUWithSamplingMetadata]):
         num_steps: int = 1,
         warmup_mode=False,
         seqs=None,
+        **kwargs,
     ) -> Optional[Union[List[SamplerOutput], IntermediateTensors]]:
         VLLM_DELAYED_SAMPLING = envs.VLLM_HPU_USE_DELAYED_SAMPLING
         use_delayed_sampling = VLLM_DELAYED_SAMPLING and not warmup_mode
         assert not (use_delayed_sampling and num_steps != 1), \
             'Delayed sampling is not compatible with MSS!'
+        assert not (use_delayed_sampling and self.spec_decode_enabled), \
+            'Delayed sampling is not compatible with speculative decoding!'
         assert model_input.input_tokens is not None
         if use_delayed_sampling and not model_input.is_prompt and \
                 self.is_driver_worker:
@@ -2087,6 +2134,7 @@ class HPUModelRunner(HPUModelRunnerBase[ModelInputForHPUWithSamplingMetadata]):
                     0, target_indices, self.cached_step_outputs[i])
                 htorch.core.mark_step()
 
+        previous_hidden_states = kwargs.get('previous_hidden_states')
         if not model_input.is_first_multi_step:
             if not model_input.is_last_step:
                 # not first or last multi-step
@@ -2150,6 +2198,24 @@ class HPUModelRunner(HPUModelRunnerBase[ModelInputForHPUWithSamplingMetadata]):
                 "virtual_engine": model_input.virtual_engine,
                 **(model_input.multi_modal_kwargs or {}),
             }
+            if previous_hidden_states is not None:
+                # HPU will pad up to block_size,
+                # pad previous_hidden_states as well
+                previous_hidden_states = previous_hidden_states.unsqueeze(
+                    1).expand(-1, input_tokens.shape[-1], -1)
+                batch_size_padding = batch_size - previous_hidden_states.shape[
+                    0]
+                if batch_size_padding > 0:
+                    dummy_previous_hidden_states = torch.zeros(
+                        batch_size_padding,
+                        *previous_hidden_states.shape[1:],
+                        dtype=previous_hidden_states.dtype,
+                        device=previous_hidden_states.device)
+                    previous_hidden_states = torch.cat(
+                        [previous_hidden_states, dummy_previous_hidden_states],
+                        dim=0)
+                execute_model_kwargs.update(
+                    {"previous_hidden_states": previous_hidden_states})
             if htorch.utils.internal.is_lazy():
                 execute_model_kwargs.update(
                     {"bypass_hpu_graphs": not use_graphs})
@@ -2157,6 +2223,7 @@ class HPUModelRunner(HPUModelRunnerBase[ModelInputForHPUWithSamplingMetadata]):
             htorch.core.mark_step()
             if self.is_driver_worker:
                 model_event_name = ("model_"
+                                    f"{self.model_type}_"
                                     f"{'prompt' if is_prompt else 'decode'}_"
                                     f"bs{batch_size}_"
                                     f"seq{seq_len}_"
@@ -2211,6 +2278,7 @@ class HPUModelRunner(HPUModelRunnerBase[ModelInputForHPUWithSamplingMetadata]):
                 with self.profiler.record_event(
                         'internal',
                     ('compute_logits_'
+                     f"{self.model_type}_"
                      f'{"prompt" if is_prompt else "decode"}_bs'
                      f'{batch_size}_'
                      f'seq{seq_len}')):
@@ -2228,6 +2296,7 @@ class HPUModelRunner(HPUModelRunnerBase[ModelInputForHPUWithSamplingMetadata]):
 
                 with self.profiler.record_event(
                         'internal', ('sample_'
+                                     f"{self.model_type}_"
                                      f'{"prompt" if is_prompt else "decode"}_'
                                      f'bs{batch_size}_'
                                      f'seq{seq_len}')):
@@ -2319,9 +2388,18 @@ class HPUModelRunner(HPUModelRunnerBase[ModelInputForHPUWithSamplingMetadata]):
                     is_prompt=is_prompt)
                 self.profiler.record_counter(self.event_start, counters)
             if num_steps == 1:
-                if self.return_hidden_states:
-                    # we only need to pass hidden states of most recent token
+                if self.spec_decode_enabled and isinstance(
+                        output, SamplerOutput):
+                    output.sampled_token_ids = output.sampled_token_ids[:
+                                                                        real_batch_size]
+                    output.sampled_token_probs = output.sampled_token_probs[:
+                                                                            real_batch_size]
+                    output.logprobs = output.logprobs[:real_batch_size]
+                if self.return_hidden_states and isinstance(
+                        output, SamplerOutput):
                     assert model_input.sampling_metadata is not None
+                    # we only need to pass hidden states of most recent token
+                    hidden_states = hidden_states[:real_batch_size]
                     if model_input.is_prompt:
                         output.prefill_hidden_states = hidden_states
                     output.hidden_states = hidden_states
@@ -2330,7 +2408,6 @@ class HPUModelRunner(HPUModelRunnerBase[ModelInputForHPUWithSamplingMetadata]):
                         return [fake_output]
                     else:
                         return []
-
                 return [output] if self.is_driver_worker else []
             else:
                 return []
