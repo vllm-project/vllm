@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
+import json
+
 import openai
 import pytest
 import pytest_asyncio
@@ -27,7 +29,7 @@ def server():
         "--enforce-eager",
         "--trust-remote-code",
         "--limit-mm-per-prompt",
-        f"audio={MAXIMUM_AUDIOS}",
+        json.dumps({"audio": MAXIMUM_AUDIOS}),
     ]
 
     with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
