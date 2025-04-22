@@ -1361,11 +1361,6 @@ class EngineArgs:
                                recommend_to_remove=True)
             return False
 
-        if self.additional_config != EngineArgs.additional_config:
-            _raise_or_fallback(feature_name="--additional-config",
-                               recommend_to_remove=False)
-            return False
-
         # Xgrammar and Guidance are supported.
         SUPPORTED_GUIDED_DECODING = [
             "xgrammar", "xgrammar:disable-any-whitespace", "guidance",
@@ -1474,10 +1469,17 @@ class EngineArgs:
                                    recommend_to_remove=False)
                 return False
 
-        # No FlashInfer or XFormers so far.
+        # No XFormers so far.
         V1_BACKENDS = [
-            "FLASH_ATTN_VLLM_V1", "FLASH_ATTN", "PALLAS", "PALLAS_VLLM_V1",
-            "TRITON_ATTN_VLLM_V1", "TRITON_MLA", "FLASHMLA"
+            "FLASH_ATTN_VLLM_V1",
+            "FLASH_ATTN",
+            "PALLAS",
+            "PALLAS_VLLM_V1",
+            "TRITON_ATTN_VLLM_V1",
+            "TRITON_MLA",
+            "FLASHMLA",
+            "FLASHINFER",
+            "FLASHINFER_VLLM_V1",
         ]
         if (envs.is_set("VLLM_ATTENTION_BACKEND")
                 and envs.VLLM_ATTENTION_BACKEND not in V1_BACKENDS):
