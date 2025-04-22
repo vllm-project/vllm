@@ -251,10 +251,6 @@ class MLACommonBackend(AttentionBackend):
     def get_supported_head_sizes() -> list[int]:
         return [576]
 
-    @staticmethod
-    def use_cascade_attention(*args, **kwargs) -> bool:
-        return False
-
 
 @dataclass
 class MLACommonPrefillMetadata:
@@ -573,6 +569,9 @@ class MLACommonMetadataBuilder(Generic[M]):
             prefill=prefill_metadata,
             decode=decode_metadata,
         )
+
+    def use_cascade_attention(self, *args, **kwargs) -> bool:
+        return False
 
 
 class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
