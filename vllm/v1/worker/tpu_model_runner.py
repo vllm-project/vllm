@@ -148,6 +148,7 @@ class TPUModelRunner:
         self.num_kv_heads = model_config.get_num_kv_heads(parallel_config)
         self.head_size = model_config.get_head_size()
         self.hidden_size = model_config.get_hidden_size()
+        self.vocab_size = model_config.get_vocab_size()
 
         # Multi-modal data support
         self.mm_registry = MULTIMODAL_REGISTRY
@@ -178,7 +179,7 @@ class TPUModelRunner:
             max_num_blocks_per_req=self.max_num_blocks_per_req,
             device=self.device,
             pin_memory=self.pin_memory,
-            vocab_size=model_config.get_vocab_size(),
+            vocab_size=self.vocab_size,
         )
 
         # Cached torch/numpy tensor
@@ -220,6 +221,20 @@ class TPUModelRunner:
         self.arange_np = np.arange(self.max_num_tokens, dtype=np.int32)
         self.num_reqs_paddings = _get_req_paddings(
             min_req_size=MIN_NUM_SEQS, max_req_size=self.max_num_reqs)
+
+        # tensors for structured decoding
+        self.grammar_bitmask_cpu = torch.zeros(
+            (self.max_num_reqs, cdiv(self.vocab_size, 32)),
+            dtype=torch.int32,
+            device="cpu",
+            pin_memory=self.pin_memory)
+        self.require_structured_out_cpu = torch.zeros(
+            (self.max_num_reqs, 1),
+            dtype=torch.bool,
+            device="cpu",
+            pin_memory=self.pin_memory)
+        self.structured_decode_arange = torch.arange(
+            0, 32, device="cpu", pin_memory=self.pin_memory)
 
         # Get maximum number of mm items per modality (batch size).
         self.max_num_mm_items_by_modality = dict()
@@ -766,12 +781,11 @@ class TPUModelRunner:
         tpu_sampling_metadata = TPUSupportedSamplingMetadata.\
             from_input_batch(self.input_batch, padded_num_reqs, self.device)
         if scheduler_output.grammar_bitmask is not None:
-            require_struct_decoding, grammar_bitmask_padded = \
+            require_struct_decoding, grammar_bitmask_padded, arange = \
                 self.prepare_structured_decoding_input(logits, scheduler_output)
-            logits = self.structured_decode(
-                require_struct_decoding.to(logits.device),
-                grammar_bitmask_padded.to(logits.device), logits,
-                torch.arange(0, 32).to(logits.device))
+            logits = self.structured_decode(require_struct_decoding,
+                                            grammar_bitmask_padded, logits,
+                                            arange)
         selected_token_ids = self.sample_from_logits(logits,
                                                      tpu_sampling_metadata)
         # Remove padding on cpu and keep dynamic op outside of xla graph.
@@ -1057,21 +1071,18 @@ class TPUModelRunner:
         logger.info(
             "Compiling structured_decoding with different input shapes.")
         start = time.perf_counter()
-        vocab_size = self.model_config.get_vocab_size()
         for num_reqs in self.num_reqs_paddings:
-            dummy_logits = torch.zeros((num_reqs, vocab_size),
+            dummy_logits = torch.zeros((num_reqs, self.vocab_size),
                                        device=self.device,
                                        dtype=self._hidden_states_dtype)
-            dummy_require_struct_decoding = torch.zeros(
-                num_reqs, dtype=torch.bool, device=self.device).unsqueeze(1)
-            dummy_grammar_bitmask = torch.zeros(
-                (num_reqs, cdiv(vocab_size, 32)),
-                dtype=torch.int32,
-                device=self.device)
+            dummy_require_struct_decoding = \
+                self.require_structured_out_cpu[:num_reqs].to(self.device)
+            dummy_grammar_bitmask = \
+                self.grammar_bitmask_cpu[:num_reqs].to(self.device)
             # The first dimension of the above 3 dummy tensors cannot be
             # mark_dynamic because some operations in structured_decode require
             # them to be static.
-            arange = torch.arange(0, 32).to(self.device)
+            arange = self.structured_decode_arange.to(self.device)
             self.structured_decode(dummy_require_struct_decoding,
                                    dummy_grammar_bitmask, dummy_logits, arange)
             logger.info("  -- num_seqs: %d", num_reqs)
@@ -1084,9 +1095,8 @@ class TPUModelRunner:
         logger.info(
             "Compiling sample_from_logits with different input shapes.")
         start = time.perf_counter()
-        vocab_size = self.model_config.get_vocab_size()
         for num_reqs in self.num_reqs_paddings:
-            dummy_logits = torch.zeros((num_reqs, vocab_size),
+            dummy_logits = torch.zeros((num_reqs, self.vocab_size),
                                        device=self.device,
                                        dtype=self._hidden_states_dtype)
             # The first dimension of dummy_logits cannot be mark_dynamic
@@ -1261,12 +1271,11 @@ class TPUModelRunner:
                               grammar_bitmask: torch.Tensor,
                               arange: torch.Tensor):
         assert (logits.shape[0] == grammar_bitmask.shape[0])
-        vocab_size = logits.shape[1]
         logits_cloned = logits.clone()
         for i in range(logits.shape[0]):
             unpacked_bitmask = (torch.bitwise_right_shift(
                 grammar_bitmask[i][:, None], arange[None, :]) & 1) == 0
-            unpacked_bitmask = unpacked_bitmask.reshape(-1)[:vocab_size]
+            unpacked_bitmask = unpacked_bitmask.reshape(-1)[:self.vocab_size]
             logits_cloned[i] = logits_cloned[i].masked_fill(
                 unpacked_bitmask, -float("inf"))
         return logits_cloned
@@ -1279,15 +1288,14 @@ class TPUModelRunner:
 
     def prepare_structured_decoding_input(
         self, logits: torch.Tensor, scheduler_output: "SchedulerOutput"
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         grammar_bitmask = scheduler_output.grammar_bitmask
         assert grammar_bitmask is not None
-        num_reqs, vocab_size = logits.shape
+        num_reqs, _ = logits.shape
 
-        # Pad grammar bitmask so that it won't cause recompilation.
-        grammar_bitmask_padded = torch.zeros((num_reqs, cdiv(vocab_size, 32)),
-                                             dtype=torch.int32,
-                                             device="cpu")
+        # Reset pre-allocated tensors
+        self.grammar_bitmask_cpu.zero_()
+        self.require_structured_out_cpu.zero_()
 
         # We receive the structured output bitmask from the scheduler, but the
         # indices of the requests in the batch may not match the indices of
@@ -1304,15 +1312,16 @@ class TPUModelRunner:
             batch_index = self.input_batch.req_id_to_index[req_id]
             struct_out_indices.append(batch_index)
             mask_indices.append(mask_index)
-        grammar_bitmask_padded[struct_out_indices] = torch.from_numpy(
+        self.grammar_bitmask_cpu[struct_out_indices] = torch.from_numpy(
             grammar_bitmask[mask_indices])
         # It's not guaranteed that all requests in this batch require
         # structured output, so create a bool tensor to represent
         # the requests that need structured output.
-        require_struct_out = torch.zeros(num_reqs, dtype=torch.bool)
         struct_out_indices = torch.tensor(struct_out_indices, dtype=torch.long)
-        require_struct_out[struct_out_indices] = True
-        return require_struct_out.unsqueeze(1), grammar_bitmask_padded
+        self.require_structured_out_cpu[struct_out_indices] = True
+        return self.require_structured_out_cpu[:num_reqs].to(logits.device), \
+            self.grammar_bitmask_cpu[:num_reqs].to(logits.device), \
+            self.structured_decode_arange.to(logits.device)
 
     def _get_mm_dummy_batch(self, modality: str,
                             batch_size: int) -> BatchedTensorInputs:

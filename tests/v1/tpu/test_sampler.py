@@ -57,7 +57,7 @@ def test_sampler_different(model_name: str):
         # Make sure first two reqs have the same K/P
         sampling_params[0] = sampling_params[1]
         output = llm.generate(p, sampling_params)
-        # There are natural numerical instabilities that make it difficult 
+        # There are natural numerical instabilities that make it difficult
         # to have deterministic results over many tokens, tests the first ~20
         # tokens match.
         assert output[0].outputs[0].text[:20] == output[1].outputs[0].text[:20]
