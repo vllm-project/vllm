@@ -44,22 +44,15 @@ ktc = KVTransferConfig.from_cli(
 llm = LLM(model="meta-llama/Meta-Llama-3.1-8B-Instruct",
           kv_transfer_config=ktc,
           max_model_len=8000,
-          enable_chunked_prefill=False,
           gpu_memory_utilization=0.8)
 
+# Should be able to see logs like the following:
+# `LMCache INFO: Storing KV cache for 6006 out of 6006 tokens for request 0`
+# This indicates that the KV cache has been stored in LMCache.
 outputs = llm.generate(first_prompt, sampling_params)
 for output in outputs:
     generated_text = output.outputs[0].text
     print(f"Generated text: {generated_text!r}")
-print("First request done.")
-
-time.sleep(1)
-
-outputs = llm.generate(second_prompt, sampling_params)
-for output in outputs:
-    generated_text = output.outputs[0].text
-    print(f"Generated text: {generated_text!r}")
-print("Second request done.")
 
 # Clean up lmcache backend
 LMCacheEngineBuilder.destroy(ENGINE_NAME)
