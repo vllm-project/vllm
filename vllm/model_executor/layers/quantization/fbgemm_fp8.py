@@ -36,7 +36,6 @@ class FBGEMMFp8Config(QuantizationConfig):
         # kernel for fast weight-only FP8 quantization
         self.use_marlin = not current_platform.has_device_capability(89)
         self.fp8_linear = Fp8LinearOp()
-        self.out_dtype = torch.get_default_dtype()
 
     @classmethod
     def get_name(cls) -> str:
