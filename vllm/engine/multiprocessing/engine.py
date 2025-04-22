@@ -30,7 +30,7 @@ from vllm.usage.usage_lib import UsageContext
 logger = init_logger(__name__)
 
 POLLING_TIMEOUT_MS = 10000
-POLLING_TIMEOUT_MS_PD_DP = 1000
+POLLING_TIMEOUT_MS_PD_DP = 1
 HEALTHY_RESPONSE = (pickle.dumps(VLLM_RPC_SUCCESS_STR), )
 
 
