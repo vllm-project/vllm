@@ -37,46 +37,17 @@ input_texts = [
 ]
 
 
-@pytest.mark.asyncio
-@pytest.mark.parametrize("model_info", MODELS)
-@pytest.mark.parametrize("dtype", ["bfloat16"])
-async def test_models(hf_runner, vllm_runner, dtype: str,
-                      model_info: EmbedModelInfo):
-    subtest_config(vllm_runner, dtype, model_info)
-
-    args = [
-        "--task",
-        "embed",
-        # use half precision for speed and memory savings in CI environment
-        "--dtype",
-        dtype,
-        "--enforce-eager",
-        "--max-model-len",
-        "512",
-        "--chat-template",
-        DUMMY_CHAT_TEMPLATE,
-        "--trust_remote_code"
-    ]
-
-    if model_info.name == "Snowflake/snowflake-arctic-embed-m-v1.5":
-        # Manually enable Matryoshka Embeddings
-        args.extend(["--hf_overrides", '{"is_matryoshka":true}'])
-
-    with (RemoteOpenAIServer(model_info.name, args) as remote_server,
-          hf_runner(model_info.name, dtype=dtype, is_sentence_transformer=True)
-          as hf_model):
-        client = remote_server.get_async_client()
-
-        await subtest_basic(model_info, remote_server, client)
-        await subtest_single_embedding(model_info, client, hf_model)
-        await subtest_batch_embedding(model_info, client, hf_model)
-        await subtest_conversation_embedding(model_info, remote_server, client)
-        await subtest_batch_base64_embedding(model_info, client, hf_model)
-        await subtest_embedding_truncation(model_info, client)
-        await subtest_matryoshka(model_info, client, hf_model)
+@pytest.fixture(scope="module", params=MODELS)
+def model_info(request):
+    return request.param
 
 
-def subtest_config(vllm_runner, dtype: str, model_info: EmbedModelInfo):
+@pytest.fixture(scope="module", params=["bfloat16"])
+def dtype(request):
+    return request.param
+
+
+def test_config(vllm_runner, dtype, model_info):
     vllm_extra_kwargs = {
         "hf_overrides": {
             "is_matryoshka": model_info.is_matryoshka
@@ -97,10 +68,43 @@ def subtest_config(vllm_runner, dtype: str, model_info: EmbedModelInfo):
                     in vllm_model.model.llm_engine.model_config.architectures)
 
 
-async def subtest_basic(model_info: EmbedModelInfo, server: RemoteOpenAIServer,
-                        client: openai.AsyncOpenAI):
+@pytest.fixture(scope="module")
+def server(model_info, dtype: str):
+    args = [
+        "--task",
+        "embed",
+        # use half precision for speed and memory savings in CI environment
+        "--dtype",
+        dtype,
+        "--enforce-eager",
+        "--max-model-len",
+        "512",
+        "--chat-template",
+        DUMMY_CHAT_TEMPLATE,
+        "--trust_remote_code"
+    ]
+
+    if model_info.name == "Snowflake/snowflake-arctic-embed-m-v1.5":
+        # Manually enable Matryoshka Embeddings
+        args.extend(["--hf_overrides", '{"is_matryoshka":true}'])
+
+    with RemoteOpenAIServer(model_info.name, args) as remote_server:
+        yield remote_server
+
+
+@pytest.fixture(scope="module")
+def hf_model(hf_runner, model_info, dtype: str):
+    with hf_runner(model_info.name, dtype=dtype,
+                   is_sentence_transformer=True) as hf_model:
+        yield hf_model
+
+
+@pytest.mark.asyncio
+async def test_basic(model_info: EmbedModelInfo, server: RemoteOpenAIServer):
     response = requests.get(server.url_for("health"))
     assert response.status_code == HTTPStatus.OK
+
+    client = server.get_async_client()
 
     models = await client.models.list()
     models = models.data
@@ -111,9 +115,12 @@ async def subtest_basic(model_info: EmbedModelInfo, server: RemoteOpenAIServer,
     assert served_model.root == model_info.name
 
 
-async def subtest_single_embedding(model_info: EmbedModelInfo,
-                                   client: openai.AsyncOpenAI,
-                                   hf_model: HfRunner):
+@pytest.mark.asyncio
+async def test_single_embedding(model_info: EmbedModelInfo,
+                                server: RemoteOpenAIServer,
+                                hf_model: HfRunner):
+    client = server.get_async_client()
+
     # test single embedding
     prompts = input_texts
     embedding_response = await client.embeddings.create(
@@ -152,9 +159,11 @@ async def subtest_single_embedding(model_info: EmbedModelInfo,
     assert embeddings.usage.total_tokens == 5
 
 
-async def subtest_batch_embedding(model_info: EmbedModelInfo,
-                                  client: openai.AsyncOpenAI,
-                                  hf_model: HfRunner):
+@pytest.mark.asyncio
+async def test_batch_embedding(model_info: EmbedModelInfo,
+                               server: RemoteOpenAIServer, hf_model: HfRunner):
+    client = server.get_async_client()
+
     # test list[str]
     prompts = [
         "The cat sat on the mat.", "A feline was resting on a rug.",
@@ -197,9 +206,11 @@ async def subtest_batch_embedding(model_info: EmbedModelInfo,
     assert embeddings.usage.total_tokens == 17
 
 
-async def subtest_conversation_embedding(model_info: EmbedModelInfo,
-                                         server: RemoteOpenAIServer,
-                                         client: openai.AsyncOpenAI):
+@pytest.mark.asyncio
+async def test_conversation_embedding(model_info: EmbedModelInfo,
+                                      server: RemoteOpenAIServer):
+    client = server.get_async_client()
+
     messages = [{
         "role": "user",
         "content": "The cat sat on the mat.",
@@ -249,9 +260,12 @@ async def subtest_conversation_embedding(model_info: EmbedModelInfo,
             exclude={"id", "created"}))
 
 
-async def subtest_batch_base64_embedding(model_info: EmbedModelInfo,
-                                         client: openai.AsyncOpenAI,
-                                         hf_model: HfRunner):
+@pytest.mark.asyncio
+async def test_batch_base64_embedding(model_info: EmbedModelInfo,
+                                      server: RemoteOpenAIServer,
+                                      hf_model: HfRunner):
+    client = server.get_async_client()
+
     prompts = [
         "Hello my name is",
         "The best thing about vLLM is that it supports many different models"
@@ -275,9 +289,20 @@ async def subtest_batch_base64_embedding(model_info: EmbedModelInfo,
                           dtype="float32").tolist())
     _correctness_test(model_info, hf_model, prompts, base64_data)
 
+    # Default response is float32 decoded from base64 by OpenAI Client
+    responses_default = await client.embeddings.create(input=prompts,
+                                                       model=model_info.name)
+    default_data = [d.embedding for d in responses_default.data]
+    _correctness_test(model_info, hf_model, prompts, default_data)
 
-async def subtest_embedding_truncation(model_info: EmbedModelInfo,
-                                       client: openai.AsyncOpenAI):
+
+@pytest.mark.asyncio
+async def test_embedding_truncation(
+    model_info: EmbedModelInfo,
+    server: RemoteOpenAIServer,
+):
+    client = server.get_async_client()
+
     input_texts = [
         "Como o Brasil pode fomentar o desenvolvimento de modelos de IA?",
     ]
@@ -326,8 +351,10 @@ async def subtest_embedding_truncation(model_info: EmbedModelInfo,
                "Please, select a smaller truncation size." in response.message
 
 
-async def subtest_matryoshka(model_info: EmbedModelInfo,
-                             client: openai.AsyncOpenAI, hf_model: HfRunner):
+@pytest.mark.asyncio
+async def test_matryoshka(model_info: EmbedModelInfo,
+                          server: RemoteOpenAIServer, hf_model: HfRunner):
+    client = server.get_async_client()
 
     async def make_request_and_correctness_test(dimensions):
         prompts = input_texts * 3
