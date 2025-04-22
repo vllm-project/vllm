@@ -453,10 +453,18 @@ class GraniteSpeechCTCEncoder(nn.Module):
             for _ in range(config.num_layers)
         ])
 
-        self.out = nn.Linear(config.hidden_dim, config.output_dim, bias=True)
-        self.out_mid = nn.Linear(config.output_dim,
-                                 config.hidden_dim,
-                                 bias=True)
+        self.out = ColumnParallelLinear(
+            input_size=config.hidden_dim,
+            output_size=config.output_dim,
+            bias=True,
+        )
+
+        self.out_mid = RowParallelLinear(
+            input_size=config.output_dim,
+            output_size=config.hidden_dim,
+            bias=True,
+        )
+        self.softmax = nn.Softmax(dim=-1)
         self.num_layers = config.num_layers
 
     def forward(self, hidden_states: torch.Tensor):
@@ -467,9 +475,10 @@ class GraniteSpeechCTCEncoder(nn.Module):
 
             if idx == self.num_layers // 2:
                 hidden_states_mid = hidden_states.clone()
-                hidden_states_mid = self.out(hidden_states_mid)
-                hidden_states += self.out_mid(
-                    nn.Softmax(dim=-1)(hidden_states_mid))
+                hidden_states_mid, _ = self.out(hidden_states_mid)
+                hidden_states_mid = self.softmax(hidden_states_mid)
+                hidden_states_mid, _ = self.out_mid(hidden_states_mid)
+                hidden_states += hidden_states_mid
         return hidden_states
 
 
