@@ -3900,7 +3900,7 @@ class VllmConfig:
             self.instance_id = random_uuid()[:5]
 
     def update_sizes_for_sequence_parallelism(self,
-                                              possible_sizes: int) -> int:
+                                              possible_sizes: list) -> list:
         # remove the sizes that not multiple of tp_size when
         # enable sequence parallelism
         removed_sizes = [
