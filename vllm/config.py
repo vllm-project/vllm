@@ -54,12 +54,14 @@ if TYPE_CHECKING:
     from vllm.transformers_utils.tokenizer_group.base_tokenizer_group import (
         BaseTokenizerGroup)
 
-    Config = TypeVar("Config", bound=DataclassInstance)
+    ConfigType = type[DataclassInstance]
 else:
     QuantizationConfig = None
-    Config = TypeVar("Config")
+    ConfigType = type
 
 logger = init_logger(__name__)
+
+ConfigT = TypeVar("ConfigT", bound=ConfigType)
 
 # This value is chosen to have a balance between ITL and TTFT. Note it is
 # not optimized for throughput.
@@ -162,7 +164,7 @@ def get_attr_docs(cls: type[Any]) -> dict[str, str]:
     return out
 
 
-def config(cls: type[Config]) -> type[Config]:
+def config(cls: ConfigT) -> ConfigT:
     """
     A decorator that ensures all fields in a dataclass have default values
     and that each field has a docstring.
@@ -181,7 +183,7 @@ def config(cls: type[Config]) -> type[Config]:
     return cls
 
 
-def get_field(cls: type[Config], name: str) -> Field:
+def get_field(cls: ConfigType, name: str) -> Field:
     """Get the default factory field of a dataclass by name. Used for getting
     default factory fields in `EngineArgs`."""
     if not is_dataclass(cls):
@@ -2749,6 +2751,9 @@ class MultiModalConfig:
     The maximum number of input items allowed per prompt for each modality.
     This should be a JSON string that will be parsed into a dictionary.
     Defaults to 1 (V0) or 999 (V1) for each modality.
+
+    For example, to allow up to 16 images and 2 videos per prompt:
+    ``{"images": 16, "videos": 2}``
     """
 
     def compute_hash(self) -> str:
