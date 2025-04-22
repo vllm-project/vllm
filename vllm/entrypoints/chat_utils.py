@@ -2,7 +2,6 @@
 
 import asyncio
 import json
-import traceback
 from abc import ABC, abstractmethod
 from collections import defaultdict, deque
 from collections.abc import Awaitable, Iterable
@@ -1233,13 +1232,4 @@ def apply_mistral_chat_template(
     # We convert those assertion errors to ValueErrors so they can be
     # are properly caught in the preprocessing_input step
     except AssertionError as e:
-        raise ValueError from e
-
-    # External library exceptions can sometimes occur despite the framework's
-    # internal exception management capabilities.
-    except Exception as e:
-
-        # Log and report any library-related exceptions for further
-        # investigation.
-        logger.exception(traceback.format_exc())
         raise ValueError from e
