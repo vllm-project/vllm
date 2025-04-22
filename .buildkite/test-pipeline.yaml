@@ -195,6 +195,7 @@ steps:
   commands:
   - pip install modelscope
   - pytest -v -s regressions
+  - VLLM_USE_V1=0 pytest -v -s regressions
 
 - label: Engine Test # 10min
   mirror_hardwares: [amdexperimental, amdproduction]
