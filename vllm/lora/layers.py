@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Dict, List, Optional, Tuple, Union, cast
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import torch_xla.core.xla_model as xm
 from transformers import PretrainedConfig
 
 from vllm.adapter_commons.layers import AdapterMapping
@@ -213,6 +214,7 @@ class VocabParallelEmbeddingWithLoRA(BaseLayerWithLoRA):
         embeddings_tensor: Optional[torch.Tensor],
         bias: Optional[torch.Tensor] = None,
     ):
+        xm.mark_step()
         self.reset_lora(index)
         self.lora_a_stacked[index, :lora_a.shape[0], :lora_a.shape[1]].copy_(
             lora_a, non_blocking=True)
@@ -235,6 +237,7 @@ class VocabParallelEmbeddingWithLoRA(BaseLayerWithLoRA):
                 )[self.embeddings_slice[0]:self.embeddings_slice[1]]
                 assert self.embeddings_weights is not None
                 self.embeddings_weights[:embeddings.shape[0]].copy_(embeddings)
+        xm.mark_step()
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         added_tokens_mask = torch.where(x > self.base_layer.org_vocab_size - 1,
@@ -381,6 +384,7 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
         # MergedColumnParallelLinearWithLoRA, all other linear LoRA layers
         # store weights in a tuple of size 1. These two layers will
         # override this function.
+        xm.mark_step()
         assert (len(self.lora_a_stacked) == len(self.lora_b_stacked) ==
                 self.n_slices == 1)
 
@@ -404,6 +408,7 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
             assert len(self.lora_bias_stacked)
             self.lora_bias_stacked[0][index, 0, :lora_bias.shape[0]].copy_(
                 lora_bias.T, non_blocking=True)
+        xm.mark_step()
 
     def apply(self,
               x: torch.Tensor,
@@ -706,6 +711,7 @@ class MergedColumnParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
         embeddings_tensor: Optional[torch.Tensor],
         lora_bias: Optional[torch.Tensor] = None,
     ):
+        xm.mark_step()
         self.reset_lora(index)
 
         if self.tp_size > 1:
@@ -733,6 +739,7 @@ class MergedColumnParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
                                               0, :lora_bias_i.shape[0]].copy_(
                                                   lora_bias_i.T,
                                                   non_blocking=True)
+        xm.mark_step()
 
     @classmethod
     @_not_fully_sharded_can_replace
@@ -1078,6 +1085,7 @@ class LogitsProcessorWithLoRA(BaseLayerWithLoRA):
         embeddings_tensor: Optional[torch.Tensor],
         bias: Optional[torch.Tensor] = None,
     ):
+        xm.mark_step()
         self.reset_lora(index)
         self.lora_a_stacked[index,
                             0, :lora_a.shape[1], :lora_a.shape[0]].copy_(
@@ -1091,6 +1099,7 @@ class LogitsProcessorWithLoRA(BaseLayerWithLoRA):
                 :embeddings_tensor.shape[0],
                 :embeddings_tensor.shape[1],
             ] = embeddings_tensor
+        xm.mark_step()
 
     def _get_logits(
         self,
