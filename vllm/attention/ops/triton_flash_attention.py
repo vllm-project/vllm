@@ -839,10 +839,13 @@ def attn_fwd(
                 # If we have no blocks after adjusting for seqlen deltas, this
                 # WG is part of the blocks that are all 0. We exit early.
                 if n_blocks <= 0:
-                    o_offset = (Out + off_z * stride_oz + off_h_q * stride_oh +
-                                cu_seqlens_q_start * stride_om)
-                    o_ptrs = (o_offset + offs_m[:, None] * stride_om +
-                              offs_d[None, :] * stride_on)
+                    o_offset = (
+                        Out + off_z * tl.cast(stride_oz, tl.int64) +
+                        off_h_q * tl.cast(stride_oh, tl.int64) +
+                        cu_seqlens_q_start * tl.cast(stride_om, tl.int64))
+                    o_ptrs = (o_offset +
+                              offs_m[:, None] * tl.cast(stride_om, tl.int64) +
+                              offs_d[None, :] * tl.cast(stride_on, tl.int64))
                     acc = tl.zeros([BLOCK_M, BLOCK_DMODEL], dtype=tl.float32)
                     o_ptrs_mask = (offs_m[:, None] < seqlen_q).broadcast_to(
                         [BLOCK_M, BLOCK_DMODEL])
@@ -850,8 +853,10 @@ def attn_fwd(
                     tl.store(o_ptrs, acc, mask=o_ptrs_mask)
                     # The tensor allocated for L is based on MAX_SEQLENS_Q as
                     # that is statically known.
-                    l_ptrs = (L + off_z * HQ * MAX_SEQLENS_Q +
-                              off_h_q * MAX_SEQLENS_Q + offs_m)
+                    l_ptrs = (L +
+                              off_z * HQ * tl.cast(MAX_SEQLENS_Q, tl.int64) +
+                              off_h_q * tl.cast(MAX_SEQLENS_Q, tl.int64) +
+                              offs_m)
                     # We store inf to LSE, not -inf because in the bwd pass,
                     # we subtract this from qk which makes it -inf, such that
                     # exp(qk - inf) = 0 for these masked blocks.
@@ -878,18 +883,24 @@ def attn_fwd(
                                                  != BLOCK_DMODEL)
 
                 # Compute pointers for all the tensors used in this kernel.
-                q_offset = (Q + off_z * stride_qz + off_h_q * stride_qh +
-                            cu_seqlens_q_start * stride_qm)
-                q_ptrs = (q_offset + offs_m[:, None] * stride_qm +
-                          offs_d[None, :] * stride_qk)
-                k_offset = (K + off_z * stride_kz + off_h_k * stride_kh +
-                            cu_seqlens_k_start * stride_kn)
-                k_ptrs = (k_offset + offs_d[:, None] * stride_kk +
-                          offs_n[None, :] * stride_kn)
-                v_offset = (V + off_z * stride_vz + off_h_k * stride_vh +
-                            cu_seqlens_k_start * stride_vk)
-                v_ptrs = (v_offset + offs_n[:, None] * stride_vk +
-                          offs_d[None, :] * stride_vn)
+                q_offset = (Q + off_z * tl.cast(stride_qz, tl.int64) +
+                            off_h_q * tl.cast(stride_qh, tl.int64) +
+                            cu_seqlens_q_start * tl.cast(stride_qm, tl.int64))
+                q_ptrs = (q_offset +
+                          offs_m[:, None] * tl.cast(stride_qm, tl.int64) +
+                          offs_d[None, :] * tl.cast(stride_qk, tl.int64))
+                k_offset = (K + off_z * tl.cast(stride_kz, tl.int64) +
+                            off_h_k * stride_kh +
+                            cu_seqlens_k_start * tl.cast(stride_kn, tl.int64))
+                k_ptrs = (k_offset +
+                          offs_d[:, None] * tl.cast(stride_kk, tl.int64) +
+                          offs_n[None, :] * tl.cast(stride_kn, tl.int64))
+                v_offset = (V + off_z * tl.cast(stride_vz, tl.int64) +
+                            off_h_k * tl.cast(stride_vh, tl.int64) +
+                            cu_seqlens_k_start * tl.cast(stride_vk, tl.int64))
+                v_ptrs = (v_offset +
+                          offs_n[:, None] * tl.cast(stride_vk, tl.int64) +
+                          offs_d[None, :] * tl.cast(stride_vn, tl.int64))
                 # Compute pointers for all scale tensors used in this kernel.
 
                 IS_EIGHT_BIT_GEMM: tl.constexpr = IS_EIGHT_BIT & (
@@ -920,15 +931,18 @@ def attn_fwd(
 
                 if USE_BIAS:
                     # Note: might get large enough to overflow on some configs
-                    bias_offset = off_h_q * stride_bh
-                    bias_ptrs = (bias + bias_offset +
-                                 offs_m[:, None] * stride_bm +
-                                 offs_n[None, :] * stride_bn)
+                    bias_offset = off_h_q * tl.cast(stride_bh, tl.int64)
+                    bias_ptrs = (
+                        bias + bias_offset +
+                        offs_m[:, None] * tl.cast(stride_bm, tl.int64) +
+                        offs_n[None, :] * tl.cast(stride_bn, tl.int64))
                 else:
                     bias_ptrs = None
 
                 if USE_ALIBI:
-                    a_offset = off_z * stride_az + off_h_q * stride_ah
+                    a_offset = off_z * tl.cast(stride_az,
+                                               tl.int64) + off_h_q * tl.cast(
+                                                   stride_ah, tl.int64)
                     alibi_slope = tl.load(alibi_slopes + a_offset)
                 else:
                     alibi_slope = None
@@ -938,11 +952,13 @@ def attn_fwd(
                 # dropout. In this case, we return an invalid pointer so
                 # indicate the mask is not valid.
                 if SHOULD_RETURN_ENCODED_SOFTMAX:
-                    encoded_sm_base = (encoded_softmax +
-                                       off_h_q * seqlen_q * seqlen_k)
-                    encoded_sm_ptrs = (encoded_sm_base +
-                                       offs_m[:, None] * seqlen_k +
-                                       offs_n[None, :])
+                    encoded_sm_base = (
+                        encoded_softmax +
+                        off_h_q * seqlen_q * tl.cast(seqlen_k, tl.int64))
+                    encoded_sm_ptrs = (
+                        encoded_sm_base +
+                        offs_m[:, None] * tl.cast(seqlen_k, tl.int64) +
+                        offs_n[None, :])
                 else:
                     encoded_sm_ptrs = None
                 # initialize pointer to m and l
@@ -1055,10 +1071,13 @@ def attn_fwd(
                         offs_n_causal = offs_n + (seqlen_q - seqlen_k)
                     else:
                         offs_n_causal = 0
-                    k_ptrs += n_full_blocks * BLOCK_N * stride_kn
-                    v_ptrs += n_full_blocks * BLOCK_N * stride_vk
+                    k_ptrs += n_full_blocks * BLOCK_N * tl.cast(
+                        stride_kn, tl.int64)
+                    v_ptrs += n_full_blocks * BLOCK_N * tl.cast(
+                        stride_vk, tl.int64)
                     if USE_BIAS:
-                        bias_ptrs += n_full_blocks * BLOCK_N * stride_bn
+                        bias_ptrs += n_full_blocks * BLOCK_N * tl.cast(
+                            stride_bn, tl.int64)
                     if SHOULD_RETURN_ENCODED_SOFTMAX:
                         encoded_sm_ptrs += n_full_blocks * BLOCK_N
                     acc, l_i, m_i = _attn_fwd_inner(
@@ -1143,8 +1162,8 @@ def attn_fwd(
                         acc = tl.where(out_ptrs_mask, acc,
                                        z.to(acc.type.element_ty))
                 # write back LSE
-                l_ptrs = (L + off_z * HQ * MAX_SEQLENS_Q +
-                          off_h_q * MAX_SEQLENS_Q + offs_m)
+                l_ptrs = (L + off_z * HQ * tl.cast(MAX_SEQLENS_Q, tl.int64) +
+                          off_h_q * tl.cast(MAX_SEQLENS_Q, tl.int64) + offs_m)
                 # If seqlen_q not multiple of BLOCK_M, we need to mask out the
                 # last few rows. This is only true for the last M block.
                 # For others, overflow_size will be -ve
@@ -1159,10 +1178,12 @@ def attn_fwd(
                     tl.store(l_ptrs, m_i + tl.math.log2(l_i))
 
                 # write back O
-                o_offset = (Out + off_z * stride_oz + off_h_q * stride_oh +
-                            cu_seqlens_q_start * stride_om)
-                o_ptrs = (o_offset + offs_m[:, None] * stride_om +
-                          offs_d[None, :] * stride_on)
+                o_offset = (Out + off_z * tl.cast(stride_oz, tl.int64) +
+                            off_h_q * tl.cast(stride_oh, tl.int64) +
+                            cu_seqlens_q_start * tl.cast(stride_om, tl.int64))
+                o_ptrs = (o_offset +
+                          offs_m[:, None] * tl.cast(stride_om, tl.int64) +
+                          offs_d[None, :] * tl.cast(stride_on, tl.int64))
                 o_ptrs_mask = tl.full([BLOCK_M, BLOCK_DMODEL],
                                       1,
                                       dtype=tl.int1)
