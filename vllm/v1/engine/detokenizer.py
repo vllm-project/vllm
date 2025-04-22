@@ -161,7 +161,7 @@ class FastIncrementalDetokenizer(BaseIncrementalDetokenizer):
         prompt_suffix = request.prompt_token_ids
         prompt_len = len(prompt_suffix)
         if prompt_len > 4:
-            for i in range(4, max(prompt_len + 1, 32)):
+            for i in range(4, min(prompt_len + 1, 24)):
                 suffix = request.prompt_token_ids[-i:]
                 if '�' not in self.tokenizer.decode(suffix):
                     prompt_suffix = suffix
