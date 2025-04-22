@@ -18,7 +18,8 @@ import vllm.envs as envs
 from vllm import version
 from vllm.config import (BlockSize, CacheConfig, CacheDType, CompilationConfig,
                          ConfigFormat, ConfigType, DecodingConfig, Device,
-                         DeviceConfig, DistributedExecutorBackend, HfOverrides,
+                         DeviceConfig, DistributedExecutorBackend,
+                         GuidedDecodingBackendV1, HfOverrides,
                          KVTransferConfig, LoadConfig, LoadFormat, LoRAConfig,
                          ModelConfig, ModelImpl, MultiModalConfig,
                          ObservabilityConfig, ParallelConfig, PoolerConfig,
@@ -227,6 +228,8 @@ class EngineArgs:
     disable_chunked_mm_input: bool = SchedulerConfig.disable_chunked_mm_input
 
     guided_decoding_backend: str = DecodingConfig.guided_decoding_backend
+    guided_decofing_backend_options: set[str] = \
+        get_field(DecodingConfig, "guided_decoding_backend_options")
     logits_processor_pattern: Optional[str] = None
 
     speculative_config: Optional[Dict[str, Any]] = None
@@ -491,8 +494,11 @@ class EngineArgs:
             description=DecodingConfig.__doc__,
         )
         guided_decoding_group.add_argument(
-            '--guided-decoding-backend',
+            "--guided-decoding-backend",
             **guided_decoding_kwargs["guided_decoding_backend"])
+        guided_decoding_group.add_argument(
+            "--guided-decoding-backend-options",
+            **guided_decoding_kwargs["guided_decoding_backend_options"])
         guided_decoding_group.add_argument(
             "--reasoning-parser",
             # This choices is a special case because it's not static
@@ -1371,11 +1377,8 @@ class EngineArgs:
             return False
 
         # Xgrammar and Guidance are supported.
-        SUPPORTED_GUIDED_DECODING = [
-            "xgrammar", "xgrammar:disable-any-whitespace", "guidance",
-            "guidance:disable-any-whitespace", "auto"
-        ]
-        if self.guided_decoding_backend not in SUPPORTED_GUIDED_DECODING:
+        supported_backends = get_args(GuidedDecodingBackendV1)
+        if self.guided_decoding_backend not in supported_backends:
             _raise_or_fallback(feature_name="--guided-decoding-backend",
                                recommend_to_remove=False)
             return False

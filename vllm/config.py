@@ -30,7 +30,6 @@ from vllm.model_executor.layers.quantization import (QUANTIZATION_METHODS,
                                                      get_quantization_config)
 from vllm.model_executor.models import ModelRegistry
 from vllm.platforms import CpuArchEnum, current_platform
-from vllm.sampling_params import GuidedDecodingParams
 from vllm.tracing import is_otel_available, otel_import_error_traceback
 from vllm.transformers_utils.config import (
     ConfigFormat, get_config, get_hf_image_processor_config,
@@ -3090,6 +3089,7 @@ def get_served_model_name(model: str,
 GuidedDecodingBackendV0 = Literal["auto", "outlines", "lm-format-enforcer",
                                   "xgrammar"]
 GuidedDecodingBackendV1 = Literal["auto", "xgrammar", "guidance"]
+GuidedDecodingBackendOptions = Literal["no-fallback", "disable-any-whitespace"]
 
 
 @config
@@ -3104,6 +3104,15 @@ class DecodingConfig:
     by default. With "auto", we will make opinionated choices based on request
     contents and what the backend libraries currently support, so the behavior
     is subject to change in each release."""
+
+    guided_decoding_backend_options: set[GuidedDecodingBackendOptions] = \
+        field(default_factory=set)
+    """Backend-specific options to pass to the specified guided decoding
+    backend:\n
+    - "no-fallback" will not allow vLLM to fallback to a different backend on
+    error.\n
+    - "disable-any-whitespace" prevents the model from generating whitespace.
+    """
 
     reasoning_backend: Optional[str] = None
     """Select the reasoning parser depending on the model that you're using.
@@ -3130,8 +3139,15 @@ class DecodingConfig:
         return hash_str
 
     def __post_init__(self):
-        backend = GuidedDecodingParams(
-            backend=self.guided_decoding_backend).backend_name
+        backend = self.guided_decoding_backend
+        if ":" in backend:
+            self.guided_decoding_backend, options = backend.split(":")
+            self.guided_decoding_backend_options = set(options.split(","))
+            logger.warning(
+                "Passing guided decoding backend options via "
+                "guided_decoding_backend (or --guided-decoding-backend) is "
+                "deprecated. Please use guided_decoding_backend_options (or "
+                "--guided-decoding-backend-options) instead.")
         if envs.VLLM_USE_V1:
             valid_guided_backends = get_args(GuidedDecodingBackendV1)
         else:
@@ -3139,6 +3155,10 @@ class DecodingConfig:
         if backend not in valid_guided_backends:
             raise ValueError(f"Invalid guided_decoding_backend '{backend}',"
                              f" must be one of {valid_guided_backends}")
+        if ("disable-any-whitespace" in self.guided_decoding_backend_options
+                and backend not in ("xgrammar", "guidance")):
+            raise ValueError("disable-any-whitespace is only supported for "
+                             "xgrammar and guidance backends.")
 
 
 @dataclass

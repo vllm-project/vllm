@@ -112,7 +112,8 @@ try:
         extra_body={
             "guided_regex": "\w+@\w+\.com\n",
             "stop": ["\n"],
-            "guided_decoding_backend": "xgrammar:no-fallback"
+            "guided_decoding_backend": "xgrammar",
+            "guided_decoding_backend_options": ["no-fallback"],
         },
     )
 except BadRequestError as e:

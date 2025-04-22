@@ -176,7 +176,7 @@ class GrammarConfig:
                 json_str = guided_params.json
 
             any_whitespace = 'disable-any-whitespace' not in \
-                    guided_params.backend_options()
+                    guided_params.backend_options
 
             # Check and log if model with xgrammar and whitespace have history
             # of runaway generation of whitespaces.
@@ -192,8 +192,8 @@ class GrammarConfig:
 
             if model_with_warn is not None and any_whitespace:
                 msg = (f"{model_with_warn} "
-                       f"model detected, consider set "
-                       f"`guided_backend=xgrammar:disable-any-whitespace` "
+                       f"model detected, consider setting "
+                       f"`backend_options={{disable-any-whitespace}}` "
                        f"to prevent runaway generation of whitespaces.")
                 logger.info_once(msg)
             # Validate the schema and raise ValueError here if it is invalid.

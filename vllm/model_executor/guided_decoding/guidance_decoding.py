@@ -19,7 +19,7 @@ def get_local_guidance_guided_decoding_logits_processor(
 
     grm = ""
     any_whitespace = 'disable-any-whitespace' not in \
-        guided_params.backend_options()
+        guided_params.backend_options
     if guided_params.json:
         grm = llguidance.LLMatcher.grammar_from_json_schema(
             guided_params.json,

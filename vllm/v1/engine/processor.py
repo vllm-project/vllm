@@ -2,9 +2,9 @@
 
 import time
 from collections.abc import Mapping, Sequence
-from typing import Literal, Optional, Union
+from typing import Literal, Optional, Union, get_args
 
-from vllm.config import VllmConfig
+from vllm.config import GuidedDecodingBackendV1, VllmConfig
 from vllm.inputs import ProcessorInputs, PromptType, SingletonInputs
 from vllm.inputs.parse import split_enc_dec_inputs
 from vllm.inputs.preprocess import InputPreprocessor
@@ -145,10 +145,7 @@ class Processor:
         if not params.guided_decoding or not self.decoding_config:
             return
 
-        supported_backends = [
-            "xgrammar", "xgrammar:disable-any-whitespace", "guidance",
-            "guidance:disable-any-whitespace", "auto"
-        ]
+        supported_backends = get_args(GuidedDecodingBackendV1)
 
         engine_level_backend = self.decoding_config.guided_decoding_backend
         if engine_level_backend not in supported_backends:
@@ -162,7 +159,7 @@ class Processor:
             # using the `_auto` option set on the backend in the params.
             if (params.guided_decoding.backend != engine_level_backend
                     and not (engine_level_backend == "auto" and "_auto"
-                             in params.guided_decoding.backend_options())):
+                             in params.guided_decoding.backend_options)):
                 raise ValueError(
                     "Request-level structured output backend selection is no "
                     "longer supported. The request specified "
@@ -198,7 +195,7 @@ class Processor:
                 # are not supported in xgrammar. Fall back to guidance.
                 params.guided_decoding.backend = "guidance"
             # Remember that this backend was set automatically
-            params.guided_decoding.add_option("_auto")
+            params.guided_decoding.backend_options.add("_auto")
 
     def process_inputs(
         self,

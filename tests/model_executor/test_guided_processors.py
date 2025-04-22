@@ -203,10 +203,12 @@ def test_multiple_guided_options_not_allowed(sample_json_schema, sample_regex):
 def test_guided_decoding_backend_options():
     """Test backend-specific options"""
     params = GuidedDecodingParams(
-        backend="xgrammar:option-1,option-2,option-3")
-    assert params.backend_options() == ["option-1", "option-2", "option-3"]
+        backend="xgrammar",
+        backend_options=["option-1", "option-2", "option-3"])
+    assert params.backend_options == ["option-1", "option-2", "option-3"]
 
-    no_fallback = GuidedDecodingParams(backend="xgrammar:option-1,no-fallback")
+    no_fallback = GuidedDecodingParams(
+        backend="xgrammar", backend_options=["option-1", "no-fallback"])
     assert no_fallback.no_fallback()
 
 

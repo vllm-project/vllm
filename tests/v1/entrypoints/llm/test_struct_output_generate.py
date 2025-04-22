@@ -16,15 +16,17 @@ from vllm.outputs import RequestOutput
 from vllm.sampling_params import GuidedDecodingParams, SamplingParams
 
 PARAMS_MODELS_BACKENDS_TOKENIZER_MODE = [
-    ("mistralai/Ministral-8B-Instruct-2410", "xgrammar:disable-any-whitespace",
+    ("mistralai/Ministral-8B-Instruct-2410", "xgrammar",
+     {"disable-any-whitespace"}, "auto"),
+    ("mistralai/Ministral-8B-Instruct-2410", "guidance",
+     {"disable-any-whitespace"}, "auto"),
+    ("mistralai/Ministral-8B-Instruct-2410", "xgrammar",
+     {"disable-any-whitespace"}, "mistral"),
+    ("Qwen/Qwen2.5-1.5B-Instruct", "xgrammar", {"disable-any-whitespace"},
      "auto"),
-    ("mistralai/Ministral-8B-Instruct-2410", "guidance:disable-any-whitespace",
-     "auto"),
-    ("mistralai/Ministral-8B-Instruct-2410", "xgrammar:disable-any-whitespace",
-     "mistral"),
-    ("Qwen/Qwen2.5-1.5B-Instruct", "xgrammar:disable-any-whitespace", "auto"),
     #FIXME: This test is flaky on CI thus disabled
-    #("Qwen/Qwen2.5-1.5B-Instruct", "guidance:disable-any-whitespace", "auto"),
+    #("Qwen/Qwen2.5-1.5B-Instruct", "guidance", {"disable-any-whitespace"},
+    # "auto"),
 ]
 
 PARAMS_MODELS_TOKENIZER_MODE = [
@@ -47,7 +49,8 @@ class CarDescription(BaseModel):
 
 
 @pytest.mark.skip_global_cleanup
-@pytest.mark.parametrize("model_name, guided_decoding_backend, tokenizer_mode",
+@pytest.mark.parametrize(("model_name,guided_decoding_backend,"
+                          "guided_decoding_backend_options,tokenizer_mode"),
                          PARAMS_MODELS_BACKENDS_TOKENIZER_MODE)
 def test_structured_output(
     monkeypatch: pytest.MonkeyPatch,
@@ -58,6 +61,7 @@ def test_structured_output(
     sample_regex: str,
     sample_guided_choice: str,
     guided_decoding_backend: str,
+    guided_decoding_backend_options: set[str],
     tokenizer_mode: str,
     model_name: str,
 ):
@@ -94,7 +98,7 @@ def test_structured_output(
 
         generated_text = output.outputs[0].text
         assert generated_text is not None
-        if 'disable-any-whitespace' in guided_decoding_backend:
+        if "disable-any-whitespace" in guided_decoding_backend_options:
             assert "\n" not in generated_text
         print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
         output_json = json.loads(generated_text)
