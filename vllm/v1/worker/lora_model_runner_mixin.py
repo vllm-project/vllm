@@ -14,7 +14,6 @@ from vllm.lora.layers import LoRAMapping
 from vllm.lora.request import LoRARequest
 from vllm.lora.worker_manager import LRUCacheWorkerLoRAManager
 from vllm.model_executor.models import supports_lora, supports_multimodal
-from vllm.platforms import current_platform
 from vllm.v1.worker.gpu_input_batch import InputBatch
 
 logger = init_logger(__name__)
@@ -96,12 +95,10 @@ class LoRAModelRunnerMixin:
             num_reqs = len(num_scheduled_tokens)
             num_loras = lora_config.max_loras
 
-            base_lora_id = lora_config.max_loras + lora_config.max_cpu_loras + 1
-
             # Make prompt lora mapping
             # Assign LoRA IDs cyclically to simulate a worst-case scenario.
             prompt_lora_mapping = (np.arange(num_reqs, dtype=np.int32) %
-                                   num_loras) + base_lora_id
+                                   num_loras) + 1
 
             # Make token lora mapping
             token_lora_mapping = np.repeat(prompt_lora_mapping,
@@ -110,9 +107,9 @@ class LoRAModelRunnerMixin:
             # Make dummy lora requests
             lora_requests: set[LoRARequest] = {
                 LoRARequest(lora_name=f"warmup_{lora_id}",
-                            lora_int_id=lora_id + base_lora_id,
+                            lora_int_id=lora_id,
                             lora_path="/not/a/real/path")
-                for lora_id in range(num_loras)
+                for lora_id in range(1, num_loras + 1)
             }
 
             with self.lora_manager.dummy_lora_cache():
@@ -129,10 +126,7 @@ class LoRAModelRunnerMixin:
                 yield
 
             # __exit__ code
-            # Disabling remove_all_adapters on the TPU backend allows us to save
-            # quite a bit of RAM. E.g. we save 2.22 GB with Llama3.1 8B
-            if not current_platform.is_tpu():
-                self.lora_manager.remove_all_adapters()
+            self.lora_manager.remove_all_adapters()
 
     def add_lora(self, lora_request: LoRARequest) -> bool:
         if not self.lora_manager:
