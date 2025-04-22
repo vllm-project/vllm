@@ -215,6 +215,7 @@ class VocabParallelEmbeddingWithLoRA(BaseLayerWithLoRA):
         bias: Optional[torch.Tensor] = None,
     ):
         xm.mark_step()
+        index = torch.tensor([index], dtype=torch.int32, device="xla")
         self.reset_lora(index)
         self.lora_a_stacked[index, :lora_a.shape[0], :lora_a.shape[1]].copy_(
             lora_a, non_blocking=True)
@@ -385,6 +386,7 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
         # store weights in a tuple of size 1. These two layers will
         # override this function.
         xm.mark_step()
+        index = torch.tensor([index], dtype=torch.int32, device="xla")
         assert (len(self.lora_a_stacked) == len(self.lora_b_stacked) ==
                 self.n_slices == 1)
 
@@ -712,6 +714,7 @@ class MergedColumnParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
         lora_bias: Optional[torch.Tensor] = None,
     ):
         xm.mark_step()
+        index = torch.tensor([index], dtype=torch.int32, device="xla")
         self.reset_lora(index)
 
         if self.tp_size > 1:
@@ -1086,6 +1089,7 @@ class LogitsProcessorWithLoRA(BaseLayerWithLoRA):
         bias: Optional[torch.Tensor] = None,
     ):
         xm.mark_step()
+        index = torch.tensor([index], dtype=torch.int32, device="xla")
         self.reset_lora(index)
         self.lora_a_stacked[index,
                             0, :lora_a.shape[1], :lora_a.shape[0]].copy_(
