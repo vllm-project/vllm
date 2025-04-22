@@ -54,25 +54,6 @@ if current_platform.is_rocm():
         dispatch_key=current_platform.dispatch_key,
     )
 
-# @cache
-# def is_rocm_aiter_linear_enabled() -> bool:
-#     # Note that envs.<ENVIRONMENT_VARIABLE> is a very slow operation
-#     # It is in the order magnitude of microseconds.
-#     # If it is used in the forward pass of any operator in an especially
-#     # large model like DeepSeekV3, it will slow down the entire forward pass
-#     # Thus cache the result. If there is a need to refresh the cache,
-#     # call is_rocm_aiter_linear_enabled.clear_cache(). This is needed
-#     # especially in the unit test case where monkeypatch is used to set
-#     # the environment variable.
-#     return (envs.VLLM_ROCM_USE_AITER_LINEAR and envs.VLLM_ROCM_USE_AITER)
-
-# def clear_rocm_aiter_environment_variables_state_cache():
-#     # This is a helper function to clear the cache of all the
-#     # environment variable resolution functions that use @cache in this file.
-#     # This is needed in the unit test case where monkeypatch is used to set
-#     # the environment variable.
-#     is_rocm_aiter_linear_enabled.cache_clear()
-
 
 class aiter_ops:
 
