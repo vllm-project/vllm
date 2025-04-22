@@ -854,6 +854,7 @@ def _format_zeta_prompt(
     Args:
         examples: The dataset examples containing events, 
             inputs, and outputs.
+        num_requests: The number of requests to format.
         original_start_marker: The marker indicating the 
             start of the editable region. Defaults to 
             "<|editable_region_start|>".
