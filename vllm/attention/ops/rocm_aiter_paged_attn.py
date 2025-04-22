@@ -6,6 +6,7 @@ import torch
 
 from vllm.attention.ops.paged_attn import PagedAttention
 from vllm.platforms import current_platform
+from vllm.utils import cdiv
 
 FP8_DTYPE = current_platform.fp8_dtype()
 
@@ -92,7 +93,7 @@ class AITERPagedAttention(PagedAttention):
 
         output = torch.empty_like(query)
         block_size = value_cache.shape[3]
-        max_num_blocks_per_seq = (max_seq_len + block_size - 1) // block_size
+        max_num_blocks_per_seq = cdiv(max_seq_len, block_size)
 
         rocm_aiter.pa_fwd_asm(query, key_cache, value_cache, block_tables,
                               seq_lens, max_num_blocks_per_seq, k_scale,
