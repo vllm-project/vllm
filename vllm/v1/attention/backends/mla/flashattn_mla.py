@@ -13,7 +13,8 @@ from vllm.v1.attention.backends.mla.common import (MLACommonBackend,
                                                    MLACommonMetadata,
                                                    MLACommonMetadataBuilder)
 from vllm.vllm_flash_attn import flash_attn_varlen_func, get_scheduler_metadata
-from vllm.vllm_flash_attn.fa_utils import flash_attn_supports_mla
+from vllm.vllm_flash_attn.fa_utils import (flash_attn_supports_mla,
+                                           get_flash_attn_version)
 
 if TYPE_CHECKING:
     pass
@@ -60,6 +61,8 @@ class FlashAttnMLAMetadataBuilder(
 
     def __init__(self, runner):
         super().__init__(runner)
+        self.fa_aot_schedule = (get_flash_attn_version() == 3)
+        self.page_size = self.runner.block_size
 
     def _schedule_decode(self, num_reqs, cu_query_lens, max_query_len, seqlens,
                          max_seq_len, causal):

@@ -218,8 +218,7 @@ from vllm.v1.attention.backends.utils import (AttentionMetadataBuilder,
 from vllm.v1.kv_cache_interface import AttentionSpec
 
 try:
-    from vllm.vllm_flash_attn import (flash_attn_varlen_func,
-                                      get_scheduler_metadata)
+    from vllm.vllm_flash_attn import flash_attn_varlen_func
     is_vllm_fa = True
 except ImportError:
     # For rocm use upstream flash attention
@@ -301,12 +300,10 @@ class MLACommonPrefillMetadata:
         max_seq_lens: list[int]
         seq_lens: torch.Tensor
         workspace: torch.Tensor
-        scheduler_metatadata: list[Optional[torch.Tensor]]
 
     block_table: torch.Tensor
     query_start_loc: torch.Tensor
     max_query_len: int
-    scheduler_metadata: Optional[torch.Tensor] = None
     chunked_context: Optional[ChunkedContextMetadata] = None
 
 
@@ -588,25 +585,6 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
 
         return self.build(0, m)
 
-    def _schedule_prefill(self, num_reqs, cu_query_lens, max_query_len,
-                          seqlens, max_seq_len, causal):
-        if self.fa_aot_schedule:
-            return get_scheduler_metadata(
-                batch_size=num_reqs,
-                max_seqlen_q=max_query_len,
-                max_seqlen_k=max_seq_len,
-                cache_seqlens=seqlens,
-                num_heads_q=self.num_heads,
-                num_heads_kv=self.num_heads,
-                headdim=self.mla_dims.qk_nope_head_dim +
-                self.mla_dims.qk_rope_head_dim,
-                headdim_v=self.mla_dims.v_head_dim,
-                page_size=self.page_size,
-                cu_seqlens_q=cu_query_lens,
-                causal=causal,
-            )
-        return None
-
     def build(self,
               num_actual_tokens: int,
               common_prefix_len: int,
@@ -700,26 +678,13 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
 
                 chunks_max_seq_lens = chunk_seq_lens.max(dim=1).values
 
-                chunks_scheduler_metadata = []
-                for i in range(num_chunks):
-                    chunks_scheduler_metadata.append(
-                        self._schedule_prefill(
-                            self._num_prefills,
-                            cu_seq_lens_cpu[i],
-                            max_query_len,
-                            chunk_seq_lens[i],
-                            chunks_max_seq_lens[i],
-                            causal=False,
-                        ))
-
                 chunked_context_metadata = \
                     chunked_context_metadata_cls(
                     cu_seq_lens=cu_seq_lens_cpu.to(device, non_blocking=True),
                     starts=chunk_starts.to(device, non_blocking=True),
                     seq_tot=chunk_seq_lens.sum(dim=1).tolist(),
                     max_seq_lens=chunks_max_seq_lens,
-                    workspace=self.chunked_prefill_workspace,
-                    scheduler_metatadata=chunks_scheduler_metadata,
+                    workspace=self.chunked_prefill_workspace
                 )
 
                 if self._use_cudnn_prefill:
@@ -728,22 +693,12 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
                 assert max(chunked_context_metadata.max_seq_lens) <= \
                     self.chunked_prefill_workspace_size
 
-            scheduler_metadata = self._schedule_prefill(
-                self._num_prefills,
-                prefill_query_start_loc,
-                max_query_len,
-                prefill_query_start_loc,
-                max_query_len,
-                causal=True,
-            )
-
             prefill_metadata = MLACommonPrefillMetadata(
                 input_positions=input_positions[tokens_start:],
                 block_table=block_table[reqs_start:, ...],
                 query_start_loc=prefill_query_start_loc,
                 max_query_len=max_query_len,
                 chunked_context=chunked_context_metadata,
-                scheduler_metadata=scheduler_metadata,
             )
 
             if self._use_cudnn_prefill:
@@ -872,7 +827,6 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
                                          v,
                                          return_softmax_lse=False,
                                          softmax_scale=None,
-                                         scheduler_metadata=None,
                                          **kwargs):
         maybe_padded_v = v
         if self._pad_v:
@@ -1119,7 +1073,6 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
                 softmax_scale=self.scale,
                 causal=False,  # Context is unmasked
                 return_softmax_lse=True,
-                scheduler_metadata=prefill_metadata.chunked_context.scheduler_metatadata[i],
             )
 
             if output is None:
@@ -1166,7 +1119,6 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
             k=k,
             v=v,
             return_softmax_lse=has_context,
-            scheduler_metadata=attn_metadata.prefill.scheduler_metadata,
         )
 
         if has_context:
