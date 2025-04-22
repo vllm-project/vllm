@@ -2,7 +2,6 @@
 import contextlib
 import copy
 import hashlib
-import importlib.metadata
 import os
 from contextlib import ExitStack
 from typing import Any, Callable, Dict, List, Optional, Tuple
@@ -11,9 +10,9 @@ from unittest.mock import patch
 import torch
 import torch._inductor.compile_fx
 import torch.fx as fx
-from packaging.version import Version
 
 from vllm.config import VllmConfig
+from vllm.utils import is_torch_equal_or_newer
 
 
 class CompilerInterface:
@@ -168,8 +167,7 @@ class InductorAdaptor(CompilerInterface):
         compiler_config: Dict[str, Any],
         runtime_shape: Optional[int] = None
     ) -> Tuple[Optional[Callable], Optional[Any]]:
-        from torch._inductor import config
-        current_config = config.get_config_copy()
+        current_config = {}
         from torch._inductor.compile_fx import compile_fx
 
         # disable remote cache
@@ -291,6 +289,19 @@ class InductorAdaptor(CompilerInterface):
             # Dynamo metrics context, see method for more details.
             stack.enter_context(self.metrics_context())
 
+            # Disable remote caching. When these are on, on remote cache-hit,
+            # the monkey-patched functions never actually get called.
+            # vLLM today assumes and requires the monkey-patched functions to
+            # get hit.
+            # TODO(zou3519): we're going to replace this all with
+            # standalone_compile sometime.
+            if is_torch_equal_or_newer("2.6"):
+                stack.enter_context(
+                    torch._inductor.config.patch(fx_graph_remote_cache=False))
+                stack.enter_context(
+                    torch._functorch.config.patch(
+                        enable_remote_autograd_cache=False))
+
             compiled_graph = compile_fx(
                 graph,
                 example_inputs,
@@ -379,7 +390,7 @@ class InductorAdaptor(CompilerInterface):
         manually setting up internal contexts. But we also rely on non-public
         APIs which might not provide these guarantees.
         """
-        if Version(importlib.metadata.version('torch')) >= Version("2.6"):
+        if is_torch_equal_or_newer("2.6"):
             import torch._dynamo.utils
             return torch._dynamo.utils.get_metrics_context()
         else:

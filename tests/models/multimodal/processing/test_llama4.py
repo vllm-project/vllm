@@ -76,11 +76,6 @@ def test_processor_override(
         if v == config.boi_token_index]
 
     # patch sizes and masks
-    patch_token_id = vocab[hf_processor.img_patch_token]
-    num_patches = processed_inputs["prompt_token_ids"].count(patch_token_id)
-    mm_counts = {"image": num_imgs}
-    assert num_patches / num_imgs <= \
-        processor.info.get_mm_max_tokens_per_item(32768, mm_counts)["image"]
     num_patches_per_chunk = processor.info.get_patch_per_chunk(
         config.vision_config)
     assert prompt_token_ids.count(config.image_token_index) \

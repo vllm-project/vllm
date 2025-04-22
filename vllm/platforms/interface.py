@@ -1,5 +1,4 @@
 # SPDX-License-Identifier: Apache-2.0
-
 import enum
 import platform
 import random
@@ -9,14 +8,21 @@ from typing import TYPE_CHECKING, NamedTuple, Optional, Tuple, Union
 import numpy as np
 import torch
 
+from vllm.inputs import ProcessorInputs, PromptType
 from vllm.logger import init_logger
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig, VllmConfig
+    from vllm.lora.request import LoRARequest
+    from vllm.pooling_params import PoolingParams
+    from vllm.sampling_params import SamplingParams
     from vllm.utils import FlexibleArgumentParser
 else:
     ModelConfig = None
     VllmConfig = None
+    LoRARequest = None
+    PoolingParams = None
+    SamplingParams = None
     FlexibleArgumentParser = None
 
 logger = init_logger(__name__)
@@ -33,6 +39,7 @@ class _Backend(enum.Enum):
     TRITON_ATTN_VLLM_V1 = enum.auto()
     XFORMERS = enum.auto()
     ROCM_FLASH = enum.auto()
+    ROCM_AITER_MLA = enum.auto()
     TORCH_SDPA = enum.auto()
     FLASHINFER = enum.auto()
     TRITON_MLA = enum.auto()  # Supported by V1
@@ -142,6 +149,9 @@ class Platform:
         """Stateless version of :func:`torch.cuda.is_available`."""
         return self._enum in (PlatformEnum.CUDA, PlatformEnum.ROCM)
 
+    def is_sleep_mode_available(self) -> bool:
+        return self._enum == PlatformEnum.CUDA
+
     @classmethod
     def get_attn_backend_cls(cls, selected_backend: _Backend, head_size: int,
                              dtype: torch.dtype, kv_cache_dtype: Optional[str],
@@ -231,7 +241,7 @@ class Platform:
                                 parser: Optional[FlexibleArgumentParser] = None
                                 ) -> None:
         """
-        Do some pre-registeration or update action for the current platform.
+        Do some pre-registration or update action for the current platform.
 
         This function is called before global VllmConfig is initialized or cli
         arguments are parsed. It's used for out-of-tree platforms to register or
@@ -380,18 +390,36 @@ class Platform:
         return False
 
     @classmethod
-    def supports_structured_output(cls) -> bool:
-        """
-        Returns whether the current platform can support structured output.
-        """
-        return False
-
-    @classmethod
     def use_custom_allreduce(cls) -> bool:
         """
         Returns if custom allreduce is supported on the current platform
         """
         return False
+
+    @classmethod
+    def validate_request(
+        cls,
+        prompt: PromptType,
+        params: Union[SamplingParams, PoolingParams],
+        processed_inputs: ProcessorInputs,
+    ) -> None:
+        """Raises if this request is unsupported on this platform"""
+
+    def __getattr__(self, key: str):
+        device = getattr(torch, self.device_name, None)
+        if device is not None and hasattr(device, key):
+            return getattr(device, key)
+        else:
+            logger.warning("Current platform %s doesn't has '%s' attribute.",
+                           self.device_name, key)
+            return None
+
+    @classmethod
+    def get_cu_count(cls, device_id: int = 0) -> int:
+        """
+        Returns the total number of compute units (CU) on single GPU.
+        """
+        raise NotImplementedError
 
 
 class UnspecifiedPlatform(Platform):
