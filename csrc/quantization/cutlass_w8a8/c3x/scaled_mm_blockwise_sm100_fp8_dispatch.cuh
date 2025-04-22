@@ -22,12 +22,10 @@ namespace vllm {
 
 using namespace cute;
 
-template <typename OutType, typename MmaTileShape, typename PerSmTileShape,
-          typename EpilogueTileShape, typename ScalesPerTile,
-          int TileSizeM_ = 128, class ClusterShape = Shape<_1, _1, _1>>
+template <typename OutType, typename MmaTileShape, typename ScalesPerTile,
+          class ClusterShape, typename EpilogueScheduler,
+          typename MainloopScheduler>
 struct cutlass_3x_gemm_fp8_blockwise {
-  using TileSizeM = Int<TileSizeM_>;
-
   using ElementAB = cutlass::float_e4m3_t;
 
   using ElementA = ElementAB;
@@ -43,7 +41,6 @@ struct cutlass_3x_gemm_fp8_blockwise {
   using LayoutD = cutlass::layout::RowMajor;
   static constexpr int AlignmentD = 128 / cutlass::sizeof_bits<ElementD>::value;
 
-  //   using StrideC = StrideD;
   using LayoutC = LayoutD;
   static constexpr int AlignmentC = AlignmentD;
 
@@ -63,30 +60,27 @@ struct cutlass_3x_gemm_fp8_blockwise {
       size<2>(MmaTileShape{}) / size<2>(ScalesPerTile{});
 
   // Shape of the threadblocks in a cluster
-  using ClusterShape_MNK = Shape<_1, _1, _1>;
+  using ClusterShape_MNK = ClusterShape;
 
   using ScaleConfig = cutlass::detail::Sm100BlockwiseScaleConfig<
       ScaleGranularityM, ScaleGranularityN, ScaleGranularityK,
       cute::UMMA::Major::MN, cute::UMMA::Major::K>;
+  using LayoutSFA = decltype(ScaleConfig::deduce_layoutSFA());
+  using LayoutSFB = decltype(ScaleConfig::deduce_layoutSFB());
 
-  using LayoutSFA =
-      decltype(ScaleConfig::deduce_layoutSFA());  // Layout type for SFA matrix
-                                                  // operand
-  using LayoutSFB =
-      decltype(ScaleConfig::deduce_layoutSFB());  // Layout type for SFB matrix
-                                                  // operand
   using ArchTag = cutlass::arch::Sm100;
   using OperatorClass = cutlass::arch::OpClassTensorOp;
 
-  using AtomThrShape = Shape<_1, _1, _1>;
-
+  static constexpr auto RoundStyle = cutlass::FloatRoundStyle::round_to_nearest;
+  using ElementScalar = float;
   // clang-format off
+  using DefaultOperation = cutlass::epilogue::fusion::LinearCombination<ElementD, ElementCompute, ElementC, ElementScalar, RoundStyle>;
   using CollectiveEpilogue = typename cutlass::epilogue::collective::CollectiveBuilder<
       ArchTag,
       OperatorClass,
-      PerSmTileShape,
+      MmaTileShape,
       ClusterShape,
-      EpilogueTileShape,
+      cutlass::epilogue::collective::EpilogueTileAuto,
       ElementAccumulator,
       ElementCompute,
       ElementC,
@@ -95,9 +89,11 @@ struct cutlass_3x_gemm_fp8_blockwise {
       ElementD,
       LayoutD,
       AlignmentD,
-      cutlass::epilogue::TmaWarpSpecialized1Sm
+      EpilogueScheduler,
+      DefaultOperation
   >::CollectiveOp;
-  
+ 
+  using StageCountType = cutlass::gemm::collective::StageCountAuto; 
   using CollectiveMainloop = typename cutlass::gemm::collective::CollectiveBuilder<
       ArchTag,
       OperatorClass,
@@ -110,16 +106,14 @@ struct cutlass_3x_gemm_fp8_blockwise {
       ElementAccumulator,
       MmaTileShape,
       ClusterShape,
-      cutlass::gemm::collective::StageCountAutoCarveout<
-          static_cast<int>(sizeof(typename CollectiveEpilogue::SharedStorage))
-      >,
-      cutlass::gemm::KernelTmaWarpSpecializedBlockwise1SmSm100
+
+          cutlass::gemm::collective::StageCountAutoCarveout<static_cast<int>(sizeof(typename CollectiveEpilogue::SharedStorage))>,
+      MainloopScheduler
   >::CollectiveOp;
   // clang-format on
 
   using KernelType = enable_sm100_only<cutlass::gemm::kernel::GemmUniversal<
-      Shape<int, int, int, int>, CollectiveMainloop, CollectiveEpilogue,
-      cutlass::gemm::PersistentScheduler>>;
+      Shape<int, int, int, int>, CollectiveMainloop, CollectiveEpilogue>>;
 
   struct GemmKernel : public KernelType {};
 };
@@ -171,7 +165,6 @@ void cutlass_gemm_caller_blockwise(torch::Tensor& out, torch::Tensor const& a,
   auto c_ptr = static_cast<ElementD*>(out.data_ptr());
   typename GemmKernel::EpilogueArguments epilogue_args{
       {}, c_ptr, c_stride, c_ptr, c_stride};
-  epilogue_args.thread.alpha = 1.0f;
   c3x::cutlass_gemm_caller<GemmKernel>(a.device(), prob_shape, mainloop_args,
                                        epilogue_args);
 }
@@ -185,16 +178,27 @@ void cutlass_gemm_blockwise_sm100_fp8_dispatch(torch::Tensor& out,
   auto m = a.size(0);
   auto k = a.size(1);
   auto n = b.size(1);
+  int sms;
+  cudaDeviceGetAttribute(&sms, cudaDevAttrMultiProcessorCount, a.get_device());
 
-  // Define tile shapes based on the value of m
-  if (m <= 128) {
+  auto should_use_2sm = [&sms](int m, int n, int tile1SM = 128) {
+    return std::ceil(static_cast<float>(m) / tile1SM) *
+               std::ceil(static_cast<float>(n) / tile1SM) >=
+           sms;
+  };
+  bool use_2sm = should_use_2sm(m, n);
+  if (use_2sm) {
     cutlass_gemm_caller_blockwise<cutlass_3x_gemm_fp8_blockwise<
-        OutType, Shape<_64, _128, _128>, Shape<_64, _128, _128>,
-        Shape<_64, _64>, Shape<_64, _1, _1>>>(out, a, b, a_scales, b_scales);
+        OutType, Shape<_256, _128, _128>, Shape<_256, _1, _1>,
+        Shape<_2, _2, _1>, cutlass::epilogue::TmaWarpSpecialized2Sm,
+        cutlass::gemm::KernelTmaWarpSpecializedBlockwise2SmSm100>>(
+        out, a, b, a_scales, b_scales);
   } else {
     cutlass_gemm_caller_blockwise<cutlass_3x_gemm_fp8_blockwise<
-        OutType, Shape<_128, _128, _128>, Shape<_128, _128, _128>,
-        Shape<_128, _64>, Shape<_128, _1, _1>>>(out, a, b, a_scales, b_scales);
+        OutType, Shape<_128, _128, _128>, Shape<_128, _1, _1>,
+        Shape<_1, _1, _1>, cutlass::epilogue::TmaWarpSpecialized1Sm,
+        cutlass::gemm::KernelTmaWarpSpecializedBlockwise1SmSm100>>(
+        out, a, b, a_scales, b_scales);
   }
 }
 
