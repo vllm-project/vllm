@@ -140,22 +140,26 @@ def apply_w8a8_block_fp8_linear(
     return output.to(dtype=input.dtype).view(*output_shape)
 
 
-# def apply_w8a8_block_fp8_linear_fake(
-#     input: torch.Tensor,
-#     weight: torch.Tensor,
-#     block_size: List[int],
-#     weight_scale: torch.Tensor,
-#     input_scale: Optional[torch.Tensor] = None,
-# ) -> torch.Tensor:
-#     output_shape = [*input.shape[:-1], weight.shape[0]]
-#     return torch.empty(output_shape, dtype=input.dtype, device=input.device)
+def apply_w8a8_block_fp8_linear_fake(
+    input: torch.Tensor,
+    weight: torch.Tensor,
+    block_size: List[int],
+    weight_scale: torch.Tensor,
+    input_scale: Optional[torch.Tensor] = None,
+    bias: Optional[torch.Tensor] = None,
+    cutlass_block_fp8_supported: bool = CUTLASS_BLOCK_FP8_SUPPORTED,
+    use_aiter_and_is_supported: bool = False,
+) -> torch.Tensor:
+    output_shape = [*input.shape[:-1], weight.shape[0]]
+    return torch.empty(output_shape, dtype=input.dtype, device=input.device)
 
-# direct_register_custom_op(
-#     op_name="apply_w8a8_block_fp8_linear",
-#     op_func=apply_w8a8_block_fp8_linear,
-#     mutates_args=[],
-#     fake_impl=apply_w8a8_block_fp8_linear_fake,
-# )
+
+direct_register_custom_op(
+    op_name="apply_w8a8_block_fp8_linear",
+    op_func=apply_w8a8_block_fp8_linear,
+    mutates_args=[],
+    fake_impl=apply_w8a8_block_fp8_linear_fake,
+)
 
 
 def input_to_float8(

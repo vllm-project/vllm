@@ -99,6 +99,9 @@ def test_enabled_ops_invalid(env: str):
             RMSNorm(1024).enabled()
 
 
+@pytest.mark.skipif(
+    not current_platform.is_rocm() or not current_platform.is_fp8_fnuz(),
+    reason="AITER is a feature exclusive for ROCm and FP8_FNUZ")
 @pytest.mark.parametrize("use_cutlass", [True, False])
 @pytest.mark.parametrize("use_rocm_aiter", ["0", "1"])
 @pytest.mark.parametrize("use_rocm_aiter_gemm_w8a8_blockscale", ["0", "1"])
@@ -107,10 +110,13 @@ def test_w8a8_blockscale_dispatch(use_cutlass: bool, use_rocm_aiter: str,
                                   monkeypatch):
 
     monkeypatch.setenv("VLLM_ROCM_USE_AITER", use_rocm_aiter)
-    monkeypatch.setenv("VLLM_ROCM_USE_AITER_GEMM_W8A8_BLOCKSCALE",
+    monkeypatch.setenv("VLLM_ROCM_USE_AITER_LINEAR",
                        use_rocm_aiter_gemm_w8a8_blockscale)
-    block_scale_func = dispatch_w8a8_blockscale_func(use_cutlass)
 
+    use_aiter_and_is_supported = (bool(int(use_rocm_aiter)) and bool(
+        int(use_rocm_aiter_gemm_w8a8_blockscale)))
+    block_scale_func = dispatch_w8a8_blockscale_func(
+        use_cutlass, use_aiter_and_is_supported=use_aiter_and_is_supported)
     if use_cutlass:
         assert block_scale_func == cutlass_scaled_mm
     elif current_platform.is_rocm() and int(use_rocm_aiter) and int(
