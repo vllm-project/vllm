@@ -225,7 +225,8 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 RUN --mount=type=bind,from=build,src=/workspace/dist,target=/vllm-workspace/dist \
     --mount=type=cache,target=/root/.cache/uv \
     uv pip install --system dist/*.whl --verbose \
-    --extra-index-url https://download.pytorch.org/whl/test/cu128
+    --extra-index-url https://download.pytorch.org/whl/test/cu128 \
+    --index-strategy unsafe-best-match
 
 # If we need to build FlashInfer wheel before its release:
 # $ export FLASHINFER_ENABLE_AOT=1
