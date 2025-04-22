@@ -1240,9 +1240,9 @@ class AsyncLLMEngine(EngineClient):
 
     async def collective_rpc(self,
                              method: str,
-                             timeout: float | None = None,
+                             timeout: Optional[float] = None,
                              args: tuple = (),
-                             kwargs: dict | None = None):
+                             kwargs: Optional[dict] = None):
         """
         Perform a collective RPC call to the given path.
         """
