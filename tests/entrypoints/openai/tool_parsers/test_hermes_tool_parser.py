@@ -3,12 +3,9 @@ import pytest
 from transformers import AutoTokenizer
 
 from tests.entrypoints.openai.tool_parsers.utils import (
-    run_tool_extraction_hermes,
-    run_tool_extraction_nonstreaming,
-)
+    run_tool_extraction_hermes, run_tool_extraction_nonstreaming)
 from vllm.entrypoints.openai.protocol import FunctionCall
-from vllm.entrypoints.openai.tool_parsers \
-    import ToolParserManager
+from vllm.entrypoints.openai.tool_parsers import ToolParserManager
 
 # Content that is not streamed
 NO_STREAM_FUNCTION_OUTPUT = (
