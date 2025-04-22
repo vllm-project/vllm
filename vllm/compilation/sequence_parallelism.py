@@ -261,7 +261,7 @@ class SequenceParallelismPass(VllmInductorPass):
         if cls._instance is None:
             cls._instance = SequenceParallelismPass(config)
         else:
-            cls._instance.config = config.compilation_config.pass_config
+            cls._instance.pass_config = config.compilation_config.pass_config
         return cls._instance
 
     def __init__(self, config: VllmConfig):

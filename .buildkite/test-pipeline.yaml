@@ -294,7 +294,7 @@ steps:
   commands:
     - pytest -v -s compile/test_pass_manager.py
     - pytest -v -s compile/test_fusion.py
-    - pytest -v -s compile/test_sequence_parallelism.py
+    - VLLM_DISABLE_COMPILE_CACHE=1 pytest -v -s compile/test_sequence_parallelism.py
 
 - label: PyTorch Fullgraph Smoke Test # 9min
   source_file_dependencies:

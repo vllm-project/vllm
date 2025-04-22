@@ -91,6 +91,9 @@ class InductorPass(CustomGraphPass):
         encoded = json.dumps(dict_, sort_keys=True).encode("utf-8")
         return hashlib.sha256(encoded).hexdigest()
 
+    def is_applicable_for_shape(self, shape: Optional[int]):
+        return True
+
 
 class CallableInductorPass(InductorPass):
     """

@@ -9,6 +9,8 @@ import torch
 from vllm import LLM, SamplingParams
 from vllm.config import CompilationConfig
 
+from ..utils import create_new_process_for_each_test, multi_gpu_test
+
 ALL_REDUCE_OP = "torch.ops.vllm.all_reduce.default"
 ALL_GATHER_OP = "torch.ops.vllm.all_gather.default"
 REDUCE_SCATTER_OP = "torch.ops.vllm.reduce_scatter.default"
@@ -34,6 +36,8 @@ def count_comm_ops(graph_path):
     return all_reduce_cnt, all_gather_cnt, reduce_scatter_cnt
 
 
+@multi_gpu_test(num_gpus=2)
+@create_new_process_for_each_test()
 def test_sequence_parallelism_compilation():
     temp_dir = tempfile.mkdtemp()
 
@@ -49,10 +53,10 @@ def test_sequence_parallelism_compilation():
         ["before_sequence_parallelism_pass", "after_sequence_parallelism_pass"]
 
     sampling_params = SamplingParams(temperature=0, )
-
     llm = LLM(model="unsloth/Llama-3.2-1B-Instruct",
               enforce_eager=False,
               tensor_parallel_size=2,
+              distributed_executor_backend="mp",
               dtype=torch.float16,
               max_num_batched_tokens=2048,
               compilation_config=config)
@@ -77,6 +81,10 @@ def test_sequence_parallelism_compilation():
 
     before_graph = os.path.join(temp_dir,
                                 "before_sequence_parallelism_pass-0.py")
+
+    assert Path(before_graph).exists(), \
+        f"Expected {before_graph} to exist, but it does not."
+
     c1, c2, c3 = count_comm_ops(before_graph)
     assert c1 > 0, "Expected all_reduce ops, but found 0 before \
         apply sequence parallelism pass"
@@ -87,6 +95,9 @@ def test_sequence_parallelism_compilation():
 
     after_graph = os.path.join(temp_dir,
                                "after_sequence_parallelism_pass-0.py")
+    assert Path(after_graph).exists(), \
+        f"Expected {after_graph} to exist, but it does not."
+
     c1, c2, c3 = count_comm_ops(after_graph)
 
     assert c1 == 0, f"Expected 0 all_reduce ops, but found {c1} after" + \
