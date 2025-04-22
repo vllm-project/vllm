@@ -3,24 +3,17 @@
 Run `pytest tests/entrypoints/openai/test_embedding_dimensions.py`.
 """
 
-from typing import NamedTuple
-
 import openai
 import pytest
 
 from vllm.entrypoints.openai.protocol import EmbeddingResponse
 
+from ...models.embedding.utils import EmbedModelInfo
 from ...utils import RemoteOpenAIServer
 
-
-class ModelInfo(NamedTuple):
-    name: str
-    is_matryoshka: bool
-
-
 MODELS = [
-    ModelInfo(name="BAAI/bge-m3", is_matryoshka=False),
-    ModelInfo(name="jinaai/jina-embeddings-v3", is_matryoshka=True),
+    EmbedModelInfo(name="BAAI/bge-m3", is_matryoshka=False),
+    EmbedModelInfo(name="jinaai/jina-embeddings-v3", is_matryoshka=True),
 ]
 
 input_texts = [
@@ -30,7 +23,7 @@ input_texts = [
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model", MODELS)
-async def test_validating_dimensions(model: ModelInfo):
+async def test_validating_dimensions(model: EmbedModelInfo):
     args = [
         "--task",
         "embed",

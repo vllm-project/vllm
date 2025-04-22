@@ -128,11 +128,9 @@ HF processing as well as memory profiling.
 
 ### For memory profiling
 
-Override the abstract method {meth}`~vllm.multimodal.profiling.BaseDummyInputsBuilder.get_dummy_processor_inputs`
-to construct dummy inputs for memory profiling. This dummy input should result in the worst-case memory usage of
-the model so that vLLM can reserve the correct amount of memory for it.
+Override the abstract methods {meth}`~vllm.multimodal.profiling.BaseDummyInputsBuilder.get_dummy_text` and {meth}`~vllm.multimodal.profiling.BaseDummyInputsBuilder.get_dummy_mm_data` to construct dummy inputs for memory profiling. These dummy inputs should result in the worst-case memory usage of the model so that vLLM can reserve the correct amount of memory for it.
 
-Assuming that the memory usage increases with the number of tokens, the dummy input can be constructed to maximize the number of output embeddings, which is the same number as placeholder feature tokens.
+Assuming that the memory usage increases with the number of tokens, the dummy inputs can be constructed to maximize the number of output embeddings, which is the same number as placeholder feature tokens.
 
 ::::{tab-set}
 :::{tab-item} Basic example: LLaVA
@@ -244,38 +242,45 @@ def get_num_image_tokens(
 ```
 
 Notice that the number of image tokens doesn't depend on the image width and height.
-We can simply use a dummy `image_size`:
+We can simply use a dummy `image_size` to calculate the multimodal profiling data:
 
 ```python
+# NOTE: In actuality, this is usually implemented as part of the
+# model's subclass of `BaseProcessingInfo`, but we show it as is
+# here for simplicity.
 def get_image_size_with_most_features(self) -> ImageSize:
     hf_config = self.get_hf_config()
     width = height = hf_config.image_size
     return ImageSize(width=width, height=height)
 
-def get_dummy_processor_inputs(
+def get_dummy_mm_data(
     self,
     seq_len: int,
     mm_counts: Mapping[str, int],
-) -> ProcessorInputs:
+) -> MultiModalDataDict:
     num_images = mm_counts.get("image", 0)
 
-    processor = self.info.get_hf_processor()
-    image_token = processor.image_token
-  
-    hf_config = self.get_hf_config()
-    target_width, target_height = self.info.get_image_size_with_most_features()
+    target_width, target_height = \
+        self.info.get_image_size_with_most_features()
 
-    mm_data = {
+    return {
         "image":
         self._get_dummy_images(width=target_width,
                                height=target_height,
                                num_images=num_images)
     }
+```
 
-    return ProcessorInputs(
-        prompt_text=image_token * num_images,
-        mm_data=mm_data,
-    )
+For the text, we simply expand the multimodal image token from the model config to match the desired number of images.
+
+```python
+def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
+    num_images = mm_counts.get("image", 0)
+
+    processor = self.info.get_hf_processor()
+    image_token = processor.image_token
+
+    return image_token * num_images
 ```
 
 :::
@@ -412,29 +417,30 @@ def get_image_size_with_most_features(self) -> ImageSize:
 
 Fuyu does not expect image placeholders in the inputs to HF processor, so
 the dummy prompt text is empty regardless of the number of images.
-Otherwise, the logic of this method is very similar to LLaVA:
 
 ```python
-def get_dummy_processor_inputs(
+def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
+    return ""
+```
+
+For the multimodal image profiling data, the logic is very similar to LLaVA:
+
+```python
+def get_dummy_mm_data(
     self,
     seq_len: int,
     mm_counts: Mapping[str, int],
-) -> ProcessorInputs:
+) -> MultiModalDataDict:
     target_width, target_height = \
         self.info.get_image_size_with_most_features()
     num_images = mm_counts.get("image", 0)
 
-    mm_data = {
+    return {
         "image":
         self._get_dummy_images(width=target_width,
-                                height=target_height,
-                                num_images=num_images)
+                               height=target_height,
+                               num_images=num_images)
     }
-
-    return ProcessorInputs(
-        prompt_text="",
-        mm_data=mm_data,
-    )
 ```
 
 :::
