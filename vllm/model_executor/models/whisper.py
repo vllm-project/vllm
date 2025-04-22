@@ -26,13 +26,13 @@ from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY, NestedTensors
-from vllm.multimodal.inputs import MultiModalFieldConfig, MultiModalKwargs
-from vllm.multimodal.parse import (MultiModalDataDict, MultiModalDataItems,
-                                   MultiModalDataParser)
+from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig,
+                                    MultiModalKwargs)
+from vllm.multimodal.parse import MultiModalDataItems, MultiModalDataParser
 from vllm.multimodal.processing import (BaseProcessingInfo,
                                         EncDecMultiModalProcessor,
                                         PromptReplacement, PromptUpdate)
-from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
+from vllm.multimodal.profiling import BaseDummyInputsBuilder
 
 from .interfaces import (MultiModalEmbeddings, SupportsMultiModal,
                          SupportsTranscription, SupportsV0Only)
@@ -538,39 +538,32 @@ class WhisperProcessingInfo(BaseProcessingInfo):
         assert isinstance(feature_extractor, WhisperFeatureExtractor)
         return feature_extractor
 
-    def get_max_audio_tokens(self) -> int:
+    def get_num_audio_tokens(self) -> int:
         return self.get_hf_config().max_source_positions
-
-    def get_mm_max_tokens_per_item(
-        self,
-        seq_len: int,
-        mm_counts: Mapping[str, int],
-    ) -> Mapping[str, int]:
-        return {"audio": self.get_max_audio_tokens()}
 
 
 class WhisperDummyInputsBuilder(BaseDummyInputsBuilder[WhisperProcessingInfo]):
 
-    def get_dummy_processor_inputs(
+    def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
+        num_audios = mm_counts.get("audio", 0)
+
+        return "<|startoftranscript|>" * num_audios
+
+    def get_dummy_mm_data(
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-    ) -> ProcessorInputs:
+    ) -> MultiModalDataDict:
         feature_extractor = self.info.get_feature_extractor()
 
         sampling_rate = feature_extractor.sampling_rate
         audio_len = feature_extractor.chunk_length * sampling_rate
         num_audios = mm_counts.get("audio", 0)
 
-        mm_data = {
+        return {
             "audio":
             self._get_dummy_audios(length=audio_len, num_audios=num_audios)
         }
-
-        return ProcessorInputs(
-            prompt_text="<|startoftranscript|>" * num_audios,
-            mm_data=mm_data,
-        )
 
 
 class WhisperMultiModalProcessor(
@@ -630,7 +623,7 @@ class WhisperMultiModalProcessor(
         hf_processor_mm_kwargs: Mapping[str, object],
         out_mm_kwargs: MultiModalKwargs,
     ) -> Sequence[PromptUpdate]:
-        num_tokens = self.info.get_max_audio_tokens()
+        num_tokens = self.info.get_num_audio_tokens()
         return [
             PromptReplacement(
                 modality="audio",

@@ -23,10 +23,15 @@ def sync_openai():
     with open(str(mary_had_lamb), "rb") as f:
         transcription = client.audio.transcriptions.create(
             file=f,
-            model="openai/whisper-small",
+            model="openai/whisper-large-v3",
             language="en",
             response_format="json",
-            temperature=0.0)
+            temperature=0.0,
+            # Additional sampling params not provided by OpenAI API.
+            extra_body=dict(
+                seed=4419,
+                repetition_penalty=1.3,
+            ))
         print("transcription result:", transcription.text)
 
 
