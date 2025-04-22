@@ -159,11 +159,8 @@ class EngineCore:
                      "warmup model) took %.2f seconds"), elapsed)
         return num_gpu_blocks, num_cpu_blocks, scheduler_kv_cache_config
 
-    def add_request(self, request: Union[EngineCoreRequest,
-                                         list[EngineCoreRequest]]):
+    def add_requests(self, requests: list[EngineCoreRequest]):
         """Add requests to the scheduler."""
-        requests = request if isinstance(request, list) else [request]
-
         for request in requests:
             if request.mm_hashes is not None:
                 # Here, if hash exists for a multimodal input, then it will be
@@ -447,7 +444,7 @@ class EngineCoreProc(EngineCore):
         """Dispatch request from client."""
 
         if request_type == EngineCoreRequestType.ADD:
-            self.add_request(request)
+            self.add_requests(request)
         elif request_type == EngineCoreRequestType.ABORT:
             self.abort_requests(request)
         elif request_type == EngineCoreRequestType.START_DP:
@@ -503,8 +500,7 @@ class EngineCoreProc(EngineCore):
         """Input socket IO thread."""
 
         # Msgpack serialization decoding.
-        add_request_decoder = MsgpackDecoder(Union[EngineCoreRequest,
-                                                   list[EngineCoreRequest]])
+        add_request_decoder = MsgpackDecoder(list[EngineCoreRequest])
         generic_decoder = MsgpackDecoder()
         identity = engine_index.to_bytes(length=2, byteorder="little")
 

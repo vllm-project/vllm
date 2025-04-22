@@ -212,7 +212,7 @@ class AsyncLLM(EngineClient):
                                                 priority)
 
         if params.n == 1:
-            await self._add_request(request, None, queue)
+            await self._add_requests([request], None, queue)
             return queue
 
         # Fan out child requests (for n>1).
@@ -225,25 +225,22 @@ class AsyncLLM(EngineClient):
             child_request.sampling_params = params
             child_requests.append(child_request)
 
-        await self._add_request(child_requests, parent_request, queue)
+        await self._add_requests(child_requests, parent_request, queue)
         return queue
 
-    async def _add_request(self, request: Union[EngineCoreRequest,
-                                                list[EngineCoreRequest]],
-                           parent_req: Optional[ParentRequest],
-                           queue: RequestOutputCollector):
+    async def _add_requests(self, requests: list[EngineCoreRequest],
+                            parent_req: Optional[ParentRequest],
+                            queue: RequestOutputCollector):
         """
         Registers each request with the local OutputProcessor and then forwards
         the bundle to Engine‑Core, using the optimal path (single vs batched).
         """
-        requests = request if isinstance(request, list) else [request]
-
         # Add the requests to OutputProcessor (this process).
         for idx, req in enumerate(requests):
             self.output_processor.add_request(req, parent_req, idx, queue)
 
         # Add the EngineCoreRequest to EngineCore (separate process).
-        await self.engine_core.add_request_async(requests)
+        await self.engine_core.add_requests_async(requests)
 
         if self.log_requests:
             for req in requests:
