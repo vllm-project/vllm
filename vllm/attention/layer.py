@@ -75,7 +75,6 @@ class Attention(nn.Module):
             block_size = 16
             is_attention_free = False
             calculate_kv_scales = False
-
         if num_kv_heads is None:
             num_kv_heads = num_heads
 
