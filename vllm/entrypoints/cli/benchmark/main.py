@@ -1,16 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 import argparse
+import importlib
 
-import vllm.entrypoints.cli.benchmark.latency
-import vllm.entrypoints.cli.benchmark.serve
-import vllm.entrypoints.cli.benchmark.throughput
 from vllm.entrypoints.cli.types import CLISubcommand
 from vllm.utils import FlexibleArgumentParser
 
 BENCHMARK_CMD_MODULES = [
-    vllm.entrypoints.cli.benchmark.latency,
-    vllm.entrypoints.cli.benchmark.serve,
-    vllm.entrypoints.cli.benchmark.throughput,
+    "vllm.entrypoints.cli.benchmark.latency",
+    "vllm.entrypoints.cli.benchmark.serve",
+    "vllm.entrypoints.cli.benchmark.throughput",
 ]
 
 
@@ -41,7 +39,8 @@ class BenchmarkSubcommand(CLISubcommand):
                                                        dest="bench_type")
         self.cmds = {}
         for cmd_module in BENCHMARK_CMD_MODULES:
-            new_cmds = cmd_module.cmd_init()
+            module = importlib.import_module(cmd_module)
+            new_cmds = module.cmd_init()
             for cmd in new_cmds:
                 cmd.subparser_init(bench_subparsers).set_defaults(
                     dispatch_function=cmd.cmd)

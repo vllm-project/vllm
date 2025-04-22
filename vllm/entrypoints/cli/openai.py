@@ -6,6 +6,7 @@ import os
 import signal
 import sys
 from typing import Optional
+from line_profiler import profile
 
 from openai import OpenAI
 from openai.types.chat import ChatCompletionMessageParam
@@ -92,11 +93,13 @@ def _add_query_options(
 class ChatCommand(CLISubcommand):
     """The `chat` subcommand for the vLLM CLI. """
 
+    @profile
     def __init__(self):
         self.name = "chat"
         super().__init__()
 
     @staticmethod
+    @profile
     def cmd(args: argparse.Namespace) -> None:
         model_name, client = _interactive_cli(args)
         system_prompt = args.system_prompt
@@ -121,6 +124,7 @@ class ChatCommand(CLISubcommand):
             conversation.append(response_message)  # type: ignore
             print(output)
 
+    @profile
     def subparser_init(
             self,
             subparsers: argparse._SubParsersAction) -> FlexibleArgumentParser:
@@ -171,5 +175,7 @@ class CompleteCommand(CLISubcommand):
         return complete_parser
 
 
+
+@profile
 def cmd_init() -> list[CLISubcommand]:
     return [ChatCommand(), CompleteCommand()]

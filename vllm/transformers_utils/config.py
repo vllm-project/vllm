@@ -18,8 +18,6 @@ from huggingface_hub.utils import (EntryNotFoundError, HfHubHTTPError,
                                    RevisionNotFoundError)
 from torch import nn
 from transformers import GenerationConfig, PretrainedConfig
-from transformers.models.auto.image_processing_auto import (
-    get_image_processor_config)
 from transformers.models.auto.modeling_auto import (
     MODEL_FOR_CAUSAL_LM_MAPPING_NAMES)
 from transformers.utils import CONFIG_NAME as HF_CONFIG_NAME
@@ -735,6 +733,8 @@ def get_hf_image_processor_config(
     revision: Optional[str] = None,
     **kwargs,
 ) -> Dict[str, Any]:
+    from transformers.models.auto.image_processing_auto import get_image_processor_config
+
     # ModelScope does not provide an interface for image_processor
     if VLLM_USE_MODELSCOPE:
         return dict()
