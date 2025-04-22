@@ -149,16 +149,27 @@ class Processor:
             "xgrammar", "xgrammar:disable-any-whitespace", "guidance",
             "guidance:disable-any-whitespace", "auto"
         ]
+
         engine_level_backend = self.decoding_config.guided_decoding_backend
         if engine_level_backend not in supported_backends:
             raise ValueError(f"Only {supported_backends} structured output is "
                              "supported in V1.")
         if params.guided_decoding.backend:
-            if params.guided_decoding.backend != engine_level_backend:
-                raise ValueError("Request-level structured output backend "
-                                 "must match engine-level backend. "
-                                 f"{params.guided_decoding.backend}"
-                                 f" != {engine_level_backend}")
+            # Request-level backend selection is not supported in V1.
+            # The values may differ if `params` is reused and was set
+            # to a specific backend based on `auto` behavior in a previous
+            # request. We remember that it was set as a result of `auto`
+            # using the `_auto` option set on the backend in the params.
+            if (params.guided_decoding.backend != engine_level_backend
+                    and not (engine_level_backend == "auto" and "_auto"
+                             in params.guided_decoding.backend_options())):
+                raise ValueError(
+                    "Request-level structured output backend selection is no "
+                    "longer supported. The request specified "
+                    f"'{params.guided_decoding.backend}', but vLLM was "
+                    f"initialised with '{engine_level_backend}'. This error "
+                    "can be resolved by removing backend selection from the "
+                    "request.")
         else:
             params.guided_decoding.backend = engine_level_backend
 
@@ -166,8 +177,15 @@ class Processor:
         if engine_level_backend.startswith("xgrammar"):
             # xgrammar with no fallback
             validate_xgrammar_grammar(params)
-            params.guided_decoding.backend = engine_level_backend
-        elif engine_level_backend == "auto":
+        elif engine_level_backend.startswith("guidance"):
+            # TODO: ideally we would have the LLTokenizer here as Lark syntax
+            # allows <|special_token|> and similar, see
+            # https://github.com/guidance-ai/llguidance/blob/main/docs/syntax.md#special-tokens
+            # Without tokenizer these are disallowed in grammars.
+            validate_guidance_grammar(params, tokenizer=None)
+        else:
+            # NOTE: engine_level_backend must be "auto" here, because we have
+            # checked supported_backends above.
             # "auto" is an opt-in to opinionated behavior where we try to
             # choose a backend based on request contents. This is not the
             # default as it is less predictable and subject to change
@@ -179,14 +197,8 @@ class Processor:
                 # The request includes some jsonschema feature(s) that
                 # are not supported in xgrammar. Fall back to guidance.
                 params.guided_decoding.backend = "guidance"
-
-        if engine_level_backend.startswith("guidance"):
-            # TODO ideally we would have the LLTokenizer here as Lark syntax
-            # allows <|special_token|> and similar, see
-            # https://github.com/guidance-ai/llguidance/blob/main/docs/syntax.md#special-tokens
-            # Without tokenizer these are disallowed in grammars.
-            validate_guidance_grammar(params, tokenizer=None)
-            params.guided_decoding.backend = engine_level_backend
+            # Remember that this backend was set automatically
+            params.guided_decoding.add_option("_auto")
 
     def process_inputs(
         self,
@@ -351,7 +363,7 @@ class Processor:
             raise ValueError(f"Token id {max_input_id} is out of vocabulary")
 
         max_prompt_len = self.model_config.max_model_len
-        if len(prompt_ids) >= max_prompt_len:
+        if len(prompt_ids) > max_prompt_len:
             if prompt_type == "encoder" and model_config.is_multimodal_model:
                 mm_registry = self.input_preprocessor.mm_registry
                 mm_processor = mm_registry.create_processor(
