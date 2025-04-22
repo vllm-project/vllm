@@ -8,8 +8,7 @@ import re
 import threading
 from dataclasses import MISSING, dataclass, fields
 from typing import (TYPE_CHECKING, Any, Callable, Dict, List, Literal,
-                    Optional, Tuple, Type, TypeVar, Union, cast, get_args,
-                    get_origin)
+                    Optional, Type, TypeVar, Union, cast, get_args, get_origin)
 
 import torch
 from typing_extensions import TypeIs
@@ -196,18 +195,23 @@ class EngineArgs:
         get_field(MultiModalConfig, "limit_per_prompt")
     mm_processor_kwargs: Optional[Dict[str, Any]] = None
     disable_mm_preprocessor_cache: bool = False
+    # LoRA fields
     enable_lora: bool = False
-    enable_lora_bias: bool = False
-    max_loras: int = 1
-    max_lora_rank: int = 16
+    enable_lora_bias: bool = LoRAConfig.bias_enabled
+    max_loras: int = LoRAConfig.max_loras
+    max_lora_rank: int = LoRAConfig.max_lora_rank
+    fully_sharded_loras: bool = LoRAConfig.fully_sharded_loras
+    max_cpu_loras: Optional[int] = LoRAConfig.max_cpu_loras
+    lora_dtype: Optional[Union[str, torch.dtype]] = LoRAConfig.lora_dtype
+    lora_extra_vocab_size: int = LoRAConfig.lora_extra_vocab_size
+    long_lora_scaling_factors: Optional[tuple[float]] = \
+        LoRAConfig.long_lora_scaling_factors
+    # PromptAdapter fields
     enable_prompt_adapter: bool = False
-    max_prompt_adapters: int = 1
-    max_prompt_adapter_token: int = 0
-    fully_sharded_loras: bool = False
-    lora_extra_vocab_size: int = 256
-    long_lora_scaling_factors: Optional[Tuple[float]] = None
-    lora_dtype: Optional[Union[str, torch.dtype]] = 'auto'
-    max_cpu_loras: Optional[int] = None
+    max_prompt_adapters: int = PromptAdapterConfig.max_prompt_adapters
+    max_prompt_adapter_token: int = \
+        PromptAdapterConfig.max_prompt_adapter_token
+
     device: Device = DeviceConfig.device
     num_scheduler_steps: int = SchedulerConfig.num_scheduler_steps
     multi_step_stream_outputs: bool = SchedulerConfig.multi_step_stream_outputs
