@@ -155,7 +155,7 @@ class RocmPlatform(Platform):
                 else:
                     raise ValueError(
                         f" The selected backend, {selected_backend.name},"
-                        "does not support block size {block_size}.")
+                        f"does not support block size {block_size}.")
             else:
                 if block_size == 1:
                     logger.info("Using AITER MLA backend.")
@@ -163,7 +163,7 @@ class RocmPlatform(Platform):
                 else:
                     raise ValueError(
                         f" The selected backend, {selected_backend.name},"
-                        "does not support block size {block_size}."
+                        f"does not support block size {block_size}."
                         "(currently only supports block size 1)")
 
         selected_backend = (_Backend.ROCM_FLASH if selected_backend
