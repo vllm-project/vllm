@@ -39,7 +39,6 @@ class QuarkW4A4MXFP4(QuarkScheme):
         layer.weight_scale = torch.nn.Parameter(layer.weight_scale.data,
                                           requires_grad=False)
 
-        # TODO(bowenbao): perform emulation only when native mx kernel is unsupported.
         try:
             from quark.torch.export.nn.modules import realquantizer
             from quark.torch.quantization.config.config import QuantizationSpec
@@ -61,6 +60,9 @@ class QuarkW4A4MXFP4(QuarkScheme):
             zero_point_shape=None,
         )
         self.weight_quantizer.scale.data = layer.weight_scale.data
+        layer.weight = torch.nn.Parameter(
+            self.weight_quantizer(layer.weight.data).to(self.out_dtype), requires_grad=False
+        )
 
         self.input_quantizer = realquantizer.get_real_quantizer(
             qspec=input_quant_spec,
@@ -110,9 +112,5 @@ class QuarkW4A4MXFP4(QuarkScheme):
                       x: torch.Tensor,
                       bias: Optional[torch.Tensor] = None) -> torch.Tensor:
 
-        # TODO: observer/quantize kernel unstable when cudagraph is enabled.
         qdq_x = self.input_quantizer(x)
-        # TODO: Reference from QParamsLinear.forward. Casting after q/dp is required.
-        dq_weight = self.weight_quantizer(layer.weight).to(self.out_dtype)
-
-        return F.linear(qdq_x, dq_weight, bias)
+        return F.linear(qdq_x, layer.weight, bias)
