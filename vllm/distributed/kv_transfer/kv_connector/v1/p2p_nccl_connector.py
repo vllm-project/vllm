@@ -74,8 +74,10 @@ class P2pNcclConnector(KVConnectorBase_V1):
                  role: KVConnectorRole,
                  rank: int = 0,
                  local_rank: int = 0):
-        super().__init__(vllm_config=vllm_config, role=role,
-                         rank=rank, local_rank=local_rank)
+        super().__init__(vllm_config=vllm_config,
+                         role=role,
+                         rank=rank,
+                         local_rank=local_rank)
         self._block_size = vllm_config.cache_config.block_size
         self._requests_need_load: dict[str, Request] = {}
         self.config = vllm_config.kv_transfer_config
@@ -245,7 +247,6 @@ class P2pNcclConnector(KVConnectorBase_V1):
             the number of tokens that can be loaded from the
             external KV cache beyond what is already computed.
         """
-
         return 0
 
     def update_state_after_alloc(self, request: "Request",
@@ -319,7 +320,7 @@ class P2pNcclConnector(KVConnectorBase_V1):
     @staticmethod
     def parse_request_id(request_id: str, is_prefill=True) -> Tuple[str, int]:
         logger.debug("parse_request_id, request_id: %s, is_prefill: %s",
-                    request_id, is_prefill)
+                     request_id, is_prefill)
         # Regular expression to match the string hostname and integer port
         if is_prefill:
             pattern = r"___decode_addr_(.*):(\d+)"
@@ -334,7 +335,7 @@ class P2pNcclConnector(KVConnectorBase_V1):
             port = int(match.group(2))
 
             logger.debug("parse_request_id, request_id: %s, ip: %s, port: %s",
-                        request_id, ip, str(port))
+                         request_id, ip, str(port))
             return ip, port
         raise ValueError(
             f"Request id {request_id} does not contain hostname and port")
