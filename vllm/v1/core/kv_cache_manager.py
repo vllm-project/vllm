@@ -8,9 +8,8 @@ from vllm.logger import init_logger
 from vllm.utils import cdiv, sha256
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_utils import (BlockHashType, KVCacheBlock,
-                                         hash_request_tokens)
+                                         KVCacheEvent, hash_request_tokens)
 from vllm.v1.core.specialized_manager import get_specialized_manager
-from vllm.v1.engine import KVCacheEvent
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.metrics.stats import PrefixCacheStats
 from vllm.v1.request import Request, RequestStatus

@@ -6,6 +6,8 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any, Callable, NamedTuple, Optional
 
+import msgspec
+
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.utils import GiB_bytes, sha256
@@ -261,6 +263,31 @@ class FreeKVCacheBlockQueue:
             ret.append(curr_block)
             curr_block = curr_block.next_free_block
         return ret
+
+
+class KVCacheEvent(
+        msgspec.Struct,
+        array_like=True,  # type: ignore[call-arg]
+        omit_defaults=True,  # type: ignore[call-arg]
+        gc=False,  # type: ignore[call-arg]
+        tag=True):
+    """Base class for all KV cache-related events"""
+
+
+class BlockStored(KVCacheEvent):
+    block_hashes: list[int]
+    parent_block_hash: Optional[int]
+    token_ids: list[int]
+    num_toks_per_block: list[int]
+    lora_id: Optional[int]
+
+
+class BlockRemoved(KVCacheEvent):
+    block_hashes: list[int]
+
+
+class AllBlocksCleared(KVCacheEvent):
+    pass
 
 
 def need_extra_keys(request: Request) -> bool:

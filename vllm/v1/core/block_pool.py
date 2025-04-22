@@ -4,12 +4,12 @@ from collections.abc import Iterable
 from typing import Callable, Optional
 
 from vllm.logger import init_logger
-from vllm.v1.core.kv_cache_utils import (BlockHashType, FreeKVCacheBlockQueue,
-                                         KVCacheBlock,
+from vllm.v1.core.kv_cache_utils import (AllBlocksCleared, BlockHashType,
+                                         BlockRemoved, BlockStored,
+                                         FreeKVCacheBlockQueue, KVCacheBlock,
+                                         KVCacheEvent,
                                          generate_block_hash_extra_keys,
                                          hash_block_tokens)
-from vllm.v1.engine import (AllBlocksCleared, BlockRemoved, BlockStored,
-                            KVCacheEvent)
 from vllm.v1.request import Request
 
 logger = init_logger(__name__)

@@ -11,9 +11,9 @@ from vllm.sampling_params import SamplingParams
 from vllm.utils import sha256
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_manager import KVCacheManager, Request
-from vllm.v1.core.kv_cache_utils import (BlockHashType, KVCacheBlock,
+from vllm.v1.core.kv_cache_utils import (AllBlocksCleared, BlockHashType,
+                                         BlockRemoved, KVCacheBlock,
                                          hash_block_tokens)
-from vllm.v1.engine import AllBlocksCleared, BlockRemoved
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
                                         KVCacheGroupSpec)
 
@@ -722,6 +722,7 @@ def test_prefix_cache_stats_disabled():
 
     # Ensure prefix_cache_stats remains None
     assert manager.prefix_cache_stats is None
+
 
 @pytest.mark.parametrize("blocks_to_cache", [2, 3, 10])
 def test_kv_cache_events(blocks_to_cache: int):

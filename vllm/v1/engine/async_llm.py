@@ -25,7 +25,7 @@ from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.transformers_utils.tokenizer_group import init_tokenizer_from_configs
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils import Device, cdiv
-from vllm.v1.engine import EngineCoreRequest, KVCacheEvent
+from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.engine.core_client import AsyncMPClient, DPAsyncMPClient
 from vllm.v1.engine.exceptions import EngineDeadError, EngineGenerateError
 from vllm.v1.engine.output_processor import (OutputProcessor,
@@ -381,8 +381,7 @@ class AsyncLLM(EngineClient):
                         AsyncLLM._record_stats(
                             stat_loggers[outputs.engine_index],
                             scheduler_stats=outputs.scheduler_stats,
-                            iteration_stats=iteration_stats,
-                            kv_cache_events=outputs.kv_cache_events)
+                            iteration_stats=iteration_stats)
             except Exception as e:
                 logger.exception("AsyncLLM output_handler failed.")
                 output_processor.propagate_error(e)
@@ -403,14 +402,12 @@ class AsyncLLM(EngineClient):
         stat_loggers: list[StatLoggerBase],
         scheduler_stats: SchedulerStats,
         iteration_stats: Optional[IterationStats],
-        kv_cache_events: Optional[list[KVCacheEvent]],
     ):
         """static so that it can be used from the output_handler task
         without a circular ref to AsyncLLM."""
         for stat_logger in stat_loggers:
             stat_logger.record(scheduler_stats=scheduler_stats,
-                               iteration_stats=iteration_stats,
-                               kv_cache_events=kv_cache_events)
+                               iteration_stats=iteration_stats)
 
     def encode(
         self,

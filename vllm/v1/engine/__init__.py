@@ -92,31 +92,6 @@ class EngineCoreEvent(msgspec.Struct):
         return cls(event_type, timestamp)
 
 
-class KVCacheEvent(
-        msgspec.Struct,
-        array_like=True,  # type: ignore[call-arg]
-        omit_defaults=True,  # type: ignore[call-arg]
-        gc=False,  # type: ignore[call-arg]
-        tag=True):
-    """Base class for all KV cache-related events"""
-
-
-class BlockStored(KVCacheEvent):
-    block_hashes: list[int]
-    parent_block_hash: Optional[int]
-    token_ids: list[int]
-    num_toks_per_block: list[int]
-    lora_id: Optional[int]
-
-
-class BlockRemoved(KVCacheEvent):
-    block_hashes: list[int]
-
-
-class AllBlocksCleared(KVCacheEvent):
-    pass
-
-
 class EngineCoreOutput(
         msgspec.Struct,
         array_like=True,  # type: ignore[call-arg]
@@ -164,8 +139,6 @@ class EngineCoreOutputs(
     # [num_reqs]
     outputs: list[EngineCoreOutput] = []
     scheduler_stats: Optional[SchedulerStats] = None
-    kv_cache_events: Optional[list[Union[BlockStored, BlockRemoved,
-                                         AllBlocksCleared]]] = None
 
     timestamp: float = 0.0
 

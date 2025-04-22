@@ -10,7 +10,7 @@ import prometheus_client
 from vllm.config import SupportsMetricsInfo, VllmConfig
 from vllm.logger import init_logger
 from vllm.v1.core.kv_cache_utils import PrefixCachingMetrics
-from vllm.v1.engine import FinishReason, KVCacheEvent
+from vllm.v1.engine import FinishReason
 from vllm.v1.metrics.stats import IterationStats, SchedulerStats
 from vllm.v1.spec_decode.metrics import SpecDecodingMetrics
 
@@ -23,8 +23,7 @@ class StatLoggerBase(ABC):
 
     @abstractmethod
     def record(self, scheduler_stats: SchedulerStats,
-               iteration_stats: Optional[IterationStats],
-               kv_cache_events: Optional[list[KVCacheEvent]]):
+               iteration_stats: Optional[IterationStats]):
         ...
 
     def log(self):  # noqa
@@ -62,8 +61,7 @@ class LoggingStatLogger(StatLoggerBase):
         return float(np.sum(tracked_stats) / (now - self.last_log_time))
 
     def record(self, scheduler_stats: SchedulerStats,
-               iteration_stats: Optional[IterationStats],
-               kv_cache_events: Optional[list[KVCacheEvent]]):
+               iteration_stats: Optional[IterationStats]):
         """Log Stats to standard output."""
         if iteration_stats:
             self._track_iteration_stats(iteration_stats)
@@ -366,8 +364,7 @@ class PrometheusStatLogger(StatLoggerBase):
         info_gauge.set(1)
 
     def record(self, scheduler_stats: SchedulerStats,
-               iteration_stats: Optional[IterationStats],
-               kv_cache_events: Optional[list[KVCacheEvent]]):
+               iteration_stats: Optional[IterationStats]):
         """Log to prometheus."""
         self.gauge_scheduler_running.set(scheduler_stats.num_running_reqs)
         self.gauge_scheduler_waiting.set(scheduler_stats.num_waiting_reqs)
