@@ -37,14 +37,14 @@ class MooncakeStoreConnector(KVConnectorBase):
     ):
         self.config = config.kv_transfer_config
         self.tp_size = config.parallel_config.tensor_parallel_size
-        self.local_rank = local_rank
+        self.local_tp_rank = local_rank
+        self.rank = rank
         self.k_head_size = 64
         self.v_head_size = 512
         self.k_v_head_size = self.k_head_size + self.v_head_size
         self.block_size = 128
-        self.local_offset_start = self.k_v_head_size // self.tp_size * local_rank
-        self.local_offset_end = self.k_v_head_size // self.tp_size * (local_rank + 1)
-        self.local_tp_rank = local_rank
+        # self.local_offset_start = self.k_v_head_size // self.tp_size * local_rank
+        # self.local_offset_end = self.k_v_head_size // self.tp_size * (local_rank + 1)
         max_num_blocks = 1000
         self.block_indice_place_holder = torch.zeros(max_num_blocks, dtype=torch.int, device="hpu")
         self.padded_length_tensor = torch.zeros(1, dtype=torch.int, device="hpu")
@@ -275,12 +275,12 @@ class MooncakeStoreConnector(KVConnectorBase):
             # values = torch.cat(values, dim=0)
             # we pack kv together, only need send one tensor
             kvcache_to_sent = keys
-            store_kvcache_key = f"{store_key_prefix}_{self.local_tp_rank}"
+            store_kvcache_key = f"{store_key_prefix}_{self.rank}"
             self.kv_store.put(store_kvcache_key, kvcache_to_sent)
             
             logger.debug(f"put kv cache key: {store_kvcache_key}")
             
-            hidden_key = f"{store_key_prefix}_hidden_{self.local_tp_rank}"
+            hidden_key = f"{store_key_prefix}_hidden_{self.rank}"
             self.kv_store.put(hidden_key,
                               hidden_or_intermediate_states[idx].unsqueeze(0).cpu())
             # ==== graph should end here ======
@@ -350,9 +350,9 @@ class MooncakeStoreConnector(KVConnectorBase):
 
             # get roi for current seq
             load_key_prefix = self.tensor_hash(current_tokens)
-            load_kvcache_key = f"{load_key_prefix}_{self.local_tp_rank}"
+            load_kvcache_key = f"{load_key_prefix}_{self.rank}"
             remote_kv = self.kv_store.get(load_kvcache_key)
-            hidden_key = f"{load_key_prefix}_hidden_{self.local_tp_rank}"
+            hidden_key = f"{load_key_prefix}_hidden_{self.rank}"
             hidden = self.kv_store.get(hidden_key)
             
             if remote_kv is None or hidden is None:
