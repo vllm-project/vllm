@@ -311,11 +311,11 @@ class FlashAttentionMetadataBuilder:
         slot_mapping = self.runner.slot_mapping_cpu[:num_actual_tokens].to(
             self.runner.device, non_blocking=True).long()
 
-        def schedule(cu_query_lens, max_query_len, seqlens, max_seq_len,
-                     causal):
+        def schedule(batch_size, cu_query_lens, max_query_len, seqlens,
+                     max_seq_len, causal):
             if self.aot_schedule:
                 return get_scheduler_metadata(
-                    batch_size=num_reqs,
+                    batch_size=batch_size,
                     max_seqlen_q=max_query_len,
                     max_seqlen_k=max_seq_len,
                     cache_seqlens=seqlens,
@@ -346,6 +346,7 @@ class FlashAttentionMetadataBuilder:
             local_max_query_len = seqlens_q_local_np.max()
             local_max_seq_len = virt_k_seqlens_np.max()
             local_scheduler_metadata = schedule(
+                batch_size=local_query_start_loc.shape[0] - 1,
                 cu_query_lens=local_query_start_loc,
                 max_query_len=local_max_query_len,
                 seqlens=local_seqused_k,
@@ -375,12 +376,14 @@ class FlashAttentionMetadataBuilder:
             suffix_kv_lens = torch.from_numpy(suffix_kv_lens).to(
                 self.runner.device)
             prefix_scheduler_metadata = schedule(
+                batch_size=num_reqs,
                 cu_query_lens=cu_prefix_query_lens,
                 max_query_len=num_actual_tokens,
                 seqlens=prefix_kv_lens,
                 max_seq_len=common_prefix_len,
                 causal=False)
-            scheduler_metadata = schedule(cu_query_lens=query_start_loc,
+            scheduler_metadata = schedule(batch_size=num_reqs,
+                                          cu_query_lens=query_start_loc,
                                           max_query_len=max_query_len,
                                           seqlens=suffix_kv_lens,
                                           max_seq_len=max_seq_len -
@@ -391,7 +394,8 @@ class FlashAttentionMetadataBuilder:
             prefix_kv_lens = None
             suffix_kv_lens = None
             prefix_scheduler_metadata = None
-            scheduler_metadata = schedule(cu_query_lens=query_start_loc,
+            scheduler_metadata = schedule(batch_size=num_reqs,
+                                          cu_query_lens=query_start_loc,
                                           max_query_len=max_query_len,
                                           seqlens=seq_lens,
                                           max_seq_len=max_seq_len,
