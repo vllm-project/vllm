@@ -703,70 +703,49 @@ class EngineArgs:
             'inputs.')
 
         # LoRA related configs
-        parser.add_argument('--enable-lora',
-                            action='store_true',
-                            help='If True, enable handling of LoRA adapters.')
-        parser.add_argument('--enable-lora-bias',
-                            action='store_true',
-                            help='If True, enable bias for LoRA adapters.')
-        parser.add_argument('--max-loras',
-                            type=int,
-                            default=EngineArgs.max_loras,
-                            help='Max number of LoRAs in a single batch.')
-        parser.add_argument('--max-lora-rank',
-                            type=int,
-                            default=EngineArgs.max_lora_rank,
-                            help='Max LoRA rank.')
-        parser.add_argument(
-            '--lora-extra-vocab-size',
-            type=int,
-            default=EngineArgs.lora_extra_vocab_size,
-            help=('Maximum size of extra vocabulary that can be '
-                  'present in a LoRA adapter (added to the base '
-                  'model vocabulary).'))
-        parser.add_argument(
+        lora_kwargs = get_kwargs(LoRAConfig)
+        lora_group = parser.add_argument_group(
+            title="LoRAConfig",
+            description=LoRAConfig.__doc__,
+        )
+        lora_group.add_argument(
+            '--enable-lora',
+            action=argparse.BooleanOptionalAction,
+            help='If True, enable handling of LoRA adapters.')
+        lora_group.add_argument('--enable-lora-bias',
+                                **lora_kwargs["bias_enabled"])
+        lora_group.add_argument('--max-loras', **lora_kwargs["max_loras"])
+        lora_group.add_argument('--max-lora-rank',
+                                **lora_kwargs["max_lora_rank"])
+        lora_group.add_argument('--lora-extra-vocab-size',
+                                **lora_kwargs["lora_extra_vocab_size"])
+        lora_group.add_argument(
             '--lora-dtype',
-            type=str,
-            default=EngineArgs.lora_dtype,
-            choices=['auto', 'float16', 'bfloat16'],
-            help=('Data type for LoRA. If auto, will default to '
-                  'base model dtype.'))
-        parser.add_argument(
-            '--long-lora-scaling-factors',
-            type=optional_str,
-            default=EngineArgs.long_lora_scaling_factors,
-            help=('Specify multiple scaling factors (which can '
-                  'be different from base model scaling factor '
-                  '- see eg. Long LoRA) to allow for multiple '
-                  'LoRA adapters trained with those scaling '
-                  'factors to be used at the same time. If not '
-                  'specified, only adapters trained with the '
-                  'base model scaling factor are allowed.'))
-        parser.add_argument(
-            '--max-cpu-loras',
-            type=int,
-            default=EngineArgs.max_cpu_loras,
-            help=('Maximum number of LoRAs to store in CPU memory. '
-                  'Must be >= than max_loras.'))
-        parser.add_argument(
-            '--fully-sharded-loras',
-            action='store_true',
-            help=('By default, only half of the LoRA computation is '
-                  'sharded with tensor parallelism. '
-                  'Enabling this will use the fully sharded layers. '
-                  'At high sequence length, max rank or '
-                  'tensor parallel size, this is likely faster.'))
-        parser.add_argument('--enable-prompt-adapter',
-                            action='store_true',
-                            help='If True, enable handling of PromptAdapters.')
-        parser.add_argument('--max-prompt-adapters',
-                            type=int,
-                            default=EngineArgs.max_prompt_adapters,
-                            help='Max number of PromptAdapters in a batch.')
-        parser.add_argument('--max-prompt-adapter-token',
-                            type=int,
-                            default=EngineArgs.max_prompt_adapter_token,
-                            help='Max number of PromptAdapters tokens')
+            **lora_kwargs["lora_dtype"],
+        )
+        lora_group.add_argument('--long-lora-scaling-factors',
+                                **lora_kwargs["long_lora_scaling_factors"])
+        lora_group.add_argument('--max-cpu-loras',
+                                **lora_kwargs["max_cpu_loras"])
+        lora_group.add_argument('--fully-sharded-loras',
+                                **lora_kwargs["fully_sharded_loras"])
+
+        # PromptAdapter related configs
+        prompt_adapter_kwargs = get_kwargs(PromptAdapterConfig)
+        prompt_adapter_group = parser.add_argument_group(
+            title="PromptAdapterConfig",
+            description=PromptAdapterConfig.__doc__,
+        )
+        prompt_adapter_group.add_argument(
+            '--enable-prompt-adapter',
+            action=argparse.BooleanOptionalAction,
+            help='If True, enable handling of PromptAdapters.')
+        prompt_adapter_group.add_argument(
+            '--max-prompt-adapters',
+            **prompt_adapter_kwargs["max_prompt_adapters"])
+        prompt_adapter_group.add_argument(
+            '--max-prompt-adapter-token',
+            **prompt_adapter_kwargs["max_prompt_adapter_token"])
 
         # Device arguments
         device_kwargs = get_kwargs(DeviceConfig)
