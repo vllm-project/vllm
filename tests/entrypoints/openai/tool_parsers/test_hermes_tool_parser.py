@@ -1116,11 +1116,7 @@ def test_tool_call_stream(streaming: bool, model_output: list,
     # intended to include these two files in
     # the code, but the codespell check did
     # not pass, so I deleted them.
-    model_path = ""
-    if len(model_path) == 0:
-        raise AssertionError('model_path requires setting the '
-                             'absolute path of the large model')
-    tokenizer = AutoTokenizer.from_pretrained(model_path)
+    tokenizer = AutoTokenizer.from_pretrained('Qwen/QwQ-32B')
 
     tool_parser = ToolParserManager.\
         get_tool_parser("hermes")(tokenizer)
@@ -1146,11 +1142,7 @@ def test_tool_call_no_stream(streaming: bool, model_output: str,
     # intended to include these two files in
     # the code, but the codespell check did
     # not pass, so I deleted them.
-    model_path = ""
-    if len(model_path) == 0:
-        raise AssertionError('model_path requires setting the '
-                             'absolute path of the large model')
-    tokenizer = AutoTokenizer.from_pretrained(model_path)
+    tokenizer = AutoTokenizer.from_pretrained('Qwen/QwQ-32B')
 
     tool_parser = ToolParserManager.\
         get_tool_parser("hermes")(tokenizer)
