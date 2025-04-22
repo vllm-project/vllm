@@ -386,13 +386,21 @@ def test_structured_output_auto_mode(
         max_tokens=1000,
         guided_decoding=GuidedDecodingParams(json=unsupported_json_schema))
 
+    prompts = ("Give an example JSON object for a grade "
+               "that fits this schema: "
+               f"{unsupported_json_schema}")
     # This would fail with the default of "xgrammar", but in "auto"
     # we will handle fallback automatically.
-    outputs = llm.generate(prompts=("Give an example JSON object for a grade "
-                                    "that fits this schema: "
-                                    f"{unsupported_json_schema}"),
+    outputs = llm.generate(prompts=prompts,
                            sampling_params=sampling_params,
                            use_tqdm=True)
+    # Make sure `auto` backend handling doesn't mess up sampling_params
+    # and that we can reuse it without error.
+    outputs.extend(
+        llm.generate(prompts=prompts,
+                     sampling_params=sampling_params,
+                     use_tqdm=True))
+
     assert outputs is not None
     for output in outputs:
         assert output is not None
