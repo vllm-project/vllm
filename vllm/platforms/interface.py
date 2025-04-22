@@ -413,6 +413,13 @@ class Platform:
                            self.device_name, key)
             return None
 
+    @classmethod
+    def get_cu_count(cls, device_id: int = 0) -> int:
+        """
+        Returns the total number of compute units (CU) on single GPU.
+        """
+        raise NotImplementedError
+
 
 class UnspecifiedPlatform(Platform):
     _enum = PlatformEnum.UNSPECIFIED
