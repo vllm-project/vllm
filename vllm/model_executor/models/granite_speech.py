@@ -31,6 +31,8 @@ from torch import nn
 from transformers import BatchFeature, PretrainedConfig
 
 from vllm.config import CacheConfig, VllmConfig
+from vllm.model_executor.layers.linear import (ColumnParallelLinear,
+                                               RowParallelLinear)
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.models.module_mapping import MultiModelKeys
@@ -254,17 +256,24 @@ class GraniteSpeechConformerFeedForward(nn.Module):
     def __init__(self, config: PretrainedConfig):
         super().__init__()
         self.pre_norm = nn.LayerNorm(config.hidden_dim)
-        self.up_proj = nn.Linear(config.hidden_dim,
-                                 config.hidden_dim * config.feedforward_mult)
+
+        # TODO - pass quant config / prefix through
+        self.up_proj = ColumnParallelLinear(
+            input_size=config.hidden_dim,
+            output_size=config.hidden_dim * config.feedforward_mult,
+        )
         self.silu = nn.SiLU()
-        self.down_proj = nn.Linear(config.hidden_dim * config.feedforward_mult,
-                                   config.hidden_dim)
+
+        self.down_proj = RowParallelLinear(
+            input_size=config.hidden_dim * config.feedforward_mult,
+            output_size=config.hidden_dim,
+        )
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         hidden_states = self.pre_norm(hidden_states)
-        hidden_states = self.up_proj(hidden_states)
+        hidden_states, _ = self.up_proj(hidden_states)
         hidden_states = self.silu(hidden_states)
-        hidden_states = self.down_proj(hidden_states)
+        hidden_states, _ = self.down_proj(hidden_states)
         return hidden_states
 
 
