@@ -293,6 +293,7 @@ class MoeWNA16Method(FusedMoEMethodBase):
         custom_routing_function: Optional[Callable] = None,
         scoring_func: str = "softmax",
         e_score_correction_bias: Optional[torch.Tensor] = None,
+        apply_router_weight_on_input: bool = False,
         activation: str = "silu",
     ) -> torch.Tensor:
         from vllm.model_executor.layers.fused_moe import fused_experts
@@ -312,21 +313,23 @@ class MoeWNA16Method(FusedMoEMethodBase):
         weight_bits = self.quant_config.weight_bits
         has_zp = self.quant_config.has_zp
 
-        return fused_experts(x,
-                             layer.w13_qweight,
-                             layer.w2_qweight,
-                             topk_weights=topk_weights,
-                             topk_ids=topk_ids,
-                             inplace=True,
-                             use_int4_w4a16=weight_bits == 4,
-                             use_int8_w8a16=weight_bits == 8,
-                             global_num_experts=global_num_experts,
-                             expert_map=expert_map,
-                             w1_scale=layer.w13_scales,
-                             w2_scale=layer.w2_scales,
-                             w1_zp=layer.w13_qzeros if has_zp else None,
-                             w2_zp=layer.w2_qzeros if has_zp else None,
-                             block_shape=[0, layer.group_size])
+        return fused_experts(
+            x,
+            layer.w13_qweight,
+            layer.w2_qweight,
+            topk_weights=topk_weights,
+            topk_ids=topk_ids,
+            inplace=True,
+            use_int4_w4a16=weight_bits == 4,
+            use_int8_w8a16=weight_bits == 8,
+            global_num_experts=global_num_experts,
+            apply_router_weight_on_input=apply_router_weight_on_input,
+            expert_map=expert_map,
+            w1_scale=layer.w13_scales,
+            w2_scale=layer.w2_scales,
+            w1_zp=layer.w13_qzeros if has_zp else None,
+            w2_zp=layer.w2_qzeros if has_zp else None,
+            block_shape=[0, layer.group_size])
 
     @staticmethod
     def get_weight_loader(layer, weight_loader):

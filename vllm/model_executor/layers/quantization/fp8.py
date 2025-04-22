@@ -116,7 +116,9 @@ class Fp8Config(QuantizationConfig):
         from vllm.attention.layer import Attention  # Avoid circular import
 
         if isinstance(layer, LinearBase):
-            if is_layer_skipped(prefix, self.ignored_layers):
+            if is_layer_skipped(prefix=prefix,
+                                ignored_layers=self.ignored_layers,
+                                fused_mapping=self.packed_modules_mapping):
                 return UnquantizedLinearMethod()
             return Fp8LinearMethod(self)
         elif isinstance(layer, FusedMoE):
@@ -252,6 +254,7 @@ class Fp8LinearMethod(LinearMethodBase):
                     weight_loader=weight_loader,
                 )
                 scale[:] = torch.finfo(torch.float32).min
+                set_weight_attrs(scale, {"scale_type": "weight_scale"})
                 layer.register_parameter("weight_scale", scale)
             else:
                 assert self.quant_config.activation_scheme == "dynamic"
@@ -266,6 +269,7 @@ class Fp8LinearMethod(LinearMethodBase):
                     weight_loader=weight_loader,
                 )
                 scale[:] = torch.finfo(torch.float32).min
+                set_weight_attrs(scale, {"scale_type": "weight_scale"})
                 # The weight_scale_inv name is intentional for deepseekv3
                 layer.register_parameter("weight_scale_inv", scale)
 
@@ -276,6 +280,7 @@ class Fp8LinearMethod(LinearMethodBase):
                                                 weight_loader=weight_loader)
 
                 scale[:] = torch.finfo(torch.float32).min
+                set_weight_attrs(scale, {"scale_type": "input_scale"})
                 layer.register_parameter("input_scale", scale)
             else:
                 layer.register_parameter("input_scale", None)
@@ -570,8 +575,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
     def process_weights_after_loading(self, layer: Module) -> None:
         # Lazy import to avoid importing triton too early.
         from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
-            expand_weights, is_rocm_aiter_block_scaled_moe_enabled,
-            is_rocm_aiter_moe_enabled, shuffle_weights)
+            expand_weights, is_rocm_aiter_moe_enabled, shuffle_weights)
 
         # TODO (rob): refactor block quant into separate class.
         if self.block_quant:
@@ -598,7 +602,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             layer.w2_weight = Parameter(w2_weight, requires_grad=False)
             layer.w2_weight_scale_inv = Parameter(w2_weight_scale_inv,
                                                   requires_grad=False)
-            if is_rocm_aiter_block_scaled_moe_enabled():
+            if is_rocm_aiter_moe_enabled():
                 # reshaping weights is required for aiter moe kernel.
                 shuffled_w13, shuffled_w2 = shuffle_weights(
                     layer.w13_weight.data, layer.w2_weight.data)
@@ -773,6 +777,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         custom_routing_function: Optional[Callable] = None,
         scoring_func: str = "softmax",
         e_score_correction_bias: Optional[torch.Tensor] = None,
+        apply_router_weight_on_input: bool = False,
         activation: str = "silu",
     ) -> torch.Tensor:
         from vllm.model_executor.layers.fused_moe import fused_experts
@@ -800,6 +805,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             activation=activation,
             use_fp8_w8a8=True,
             global_num_experts=global_num_experts,
+            apply_router_weight_on_input=apply_router_weight_on_input,
             expert_map=expert_map,
             w1_scale=(layer.w13_weight_scale_inv
                       if self.block_quant else layer.w13_weight_scale),
