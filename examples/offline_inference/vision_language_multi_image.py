@@ -331,11 +331,10 @@ def load_kimi_vl(question: str, image_urls: list[str]) -> ModelRequestData:
 
     engine_args = EngineArgs(
         model=model_name,
+        trust_remote_code=True,
         max_model_len=4096,
         max_num_seqs=4,
-        tensor_parallel_size=1,
         limit_mm_per_prompt={"image": len(image_urls)},
-        trust_remote_code=True,
     )
 
     placeholders = [{"type": "image", "image": url} for url in image_urls]
@@ -504,11 +503,13 @@ def load_phi4mm(question: str, image_urls: list[str]) -> ModelRequestData:
     engine_args = EngineArgs(
         model=model_path,
         trust_remote_code=True,
-        max_model_len=10000,
+        max_model_len=4096,
         max_num_seqs=2,
         limit_mm_per_prompt={"image": len(image_urls)},
         enable_lora=True,
         max_lora_rank=320,
+        # Note - mm_processor_kwargs can also be passed to generate/chat calls
+        mm_processor_kwargs={"dynamic_hd": 4},
     )
 
     placeholders = "".join(f"<|image_{i}|>"

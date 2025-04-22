@@ -1,9 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import pytest
-import torch.nn.functional as F
 
-from vllm._aiter_ops import clear_rocm_aiter_environment_variables_state_cache
 from vllm.config import CompilationConfig, VllmConfig, set_current_vllm_config
 from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.layers.activation import (GeluAndMul,
@@ -16,7 +14,7 @@ from vllm.model_executor.layers.fused_moe.fused_moe import (
 from vllm.model_executor.layers.layernorm import (
     RMSNorm, dispatch_cuda_rmsnorm_func, fused_add_rms_norm, rms_norm,
     rocm_aiter_fused_add_rms_norm, rocm_aiter_rms_norm)
-from vllm.model_executor.layers.linear import dispatch_unquantized_linear_func
+from vllm.model_executor.layers.utils import dispatch_unquantized_gemm
 from vllm.platforms import current_platform
 
 
@@ -99,14 +97,16 @@ def test_enabled_ops_invalid(env: str):
             RMSNorm(1024).enabled()
 
 
+@pytest.mark.skipif(not current_platform.is_rocm(),
+                    reason="AITER is a feature exclusive for ROCm")
 @pytest.mark.parametrize("use_rocm_aiter", ["0", "1"])
 @pytest.mark.parametrize("use_rocm_aiter_linear", ["0", "1"])
 def test_unquantized_linear_dispatch(use_rocm_aiter: str,
                                      use_rocm_aiter_linear: str, monkeypatch):
     monkeypatch.setenv("VLLM_ROCM_USE_AITER", use_rocm_aiter)
     monkeypatch.setenv("VLLM_ROCM_USE_AITER_LINEAR", use_rocm_aiter_linear)
-    clear_rocm_aiter_environment_variables_state_cache()
-    linear_func = dispatch_unquantized_linear_func()
+
+    linear_func = dispatch_unquantized_gemm()
     print(f"use_rocm_aiter: {use_rocm_aiter}, " +
           f"use_rocm_aiter_linear: {use_rocm_aiter_linear}")
     if current_platform.is_rocm() and int(use_rocm_aiter) and int(
@@ -114,7 +114,8 @@ def test_unquantized_linear_dispatch(use_rocm_aiter: str,
         from vllm._aiter_ops import aiter_ops
         assert linear_func == aiter_ops.rocm_aiter_tuned_gemm
     else:
-        assert linear_func == F.linear
+        from vllm.model_executor.layers.utils import rocm_unquantized_gemm
+        assert linear_func == rocm_unquantized_gemm
 
 
 @pytest.mark.parametrize("use_rocm_aiter", ["0", "1"])

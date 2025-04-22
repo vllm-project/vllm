@@ -89,7 +89,7 @@ def run_phi4mm(question: str, audio_count: int) -> ModelRequestData:
     engine_args = EngineArgs(
         model=model_path,
         trust_remote_code=True,
-        max_model_len=4096,
+        max_model_len=12800,
         max_num_seqs=2,
         enable_lora=True,
         max_lora_rank=320,
@@ -124,6 +124,36 @@ def run_qwen2_audio(question: str, audio_count: int) -> ModelRequestData:
               f"{audio_in_prompt}{question}<|im_end|>\n"
               "<|im_start|>assistant\n")
 
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompt=prompt,
+    )
+
+
+# Qwen2.5-Omni
+def run_qwen2_5_omni(question: str, audio_count: int):
+    model_name = "Qwen/Qwen2.5-Omni-7B"
+
+    engine_args = EngineArgs(
+        model=model_name,
+        max_model_len=4096,
+        max_num_seqs=5,
+        limit_mm_per_prompt={"audio": audio_count},
+    )
+
+    audio_in_prompt = "".join([
+        "<|audio_bos|><|AUDIO|><|audio_eos|>\n" for idx in range(audio_count)
+    ])
+
+    default_system = (
+        "You are Qwen, a virtual human developed by the Qwen Team, Alibaba "
+        "Group, capable of perceiving auditory and visual inputs, as well as "
+        "generating text and speech.")
+
+    prompt = (f"<|im_start|>system\n{default_system}<|im_end|>\n"
+              "<|im_start|>user\n"
+              f"{audio_in_prompt}{question}<|im_end|>\n"
+              "<|im_start|>assistant\n")
     return ModelRequestData(
         engine_args=engine_args,
         prompt=prompt,
@@ -182,6 +212,7 @@ model_example_map = {
     "minicpmo": run_minicpmo,
     "phi4_mm": run_phi4mm,
     "qwen2_audio": run_qwen2_audio,
+    "qwen2_5_omni": run_qwen2_5_omni,
     "ultravox": run_ultravox,
     "whisper": run_whisper,
 }

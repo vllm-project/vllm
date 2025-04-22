@@ -2,14 +2,12 @@
 
 import itertools
 from abc import abstractmethod
-from typing import Any, Callable, Literal, Optional, Union
+from typing import Any, Literal, Optional, Union
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 from torch.nn.parameter import Parameter, UninitializedParameter
 
-from vllm._aiter_ops import aiter_ops
 from vllm.distributed import (divide, get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size,
                               split_tensor_along_last_dim,
@@ -18,6 +16,7 @@ from vllm.distributed import (divide, get_tensor_model_parallel_rank,
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig, QuantizeMethodBase)
+from vllm.model_executor.layers.utils import dispatch_unquantized_gemm
 # yapf: disable
 from vllm.model_executor.parameter import (BasevLLMParameter,
                                            BlockQuantScaleParameter,
@@ -32,6 +31,8 @@ logger = init_logger(__name__)
 
 WEIGHT_LOADER_V2_SUPPORTED = [
     "CompressedTensorsLinearMethod",
+    "BitBLASLinearMethod",
+    "GPTQBitBLASLinearMethod",
     "AWQMarlinLinearMethod",
     "AWQLinearMethod",
     "GPTQMarlinLinearMethod",
@@ -51,12 +52,13 @@ WEIGHT_LOADER_V2_SUPPORTED = [
 ]
 
 
-def dispatch_unquantized_linear_func(
-) -> Callable[[torch.Tensor, torch.Tensor, torch.Tensor], torch.Tensor]:
-    from vllm._aiter_ops import is_rocm_aiter_linear_enabled
-    if is_rocm_aiter_linear_enabled():
-        return aiter_ops.rocm_aiter_tuned_gemm
-    return F.linear
+def adjust_bitblas_shard(param, shard_size, shard_offset):
+    bitblas_tile_size = getattr(param, "bitblas_tile_size", None)
+    if bitblas_tile_size is not None:
+        return (shard_size // bitblas_tile_size,
+                shard_offset // bitblas_tile_size)
+
+    return shard_size, shard_offset
 
 
 def adjust_marlin_shard(param, shard_size, shard_offset):
@@ -179,6 +181,10 @@ class LinearMethodBase(QuantizeMethodBase):
 class UnquantizedLinearMethod(LinearMethodBase):
     """Linear method without quantization."""
 
+    def __init__(self):
+        super().__init__()
+        self._gemm_func = dispatch_unquantized_gemm()
+
     def create_weights(self, layer: torch.nn.Module,
                        input_size_per_partition: int,
                        output_partition_sizes: list[int], input_size: int,
@@ -196,7 +202,8 @@ class UnquantizedLinearMethod(LinearMethodBase):
               layer: torch.nn.Module,
               x: torch.Tensor,
               bias: Optional[torch.Tensor] = None) -> torch.Tensor:
-        return dispatch_unquantized_linear_func()(x, layer.weight, bias)
+
+        return self._gemm_func(x, layer.weight, bias)
 
 
 class LinearBase(torch.nn.Module):
@@ -623,6 +630,9 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
                     shard_size, shard_offset = adjust_marlin_shard(
                         param, shard_size, shard_offset)
 
+                shard_size, shard_offset = adjust_bitblas_shard(
+                    param, shard_size, shard_offset)
+
                 if use_bitsandbytes_4bit:
                     index = list(itertools.accumulate([0] + self.output_sizes))
                     orig_offsets = {
@@ -654,6 +664,8 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
                 # Special case for Marlin.
                 shard_size, shard_offset = adjust_marlin_shard(
                     param, shard_size, shard_offset)
+            shard_size, shard_offset = adjust_bitblas_shard(
+                param, shard_size, shard_offset)
 
             use_bitsandbytes_4bit = getattr(param, "use_bitsandbytes_4bit",
                                             False)
