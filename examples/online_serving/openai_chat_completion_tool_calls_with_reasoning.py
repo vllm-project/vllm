@@ -129,9 +129,8 @@ def main():
                                                        model=model,
                                                        tools=tools,
                                                        stream=True)
-    chunks = []
-    for chunk in tool_calls_stream:
-        chunks.append(chunk)
+
+    chunks = list(tool_calls_stream)
 
     reasoning_content, arguments, function_names = extract_reasoning_and_calls(
         chunks)
@@ -174,9 +173,7 @@ def main():
         },
         stream=True)
 
-    chunks = []
-    for chunk in tool_calls_stream:
-        chunks.append(chunk)
+    chunks = list(tool_calls_stream)
 
     reasoning_content, arguments, function_names = extract_reasoning_and_calls(
         chunks)
