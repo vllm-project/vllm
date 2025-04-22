@@ -10,7 +10,6 @@ import torch
 import triton
 import triton.language as tl
 
-import vllm.envs as envs
 from vllm import _custom_ops as ops
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
@@ -93,17 +92,12 @@ if current_platform.is_rocm():
     )
 
 
-def is_rocm_aiter_gemm_w8a8_blockscale_enabled() -> bool:
-    return current_platform.is_rocm() \
-        and envs.VLLM_ROCM_USE_AITER \
-        and envs.VLLM_ROCM_USE_AITER_GEMM_W8A8_BLOCKSCALE
-
-
 def dispatch_w8a8_blockscale_func(
-        use_cutlass: bool) -> Callable[..., torch.Tensor]:
+        use_cutlass: bool,
+        use_aiter_and_is_supported: bool) -> Callable[..., torch.Tensor]:
     if use_cutlass:
         return cutlass_scaled_mm
-    if is_rocm_aiter_gemm_w8a8_blockscale_enabled():
+    if (use_aiter_and_is_supported):
         return torch.ops.vllm.rocm_aiter_gemm_w8a8_blockscale
     return w8a8_block_fp8_matmul
 
@@ -118,6 +112,7 @@ def apply_w8a8_block_fp8_linear(
     input_scale: Optional[torch.Tensor] = None,
     bias: Optional[torch.Tensor] = None,
     cutlass_block_fp8_supported: bool = CUTLASS_BLOCK_FP8_SUPPORTED,
+    use_aiter_and_is_supported: bool = False,
 ) -> torch.Tensor:
     assert input_scale is None
     # View input as 2D matrix for fp8 methods
@@ -132,36 +127,35 @@ def apply_w8a8_block_fp8_linear(
     q_input, x_scale = per_token_group_quant_fp8(
         input_2d, block_size[1], column_major_scales=use_cutlass)
 
-    output = dispatch_w8a8_blockscale_func(use_cutlass)(
-        A=q_input,
-        B=weight,
-        As=x_scale,
-        Bs=weight_scale,
-        block_size=block_size,
-        output_dtype=input.dtype)
+    output = dispatch_w8a8_blockscale_func(
+        use_cutlass, use_aiter_and_is_supported)(A=q_input,
+                                                 B=weight,
+                                                 As=x_scale,
+                                                 Bs=weight_scale,
+                                                 block_size=block_size,
+                                                 output_dtype=input.dtype)
 
     if bias is not None:
         output = output + bias
     return output.to(dtype=input.dtype).view(*output_shape)
 
 
-def apply_w8a8_block_fp8_linear_fake(
-    input: torch.Tensor,
-    weight: torch.Tensor,
-    block_size: List[int],
-    weight_scale: torch.Tensor,
-    input_scale: Optional[torch.Tensor] = None,
-) -> torch.Tensor:
-    output_shape = [*input.shape[:-1], weight.shape[0]]
-    return torch.empty(output_shape, dtype=input.dtype, device=input.device)
+# def apply_w8a8_block_fp8_linear_fake(
+#     input: torch.Tensor,
+#     weight: torch.Tensor,
+#     block_size: List[int],
+#     weight_scale: torch.Tensor,
+#     input_scale: Optional[torch.Tensor] = None,
+# ) -> torch.Tensor:
+#     output_shape = [*input.shape[:-1], weight.shape[0]]
+#     return torch.empty(output_shape, dtype=input.dtype, device=input.device)
 
-
-direct_register_custom_op(
-    op_name="apply_w8a8_block_fp8_linear",
-    op_func=apply_w8a8_block_fp8_linear,
-    mutates_args=[],
-    fake_impl=apply_w8a8_block_fp8_linear_fake,
-)
+# direct_register_custom_op(
+#     op_name="apply_w8a8_block_fp8_linear",
+#     op_func=apply_w8a8_block_fp8_linear,
+#     mutates_args=[],
+#     fake_impl=apply_w8a8_block_fp8_linear_fake,
+# )
 
 
 def input_to_float8(
