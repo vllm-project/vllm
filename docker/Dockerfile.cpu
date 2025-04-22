@@ -62,7 +62,7 @@ RUN echo 'ulimit -c 0' >> ~/.bashrc
 FROM base AS vllm-build
 
 ARG GIT_REPO_CHECK=0
-# Support for building with non-AVX512 vLLM: docker build --build-arg VLLM_CPU_DISABLE_AVX512="true" ...
+# Support for building with non-AVX512 vLLM: docker build --squash --build-arg VLLM_CPU_DISABLE_AVX512="true" ...
 ARG VLLM_CPU_DISABLE_AVX512
 ENV VLLM_CPU_DISABLE_AVX512=${VLLM_CPU_DISABLE_AVX512}
 

@@ -77,7 +77,7 @@ You can build and run vLLM from source via the provided <gh-file:docker/Dockerfi
 
 ```console
 # optionally specifies: --build-arg max_jobs=8 --build-arg nvcc_threads=2
-DOCKER_BUILDKIT=1 docker build . --target vllm-openai --tag vllm/vllm-openai --file docker/Dockerfile
+DOCKER_BUILDKIT=1 docker build . --target vllm-openai --tag vllm/vllm-openai --file docker/Dockerfile --squash
 ```
 
 :::{note}
@@ -105,6 +105,7 @@ Keep an eye on memory usage with parallel jobs as it can be substantial (see exa
 $ python3 use_existing_torch.py
 $ DOCKER_BUILDKIT=1 docker build . \
   --file docker/Dockerfile \
+  --squash \
   --target vllm-openai \
   --platform "linux/arm64" \
   -t vllm/vllm-gh200-openai:latest \

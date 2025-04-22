@@ -177,7 +177,7 @@ Currently, there are no pre-built CPU wheels.
 ### Build image from source
 
 ```console
-$ docker build -f docker/Dockerfile.cpu --tag vllm-cpu-env --target vllm-openai .
+$ docker build --squash -f docker/Dockerfile.cpu --tag vllm-cpu-env --target vllm-openai .
 
 # Launching OpenAI server 
 $ docker run --rm \
