@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import functools
+import json
 from collections import UserDict
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -194,9 +195,9 @@ class MultiModalRegistry:
             max_items = self._limits_by_model[model_config][data_key]
             if num_items > max_items:
                 raise ValueError(
-                    f"You set {data_key}={max_items} (or defaulted to 1) in "
-                    f"`--limit-mm-per-prompt`, but found {num_items} items "
-                    "in the same prompt.")
+                    f"You set '{json.dumps({data_key: max_items})}' (or "
+                    "defaulted to 1) in `--limit-mm-per-prompt`, but found "
+                    f"{num_items} items in the same prompt.")
 
             input_dict = plugin.map_input(model_config, data_value,
                                           mm_processor_kwargs)
@@ -258,10 +259,18 @@ class MultiModalRegistry:
         """
         if self.has_processor(model_config):
             processor = self.create_processor(model_config, disable_cache=True)
+            profiler = MultiModalProfiler(processor)
+
             seq_len = model_config.max_model_len
             mm_limits = self.get_mm_limits_per_prompt(model_config)
-            return processor.info.get_mm_max_tokens_per_item(
-                seq_len, mm_limits)
+
+            return profiler.get_mm_max_tokens(
+                seq_len,
+                {
+                    modality: 1
+                    for modality, limit in mm_limits.items() if limit > 0
+                },
+            )
 
         return {
             key: plugin.get_max_multimodal_tokens(model_config)
@@ -458,6 +467,7 @@ class MultiModalRegistry:
         self,
         model_config: "ModelConfig",
         seq_len: int,
+        mm_counts: Optional[Mapping[str, int]] = None,
     ) -> DummyDecoderData:
         """
         Create dummy data for profiling the memory usage of a model.
@@ -466,7 +476,7 @@ class MultiModalRegistry:
         """
         processor = self.create_processor(model_config, disable_cache=True)
         profiler = MultiModalProfiler(processor)
-        dummy_data = profiler.get_decoder_dummy_data(seq_len)
+        dummy_data = profiler.get_decoder_dummy_data(seq_len, mm_counts)
 
         # Having more tokens is over-conservative but otherwise fine
         token_ids = dummy_data.prompt_token_ids
@@ -481,6 +491,7 @@ class MultiModalRegistry:
         self,
         model_config: "ModelConfig",
         seq_len: int,
+        mm_counts: Optional[Mapping[str, int]] = None,
     ) -> DummyEncoderData:
         """
         Create dummy data for profiling the memory usage of a model.
@@ -489,7 +500,7 @@ class MultiModalRegistry:
         """
         processor = self.create_processor(model_config, disable_cache=True)
         profiler = MultiModalProfiler(processor)
-        dummy_data = profiler.get_encoder_dummy_data(seq_len)
+        dummy_data = profiler.get_encoder_dummy_data(seq_len, mm_counts)
 
         # Having more tokens is over-conservative but otherwise fine
         token_ids = dummy_data.prompt_token_ids

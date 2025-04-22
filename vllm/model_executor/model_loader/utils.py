@@ -36,14 +36,11 @@ def is_transformers_impl_compatible(
     mod = module or getattr(transformers, arch, None)
     if mod is None:
         return False
-    if hasattr(mod, "supports_backend"):
-        return mod.is_backend_compatible()
-    else:
-        return mod._supports_flex_attn
+    return mod.is_backend_compatible()
 
 
-def resolve_transformers_fallback(model_config: ModelConfig,
-                                  architectures: list[str]):
+def resolve_transformers_arch(model_config: ModelConfig,
+                              architectures: list[str]):
     for i, arch in enumerate(architectures):
         if arch == "TransformersForCausalLM":
             continue
@@ -104,8 +101,7 @@ def get_model_architecture(
                             for arch in architectures)
     if (not is_vllm_supported
             or model_config.model_impl == ModelImpl.TRANSFORMERS):
-        architectures = resolve_transformers_fallback(model_config,
-                                                      architectures)
+        architectures = resolve_transformers_arch(model_config, architectures)
 
     model_cls, arch = ModelRegistry.resolve_model_cls(architectures)
     if model_config.task == "embed":

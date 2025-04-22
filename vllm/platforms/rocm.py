@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import os
-from functools import lru_cache, wraps
+from functools import cache, lru_cache, wraps
 from typing import TYPE_CHECKING, Dict, List, Optional
 
 import torch
@@ -20,8 +20,9 @@ else:
 logger = init_logger(__name__)
 
 try:
-    from amdsmi import (amdsmi_get_gpu_asic_info, amdsmi_get_processor_handles,
-                        amdsmi_init, amdsmi_shut_down)
+    from amdsmi import (AmdSmiException, amdsmi_get_gpu_asic_info,
+                        amdsmi_get_processor_handles, amdsmi_init,
+                        amdsmi_shut_down, amdsmi_topo_get_link_type)
 except ImportError as e:
     logger.warning("Failed to import from amdsmi with %r", e)
 
@@ -97,6 +98,30 @@ def device_id_to_physical_device_id(device_id: int) -> int:
         return device_id
 
 
+@cache
+def use_rocm_custom_paged_attention(qtype: torch.dtype, head_size: int,
+                                    block_size: int, gqa_ratio: int,
+                                    max_seq_len: int,
+                                    sliding_window: int) -> bool:
+
+    GPU_ARCH = torch.cuda.get_device_properties("cuda").gcnArchName
+    ON_NAVI = "gfx1" in GPU_ARCH
+    ON_MI250_MI300 = any(arch in GPU_ARCH for arch in ["gfx90a", "gfx942"])
+
+    # rocm custom page attention not support on navi (gfx1*)
+    # custom paged attn always supported on V0. On V1, requires sliding window
+    # disabled due to observed numerical discrepancy.
+    return (ON_MI250_MI300 and not ON_NAVI
+            and (not envs.VLLM_USE_V1 or sliding_window == 0
+                 or sliding_window == (-1, -1))
+            and (qtype == torch.half or qtype == torch.bfloat16)
+            and (head_size == 64 or head_size == 128)
+            and (block_size == 16 or block_size == 32)
+            and (gqa_ratio >= 1 and gqa_ratio <= 16) and max_seq_len <= 32768
+            and not (envs.VLLM_ROCM_USE_AITER_PAGED_ATTN
+                     and envs.VLLM_ROCM_USE_AITER))
+
+
 class RocmPlatform(Platform):
     _enum = PlatformEnum.ROCM
     device_name: str = "rocm"
@@ -116,8 +141,36 @@ class RocmPlatform(Platform):
                              kv_cache_dtype, block_size, use_v1,
                              use_mla) -> str:
         if use_mla:
-            logger.info("Using Triton MLA backend.")
-            return "vllm.attention.backends.triton_mla.TritonMLABackend"
+            from vllm.attention.backends.rocm_aiter_mla import (
+                is_aiter_mla_enabled)
+
+            if selected_backend is None:
+                selected_backend = (_Backend.ROCM_AITER_MLA if
+                                    is_aiter_mla_enabled() or block_size == 1
+                                    else _Backend.TRITON_MLA)
+
+            if selected_backend == _Backend.TRITON_MLA:
+                if block_size != 1:
+                    logger.info("Using Triton MLA backend.")
+                    return "vllm.attention.backends.triton_mla.TritonMLABackend"  # noqa: E501
+                else:
+                    raise ValueError(
+                        f" The selected backend, {selected_backend.name},"
+                        f"does not support block size {block_size}.")
+            elif selected_backend == _Backend.ROCM_AITER_MLA:
+                if block_size == 1:
+                    logger.info("Using AITER MLA backend.")
+                    return "vllm.attention.backends.rocm_aiter_mla.AiterMLABackend"  # noqa: E501
+                else:
+                    raise ValueError(
+                        f" The selected backend, {selected_backend.name},"
+                        f"does not support block size {block_size}."
+                        "(currently only supports block size 1)")
+            else:
+                raise ValueError(
+                    f" The selected backend, {selected_backend.name},"
+                    f"is not MLA type while requested for MLA backend.")
+
         selected_backend = (_Backend.ROCM_FLASH if selected_backend
                             == _Backend.FLASH_ATTN else selected_backend)
         if envs.VLLM_USE_V1:
@@ -135,9 +188,35 @@ class RocmPlatform(Platform):
 
     @classmethod
     @lru_cache(maxsize=8)
-    def get_device_capability(cls, device_id: int = 0) -> DeviceCapability:
+    def get_device_capability(cls,
+                              device_id: int = 0
+                              ) -> Optional[DeviceCapability]:
         major, minor = torch.cuda.get_device_capability(device_id)
         return DeviceCapability(major=major, minor=minor)
+
+    @staticmethod
+    @with_amdsmi_context
+    def is_fully_connected(physical_device_ids: List[int]) -> bool:
+        """
+        Query if the set of gpus are fully connected by xgmi (1 hop)
+        """
+        handles = [
+            amdsmi_get_processor_handles()[i] for i in physical_device_ids
+        ]
+        for i, handle in enumerate(handles):
+            for j, peer_handle in enumerate(handles):
+                if i < j:
+                    try:
+                        link_type = amdsmi_topo_get_link_type(
+                            handle, peer_handle)
+                        # type is 2 for XGMI
+                        if link_type["hops"] != 1 or link_type["type"] != 2:
+                            return False
+                    except AmdSmiException as error:
+                        logger.error("AMD 1 hop XGMI detection failed.",
+                                     exc_info=error)
+                        return False
+        return True
 
     @classmethod
     @with_amdsmi_context
@@ -255,3 +334,15 @@ class RocmPlatform(Platform):
     def supports_v1(cls, model_config: ModelConfig) -> bool:
         # V1 support on AMD gpus is experimental
         return True
+
+    @classmethod
+    def use_custom_allreduce(cls) -> bool:
+        # We only enable custom allreduce for MI300 series
+        gcn_arch = torch.cuda.get_device_properties(0).gcnArchName
+        supported_archs = ['gfx94']
+        return any(gfx in gcn_arch for gfx in supported_archs)
+
+    @classmethod
+    def get_cu_count(cls, device_id: int = 0) -> int:
+        return torch.cuda.get_device_properties(
+            device_id).multi_processor_count

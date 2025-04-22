@@ -102,10 +102,11 @@ def get_pp_indices(num_hidden_layers: int, pp_rank: int,
         if remaining_layers := num_hidden_layers % pp_size:
             for i in range(2, remaining_layers + 2):
                 partitions[-i] += 1
-            logger.info("Hidden layers were unevenly partitioned: %s",
-                        ",".join(str(p) for p in partitions))
-            logger.info("This can be manually overridden using the "
-                        "VLLM_PP_LAYER_PARTITION environment variable")
+            logger.info(
+                "Hidden layers were unevenly partitioned: [%s]. "
+                "This can be manually overridden using the "
+                "VLLM_PP_LAYER_PARTITION environment variable",
+                ",".join(str(p) for p in partitions))
 
     start_layer = sum(partitions[:pp_rank])
     end_layer = start_layer + partitions[pp_rank]
@@ -207,10 +208,7 @@ class StatelessProcessGroup:
     def barrier(self):
         """A barrier to synchronize all ranks."""
         for i in range(self.world_size):
-            if i == self.rank:
-                self.broadcast_obj(None, src=self.rank)
-            else:
-                self.broadcast_obj(None, src=i)
+            self.broadcast_obj(None, src=i)
 
     @staticmethod
     def create(

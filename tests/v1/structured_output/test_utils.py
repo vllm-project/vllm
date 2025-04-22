@@ -2,7 +2,7 @@
 
 import pytest
 
-from vllm.v1.structured_output.utils import (
+from vllm.v1.structured_output.backend_xgrammar import (
     has_xgrammar_unsupported_json_features)
 
 
@@ -12,18 +12,6 @@ def unsupported_string_schemas():
         {
             "type": "string",
             "pattern": "^[a-zA-Z]+$"
-        },
-        {
-            "type": "string",
-            "enum": ["active", "inactive", "pending"]
-        },
-        {
-            "type": "string",
-            "minLength": 1
-        },
-        {
-            "type": "string",
-            "maxLength": 100
         },
         {
             "type": "string",
@@ -163,6 +151,18 @@ def supported_schema():
                 "items": {
                     "type": "number"
                 }
+            },
+            "car_type": {
+                "type": "string",
+                "enum": ["sedan", "suv", "truck"]
+            },
+            "short_description": {
+                "type": "string",
+                "maxLength": 50
+            },
+            "long_description": {
+                "type": "string",
+                "minLength": 50
             },
             "address": {
                 "type": "object",
