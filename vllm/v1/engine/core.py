@@ -159,25 +159,26 @@ class EngineCore:
                      "warmup model) took %.2f seconds"), elapsed)
         return num_gpu_blocks, num_cpu_blocks, scheduler_kv_cache_config
 
-    def add_request(self, request: EngineCoreRequest):
-        """Add request to the scheduler."""
+    def add_requests(self, requests: list[EngineCoreRequest]):
+        """Add requests to the scheduler."""
+        for request in requests:
+            if request.mm_hashes is not None:
+                # Here, if hash exists for a multimodal input, then it will be
+                # fetched from the cache, else it will be added to the cache.
+                # Note that the cache here is mirrored with the client cache, so
+                # anything that has a hash must have a HIT cache entry here
+                # as well.
+                assert request.mm_inputs is not None
+                request.mm_inputs = (
+                    self.mm_input_cache_server.get_and_update_p1(
+                        request.mm_inputs, request.mm_hashes))
 
-        if request.mm_hashes is not None:
-            # Here, if hash exists for a multimodal input, then it will be
-            # fetched from the cache, else it will be added to the cache.
-            # Note that the cache here is mirrored with the client cache, so
-            # anything that has a hash must have a HIT cache entry here
-            # as well.
-            assert request.mm_inputs is not None
-            request.mm_inputs = self.mm_input_cache_server.get_and_update_p1(
-                request.mm_inputs, request.mm_hashes)
+            req = Request.from_engine_core_request(request)
+            if req.use_structured_output:
+                # Start grammar compilation asynchronously
+                self.structured_output_manager.grammar_init(req)
 
-        req = Request.from_engine_core_request(request)
-        if req.use_structured_output:
-            # Start grammar compilation asynchronously
-            self.structured_output_manager.grammar_init(req)
-
-        self.scheduler.add_request(req)
+            self.scheduler.add_request(req)
 
     def abort_requests(self, request_ids: list[str]):
         """Abort requests from the scheduler."""
@@ -443,7 +444,7 @@ class EngineCoreProc(EngineCore):
         """Dispatch request from client."""
 
         if request_type == EngineCoreRequestType.ADD:
-            self.add_request(request)
+            self.add_requests(request)
         elif request_type == EngineCoreRequestType.ABORT:
             self.abort_requests(request)
         elif request_type == EngineCoreRequestType.START_DP:
@@ -499,7 +500,7 @@ class EngineCoreProc(EngineCore):
         """Input socket IO thread."""
 
         # Msgpack serialization decoding.
-        add_request_decoder = MsgpackDecoder(EngineCoreRequest)
+        add_request_decoder = MsgpackDecoder(list[EngineCoreRequest])
         generic_decoder = MsgpackDecoder()
         identity = engine_index.to_bytes(length=2, byteorder="little")
 
@@ -516,11 +517,11 @@ class EngineCoreProc(EngineCore):
                 type_frame, *data_frames = socket.recv_multipart(copy=False)
                 request_type = EngineCoreRequestType(bytes(type_frame.buffer))
 
-                # Deserialize the request data.
-                decoder = add_request_decoder if (
-                    request_type
-                    == EngineCoreRequestType.ADD) else generic_decoder
-                request = decoder.decode(data_frames)
+                # Deserialize payload based on request type
+                if request_type == EngineCoreRequestType.ADD:
+                    request = add_request_decoder.decode(data_frames)
+                else:
+                    request = generic_decoder.decode(data_frames)
 
                 # Push to input queue for core busy loop.
                 self.input_queue.put_nowait((request_type, request))

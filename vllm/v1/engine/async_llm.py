@@ -212,31 +212,39 @@ class AsyncLLM(EngineClient):
                                                 priority)
 
         if params.n == 1:
-            await self._add_request(request, None, 0, queue)
+            await self._add_requests([request], None, queue)
             return queue
 
         # Fan out child requests (for n>1).
         parent_request = ParentRequest(request_id, params)
+        child_requests = []
         for idx in range(params.n):
             request_id, params = parent_request.get_child_info(idx)
             child_request = request if idx == params.n - 1 else copy(request)
             child_request.request_id = request_id
             child_request.sampling_params = params
-            await self._add_request(child_request, parent_request, idx, queue)
+            child_requests.append(child_request)
+
+        await self._add_requests(child_requests, parent_request, queue)
         return queue
 
-    async def _add_request(self, request: EngineCoreRequest,
-                           parent_req: Optional[ParentRequest], index: int,
-                           queue: RequestOutputCollector):
-
-        # Add the request to OutputProcessor (this process).
-        self.output_processor.add_request(request, parent_req, index, queue)
+    async def _add_requests(self, requests: list[EngineCoreRequest],
+                            parent_req: Optional[ParentRequest],
+                            queue: RequestOutputCollector):
+        """
+        Registers each request with the local OutputProcessor and then forwards
+        the bundle to Engine‑Core, using the optimal path (single vs batched).
+        """
+        # Add the requests to OutputProcessor (this process).
+        for idx, req in enumerate(requests):
+            self.output_processor.add_request(req, parent_req, idx, queue)
 
         # Add the EngineCoreRequest to EngineCore (separate process).
-        await self.engine_core.add_request_async(request)
+        await self.engine_core.add_requests_async(requests)
 
         if self.log_requests:
-            logger.info("Added request %s.", request.request_id)
+            for req in requests:
+                logger.info("Added request %s.", req.request_id)
 
     # TODO: we should support multiple prompts in one call, as you
     # can do with LLM.generate. So that for multi-prompt completion

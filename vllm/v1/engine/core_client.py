@@ -79,7 +79,7 @@ class EngineCoreClient(ABC):
     def get_output(self) -> EngineCoreOutputs:
         raise NotImplementedError
 
-    def add_request(self, request: EngineCoreRequest) -> None:
+    def add_requests(self, requests: list[EngineCoreRequest]) -> None:
         raise NotImplementedError
 
     def profile(self, is_start: bool = True) -> None:
@@ -134,7 +134,8 @@ class EngineCoreClient(ABC):
     async def get_output_async(self) -> EngineCoreOutputs:
         raise NotImplementedError
 
-    async def add_request_async(self, request: EngineCoreRequest) -> None:
+    async def add_requests_async(self,
+                                 requests: list[EngineCoreRequest]) -> None:
         raise NotImplementedError
 
     async def profile_async(self, is_start: bool = True) -> None:
@@ -198,8 +199,8 @@ class InprocClient(EngineCoreClient):
     def get_output(self) -> EngineCoreOutputs:
         return self.engine_core.step()
 
-    def add_request(self, request: EngineCoreRequest) -> None:
-        self.engine_core.add_request(request)
+    def add_requests(self, requests: list[EngineCoreRequest]) -> None:
+        self.engine_core.add_requests(requests)
 
     def abort_requests(self, request_ids: list[str]) -> None:
         if len(request_ids) > 0:
@@ -557,11 +558,12 @@ class SyncMPClient(MPClient):
 
         return future.result()
 
-    def add_request(self, request: EngineCoreRequest) -> None:
+    def add_requests(self, requests: list[EngineCoreRequest]) -> None:
         # NOTE: text prompt is not needed in the core engine as it has been
         # tokenized.
-        request.prompt = None
-        self._send_input(EngineCoreRequestType.ADD, request)
+        for request in requests:
+            request.prompt = None
+        self._send_input(EngineCoreRequestType.ADD, requests)
 
     def abort_requests(self, request_ids: list[str]) -> None:
         if len(request_ids) > 0:
@@ -727,11 +729,13 @@ class AsyncMPClient(MPClient):
         self._ensure_output_queue_task()
         return await future
 
-    async def add_request_async(self, request: EngineCoreRequest) -> None:
+    async def add_requests_async(self,
+                                 requests: list[EngineCoreRequest]) -> None:
         # NOTE: text prompt is not needed in the core engine as it has been
         # tokenized.
-        request.prompt = None
-        await self._send_input(EngineCoreRequestType.ADD, request)
+        for req in requests:
+            req.prompt = None
+        await self._send_input(EngineCoreRequestType.ADD, requests)
         self._ensure_output_queue_task()
 
     async def abort_requests_async(self, request_ids: list[str]) -> None:
@@ -825,13 +829,16 @@ class DPAsyncMPClient(AsyncMPClient):
             for engine in self.core_engines
         ]))[0]
 
-    async def add_request_async(self, request: EngineCoreRequest) -> None:
+    async def add_requests_async(self,
+                                 requests: list[EngineCoreRequest]) -> None:
         # NOTE: text prompt is not needed in the core engine as it has been
         # tokenized.
-        request.prompt = None
+        for request in requests:
+            request.prompt = None
 
-        msg = (EngineCoreRequestType.ADD.value, *self.encoder.encode(request))
+        msg = (EngineCoreRequestType.ADD.value, *self.encoder.encode(requests))
 
+        # TODO: @dblincoe fix this for batched
         chosen_engine = self.get_core_engine_for_request()
         self.reqs_in_flight[request.request_id] = chosen_engine
         chosen_engine.num_reqs_in_flight += 1

@@ -195,21 +195,24 @@ class LLMEngine:
             # Make a new RequestState and queue.
             self.output_processor.add_request(request, None, 0)
             # Add the request to EngineCore.
-            self.engine_core.add_request(request)
+            self.engine_core.add_requests([request])
             return
 
         # Fan out child requests (for n>1).
         parent_req = ParentRequest(request_id, params)
+        child_requests = []
         for idx in range(n):
             request_id, params = parent_req.get_child_info(idx)
             child_request = request if idx == n - 1 else copy(request)
             child_request.request_id = request_id
             child_request.sampling_params = params
+            child_requests.append(child_request)
 
             # Make a new RequestState and queue.
             self.output_processor.add_request(child_request, parent_req, idx)
-            # Add the request to EngineCore.
-            self.engine_core.add_request(child_request)
+
+        # Add the batch of child requests to EngineCore.
+        self.engine_core.add_requests(child_requests)
 
     def step(self) -> list[RequestOutput]:
 
