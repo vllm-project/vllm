@@ -92,7 +92,6 @@ class MyAttention(nn.Module):
     ...
 
 class MyModel(PreTrainedModel):
-  # This is attr must be present in the base model
   _supports_attention_backend = True
 ```
 
