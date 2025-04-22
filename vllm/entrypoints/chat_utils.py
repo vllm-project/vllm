@@ -35,7 +35,7 @@ from typing_extensions import Required, TypeAlias, TypedDict
 
 from vllm.config import ModelConfig
 from vllm.logger import init_logger
-from vllm.multimodal import MultiModalDataDict
+from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalDataDict
 from vllm.multimodal.utils import MediaConnector
 from vllm.transformers_utils.processor import cached_get_processor
 from vllm.transformers_utils.tokenizer import AnyTokenizer, MistralTokenizer
@@ -452,8 +452,6 @@ class BaseMultiModalItemTracker(ABC, Generic[_T]):
 
         self._model_config = model_config
         self._tokenizer = tokenizer
-        self._allowed_items = (model_config.multimodal_config.limit_per_prompt
-                               if model_config.multimodal_config else {})
 
         self._items_by_modality = defaultdict[str, list[_T]](list)
 
@@ -464,6 +462,10 @@ class BaseMultiModalItemTracker(ABC, Generic[_T]):
     @property
     def allowed_local_media_path(self):
         return self._model_config.allowed_local_media_path
+
+    @property
+    def mm_registry(self):
+        return MULTIMODAL_REGISTRY
 
     @staticmethod
     @cache
@@ -480,11 +482,8 @@ class BaseMultiModalItemTracker(ABC, Generic[_T]):
         if modality in ("image", "image_embeds"):
             if model_type == "chatglm":
                 return "<|begin_of_image|><|endoftext|><|end_of_image|>"
-            if model_type == "phi3_v":
-                # Workaround since this token is not defined in the tokenizer
+            if model_type in ("phi3_v", "phi4mm"):
                 return f"<|image_{current_count}|>"
-            if model_type == "phi4mm":
-                return "<|endoftext10|>"  # 200010 (see vocab.json in hf model)
             if model_type in ("minicpmo", "minicpmv"):
                 return "(<image>./</image>)"
             if model_type in ("blip-2", "florence2", "fuyu", "paligemma",
@@ -498,26 +497,30 @@ class BaseMultiModalItemTracker(ABC, Generic[_T]):
                                               hf_config.image_token_index)
             if model_type in ("aya_vision", "chameleon", "deepseek_vl_v2",
                               "internvl_chat", "skywork_chat", "NVLM_D",
-                              "h2ovl_chat", "idefics3"):
+                              "h2ovl_chat", "idefics3", "smolvlm"):
                 return "<image>"
             if model_type in ("mllama", "llama4"):
                 return "<|image|>"
             if model_type in ("qwen2_vl", "qwen2_5_vl"):
                 return "<|vision_start|><|image_pad|><|vision_end|>"
+            if model_type == "qwen2_5_omni":
+                return "<|vision_start|><|IMAGE|><|vision_end|>"
             if model_type == "molmo":
                 return ""
             if model_type == "aria":
                 return "<|fim_prefix|><|img|><|fim_suffix|>"
             if model_type == "gemma3":
                 return "<start_of_image>"
+            if model_type == "kimi_vl":
+                return "<|media_start|>image<|media_content|><|media_pad|><|media_end|>" # noqa: E501
 
             raise TypeError(f"Unknown {modality} model type: {model_type}")
         elif modality == "audio":
             if model_type == "ultravox":
                 return "<|audio|>"
             if model_type == "phi4mm":
-                return "<|endoftext11|>"  # 200011 (see vocab.json in hf model)
-            if model_type == "qwen2_audio":
+                return f"<|audio_{current_count}|>"
+            if model_type in ("qwen2_audio", "qwen2_5_omni"):
                 return (f"Audio {current_count}: "
                         f"<|audio_bos|><|AUDIO|><|audio_eos|>")
             if model_type == "minicpmo":
@@ -526,6 +529,8 @@ class BaseMultiModalItemTracker(ABC, Generic[_T]):
         elif modality == "video":
             if model_type in ("qwen2_vl", "qwen2_5_vl"):
                 return "<|vision_start|><|video_pad|><|vision_end|>"
+            if model_type == "qwen2_5_omni":
+                return "<|vision_start|><|VIDEO|><|vision_end|>"
             if model_type in ("minicpmo", "minicpmv"):
                 return "(<video>./</video>)"
             if model_type.startswith("llava"):
@@ -540,12 +545,29 @@ class BaseMultiModalItemTracker(ABC, Generic[_T]):
         Add a multi-modal item to the current prompt and returns the
         placeholder string to use, if any.
         """
-        allowed_count = self._allowed_items.get(modality, 1)
+        mm_registry = self.mm_registry
+        model_config = self.model_config
+
+        input_modality = modality.replace("_embeds", "")
+
+        if mm_registry.has_processor(model_config):
+            mm_processor = mm_registry.create_processor(model_config)
+            allowed_counts = mm_processor.info.get_allowed_mm_limits()
+            allowed_count = allowed_counts.get(input_modality, 0)
+        else:
+            mm_config = model_config.multimodal_config
+            if mm_config is None:
+                msg = "This model does not support multi-modal inputs"
+                raise ValueError(msg)
+
+            allowed_count = mm_config.get_limit_per_prompt(input_modality)
+
         current_count = len(self._items_by_modality[modality]) + 1
         if current_count > allowed_count:
             raise ValueError(
                 f"At most {allowed_count} {modality}(s) may be provided in "
-                "one request.")
+                "one request. You can set `--limit-mm-per-prompt` to "
+                "increase this limit if the model supports it.")
 
         self._items_by_modality[modality].append(item)
 
@@ -1073,7 +1095,11 @@ def _parse_chat_message_content(
         if role == 'assistant':
             parsed_msg = _AssistantParser(message)
 
-            if "tool_calls" in parsed_msg:
+            # The 'tool_calls' is not None check ensures compatibility.
+            # It's needed only if downstream code doesn't strictly
+            # follow the OpenAI spec.
+            if ("tool_calls" in parsed_msg
+                and parsed_msg["tool_calls"] is not None):
                 result_msg["tool_calls"] = list(parsed_msg["tool_calls"])
         elif role == "tool":
             parsed_msg = _ToolParser(message)
@@ -1193,8 +1219,15 @@ def apply_mistral_chat_template(
         **kwargs,
     )
 
-    return tokenizer.apply_chat_template(
-        messages=messages,
-        tools=tools,
-        **kwargs,
-    )
+    try:
+        return tokenizer.apply_chat_template(
+            messages=messages,
+            tools=tools,
+            **kwargs,
+        )
+    # mistral-common uses assert statements to stop processing of input
+    # if input does not comply with the expected format.
+    # We convert those assertion errors to ValueErrors so they can be
+    # are properly caught in the preprocessing_input step
+    except AssertionError as e:
+        raise ValueError from e

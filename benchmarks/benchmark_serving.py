@@ -50,7 +50,7 @@ try:
 except ImportError:
     from argparse import ArgumentParser as FlexibleArgumentParser
 
-from benchmark_dataset import (AIMODataset, BurstGPTDataset,
+from benchmark_dataset import (AIMODataset, ASRDataset, BurstGPTDataset,
                                ConversationDataset, HuggingFaceDataset,
                                InstructCoderDataset, RandomDataset,
                                SampleRequest, ShareGPTDataset, SonnetDataset,
@@ -156,7 +156,7 @@ def calculate_metrics(
         if outputs[i].success:
             output_len = outputs[i].output_tokens
 
-            if output_len is None:
+            if not output_len:
                 # We use the tokenizer to count the number of output tokens
                 # for some serving backends instead of looking at
                 # len(outputs[i].itl) since multiple output tokens may be
@@ -274,10 +274,6 @@ async def benchmark(
         input_requests[0].expected_output_len, \
             input_requests[0].multi_modal_data
 
-    if backend != "openai-chat" and test_mm_content is not None:
-        # multi-modal benchmark is only available on OpenAI Chat backend.
-        raise ValueError(
-            "Multi-modal content is only supported on 'openai-chat' backend.")
     assert test_mm_content is None or isinstance(test_mm_content, dict)
     test_input = RequestFuncInput(
         model=model_id,
@@ -604,6 +600,9 @@ def main(args: argparse.Namespace):
         elif args.dataset_path in AIMODataset.SUPPORTED_DATASET_PATHS:
             dataset_class = AIMODataset
             args.hf_split = "train"
+        elif args.dataset_path in ASRDataset.SUPPORTED_DATASET_PATHS:
+            dataset_class = ASRDataset
+            args.hf_split = "train"
         else:
             supported_datasets = set([
                 dataset_name for cls in HuggingFaceDataset.__subclasses__()
@@ -615,6 +614,13 @@ def main(args: argparse.Namespace):
                 f" from one of following: {supported_datasets}. "
                 "Please consider contributing if you would "
                 "like to add support for additional dataset formats.")
+
+        if (dataset_class.IS_MULTIMODAL and backend not in \
+            ["openai-chat", "openai-audio"]):
+            # multi-modal benchmark is only available on OpenAI Chat backend.
+            raise ValueError(
+                "Multi-modal content is only supported on 'openai-chat' and " \
+                "'openai-audio' backend.")
         input_requests = dataset_class(
             dataset_path=args.dataset_path,
             dataset_subset=args.hf_subset,
@@ -921,7 +927,7 @@ if __name__ == "__main__":
         "--percentile-metrics",
         type=str,
         default="ttft,tpot,itl",
-        help="Comma-seperated list of selected metrics to report percentils. "
+        help="Comma-separated list of selected metrics to report percentils. "
         "This argument specifies the metrics to report percentiles. "
         "Allowed metric names are \"ttft\", \"tpot\", \"itl\", \"e2el\". "
         "Default value is \"ttft,tpot,itl\".")
@@ -929,7 +935,7 @@ if __name__ == "__main__":
         "--metric-percentiles",
         type=str,
         default="99",
-        help="Comma-seperated list of percentiles for selected metrics. "
+        help="Comma-separated list of percentiles for selected metrics. "
         "To report 25-th, 50-th, and 75-th percentiles, use \"25,50,75\". "
         "Default value is \"99\". "
         "Use \"--percentile-metrics\" to select metrics.",
@@ -996,18 +1002,23 @@ if __name__ == "__main__":
     random_group.add_argument(
         "--random-range-ratio",
         type=float,
-        default=1.0,
-        help="Range of sampled ratio of input/output length, "
-        "used only for random sampling.",
+        default=0.0,
+        help="Range ratio for sampling input/output length, "
+        "used only for random sampling. Must be in the range [0, 1) to define "
+        "a symmetric sampling range"
+        "[length * (1 - range_ratio), length * (1 + range_ratio)].",
     )
     random_group.add_argument(
         "--random-prefix-len",
         type=int,
         default=0,
-        help="Number of fixed prefix tokens before random "
-        " context. The length range of context in a random "
-        " request is [random-prefix-len, "
-        " random-prefix-len + random-prefix-len * random-range-ratio).")
+        help=("Number of fixed prefix tokens before the random context "
+              "in a request. "
+              "The total input length is the sum of `random-prefix-len` and "
+              "a random "
+              "context length sampled from [input_len * (1 - range_ratio), "
+              "input_len * (1 + range_ratio)]."),
+    )
 
     hf_group = parser.add_argument_group("hf dataset options")
     hf_group.add_argument("--hf-subset",
