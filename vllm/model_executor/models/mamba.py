@@ -153,9 +153,9 @@ class MambaModel(nn.Module):
         hidden_states, _ = self.norm_f(hidden_states, residual)
 
         return hidden_states
-    
+
     def load_weights(self, weights: Iterable[Tuple[str,
-                                                torch.Tensor]]) -> Set[str]:
+                                                   torch.Tensor]]) -> Set[str]:
         params_dict = dict(self.named_parameters())
         loaded_params: Set[str] = set()
         for name, loaded_weight in weights:
@@ -173,6 +173,7 @@ class MambaModel(nn.Module):
             weight_loader(param, loaded_weight)
             loaded_params.add(name)
         return loaded_params
+
 
 class MambaForCausalLM(nn.Module, HasInnerState, IsAttentionFree, SupportsPP,
                        SupportsV0Only):
