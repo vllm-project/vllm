@@ -241,6 +241,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             device=self.device)
 
         # OPTIMIZATION: Cache the tensors rather than creating them every step.
+        # Keep in int64 to avoid overflow with long context
         self.arange_np = np.arange(max(self.max_num_reqs + 1,
                                        self.max_model_len,
                                        self.max_num_tokens),
@@ -521,7 +522,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # E.g., [0, 1, 0, 1, 2, 3, 4, 0, 1, 2]
         # -> [0, 1, M, M + 1, M + 2, M + 3, M + 4, 2 * M, 2 * M + 1, 2 * M + 2]
         # where M is the max_model_len.
-        # For long context, may need to cast to int64 to avoid overflow
         token_indices = (positions_np +
                          req_indices * self.input_batch.token_ids_cpu.shape[1])
 

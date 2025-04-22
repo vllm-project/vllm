@@ -216,6 +216,7 @@ class TPUModelRunner:
 
         # Range tensor with values [0 .. self.max_num_tokens - 1].
         # Used to initialize positions / context_lens / seq_lens
+        # Keep in int64 to avoid overflow with long context
         self.arange_np = np.arange(self.max_num_tokens, dtype=np.int64)
         self.num_reqs_paddings = _get_req_paddings(
             min_req_size=MIN_NUM_SEQS, max_req_size=self.max_num_reqs)
@@ -457,7 +458,6 @@ class TPUModelRunner:
         # E.g., [0, 1, 0, 1, 2, 3, 4, 0, 1, 2]
         # -> [0, 1, M, M + 1, M + 2, M + 3, M + 4, 2 * M, 2 * M + 1, 2 * M + 2]
         # where M is the max_model_len.
-        # For long context, may need to cast to int64 to avoid overflow
         token_indices = (positions_np +
                          req_indices * self.input_batch.token_ids_cpu.shape[1])
 
