@@ -97,7 +97,7 @@ class MyModel(PreTrainedModel):
 
 Here is what happens in the background when this model is loaded:
 
-1. The config is loaded
+1. The config is loaded.
 2. `MyModel` Python class is loaded from the `auto_map` in config, and we check that the model `is_backend_compatible()`.
 3. `MyModel` is loaded into `TransformersForCausalLM` (see <gh-file:vllm/model_executor/models/transformers.py>) which sets `self.config._attn_implementation = "vllm"` so that vLLM's attention layer is used.
 
