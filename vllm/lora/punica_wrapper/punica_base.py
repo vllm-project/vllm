@@ -207,7 +207,8 @@ class PunicaWrapperBase(PunicaWrapperABC):
             self._long_lora_indices.zero_()
         self.indices_len[:] = indices_len
 
-    def _update_prefill_metada(self, token_lora_tensor: torch.Tensor) -> None:
+    def _update_prefill_metadata(self,
+                                 token_lora_tensor: torch.Tensor) -> None:
 
         (b_seq_start_tensor, seq_length_tensor, lora_indices_tensor,
          batch_size, max_length, token_nums,
@@ -334,7 +335,7 @@ class PunicaWrapperBase(PunicaWrapperABC):
                                    long_lora_context)
         if mapping.is_prefill:
             # Update metadata required for prefill-related operators.
-            self._update_prefill_metada(self.token_lora_indices)
+            self._update_prefill_metadata(self.token_lora_indices)
             self.is_prefill = True
         else:
             self.is_prefill = False
