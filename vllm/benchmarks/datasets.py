@@ -829,3 +829,103 @@ class AIMODataset(HuggingFaceDataset):
                 ))
         self.maybe_oversample_requests(sampled_requests, num_requests)
         return sampled_requests
+
+
+# -----------------------------------------------------------------------------
+# Next Edit Prediction Dataset Implementation
+# -----------------------------------------------------------------------------
+zeta_prompt = """### Instruction:
+You are a code completion assistant and your task is to analyze user edits and then rewrite an excerpt that the user provides, suggesting the appropriate edits within the excerpt, taking into account the cursor location.
+
+### User Edits:
+
+{}
+
+### User Excerpt:
+
+{}
+
+### Response:
+
+""" # noqa: E501
+
+
+def _format_zeta_prompt(
+        examples: dict,
+        original_start_marker: str = "<|editable_region_start|>") -> dict:
+    """Format the zeta prompt for the Next Edit Prediction (NEP) dataset.
+    
+    This function formats examples from the NEP dataset 
+    into prompts and expected outputs. It could be 
+    further extended to support more NEP datasets.
+    
+    Args:
+        examples: The dataset examples containing events, 
+            inputs, and outputs.
+        original_start_marker: The marker indicating the 
+            start of the editable region. Defaults to 
+            "<|editable_region_start|>".
+            
+    Returns:
+        A dictionary with the formatted prompts and expected outputs.
+    """
+    events = examples["events"]
+    inputs = examples["input"]
+    outputs = examples["output"]
+    prompts, expected_outputs = [], []
+    for event, input, output in zip(events, inputs, outputs):
+        # create the final prompt
+        prompts.append(zeta_prompt.format(event, input))
+
+        # following the original implementation, extract the focused region
+        # from the raw output
+        output_start_index = output.find(original_start_marker)
+        output_focused_region = output[output_start_index:]
+        output = output_focused_region
+        expected_outputs.append(output)
+
+    return {"prompt": prompts, "expected_output": expected_outputs}
+
+
+class NextEditPredictionDataset(HuggingFaceDataset):
+    """
+    Dataset class for processing a Next Edit Prediction dataset.
+    """
+
+    SUPPORTED_DATASET_PATHS = {
+        "zed-industries/zeta",
+    }
+    MAPPING_PROMPT_FUNCS = {
+        "zed-industries/zeta": _format_zeta_prompt,
+    }
+
+    def preprocess_data(self, num_requests: int) -> "Dataset":  # noqa: F821
+        """Preprocess the data to format the prompts and expected outputs."""
+        data = self.data[:num_requests]
+        formatting_prompt_func = self.MAPPING_PROMPT_FUNCS.get(
+            self.dataset_path)
+        if formatting_prompt_func is None:
+            raise ValueError(f"Unsupported dataset path: {self.dataset_path}")
+        data = data.map(formatting_prompt_func, batched=True)
+        return data
+
+    def sample(self, tokenizer: PreTrainedTokenizerBase, num_requests: int,
+               **kwargs):
+        # lazily preprocess only "num_requests" samples
+        data = self.preprocess_data(num_requests)
+        if len(data) < num_requests:
+            logger.info(
+                "Requested %d samples, but the dataset %s only has %d",
+                num_requests,
+                self.dataset_path,
+                len(data),
+            )
+        samples = [
+            SampleRequest(
+                prompt=item["prompt"],
+                prompt_len=len(tokenizer(item["prompt"]).input_ids),
+                expected_output_len=len(
+                    tokenizer(item["expected_output"]).input_ids),
+            ) for item in data
+        ]
+        return samples

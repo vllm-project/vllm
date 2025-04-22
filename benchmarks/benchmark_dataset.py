@@ -28,7 +28,7 @@ from typing import Any, Callable, Optional, Union
 
 import numpy as np
 import pandas as pd
-from datasets import load_dataset
+from datasets import Dataset, load_dataset
 from PIL import Image
 from transformers import PreTrainedTokenizerBase
 
@@ -901,35 +901,35 @@ class NextEditPredictionDataset(HuggingFaceDataset):
         "zed-industries/zeta": _format_zeta_prompt,
     }
 
-    def load_data(self) -> None:
-        """Load data from HuggingFace datasets."""
-        super().load_data()
+    def preprocess_data(self, num_requests: int) -> Dataset:
+        """Preprocess the data to format the prompts and expected outputs."""
+        data = self.data[:num_requests]
         formatting_prompt_func = self.MAPPING_PROMPT_FUNCS.get(
             self.dataset_path)
         if formatting_prompt_func is None:
             raise ValueError(f"Unsupported dataset path: {self.dataset_path}")
-        self.data = self.data.map(formatting_prompt_func, batched=True)
+        data = data.map(formatting_prompt_func, batched=True)
+        return data
 
     def sample(self, tokenizer: PreTrainedTokenizerBase, num_requests: int,
                **kwargs):
-        samples = []
-        for item in self.data:
-            if len(samples) >= num_requests:
-                break
-            samples.append(
-                SampleRequest(
-                    prompt=item["prompt"],
-                    prompt_len=len(tokenizer(item["prompt"]).input_ids),
-                    expected_output_len=len(
-                        tokenizer(item["expected_output"]).input_ids),
-                ))
-        if len(samples) < num_requests:
+        # lazily preprocess only "num_requests" samples
+        data = self.preprocess_data(num_requests)
+        if len(data) < num_requests:
             logger.info(
                 "Requested %d samples, but the dataset %s only has %d",
                 num_requests,
                 self.dataset_path,
-                len(samples),
+                len(data),
             )
+        samples = [
+            SampleRequest(
+                prompt=item["prompt"],
+                prompt_len=len(tokenizer(item["prompt"]).input_ids),
+                expected_output_len=len(
+                    tokenizer(item["expected_output"]).input_ids),
+            ) for item in data
+        ]
         return samples
 
 
