@@ -212,7 +212,7 @@ class AsyncLLM(EngineClient):
                                                 priority)
 
         if params.n == 1:
-            await self._enqueue_requests([request], None, queue)
+            await self._enqueue_requests(request, None, queue)
             return queue
 
         # Fan out child requests (for n>1).
@@ -230,7 +230,7 @@ class AsyncLLM(EngineClient):
 
     async def _enqueue_requests(
         self,
-        requests: list[EngineCoreRequest],
+        requests: Union[EngineCoreRequest, list[EngineCoreRequest]],
         parent_request: Optional[ParentRequest],
         queue: RequestOutputCollector,
     ) -> None:
@@ -238,13 +238,11 @@ class AsyncLLM(EngineClient):
         Registers each request with the local OutputProcessor and then forwards
         the bundle to Engine‑Core, using the optimal path (single vs batched).
         """
-        for idx, req in enumerate(requests):
-            self.output_processor.add_request(req, parent_request, idx, queue)
+        for idx, request in enumerate(requests):
+            self.output_processor.add_request(request, parent_request, idx,
+                                              queue)
 
-        if len(requests) == 1:
-            await self.engine_core.add_request_async(requests[0])
-        else:
-            await self.engine_core.add_request_batched_async(requests)
+        await self.engine_core.add_request_async(requests)
 
         if self.log_requests:
             for req in requests:

@@ -159,25 +159,29 @@ class EngineCore:
                      "warmup model) took %.2f seconds"), elapsed)
         return num_gpu_blocks, num_cpu_blocks, scheduler_kv_cache_config
 
-    def add_request(self, request: EngineCoreRequest):
-        """Add request to the scheduler."""
+    def add_request(self, request: Union[EngineCoreRequest,
+                                         list[EngineCoreRequest]]):
+        """Add requests to the scheduler."""
+        requests = request if isinstance(request, list) else [request]
 
-        if request.mm_hashes is not None:
-            # Here, if hash exists for a multimodal input, then it will be
-            # fetched from the cache, else it will be added to the cache.
-            # Note that the cache here is mirrored with the client cache, so
-            # anything that has a hash must have a HIT cache entry here
-            # as well.
-            assert request.mm_inputs is not None
-            request.mm_inputs = self.mm_input_cache_server.get_and_update_p1(
-                request.mm_inputs, request.mm_hashes)
+        for request in requests:
+            if request.mm_hashes is not None:
+                # Here, if hash exists for a multimodal input, then it will be
+                # fetched from the cache, else it will be added to the cache.
+                # Note that the cache here is mirrored with the client cache, so
+                # anything that has a hash must have a HIT cache entry here
+                # as well.
+                assert request.mm_inputs is not None
+                request.mm_inputs = (
+                    self.mm_input_cache_server.get_and_update_p1(
+                        request.mm_inputs, request.mm_hashes))
 
-        req = Request.from_engine_core_request(request)
-        if req.use_structured_output:
-            # Start grammar compilation asynchronously
-            self.structured_output_manager.grammar_init(req)
+            req = Request.from_engine_core_request(request)
+            if req.use_structured_output:
+                # Start grammar compilation asynchronously
+                self.structured_output_manager.grammar_init(req)
 
-        self.scheduler.add_request(req)
+            self.scheduler.add_request(req)
 
     def abort_requests(self, request_ids: list[str]):
         """Abort requests from the scheduler."""
@@ -444,9 +448,6 @@ class EngineCoreProc(EngineCore):
 
         if request_type == EngineCoreRequestType.ADD:
             self.add_request(request)
-        elif request_type == EngineCoreRequestType.ADD_BATCHED:
-            for req in request:
-                self.add_request(req)
         elif request_type == EngineCoreRequestType.ABORT:
             self.abort_requests(request)
         elif request_type == EngineCoreRequestType.START_DP:
@@ -502,8 +503,8 @@ class EngineCoreProc(EngineCore):
         """Input socket IO thread."""
 
         # Msgpack serialization decoding.
-        add_request_decoder = MsgpackDecoder(EngineCoreRequest)
-        add_batched_request_decoder = MsgpackDecoder(list[EngineCoreRequest])
+        add_request_decoder = MsgpackDecoder(Union[EngineCoreRequest,
+                                                   list[EngineCoreRequest]])
         generic_decoder = MsgpackDecoder()
         identity = engine_index.to_bytes(length=2, byteorder="little")
 
@@ -523,8 +524,6 @@ class EngineCoreProc(EngineCore):
                 # Deserialize payload based on request type
                 if request_type == EngineCoreRequestType.ADD:
                     request = add_request_decoder.decode(data_frames)
-                elif request_type == EngineCoreRequestType.ADD_BATCHED:
-                    request = add_batched_request_decoder.decode(data_frames)
                 else:
                     request = generic_decoder.decode(data_frames)
 

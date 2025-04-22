@@ -212,7 +212,7 @@ class LLMEngine:
             self.output_processor.add_request(child_request, parent_req, idx)
 
         # Add the batch of child requests to EngineCore.
-        self.engine_core.add_request_batched(child_requests)
+        self.engine_core.add_request(child_requests)
 
     def step(self) -> list[RequestOutput]:
 
