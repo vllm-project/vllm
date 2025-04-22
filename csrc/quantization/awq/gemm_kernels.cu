@@ -592,7 +592,8 @@ __global__ void __launch_bounds__(64)
   // Store results converting FP32 to BF16
   for (int ax1_0_1 = 0; ax1_0_1 < (N / 32); ++ax1_0_1) {
     for (int local_id = 0; local_id < 8; ++local_id) {
-      int row_offset = ...;  // Same as before
+      int row_offset = (((int)blockIdx_y) / j_factors1) * 16 +
+                       ((int)threadIdx.x) / 4 + (local_id % 4) / 2 * 8;  // Same as before
       if (row_offset < M) {
         *(C_ptr + ax1_0_1 * 16 + row_offset * OC + (local_id / 4) * 8 +
           local_id % 2) = __float2bfloat16(C_warp[(ax1_0_1 * 8) + local_id]);
