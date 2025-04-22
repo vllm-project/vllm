@@ -530,6 +530,13 @@ class _AsyncLLMEngine(LLMEngine):
             self.tokenizer.check_health()
         self.model_executor.check_health()
 
+    async def collective_rpc_async(self,
+                                   method: str,
+                                   timeout: Optional[float] = None,
+                                   args: tuple = (),
+                                   kwargs: Optional[dict] = None):
+        raise NotImplementedError
+
 
 async def build_guided_decoding_logits_processor_async(
         sampling_params: SamplingParams, tokenizer: AnyTokenizer,
