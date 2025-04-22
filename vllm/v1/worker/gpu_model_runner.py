@@ -244,7 +244,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.arange_np = np.arange(max(self.max_num_reqs + 1,
                                        self.max_model_len,
                                        self.max_num_tokens),
-                                   dtype=np.int32)
+                                   dtype=np.int64)
         # NOTE(woosuk): These tensors are "stateless", i.e., they are literally
         # a faster version of creating a new tensor every time. Thus, we should
         # not make any assumptions about the values in these tensors.
@@ -273,11 +273,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                                         device="cpu",
                                         pin_memory=self.pin_memory)
         self.seq_lens_np = self.seq_lens_cpu.numpy()
-
-        max_token_idx = self.max_num_reqs * self.max_model_len - 1
-        # if max token idx exceeds int32 max, use int64 to avoid overflow
-        self.token_indices_dtype = np.int32 \
-            if max_token_idx <= np.iinfo(np.int32).max else np.int64
 
     def _update_states(self, scheduler_output: "SchedulerOutput") -> None:
         """Update the cached states and the persistent batch with the scheduler
@@ -528,8 +523,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # where M is the max_model_len.
         # For long context, may need to cast to int64 to avoid overflow
         token_indices = (positions_np +
-                         req_indices.astype(self.token_indices_dtype) *
-                         self.input_batch.token_ids_cpu.shape[1])
+                         req_indices * self.input_batch.token_ids_cpu.shape[1])
 
         # NOTE(woosuk): We use torch.index_select instead of np.take here
         # because torch.index_select is much faster than np.take for large
