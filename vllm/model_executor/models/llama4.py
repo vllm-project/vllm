@@ -37,7 +37,7 @@ from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 
 from .llama import LlamaForCausalLM, LlamaMLP, LlamaModel
-from .utils import (AutoWeightsLoader, extract_layer_index,
+from .utils import (AutoWeightsLoader, extract_layer_index, fast_topk,
                     is_pp_missing_parameter)
 
 
@@ -50,9 +50,9 @@ class Llama4MoE(nn.Module):
         topk: int,
         renormalize: bool,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        router_scores, router_indices = torch.topk(gating_output, topk, dim=-1)
-        router_scores = torch.sigmoid(router_scores.float()).to(
-            hidden_states.dtype)
+        router_scores, router_indices = fast_topk(gating_output, topk, dim=-1)
+        # psuedo-standard is that the router scores are floats
+        router_scores = torch.sigmoid(router_scores.float())
         return (router_scores, router_indices.to(torch.int32))
 
     def __init__(self,

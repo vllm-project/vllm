@@ -523,6 +523,13 @@ def validate_args(args):
         raise ValueError(
             "Tokenizer must be the same as the model for MII backend.")
 
+    # --data-parallel is not supported currently.
+    # https://github.com/vllm-project/vllm/issues/16222
+    if args.data_parallel_size > 1:
+        raise ValueError(
+            "Data parallel is not supported in offline benchmark, \
+            please use benchmark serving instead")
+
 
 if __name__ == "__main__":
     parser = FlexibleArgumentParser(description="Benchmark the throughput.")
@@ -597,18 +604,26 @@ if __name__ == "__main__":
     parser.add_argument(
         "--prefix-len",
         type=int,
-        default=0,
-        help="Number of fixed prefix tokens before the random "
-        "context in a request (default: 0).",
-    )
+        default=None,
+        help=f"Number of prefix tokens to be used in RandomDataset "
+        "and SonnetDataset. For RandomDataset, the total input "
+        "length is the sum of prefix-len (default: "
+        f"{RandomDataset.DEFAULT_PREFIX_LEN}) and a random context length "
+        "sampled from [input_len * (1 - range_ratio), "
+        "input_len * (1 + range_ratio)]. For SonnetDataset, "
+        f"prefix_len (default: {SonnetDataset.DEFAULT_PREFIX_LEN}) "
+        "controls how much of the input is fixed lines versus "
+        "random lines, but the total input length remains approximately "
+        "input_len tokens.")
     # random dataset
     parser.add_argument(
         "--random-range-ratio",
         type=float,
-        default=0.0,
-        help="Range ratio for sampling input/output length, "
-        "used only for RandomDataset. Must be in the range [0, 1) to define "
-        "a symmetric sampling range "
+        default=None,
+        help=f"Range ratio (default : {RandomDataset.DEFAULT_RANGE_RATIO}) "
+        "for sampling input/output length, "
+        "used only for RandomDataset. Must be in the range [0, 1) to "
+        "define a symmetric sampling range "
         "[length * (1 - range_ratio), length * (1 + range_ratio)].",
     )
 
