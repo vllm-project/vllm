@@ -51,7 +51,7 @@ try:
 except ImportError:
     from argparse import ArgumentParser as FlexibleArgumentParser
 
-from vllm.v1.structured_output.utils import (
+from vllm.v1.structured_output.backend_xgrammar import (
     has_xgrammar_unsupported_json_features)
 
 MILLISECONDS_TO_SECONDS_CONVERSION = 1000
