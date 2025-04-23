@@ -1154,6 +1154,8 @@ class RowParallelLinear(LinearBase):
         self.output_size_per_partition = output_size
         self.output_partition_sizes = [output_size]
 
+        print("RowParallelLinear quant_config", quant_config)
+
         super().__init__(input_size,
                          output_size,
                          skip_bias_add,

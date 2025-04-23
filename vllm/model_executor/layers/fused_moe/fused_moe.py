@@ -20,6 +20,7 @@ from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     per_token_group_quant_fp8)
 from vllm.model_executor.layers.quantization.utils.int8_utils import (
     per_token_group_quant_int8, per_token_quant_int8)
+from vllm.model_executor.layers.quantization.utils.mxfp4_utils import per_token_group_quant_mxfp4
 from vllm.platforms import current_platform
 from vllm.utils import direct_register_custom_op
 
@@ -974,6 +975,7 @@ def inplace_fused_experts(hidden_states: torch.Tensor,
                           use_int8_w8a8: bool = False,
                           use_int8_w8a16: bool = False,
                           use_int4_w4a16: bool = False,
+                          use_mxfp4_w4a4: bool = False,
                           per_channel_quant: bool = False,
                           global_num_experts: int = -1,
                           expert_map: Optional[torch.Tensor] = None,
@@ -986,7 +988,7 @@ def inplace_fused_experts(hidden_states: torch.Tensor,
                           block_shape: Optional[List[int]] = None) -> None:
     fused_experts_impl(hidden_states, w1, w2, topk_weights, topk_ids, True,
                        activation, apply_router_weight_on_input, use_fp8_w8a8,
-                       use_int8_w8a8, use_int8_w8a16, use_int4_w4a16,
+                       use_int8_w8a8, use_int8_w8a16, use_int4_w4a16, use_mxfp4_w4a4,
                        per_channel_quant, global_num_experts, expert_map,
                        w1_scale, w2_scale, w1_zp, w2_zp, a1_scale, a2_scale,
                        block_shape)
@@ -1004,6 +1006,7 @@ def inplace_fused_experts_fake(
         use_int8_w8a8: bool = False,
         use_int8_w8a16: bool = False,
         use_int4_w4a16: bool = False,
+        use_mxfp4_w4a4: bool = False,
         per_channel_quant: bool = False,
         global_num_experts: int = -1,
         expert_map: Optional[torch.Tensor] = None,
@@ -1038,6 +1041,7 @@ def outplace_fused_experts(
         use_int8_w8a8: bool = False,
         use_int8_w8a16: bool = False,
         use_int4_w4a16: bool = False,
+        use_mxfp4_w4a4: bool = False,
         per_channel_quant: bool = False,
         global_num_experts: int = -1,
         expert_map: Optional[torch.Tensor] = None,
@@ -1051,7 +1055,7 @@ def outplace_fused_experts(
     return fused_experts_impl(hidden_states, w1, w2, topk_weights, topk_ids,
                               False, activation, apply_router_weight_on_input,
                               use_fp8_w8a8, use_int8_w8a8, use_int8_w8a16,
-                              use_int4_w4a16, per_channel_quant,
+                              use_int4_w4a16, use_mxfp4_w4a4, per_channel_quant,
                               global_num_experts, expert_map, w1_scale,
                               w2_scale, w1_zp, w2_zp, a1_scale, a2_scale,
                               block_shape)
@@ -1068,6 +1072,7 @@ def outplace_fused_experts_fake(
         use_int8_w8a8: bool = False,
         use_int8_w8a16: bool = False,
         use_int4_w4a16: bool = False,
+        use_mxfp4_w4a4: bool = False,
         per_channel_quant: bool = False,
         global_num_experts: int = -1,
         expert_map: Optional[torch.Tensor] = None,
@@ -1120,6 +1125,7 @@ def fused_experts(hidden_states: torch.Tensor,
                   use_int8_w8a8: bool = False,
                   use_int8_w8a16: bool = False,
                   use_int4_w4a16: bool = False,
+                  use_mxfp4_w4a4: bool = False,
                   per_channel_quant: bool = False,
                   global_num_experts: int = -1,
                   expert_map: Optional[torch.Tensor] = None,
@@ -1183,6 +1189,7 @@ def moe_kernel_prepare_input(
     use_int8_w8a8: bool,
     use_int8_w8a16: bool,
     use_int4_w4a16: bool,
+    use_mxfp4_w4a4: bool,
     per_channel_quant: bool,
     block_shape: Optional[List[int]] = None,
 ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
@@ -1220,6 +1227,14 @@ def moe_kernel_prepare_input(
     elif use_int8_w8a16 or use_int4_w4a16:
         assert B_scale is not None
         assert block_shape is None or block_shape[0] == 0
+    elif use_mxfp4_w4a4:
+        # We assume B to be fake quantized.
+
+        assert len(block_shape) == 2
+        _, block_k = block_shape[0], block_shape[1]
+        print("block_k")
+        A, A_scale = per_token_group_quant_mxfp4(A, block_k)
+
     else:
         assert A_scale is None
         assert B_scale is None
@@ -1239,6 +1254,7 @@ def fused_experts_impl(hidden_states: torch.Tensor,
                        use_int8_w8a8: bool = False,
                        use_int8_w8a16: bool = False,
                        use_int4_w4a16: bool = False,
+                       use_mxfp4_w4a4: bool = False,
                        per_channel_quant: bool = False,
                        global_num_experts: int = -1,
                        expert_map: Optional[torch.Tensor] = None,
@@ -1350,6 +1366,7 @@ def fused_experts_impl(hidden_states: torch.Tensor,
             use_int8_w8a8=use_int8_w8a8,
             use_int8_w8a16=use_int8_w8a16,
             use_int4_w4a16=use_int4_w4a16,
+            use_mxfp4_w4a4=use_mxfp4_w4a4,
             per_channel_quant=per_channel_quant,
             block_shape=block_shape)
 
@@ -1396,6 +1413,7 @@ def fused_experts_impl(hidden_states: torch.Tensor,
             use_int8_w8a8=use_int8_w8a8,
             use_int8_w8a16=use_int8_w8a16,
             use_int4_w4a16=use_int4_w4a16,
+            use_mxfp4_w4a4=use_mxfp4_w4a4,
             per_channel_quant=per_channel_quant,
             block_shape=block_shape)
 
@@ -1443,6 +1461,7 @@ def fused_moe(
     use_int8_w8a8: bool = False,
     use_int8_w8a16: bool = False,
     use_int4_w4a16: bool = False,
+    use_mxfp4_w4a4: bool = False,
     per_channel_quant: bool = False,
     global_num_experts: int = -1,
     expert_map: Optional[torch.Tensor] = None,

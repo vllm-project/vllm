@@ -10,9 +10,11 @@ from vllm.model_executor.parameter import (GroupQuantScaleParameter,
                                            PackedvLLMParameter)
 from vllm.platforms import current_platform
 
+from vllm.model_executor.layers.quantization.utils.mxfp4_utils import OCP_MX_BLOCK_SIZE
+
 __all__ = ["QuarkW4A4MXFP4"]
 
-OCP_MX_BLOCK_SIZE = 32
+
 
 
 class QuarkW4A4MXFP4(QuarkScheme):
@@ -24,6 +26,28 @@ class QuarkW4A4MXFP4(QuarkScheme):
         self.weight_quant_spec = weight_quant_spec
         self.input_quant_spec = input_quant_spec
         self.emulate = not current_platform.supports_mx()
+
+        if self.emulate:
+            try:
+                from quark.torch.export.nn.modules import realquantizer
+                from quark.torch.quantization.config.config import (
+                    QuantizationSpec)
+            except ImportError as err:
+                raise ImportError(
+                    "The package `amd-quark` is required to use AMD Quark "
+                    "MX-FP4 models. Please install it with `pip install "
+                    "amd-quark`.") from err
+
+            input_quant_spec = QuantizationSpec.from_dict(
+                self.input_quant_spec)
+
+            self.input_quantizer = realquantizer.get_real_quantizer(
+                qspec=input_quant_spec,
+                quantizer=None,
+                real_quantized=False,
+                float_dtype=self.out_dtype,
+            )
+
 
     @classmethod
     def get_min_capability(cls) -> int:
@@ -49,10 +73,8 @@ class QuarkW4A4MXFP4(QuarkScheme):
 
             weight_quant_spec = QuantizationSpec.from_dict(
                 self.weight_quant_spec)
-            input_quant_spec = QuantizationSpec.from_dict(
-                self.input_quant_spec)
 
-            self.weight_quantizer = realquantizer.get_real_quantizer(
+            weight_quantizer = realquantizer.get_real_quantizer(
                 qspec=weight_quant_spec,
                 quantizer=None,
                 real_quantized=True,
@@ -61,17 +83,11 @@ class QuarkW4A4MXFP4(QuarkScheme):
                 scale_shape=layer.weight_scale.shape,
                 zero_point_shape=None,
             )
-            self.weight_quantizer.scale.data = layer.weight_scale.data
-            layer.weight = torch.nn.Parameter(
-                self.weight_quantizer(layer.weight.data).to(self.out_dtype),
-                requires_grad=False,
-            )
+            weight_quantizer.scale.data = layer.weight_scale.data
 
-            self.input_quantizer = realquantizer.get_real_quantizer(
-                qspec=input_quant_spec,
-                quantizer=None,
-                real_quantized=False,
-                float_dtype=self.out_dtype,
+            layer.weight = torch.nn.Parameter(
+                weight_quantizer(layer.weight.data).to(self.out_dtype),
+                requires_grad=False,
             )
 
     def create_weights(self, layer: torch.nn.Module,

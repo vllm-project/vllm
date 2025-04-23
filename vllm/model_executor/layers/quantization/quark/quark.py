@@ -70,7 +70,11 @@ class QuarkConfig(QuantizationConfig):
             return QuarkLinearMethod(self)
         if isinstance(layer, Attention):
             return QuarkKVCacheMethod(self)
+
+        # TODO: mixtral defined in mixtral_quant.py does not use FusedMoE, so probably
+        # `QuarkMoEMethod` was never actually used?
         if isinstance(layer, FusedMoE):
+            print("CALL QuarkMoEMethod.get_moe_method")
             return QuarkMoEMethod.get_moe_method(self,
                                                  module=layer,
                                                  layer_name=prefix)
@@ -166,7 +170,7 @@ class QuarkConfig(QuantizationConfig):
         is_static_weight = not weight_quant.get("is_dynamic")
         is_per_tensor_or_channel_weight = (weight_quant.get("qscheme")
                                            in ["per_tensor", "per_channel"])
-
+        
         if not (is_fp8_dtype and is_static_weight
                 and is_per_tensor_or_channel_weight):
             return False

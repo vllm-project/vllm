@@ -208,6 +208,9 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             scoring_func=scoring_func,
             e_score_correction_bias=e_score_correction_bias)
 
+        print("layer.w13_weight", layer.w13_weight.shape)
+        print("topk_weights", topk_weights, topk_weights.shape)
+        print("topk_ids", topk_ids)
         return fused_experts(
             hidden_states=x,
             w1=layer.w13_weight,
@@ -442,6 +445,7 @@ class FusedMoE(torch.nn.Module):
 
         # For smuggling this layer into the fused moe custom op
         self.use_direct_call = self.dp_size == 1
+        print("self.use_direct_call", self.use_direct_call)
         if not self.use_direct_call:
             compilation_config = vllm_config.compilation_config
             if prefix in compilation_config.static_forward_context:
@@ -586,6 +590,10 @@ class FusedMoE(torch.nn.Module):
 
         # Index the loaded weight for tp sharding.
         # gate_up_proj: "MergedColumnParallel", so tp sharding on output_dim
+
+        print("loaded_weight here", loaded_weight.shape)
+        print("shard_id", shard_id)
+        print("shard_dim", shard_dim)
         shard_size = expert_data.shape[shard_dim] // 2
         loaded_weight = loaded_weight.narrow(shard_dim, shard_size * tp_rank,
                                              shard_size)
@@ -597,6 +605,11 @@ class FusedMoE(torch.nn.Module):
         else:
             assert shard_id == "w3"
             expert_data = expert_data.narrow(shard_dim, shard_size, shard_size)
+        
+        print("expert_data here", expert_data.shape)
+
+        print("loaded_weight last", loaded_weight.shape, loaded_weight.dtype)
+        print("expert_data last", expert_data.shape, expert_data.dtype)
         expert_data.copy_(loaded_weight)
 
     def _load_w2(self,
@@ -644,6 +657,8 @@ class FusedMoE(torch.nn.Module):
     def weight_loader(self, param: torch.nn.Parameter,
                       loaded_weight: torch.Tensor, weight_name: str,
                       shard_id: str, expert_id: int) -> None:
+
+        print("loaded_weight from weight_loader", loaded_weight.shape, loaded_weight.dtype)
 
         expert_id = self._map_global_expert_id_to_local_expert_id(expert_id)
         if expert_id == -1:
@@ -839,6 +854,7 @@ class FusedMoE(torch.nn.Module):
 
     def forward(self, hidden_states: torch.Tensor,
                 router_logits: torch.Tensor):
+        print("self.use_direct_call", self.use_direct_call)
         if self.use_direct_call:
             return self.forward_impl(hidden_states, router_logits)
         else:
@@ -858,6 +874,7 @@ class FusedMoE(torch.nn.Module):
             router_logits = self.naive_multicast(router_logits,
                                                  cu_tokens_across_dp_cpu)
 
+        print("self.quant_method", self.quant_method)
         # Matrix multiply.
         final_hidden_states = self.quant_method.apply(
             layer=self,
