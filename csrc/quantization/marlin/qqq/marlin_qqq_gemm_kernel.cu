@@ -1154,7 +1154,7 @@ torch::Tensor marlin_qqq_gemm(torch::Tensor const& a,
       "Shape mismatch: b_q_weight.size(0) = " + str(b_q_weight.size(0)) +
           ", size_k = " + str(size_k) + ", tile_size = " + str(tile_size));
 
-  int groupsize = (s_group.numel() == 0) ? -1 : size_k / s_group.size(0);
+  auto groupsize = (s_group.numel() == 0) ? -1 : size_k / s_group.size(0);
   // Verify groupsize
   TORCH_CHECK(groupsize == -1 || groupsize == 128,
               "Unexpected groupsize = " + str(groupsize));
