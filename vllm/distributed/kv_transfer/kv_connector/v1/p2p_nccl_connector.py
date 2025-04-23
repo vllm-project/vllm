@@ -227,7 +227,8 @@ class P2pNcclConnector(KVConnectorBase_V1):
                                                kv_cache, remote_address)
 
     def wait_for_save(self):
-        return
+        if self.is_producer:
+            self.p2p_nccl_pipe.wait_for_sent()
 
     def get_num_new_matched_tokens(
         self,

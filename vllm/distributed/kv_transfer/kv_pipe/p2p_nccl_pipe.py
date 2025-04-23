@@ -283,7 +283,7 @@ class P2pNcclPipe:
                                 [remote_address, b"0"])
                             comm, rank = self.comms[remote_address.decode()]
                             self._recv(comm, tensor, rank ^ 1)
-                            logger.debug(
+                            logger.info(
                                 "🔵[PUT]Recv Tensor, %s👈%s, MyRank:%s, "
                                 "data:%s, shape:%s", self.zmq_address,
                                 remote_address.decode(), rank, data,
@@ -341,7 +341,20 @@ class P2pNcclPipe:
                 while not self.send_queue:
                     self.send_queue_cv.wait()
                 tensor_id, remote_address, tensor = self.send_queue.popleft()
+                if not self.send_queue:
+                    self.send_queue_cv.notify()
             self._send_sync(tensor_id, tensor, remote_address)
+
+    def wait_for_sent(self):
+        if self.send_type == "PUT_ASYNC":
+            start_time = time.time()
+            with self.send_queue_cv:
+                while self.send_queue:
+                    self.send_queue_cv.wait()
+            duration = time.time() - start_time
+            logger.info(
+                "🚧[PUT_ASYNC]It took %.3fms to wait for the send_queue"
+                " to be empty, rank:%d", duration * 1000, self.rank)
 
     def _send_sync(
         self,
