@@ -8,12 +8,10 @@ import random
 import pytest
 import torch
 
-from tests.kernels.utils import opcheck
+from tests.kernels.utils import baseline_scaled_mm, opcheck, to_fp8, to_int8
 from vllm import _custom_ops as ops
 from vllm.platforms import current_platform
 from vllm.utils import cdiv
-
-from .utils import baseline_scaled_mm, to_fp8, to_int8
 
 MNK_FACTORS = [
     (1, 256, 128),

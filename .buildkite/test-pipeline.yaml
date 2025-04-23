@@ -317,15 +317,46 @@ steps:
   commands:
   - pytest -v -s compile/test_full_graph.py
 
-- label: Kernels Test %N # 1h each
-  mirror_hardwares: [amd]
+- label: Kernels Core Operation Test
   source_file_dependencies:
   - csrc/
-  - vllm/attention
-  - tests/kernels
+  - tests/kernels/core
   commands:
-    - pytest -v -s kernels --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
-  parallelism: 4
+    - pytest -v -s kernels/core
+
+- label: Kernels Attention Test %N
+  source_file_dependencies:
+  - csrc/attention/
+  - vllm/attention
+  - vllm/v1/attention
+  - tests/kernels/attention
+  commands:
+    - pytest -v -s kernels/attention --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
+  parallelism: 2
+
+- label: Kernels Quantization Test %N
+  source_file_dependencies:
+  - csrc/quantization/
+  - vllm/model_executor/layers/quantization
+  - tests/kernels/quantization
+  commands:
+    - pytest -v -s kernels/quantization  --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
+  parallelism: 2
+
+- label: Kernels MoE Test
+  source_file_dependencies:
+  - csrc/moe/
+  - tests/kernels/moe
+  - vllm/model_executor/layers/fused_moe/
+  commands:
+    - pytest -v -s kernels/moe
+
+- label: Kernels Mamba Test
+  source_file_dependencies:
+  - csrc/mamba/
+  - tests/kernels/mamba
+  commands:
+    - pytest -v -s kernels/mamba
 
 - label: Tensorizer Test # 11min
   # mirror_hardwares: [amd]
