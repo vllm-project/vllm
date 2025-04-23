@@ -72,10 +72,14 @@ class MistralToolParser(ToolParser):
 
     def adjust_request(
             self, request: ChatCompletionRequest) -> ChatCompletionRequest:
-        if request.tools and request.tool_choice != 'none':
-            # do not skip special tokens because mistral uses the special
-            # tokens to indicate the start and end of the tool calls
-            # information.
+        if not isinstance(
+                self.model_tokenizer, MistralTokenizer
+        ) and request.tools and request.tool_choice != 'none':
+            # Do not skip special tokens when using chat template
+            # with Mistral parser as TOOL_CALL token is needed
+            # for tool detection.
+            # Note: we don't want skip_special_tokens=False
+            # with MistralTokenizer as it is incompatible
             request.skip_special_tokens = False
         return request
 
