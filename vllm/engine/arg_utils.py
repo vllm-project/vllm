@@ -1630,7 +1630,10 @@ class EngineArgs:
             # This is only used to set default_max_num_batched_tokens
             device_name = "no-device"
 
-        if "h100" in device_name or "h200" in device_name:
+        large_mem_gpus = [
+            "a100", "h100", "h200", "b100", "b200", "mi300x", "mi325x"
+        ]
+        if any(gpu in device_name for gpu in large_mem_gpus):
             # For H100 and H200, we use larger default values.
             default_max_num_batched_tokens = {
                 UsageContext.LLM_CLASS: 16384,
