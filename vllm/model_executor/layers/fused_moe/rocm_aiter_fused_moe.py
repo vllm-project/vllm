@@ -286,7 +286,8 @@ if current_platform.is_rocm():
                               tags=(torch.Tag.inplace_view, ))
 
 
-def rocm_aiter_fused_experts(hidden_states: torch.Tensor,
+def rocm_aiter_fused_experts(*,
+                             hidden_states: torch.Tensor,
                              w1: torch.Tensor,
                              w2: torch.Tensor,
                              topk_weights: torch.Tensor,
