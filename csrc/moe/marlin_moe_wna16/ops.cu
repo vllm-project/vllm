@@ -286,6 +286,11 @@ bool is_valid_config(thread_config_t const& th_config, bool m_block_size_8,
                       pipe_stages, GROUP_BLOCKS, IS_ZP_FLOAT>;               \
     }
 
+  // COMMON: cases for (group_blocks in [-1, 2, 4, 8] and is_zp_float == false)
+  //         this is the most common cases
+  // BIGGROUP: cases for big group size (group_blocks in [-1, 8])
+  // FZP: cases for float-zero-point (is_zp_float = true)
+  // ACT: cases for act order case (group_blocks == 0)
   #define COMMON_GET_IF_M1(W_TYPE, N_BLOCKS, K_BLOCKS, NUM_THREADS)       \
     _GET_IF(W_TYPE, 1, N_BLOCKS, K_BLOCKS, true, -1, NUM_THREADS, false)  \
     _GET_IF(W_TYPE, 1, N_BLOCKS, K_BLOCKS, true, 2, NUM_THREADS, false)   \

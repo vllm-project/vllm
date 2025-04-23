@@ -1202,7 +1202,7 @@ __global__ void Marlin(
     if constexpr (has_zp && is_zp_float || !has_zp) {
       dequant<scalar_t2, w_type_id>(q, frag_b_ptr);
     } else {
-      // static_assert(has_zp && !is_zp_float);
+      static_assert(has_zp && !is_zp_float);
       static_assert(w_type_id == vllm::kU4.id() || w_type_id == vllm::kU8.id());
       // If (has_zp && !is_zp_float),
       // we use not-zp version `dequant` function

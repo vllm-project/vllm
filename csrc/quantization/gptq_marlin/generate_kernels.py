@@ -58,16 +58,21 @@ def generate_new_kernels():
         for group_blocks, m_blocks, thread_configs in itertools.product(
                 GROUP_BLOCKS, THREAD_M_BLOCKS, THREAD_CONFIGS):
 
+            # act order case only support gptq-int4 and gptq-int8
             if group_blocks == 0 and scalar_type not in [
                     "vllm::kU4B8", "vllm::kU8B128"
             ]:
                 continue
             if thread_configs[2] == 256:
+                # for small batch (m_blocks == 1), we only need (128, 128, 256)
+                # for large batch (m_blocks > 1), we only need (64, 256, 256)
                 if m_blocks <= 1 and thread_configs[0] != 128:
                     continue
                 if m_blocks > 1 and thread_configs[0] != 64:
                     continue
 
+            # we only support channelwise quantization and group_size == 128
+            # for fp8
             if scalar_type == "vllm::kFE4M3fn" and group_blocks not in [-1, 8]:
                 continue
 

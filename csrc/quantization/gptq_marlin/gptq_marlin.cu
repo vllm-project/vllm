@@ -256,6 +256,11 @@ bool is_valid_config(thread_config_t const& th_config, int thread_m_blocks,
                       pipe_stages, GROUP_BLOCKS, IS_ZP_FLOAT>;               \
     }
 
+  // COMMON: cases for (group_blocks in [-1, 2, 4, 8] and is_zp_float == false)
+  //         this is the most common cases
+  // BIGGROUP: cases for big group size (group_blocks in [-1, 8])
+  // FZP: cases for float-zero-point (is_zp_float = true)
+  // ACT: cases for act order case (group_blocks == 0)
   #define COMMON_GET_IF_M1(W_TYPE, N_BLOCKS, K_BLOCKS, NUM_THREADS)       \
     _GET_IF(W_TYPE, 1, N_BLOCKS, K_BLOCKS, true, -1, NUM_THREADS, false)  \
     _GET_IF(W_TYPE, 1, N_BLOCKS, K_BLOCKS, true, 2, NUM_THREADS, false)   \
@@ -808,7 +813,6 @@ torch::Tensor gptq_marlin_gemm(
               "size_n = ", size_n, ", is not divisible by min_thread_n = ",
               MARLIN_NAMESPACE_NAME::min_thread_n);
 
-  // int max_n_tiles = size_n / MARLIN_NAMESPACE_NAME::min_thread_n;
   int min_workspace_size = sms;
   TORCH_CHECK(workspace.numel() >= min_workspace_size,
               "workspace.numel = ", workspace.numel(),
