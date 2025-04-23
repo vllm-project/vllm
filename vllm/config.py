@@ -1261,11 +1261,14 @@ PrefixCachingHashAlgo = Literal["builtin", "sha256"]
 class CacheConfig:
     """Configuration for the KV cache."""
 
-    block_size: Optional[BlockSize] = None
+    block_size: BlockSize = None  # type: ignore
     """Size of a contiguous cache block in number of tokens. This is ignored on
     neuron devices and set to `--max-model-len`. On CUDA devices, only block
     sizes up to 32 are supported. On HPU devices, block size defaults to 128.
-    """
+
+    This config has no static default. If left unspecified by the user, it will
+    be set in `Platform.check_and_update_configs()` based on the current
+    platform."""
     gpu_memory_utilization: float = 0.9
     """The fraction of GPU memory to be used for the model executor, which can
     range from 0 to 1. For example, a value of 0.5 would imply 50% GPU memory
