@@ -31,9 +31,7 @@ TEMPLATE = ("template __global__ void Marlin<"
 
 # int8 with zero point case (vllm::kU8) is also supported,
 # we don't add it to reduce wheel size.
-SCALAR_TYPES = [
-    "vllm::kU4", "vllm::kU4B8",  "vllm::kU8B128", "vllm::kFE4M3fn"
-]
+SCALAR_TYPES = ["vllm::kU4", "vllm::kU4B8",  "vllm::kU8B128", "vllm::kFE4M3fn"]
 THREAD_CONFIGS = [(128, 128, 256), (64, 256, 256), (64, 128, 128),
                   (128, 64, 128)]
 
