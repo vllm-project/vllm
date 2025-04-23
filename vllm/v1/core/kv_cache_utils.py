@@ -126,6 +126,8 @@ class KVCacheBlock:
     prev_free_block: Optional["KVCacheBlock"] = None
     next_free_block: Optional["KVCacheBlock"] = None
 
+    kv_cache_group_id: int = -1
+
     def incr_ref(self):
         self.ref_cnt += 1
 
@@ -145,6 +147,7 @@ class KVCacheBlock:
     def reset_hash(self):
         """Reset the block hash when the block is evicted."""
         self._block_hash = None
+        self.kv_cache_group_id = -1
 
     def __repr__(self) -> str:
         # Use block_id instead of KVCacheBlock object to avoid calling __repr__
@@ -265,12 +268,11 @@ class FreeKVCacheBlockQueue:
         return ret
 
 
-def need_extra_keys(request: Request, kv_cache_group_id: int) -> bool:
+def need_extra_keys(request: Request) -> bool:
     """Check whether the blocks allocated to this request need extra hash keys.
 
     Args:
         request (Request): The request.
-        kv_cache_group_id (int): The id of the kv cache group. -1 means no kv cache group.
 
     Returns:
         bool: Whether blocks allocated to this request need extra hash keys.
@@ -278,9 +280,7 @@ def need_extra_keys(request: Request, kv_cache_group_id: int) -> bool:
 
     # Multimodal requests need to include the MM hash.
     # LoRA requests need to include the LoRA ID.
-    return bool(request.mm_positions) or (request.lora_request
-                                          is not None) or (kv_cache_group_id
-                                                           != -1)
+    return bool(request.mm_positions) or (request.lora_request is not None)
 
 
 def _gen_mm_extra_hash_keys(request: Request, start_token_idx: int,
@@ -368,8 +368,7 @@ def _gen_lora_extra_hash_keys(request: Request) -> list[int]:
 
 def generate_block_hash_extra_keys(
         request: Request, start_token_idx: int, end_token_idx: int,
-        start_mm_idx: int,
-        kv_cache_group_id: int) -> tuple[Optional[tuple[Any, ...]], int]:
+        start_mm_idx: int) -> tuple[Optional[tuple[Any, ...]], int]:
     """Generate extra keys for the block hash. The extra keys can come from
     the multi-modal inputs and request specific metadata (e.g., LoRA ID).
 
@@ -378,8 +377,6 @@ def generate_block_hash_extra_keys(
         start_token_idx: The start token index of the block.
         end_token_idx: The end token index of the block.
         start_mm_idx: The start multi-modal index of the block.
-        kv_cache_group_id: The id of the kv cache group. -1 means no kv cache 
-        group.
     Returns:
         A tuple of extra keys and the next multi-modal index.
     """
@@ -389,8 +386,6 @@ def generate_block_hash_extra_keys(
     lora_extra_keys: list[int] = _gen_lora_extra_hash_keys(request)
 
     extra_keys: list[Any] = lora_extra_keys + mm_extra_keys
-    if kv_cache_group_id != -1:
-        extra_keys.append(kv_cache_group_id)
 
     if not extra_keys:
         return None, new_start_mm_idx
@@ -414,8 +409,6 @@ def hash_block_tokens(
             if this is the first block.
         curr_block_token_ids: A list of token ids in the current
             block. The current block is assumed to be full.
-        kv_cache_group_id: The id of the kv cache group. -1 means no kv cache group.
-        extra_keys: Extra keys for the block.
 
     Returns:
         The hash value of the block and the token ids in the block.
@@ -431,24 +424,21 @@ def hash_block_tokens(
         curr_block_token_ids_tuple, extra_keys)
 
 
-def hash_request_tokens(hash_function: Any,
-                        block_size: int,
-                        request: Request,
-                        kv_cache_group_id: int = -1) -> list[BlockHashType]:
+def hash_request_tokens(hash_function: Any, block_size: int,
+                        request: Request) -> list[BlockHashType]:
     """Computes hash values of a chain of blocks given a sequence of
     token IDs. The hash value is used for prefix caching.
 
     Args:
         block_size: The size of each block.
         request: The request object.
-        kv_cache_group_id: The id of the kv cache group. -1 means no kv cache group.
 
     Returns:
         The list of computed hash values.
     """
     token_ids = request.all_token_ids
 
-    req_need_extra_keys = need_extra_keys(request, kv_cache_group_id)
+    req_need_extra_keys = need_extra_keys(request)
     req_extra_keys = None
     curr_mm_idx = 0
 
@@ -464,7 +454,7 @@ def hash_request_tokens(hash_function: Any,
         if req_need_extra_keys:
             # MM and LoRA requests need extra keys for block-hash computation.
             req_extra_keys, curr_mm_idx = generate_block_hash_extra_keys(
-                request, start, end, curr_mm_idx, kv_cache_group_id)
+                request, start, end, curr_mm_idx)
 
         block_hash = hash_block_tokens(hash_function, parent_block_hash_value,
                                        block_token_ids, req_extra_keys)

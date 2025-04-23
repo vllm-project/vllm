@@ -62,15 +62,17 @@ class KVCacheManager:
         # FIXME: make prefix cache stats conditional on log_stats
         self.prefix_cache_stats = PrefixCacheStats() if log_stats else None
 
-        self.block_pool = BlockPool(self.num_gpu_blocks, enable_caching)
+        self.num_kv_cache_groups = len(kv_cache_config.kv_cache_groups)
+
+        self.block_pool = BlockPool(self.num_gpu_blocks, enable_caching,
+                                    self.num_kv_cache_groups)
         self.specialized_managers = [
             get_specialized_manager(
                 kv_cache_spec=g.kv_cache_spec,
                 block_pool=self.block_pool,
-            ) for g in kv_cache_config.kv_cache_groups
+                kv_cache_group_id=i,
+            ) for i, g in enumerate(kv_cache_config.kv_cache_groups)
         ]
-
-        self.num_kv_cache_groups = len(kv_cache_config.kv_cache_groups)
 
         # Mapping from request ID to blocks to track the blocks allocated
         # for each request, so that we can free the blocks when the request
@@ -82,8 +84,13 @@ class KVCacheManager:
         # Mapping from request ID to kv block hashes.
         # This is to avoid recomputing the block hashes for each call of
         # `get_computed_blocks` or `allocate_slots`.
-        self.req_to_block_hashes: defaultdict[
-            str, list[list[BlockHashType]]] = defaultdict(lambda: [])
+        # block_size -> list[BlockHashType]; TODO update comment
+        self.req_to_block_hashes: defaultdict[str, dict[
+            int, list[BlockHashType]]] = defaultdict(dict)
+
+        self.all_block_sizes = set(
+            g.kv_cache_spec.block_size
+            for g in self.kv_cache_config.kv_cache_groups)
 
         # {req_id: The number of cached blocks for each kv cache group}
         # This is used to track the number of cached blocks for each request.
@@ -136,11 +143,11 @@ class KVCacheManager:
         # if the scheduler has tried to schedule the request before.
         block_hashes = self.req_to_block_hashes[request.request_id]
         if len(block_hashes) == 0:
-            block_hashes = [
-                hash_request_tokens(self.caching_hash_fn,
-                                    g.kv_cache_spec.block_size, request, i)
-                for i, g in enumerate(self.kv_cache_config.kv_cache_groups)
-            ]
+            block_hashes = {
+                block_size:
+                hash_request_tokens(self.caching_hash_fn, block_size, request)
+                for block_size in self.all_block_sizes
+            }
             self.req_to_block_hashes[request.request_id] = block_hashes
 
         if self.log_stats:
@@ -164,22 +171,20 @@ class KVCacheManager:
         #     last_block_hash = block_hashes.pop()
         # else:
         #     last_block_hash = None
-        last_block_hashs: list[Optional[BlockHashType]] = []
+        last_block_hashs: dict[int, BlockHashType] = {}
         for i in range(self.num_kv_cache_groups):
-            if len(
-                    block_hashes[i]
-            ) * self.specialized_managers[i].block_size == request.num_tokens:
-                last_block_hashs.append(block_hashes[i].pop())
-            else:
-                last_block_hashs.append(None)
+            block_size = self.specialized_managers[i].block_size
+            if len(block_hashes[block_size]
+                   ) * block_size == request.num_tokens:
+                last_block_hashs[block_size] = block_hashes[block_size].pop()
 
         computed_blocks, num_computed_tokens = self.find_longest_cache_hit(
             request.request_id, block_hashes)
 
         for i in range(self.num_kv_cache_groups):
-            last_block_hash = last_block_hashs[i]
-            if last_block_hash is not None:
-                block_hashes[i].append(last_block_hash)
+            block_size = self.specialized_managers[i].block_size
+            if block_size in last_block_hashs:
+                block_hashes[block_size].append(last_block_hashs[block_size])
         if self.log_stats:
             assert self.prefix_cache_stats is not None
 
@@ -326,17 +331,19 @@ class KVCacheManager:
         # not cache any speculated tokens. We only cache blocks with
         # generated (accepted) tokens.
         for i in range(self.num_kv_cache_groups):
+            block_size = self.specialized_managers[i].block_size
             num_full_blocks_after_append = (
-                num_computed_tokens + num_tokens - len(request.spec_token_ids)
-            ) // self.specialized_managers[i].block_size
+                num_computed_tokens + num_tokens -
+                len(request.spec_token_ids)) // block_size
 
             self.block_pool.cache_full_blocks(
                 request=request,
                 blocks=req_blocks[i],
-                block_hashes=self.req_to_block_hashes[request.request_id][i],
+                block_hashes=self.req_to_block_hashes[request.request_id]
+                [block_size],
                 num_cached_blocks=num_cached_blocks[i],
                 num_full_blocks=num_full_blocks_after_append,
-                block_size=self.specialized_managers[i].block_size,
+                block_size=block_size,
                 hash_fn=self.caching_hash_fn,
                 kv_cache_group_id=i,
             )
@@ -439,11 +446,18 @@ class KVCacheManager:
         self.req_to_block_hashes.pop(request.request_id, None)
 
     def find_longest_cache_hit(
-        self, request_id: str, block_hashes: list[list[BlockHashType]]
+        self, request_id: str, block_hashes_dict: dict[int,
+                                                       list[BlockHashType]]
     ) -> tuple[list[list[KVCacheBlock]], int]:
         """Find the longest cache hit for each kv cache group.
         TODO: add more notes
         """
+        if self.num_kv_cache_groups == 1:
+            block_size = self.kv_cache_config.kv_cache_groups[
+                0].kv_cache_spec.block_size
+            hit_blocks = self.specialized_managers[0].find_longest_cache_hit(
+                request_id, block_hashes_dict[block_size])
+            return [hit_blocks], len(hit_blocks) * block_size
         # TODO: accelerate by make full attention the first layer
         # TODO: add note for the two magic number
         num_computed_tokens = [self.max_model_len + 100] * len(
@@ -451,7 +465,10 @@ class KVCacheManager:
         min_computed_tokens = self.max_model_len
 
         # Use copy to avoid modifying the original block_hashes
-        block_hashes = [block_hash.copy() for block_hash in block_hashes]
+        block_hashes = [
+            block_hashes_dict[g.kv_cache_spec.block_size].copy()
+            for g in self.kv_cache_config.kv_cache_groups
+        ]
 
         def shrink_length(block_hashes, length):
             del block_hashes[length:]

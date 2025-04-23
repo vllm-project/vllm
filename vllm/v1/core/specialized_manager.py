@@ -20,17 +20,20 @@ class SpecializedManager(ABC):
         self,
         kv_cache_spec: KVCacheSpec,
         block_pool: BlockPool,
+        kv_cache_group_id: int,
     ) -> None:
         """
         Initializes the SpecializedManager.
         Args:
             kv_cache_spec: The kv_cache_spec for this manager.
             block_pool: The block pool.
+            kv_cache_group_id: The id of the kv cache group.
         """
 
         self.block_size = kv_cache_spec.block_size
         self.kv_cache_spec = kv_cache_spec
         self.block_pool = block_pool
+        self.kv_cache_group_id = kv_cache_group_id
         # for caching the intermediate states between multiple calls of
         # find_longest_cache_hit
         self.req_cached_blocks: dict[str, list[KVCacheBlock]] = {}
@@ -124,7 +127,7 @@ class FullAttentionManager(SpecializedManager):
                 # not in the cached_block_hash_to_id, the following block hashes
                 # are not computed yet for sure.
                 if cached_block := self.block_pool.get_cached_block(
-                        block_hash):
+                        block_hash, self.kv_cache_group_id):
                     computed_blocks.append(cached_block)
                 else:
                     break
@@ -141,9 +144,9 @@ class FullAttentionManager(SpecializedManager):
 
 class SlidingWindowManager(SpecializedManager):
 
-    def __init__(self, kv_cache_spec: SlidingWindowSpec,
-                 block_pool: BlockPool):
-        super().__init__(kv_cache_spec, block_pool)
+    def __init__(self, kv_cache_spec: SlidingWindowSpec, block_pool: BlockPool,
+                 kv_cache_group_id: int):
+        super().__init__(kv_cache_spec, block_pool, kv_cache_group_id)
         self.sliding_window = kv_cache_spec.sliding_window
         # The number of contiguous blocks needed for prefix cache hit.
         # -1 since the input token itself is also included in the window
@@ -176,7 +179,7 @@ class SlidingWindowManager(SpecializedManager):
         # Search from right to left and early stop when a match is found.
         for i in range(len(block_hashes) - num_contiguous_blocks - 1, -1, -1):
             if cached_block := self.block_pool.get_cached_block(
-                    block_hashes[i]):
+                    block_hashes[i], self.kv_cache_group_id):
                 computed_blocks[i] = cached_block
                 num_contiguous_blocks += 1
                 if (num_contiguous_blocks
@@ -218,8 +221,8 @@ spec_manager_map: dict[type[KVCacheSpec], type[SpecializedManager]] = {
 }
 
 
-def get_specialized_manager(kv_cache_spec: KVCacheSpec,
-                            block_pool: BlockPool) -> SpecializedManager:
+def get_specialized_manager(kv_cache_spec: KVCacheSpec, block_pool: BlockPool,
+                            kv_cache_group_id: int) -> SpecializedManager:
     manager_class = spec_manager_map[type(kv_cache_spec)]
-    manager = manager_class(kv_cache_spec, block_pool)
+    manager = manager_class(kv_cache_spec, block_pool, kv_cache_group_id)
     return manager
