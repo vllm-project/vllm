@@ -98,15 +98,24 @@ def device_id_to_physical_device_id(device_id: int) -> int:
         return device_id
 
 
+def on_navi() -> bool:
+    GPU_ARCH = torch.cuda.get_device_properties("cuda").gcnArchName
+    return "gfx1" in GPU_ARCH
+
+
+def on_mi250_mi300() -> bool:
+    GPU_ARCH = torch.cuda.get_device_properties("cuda").gcnArchName
+    return any(arch in GPU_ARCH for arch in ["gfx90a", "gfx942"])
+
+
 @cache
 def use_rocm_custom_paged_attention(qtype: torch.dtype, head_size: int,
                                     block_size: int, gqa_ratio: int,
                                     max_seq_len: int,
                                     sliding_window: int) -> bool:
 
-    GPU_ARCH = torch.cuda.get_device_properties("cuda").gcnArchName
-    ON_NAVI = "gfx1" in GPU_ARCH
-    ON_MI250_MI300 = any(arch in GPU_ARCH for arch in ["gfx90a", "gfx942"])
+    ON_NAVI = on_navi()
+    ON_MI250_MI300 = on_mi250_mi300()
 
     # rocm custom page attention not support on navi (gfx1*)
     # custom paged attn always supported on V0. On V1, requires sliding window
