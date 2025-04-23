@@ -312,6 +312,7 @@ class BackgroundResources:
     def __call__(self):
         """Clean up background resources."""
 
+        self.engine_dead = True
         for core_engine in self.core_engines:
             core_engine.close()
 
@@ -564,7 +565,7 @@ class SyncMPClient(MPClient):
         self._send_input(EngineCoreRequestType.ADD, request)
 
     def abort_requests(self, request_ids: list[str]) -> None:
-        if len(request_ids) > 0:
+        if request_ids and not self.resources.engine_dead:
             self._send_input(EngineCoreRequestType.ABORT, request_ids)
 
     def profile(self, is_start: bool = True) -> None:
@@ -735,7 +736,7 @@ class AsyncMPClient(MPClient):
         self._ensure_output_queue_task()
 
     async def abort_requests_async(self, request_ids: list[str]) -> None:
-        if len(request_ids) > 0:
+        if request_ids and not self.resources.engine_dead:
             await self._send_input(EngineCoreRequestType.ABORT, request_ids)
 
     async def profile_async(self, is_start: bool = True) -> None:
@@ -792,14 +793,11 @@ class DPAsyncMPClient(AsyncMPClient):
     def __init__(self, vllm_config: VllmConfig, executor_class: type[Executor],
                  log_stats: bool):
 
-        self.num_engines_running = 0
+        self.current_wave = 0
+        self.engines_running = False
         self.reqs_in_flight: dict[str, CoreEngine] = {}
 
         super().__init__(vllm_config, executor_class, log_stats)
-
-        # Control message used for triggering dp idle mode loop.
-        self.start_dp_msg = (EngineCoreRequestType.START_DP.value,
-                             *self.encoder.encode(None))
 
         assert len(self.core_engines) > 1
 
@@ -829,23 +827,23 @@ class DPAsyncMPClient(AsyncMPClient):
         # NOTE: text prompt is not needed in the core engine as it has been
         # tokenized.
         request.prompt = None
-
-        msg = (EngineCoreRequestType.ADD.value, *self.encoder.encode(request))
+        request.current_wave = self.current_wave
 
         chosen_engine = self.get_core_engine_for_request()
         self.reqs_in_flight[request.request_id] = chosen_engine
         chosen_engine.num_reqs_in_flight += 1
-        if self.num_engines_running >= len(self.core_engines):
-            await self._send_input_message(msg, chosen_engine)
-        else:
+
+        to_await = self._send_input(EngineCoreRequestType.ADD, request,
+                                    chosen_engine)
+        if not self.engines_running:
             # Send request to chosen engine and dp start loop
             # control message to all other engines.
-            self.num_engines_running += len(self.core_engines)
-            await asyncio.gather(*[
-                self._send_input_message(
-                    msg if engine is chosen_engine else self.start_dp_msg,
-                    engine) for engine in self.core_engines
-            ])
+            self.engines_running = True
+            to_await = asyncio.gather(
+                to_await,  # type: ignore[assignment]
+                *self._start_wave_coros(exclude_index=chosen_engine.index))
+
+        await to_await
 
         self._ensure_output_queue_task()
 
@@ -860,21 +858,31 @@ class DPAsyncMPClient(AsyncMPClient):
                 if engine := self.reqs_in_flight.pop(req_id, None):
                     engine.num_reqs_in_flight -= 1
 
-        if outputs.engine_paused:
-            assert self.num_engines_running >= 1
-            self.num_engines_running -= 1
-            if not self.num_engines_running and self.reqs_in_flight:
-                # If there are requests in flight here, they must have
-                # been sent after the engines paused. We must make
-                # sure to start the other engines:
-                self.num_engines_running = len(self.core_engines)
-                coros = [
-                    self._send_input_message(self.start_dp_msg, engine)
-                    for engine in self.core_engines
-                    if not engine.num_reqs_in_flight
-                ]
-                if coros:
-                    await asyncio.gather(*coros)
+        if outputs.wave_complete is not None:
+            # Current wave is complete, move to next wave number
+            # and mark engines as paused.
+            if self.current_wave <= outputs.wave_complete:
+                self.current_wave = outputs.wave_complete + 1
+                self.engines_running = False
+
+        elif outputs.start_wave is not None and (
+                outputs.start_wave > self.current_wave or
+            (outputs.start_wave == self.current_wave
+             and not self.engines_running)):
+            # Engine received request for a non-current wave so we must ensure
+            # that other engines progress to the next wave.
+            self.current_wave = outputs.start_wave
+            self.engines_running = True
+            await asyncio.gather(*self._start_wave_coros(
+                exclude_index=outputs.engine_index))
+
+    def _start_wave_coros(self, exclude_index: int) -> list[Awaitable[None]]:
+        logger.debug("Sending start DP wave %d.", self.current_wave)
+        return [
+            self._send_input(EngineCoreRequestType.START_DP_WAVE,
+                             self.current_wave, engine)
+            for engine in self.core_engines if engine.index != exclude_index
+        ]
 
     async def abort_requests_async(self, request_ids: list[str]) -> None:
         if not request_ids:
@@ -895,5 +903,6 @@ class DPAsyncMPClient(AsyncMPClient):
 
     async def _abort_requests(self, request_ids: list[str],
                               engine: CoreEngine) -> None:
-        await self._send_input(EngineCoreRequestType.ABORT, request_ids,
-                               engine)
+        if not self.resources.engine_dead:
+            await self._send_input(EngineCoreRequestType.ABORT, request_ids,
+                                   engine)
