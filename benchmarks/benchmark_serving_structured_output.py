@@ -11,7 +11,7 @@ On the client side, run:
         --model <your_model> \
         --dataset json \
         --structured-output-ratio 1.0 \
-        --structured-output-backend xgrammar \
+        --structured-output-backend auto \
         --request-rate 10 \
         --num-prompts 1000
 
@@ -51,7 +51,7 @@ try:
 except ImportError:
     from argparse import ArgumentParser as FlexibleArgumentParser
 
-from vllm.v1.structured_output.utils import (
+from vllm.v1.structured_output.backend_xgrammar import (
     has_xgrammar_unsupported_json_features)
 
 MILLISECONDS_TO_SECONDS_CONVERSION = 1000
@@ -997,12 +997,14 @@ if __name__ == "__main__":
                         type=float,
                         default=1.0,
                         help="Ratio of Structured Outputs requests")
-    parser.add_argument(
-        "--structured-output-backend",
-        type=str,
-        choices=["outlines", "lm-format-enforcer", "xgrammar", "guidance"],
-        default="xgrammar",
-        help="Backend to use for structured outputs")
+    parser.add_argument("--structured-output-backend",
+                        type=str,
+                        choices=[
+                            "outlines", "lm-format-enforcer", "xgrammar",
+                            "guidance", "auto"
+                        ],
+                        default="auto",
+                        help="Backend to use for structured outputs")
 
     args = parser.parse_args()
     main(args)
