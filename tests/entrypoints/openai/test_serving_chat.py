@@ -272,3 +272,23 @@ def test_serving_chat_could_load_correct_generation_config():
 
     assert mock_engine.generate.call_args.args[1].temperature == 0.0
     assert mock_engine.generate.call_args.args[1].repetition_penalty == 1.05
+
+    # Test cache_salt
+    req = ChatCompletionRequest(
+        model=MODEL_NAME,
+        messages=[{
+            "role": "user",
+            "content": "what is 1+1?"
+        }],
+    )
+
+    # By default cache_salt in the engine prompt is not set
+    with suppress(Exception):
+        asyncio.run(serving_chat.create_chat_completion(req))
+    assert "cache_salt" not in mock_engine.generate.call_args.args[0]
+
+    # Test with certain cache_salt
+    req.cache_salt = "test_salt"
+    with suppress(Exception):
+        asyncio.run(serving_chat.create_chat_completion(req))
+    assert mock_engine.generate.call_args.args[0]["cache_salt"] == "test_salt"

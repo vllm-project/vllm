@@ -1777,6 +1777,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
             mm_kwargs=mm_kwargs,
             mm_hashes=mm_hashes,
             mm_placeholders=mm_placeholder_ranges,
+            cache_salt=cache_salt,
         )
 
 
@@ -1789,7 +1790,7 @@ class EncDecMultiModalProcessor(BaseMultiModalProcessor[_I]):
         mm_data: MultiModalDataDict,
     ) -> Union[str, list[int]]:
         """
-        Create input prompt for the encoder. HF processor will be applied on 
+        Create input prompt for the encoder. HF processor will be applied on
         this prompt during profiling and generation.
         """
         raise NotImplementedError

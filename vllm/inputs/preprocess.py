@@ -17,7 +17,8 @@ from vllm.transformers_utils.tokenizer_group import TokenizerGroup
 
 from .data import (DecoderOnlyInputs, EncoderDecoderInputs, ProcessorInputs,
                    PromptType, SingletonInputs, SingletonPrompt, token_inputs)
-from .parse import is_explicit_encoder_decoder_prompt, parse_singleton_prompt
+from .parse import (ParsedStrPrompt, ParsedTextPrompt, ParsedTokensPrompt,
+                    is_explicit_encoder_decoder_prompt, parse_singleton_prompt)
 
 logger = init_logger(__name__)
 
@@ -235,6 +236,7 @@ class InputPreprocessor:
         mm_processor_kwargs: Optional[Mapping[str, object]],
         lora_request: Optional[LoRARequest],
         return_mm_hashes: bool = False,
+        cache_salt: Optional[str] = None,
     ) -> MultiModalInputs:
         """
         Apply the model's multi-modal processor to a multi-modal prompt,
@@ -254,8 +256,11 @@ class InputPreprocessor:
         if mm_processor_kwargs is None:
             mm_processor_kwargs = {}
 
-        return mm_processor.apply(prompt, mm_data, mm_processor_kwargs,
-                                  return_mm_hashes)
+        return mm_processor.apply(prompt,
+                                  mm_data,
+                                  mm_processor_kwargs,
+                                  return_mm_hashes,
+                                  cache_salt=cache_salt)
 
     async def _process_multimodal_async(
         self,
@@ -264,6 +269,7 @@ class InputPreprocessor:
         mm_processor_kwargs: Optional[Mapping[str, object]],
         lora_request: Optional[LoRARequest],
         return_mm_hashes: bool = False,
+        cache_salt: Optional[str] = None,
     ) -> MultiModalInputs:
         """Async version of :meth:`_process_multimodal`."""
         # At the moment on model (PrithviGeoSpatialMAE) requires to be
@@ -280,8 +286,29 @@ class InputPreprocessor:
         if mm_processor_kwargs is None:
             mm_processor_kwargs = {}
 
-        return mm_processor.apply(prompt, mm_data, mm_processor_kwargs,
-                                  return_mm_hashes)
+        return mm_processor.apply(prompt,
+                                  mm_data,
+                                  mm_processor_kwargs,
+                                  return_mm_hashes,
+                                  cache_salt=cache_salt)
+
+    def _get_prompt_data(parsed_prompt: Union[ParsedStrPrompt,
+                                              ParsedTextPrompt,
+                                              ParsedTokensPrompt]):
+        prompt_text = None
+        prompt_token_ids = None
+        token_type_ids = None
+
+        content = parsed_prompt["content"]
+        if parsed_prompt["type"] == "tokens":
+            prompt_token_ids = content.get("prompt_token_ids")
+            token_type_ids = content.get("token_type_ids")
+        elif parsed_prompt["type"] == "text":
+            prompt_text = content["prompt"]
+        else:
+            assert_never(parsed_prompt)
+
+        return prompt_text, prompt_token_ids, token_type_ids
 
     def _prompt_to_llm_inputs(
         self,
@@ -304,40 +331,35 @@ class InputPreprocessor:
         * :class:`SingletonInputs` instance
         """
         parsed = parse_singleton_prompt(prompt)
+        content = parsed["content"]
 
         if parsed["type"] == "str":
-            prompt_text = parsed["content"]
             prompt_token_ids = self._tokenize_prompt(
-                prompt_text,
+                content,
                 lora_request=lora_request,
                 tokenization_kwargs=tokenization_kwargs,
             )
 
             return token_inputs(
-                prompt=prompt_text,
+                prompt=content,
                 prompt_token_ids=prompt_token_ids,
             )
 
-        if parsed["type"] == "tokens":
-            tokens_content = parsed["content"]
+        prompt_text, prompt_token_ids, token_type_ids = self._get_prompt_data(
+            parsed)
 
-            prompt_token_ids = tokens_content["prompt_token_ids"]
-            token_type_ids = tokens_content.get("token_type_ids")
-            multi_modal_data = tokens_content.get("multi_modal_data")
-            mm_processor_kwargs = tokens_content.get("mm_processor_kwargs")
+        multi_modal_data = content.get("multi_modal_data")
+        mm_processor_kwargs = content.get("mm_processor_kwargs")
+        cache_salt = content.get("cache_salt")
 
-            if multi_modal_data is not None:
-                return self._process_multimodal(
-                    prompt_token_ids,
-                    multi_modal_data,
-                    mm_processor_kwargs,
-                    lora_request=lora_request,
-                    return_mm_hashes=return_mm_hashes,
-                )
-
-            return token_inputs(
-                prompt_token_ids=prompt_token_ids,
-                token_type_ids=token_type_ids,
+        if multi_modal_data is not None:
+            return self._process_multimodal(
+                prompt_token_ids if prompt_text is None else prompt_text,
+                multi_modal_data,
+                mm_processor_kwargs,
+                lora_request=lora_request,
+                return_mm_hashes=return_mm_hashes,
+                cache_salt=cache_salt,
             )
 
         if parsed["type"] == "text":
@@ -362,12 +384,12 @@ class InputPreprocessor:
                 tokenization_kwargs=tokenization_kwargs,
             )
 
-            return token_inputs(
-                prompt=prompt_text,
-                prompt_token_ids=prompt_token_ids,
-            )
-
-        assert_never(parsed)
+        return token_inputs(
+            prompt=prompt_text,
+            prompt_token_ids=prompt_token_ids,
+            token_type_ids=token_type_ids,
+            cache_salt=cache_salt,
+        )
 
     async def _prompt_to_llm_inputs_async(
         self,
@@ -378,65 +400,49 @@ class InputPreprocessor:
     ) -> SingletonInputs:
         """Async version of :meth:`_extract_prompt_components`."""
         parsed = parse_singleton_prompt(prompt)
+        content = parsed["content"]
 
         if parsed["type"] == "str":
-            prompt_text = parsed["content"]
             prompt_token_ids = await self._tokenize_prompt_async(
-                prompt_text,
+                prompt=content,
                 lora_request=lora_request,
                 tokenization_kwargs=tokenization_kwargs,
             )
 
             return token_inputs(
-                prompt=prompt_text,
+                prompt=content,
                 prompt_token_ids=prompt_token_ids,
             )
 
-        if parsed["type"] == "tokens":
-            tokens_content = parsed["content"]
+        prompt_text, prompt_token_ids, token_type_ids = self._get_prompt_data(
+            parsed)
 
-            prompt_token_ids = tokens_content["prompt_token_ids"]
-            multi_modal_data = tokens_content.get("multi_modal_data")
-            mm_processor_kwargs = tokens_content.get("mm_processor_kwargs")
+        multi_modal_data = content.get("multi_modal_data")
+        mm_processor_kwargs = content.get("mm_processor_kwargs")
+        cache_salt = content.get("cache_salt")
 
-            if multi_modal_data is not None:
-                return await self._process_multimodal_async(
-                    prompt_token_ids,
-                    multi_modal_data,
-                    mm_processor_kwargs,
-                    lora_request=lora_request,
-                    return_mm_hashes=return_mm_hashes,
-                )
+        if multi_modal_data is not None:
+            return await self._process_multimodal_async(
+                prompt_token_ids if prompt_text is None else prompt_text,
+                multi_modal_data,
+                mm_processor_kwargs,
+                lora_request=lora_request,
+                return_mm_hashes=return_mm_hashes,
+                cache_salt=cache_salt,
+            )
 
-            return token_inputs(prompt_token_ids=prompt_token_ids)
-
-        if parsed["type"] == "text":
-            text_content = parsed["content"]
-
-            prompt_text = text_content["prompt"]
-            multi_modal_data = text_content.get("multi_modal_data")
-            mm_processor_kwargs = text_content.get("mm_processor_kwargs")
-
-            if multi_modal_data is not None:
-                return await self._process_multimodal_async(
-                    prompt_text,
-                    multi_modal_data,
-                    mm_processor_kwargs,
-                    lora_request=lora_request,
-                    return_mm_hashes=return_mm_hashes,
-                )
-
-            prompt_token_ids = await self._tokenize_prompt_async(
+        if prompt_token_ids is None:
+            prompt_token_ids = self._tokenize_prompt_async(
                 prompt_text,
                 lora_request=lora_request,
             )
 
-            return token_inputs(
-                prompt=prompt_text,
-                prompt_token_ids=prompt_token_ids,
-            )
-
-        assert_never(parsed)
+        return token_inputs(
+            prompt=prompt_text,
+            prompt_token_ids=prompt_token_ids,
+            token_type_ids=token_type_ids,
+            cache_salt=cache_salt,
+        )
 
     def _build_enc_dec_llm_inputs(
         self,
