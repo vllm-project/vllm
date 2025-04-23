@@ -83,6 +83,8 @@ def generate_new_kernels():
             is_zp_float_list = [False]
             if dtype == "fp16" and scalar_type == "vllm::kU4" and \
                     group_blocks == 4:
+                # HQQ (is_zp_float = true) only supports
+                # 4bit quantization and fp16
                 is_zp_float_list.append(True)
 
             for is_zp_float in is_zp_float_list:
