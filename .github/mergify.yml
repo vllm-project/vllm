@@ -55,11 +55,19 @@ pull_request_rules:
   description: Automatically apply structured-output label
   conditions:
     - or:
+      - files~=^benchmarks/structured_schemas/
+      - files=benchmarks/benchmark_serving_structured_output.py
+      - files=benchmarks/run_structured_output_benchmark.sh
+      - files=docs/source/features/structured_outputs.md
+      - files=examples/offline_inference/structured_outputs.py
+      - files=examples/online_serving/openai_chat_completion_structured_outputs.py
+      - files=examples/online_serving/openai_chat_completion_structured_outputs_with_reasoning.py
       - files~=^vllm/model_executor/guided_decoding/
       - files=tests/model_executor/test_guided_processors.py
       - files=tests/entrypoints/llm/test_guided_generate.py
-      - files=benchmarks/benchmark_serving_guided.py
-      - files=benchmarks/benchmark_guided.py
+      - files~=^tests/v1/structured_output/
+      - files=tests/v1/entrypoints/llm/test_guided_generate.py
+      - files~=^vllm/v1/structured_output/
   actions:
     label:
       add:
