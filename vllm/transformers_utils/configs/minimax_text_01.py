@@ -3,6 +3,7 @@
 
 from transformers.configuration_utils import PretrainedConfig
 
+
 class MiniMaxText01Config(PretrainedConfig):
     model_type = "MiniMaxText01"
     keys_to_ignore_at_inference = ["past_key_values"]
