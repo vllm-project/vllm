@@ -180,8 +180,7 @@ class UsageMessage:
             self.gpu_count = torch_xla.runtime.world_size()
             self.gpu_type = torch_xla.tpu.tpu_type()
             self.gpu_memory_per_device = (
-                torch_xla.core.xla_model.get_memory_info().bytes_limit
-            )
+                torch_xla.core.xla_model.get_memory_info().bytes_limit)
             # except ImportError:
             # pass
         self.provider = _detect_cloud_provider()
