@@ -1,10 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import copy
-import threading
 import time
 import uuid
-from concurrent.futures import Future
+from concurrent.futures import Future, ThreadPoolExecutor
 
 import pytest
 from transformers import AutoTokenizer
@@ -244,32 +243,32 @@ def test_engine_core_concurrent_batches(monkeypatch: pytest.MonkeyPatch):
                 self, kv_cache_configs: list[KVCacheConfig]) -> None:
             super().initialize_from_config(kv_cache_configs)
 
-            # This executor actually can only run 1 batch at a time
-            self.semaphore = threading.Semaphore(1)
+            # Create a thread pool with a single worker
+            self.thread_pool = ThreadPoolExecutor(max_workers=1)
 
         def execute_model(
             self,
             scheduler_output,
         ) -> Future[ModelRunnerOutput]:
             """Make execute_model non-blocking."""
-            future: Future[ModelRunnerOutput] = Future()
 
-            def _thread_wrapper(scheduler_output, future):
-                with self.semaphore:
-                    output = self.collective_rpc("execute_model",
-                                                 args=(scheduler_output, ))
-                    # Make a copy because output[0] may be reused
-                    # by the next batch.
-                    output = copy.deepcopy(output[0])
-                    future.set_result(output)
+            def _execute():
+                output = self.collective_rpc("execute_model",
+                                             args=(scheduler_output, ))
+                # Make a copy because output[0] may be reused
+                # by the next batch.
+                return copy.deepcopy(output[0])
 
-            threading.Thread(target=_thread_wrapper,
-                             args=(scheduler_output, future)).start()
-            return future
+            # Use the thread pool instead of creating a new thread
+            return self.thread_pool.submit(_execute)
 
         @property
         def max_concurrent_batches(self) -> int:
             return 2
+
+        def shutdown(self):
+            if hasattr(self, 'thread_pool'):
+                self.thread_pool.shutdown(wait=False)
 
     with monkeypatch.context() as m:
         m.setenv("VLLM_USE_V1", "1")
@@ -340,7 +339,7 @@ def test_engine_core_concurrent_batches(monkeypatch: pytest.MonkeyPatch):
         assert scheduler_output.num_scheduled_tokens[0] == 1
 
         # Batch queue is full. Finish Batch 3. Get first token of req1.
-        engine_core.step_with_batch_queue()
+        output = engine_core.step_with_batch_queue()
         assert output is not None
         assert len(output.outputs) == 1
         assert engine_core.scheduler.requests[req1.request_id].num_tokens == 13
