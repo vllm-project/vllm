@@ -9,7 +9,7 @@ import torch
 from vllm.config import (CacheConfig, DeviceConfig, ModelConfig, ParallelConfig, VllmConfig)
 from vllm.logger import init_logger
 from vllm.model_executor.layers.sampler import SamplerOutput
-from vllm.sequence import ExecuteModelRequest, SequenceGroup
+from vllm.sequence import ExecuteModelRequest
 from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE, get_dtype_size, LayerBlockType
 from vllm.worker.worker import raise_if_cache_size_invalid
 from vllm.worker.tt_model_runner import TTModelRunner, TTModelInput
@@ -362,12 +362,6 @@ class TTWorker(LoRANotSupportedWorkerBase, LocalOrDistributedWorkerBase):
 
         # output is List[SamplerOutput]
         return output
-    
-    def validate_seq_group(self, seq_group: SequenceGroup) -> None:
-         '''
-         Validate the sequence group before it is scheduled for execution in LLMEngine::_add_processed_request.
-         '''
-         self.model_runner.validate_seq_group(seq_group)
     
     # TT-NN utilities
     

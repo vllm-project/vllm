@@ -1,13 +1,18 @@
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Optional, Union
 
 import torch
+
+from vllm.inputs import ProcessorInputs, PromptType
+from vllm.sampling_params import SamplingParams
 
 from .interface import Platform, PlatformEnum
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
+    from vllm.pooling_params import PoolingParams
 else:
     VllmConfig = None
+    PoolingParams = None
 
 
 class TTPlatform(Platform):
@@ -36,3 +41,24 @@ class TTPlatform(Platform):
         parallel_config = vllm_config.parallel_config
         if parallel_config.worker_cls == "auto":
             parallel_config.worker_cls = "vllm.worker.tt_worker.TTWorker"
+    
+    @classmethod
+    def validate_request(
+        cls,
+        prompt: PromptType,
+        params: Union[SamplingParams, PoolingParams],
+        processed_inputs: ProcessorInputs,
+    ) -> None:
+        """Raises if this request is unsupported on this platform"""
+        
+        if isinstance(params, SamplingParams):
+            if params.n != 1:
+                raise ValueError(f"Currently only supporting n=1 on {cls.device_name}.")
+            if params.best_of is not None:
+                raise ValueError(f"Currently not supporting best_of on {cls.device_name}")
+            if params.logprobs is not None:
+                raise ValueError(f"Currently not supporting logprobs on {cls.device_name}")
+            if params.prompt_logprobs is not None:
+                raise ValueError(f"Currently not supporting prompt_logprobs on {cls.device_name}")
+            if params.guided_decoding is not None:
+                raise ValueError(f"Currently not supporting guided decoding on {cls.device_name}")

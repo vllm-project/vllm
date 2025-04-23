@@ -12,7 +12,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.model_executor.model_loader.tt_loader import TTModelLoader
 from vllm.model_executor.models import supports_multimodal
-from vllm.sequence import IntermediateTensors, SequenceGroupMetadata, Logprob, SequenceOutput, CompletionSequenceGroupOutput, SequenceGroup
+from vllm.sequence import IntermediateTensors, SequenceGroupMetadata, Logprob, SequenceOutput, CompletionSequenceGroupOutput
 from vllm.worker.model_runner_base import ModelRunnerBase, ModelRunnerInputBase
 from vllm.utils import make_tensor_with_pad
 
@@ -145,26 +145,6 @@ class TTModelRunner(ModelRunnerBase[TTModelInput]):
         return TTModelInput.from_broadcasted_tensor_dict(
             tensor_dict,
         )
-
-    def validate_seq_group(self, seq_group: SequenceGroup) -> None:
-        '''
-        Validate a sequence group before it is scheduled for execution.
-        Called by TTExecutor::validate_seq_group before the sequence group 
-        is scheduled for execution in LLMEngine::_add_processed_request.
-        '''
-        
-        sampling_params = seq_group.sampling_params
-        
-        if seq_group.num_seqs() != 1:
-            raise ValueError("Currently only supporting one sequence per request group")
-        if sampling_params.n != 1:
-            raise ValueError("Currently only supporting n=1")
-        if sampling_params.best_of is not None:
-            raise ValueError("Currently not supporting best_of")
-        if sampling_params.logprobs is not None:
-            raise ValueError("Currently not supporting logprobs")
-        if sampling_params.prompt_logprobs is not None:
-            raise ValueError("Currently not supporting prompt_logprobs")
 
     def prepare_model_input(
             self,
