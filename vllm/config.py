@@ -3663,8 +3663,9 @@ class PaddingConfig:
                 self.padding_gap, 8)
             self.min_token_size = 8
             self.num_token_paddings = [1, 2, 4]
-        elif current_platform.is_tpu():
-            self.padding_gap = 0 if self.padding_gap is None else self.padding_gap
+        else:
+            self.padding_gap = 0 if self.padding_gap is None \
+                else self.padding_gap
             self.min_token_size = 16
             self.num_token_paddings = []
 
@@ -3704,9 +3705,8 @@ class PaddingConfig:
                         break
                     padding_gap *= 2
                 if (padding_gap != self.padding_gap):
-                    print(
-                        f"adjust padding_gap from {self.padding_gap} to {padding_gap}"
-                    )
+                    print(f"adjust padding_gap from {self.padding_gap} \
+                        to {padding_gap}")
                     self.padding_gap = padding_gap
             while num <= padding_gap:
                 self.num_token_paddings.append(num)

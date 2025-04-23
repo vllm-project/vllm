@@ -544,8 +544,8 @@ class TPUModelRunner:
             num_scheduled_tokens_per_req)
 
         # Do the padding and copy the tensors to the TPU.
-        padded_total_num_scheduled_tokens = self.padding_config.get_padded_token_len(
-            total_num_scheduled_tokens)
+        padded_total_num_scheduled_tokens = \
+            self.padding_config.get_padded_token_len(total_num_scheduled_tokens)
         # Zero out to avoid spurious values from prev iteration (last cp chunk)
         self.input_ids_cpu[
             total_num_scheduled_tokens:padded_total_num_scheduled_tokens] = 0

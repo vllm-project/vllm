@@ -821,8 +821,8 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
                                         max_encoder_seq_len):
             return -1
 
-        graph_batch_size = self.runner.vllm_config.padding_config.get_padded_token_len(
-            batch_size)
+        graph_batch_size = self.runner.vllm_config.padding_config.\
+            get_padded_token_len(batch_size)
         assert graph_batch_size >= batch_size
         return graph_batch_size - batch_size
 

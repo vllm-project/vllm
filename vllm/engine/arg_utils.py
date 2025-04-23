@@ -23,10 +23,10 @@ from vllm.config import (BlockSize, CacheConfig, CacheDType, CompilationConfig,
                          KVTransferConfig, LoadConfig, LoadFormat, LoRAConfig,
                          ModelConfig, ModelImpl, MultiModalConfig,
                          ObservabilityConfig, PaddingConfig, ParallelConfig,
-                         PoolerConfig, PoolType, PrefixCachingHashAlgo, PromptAdapterConfig,
-                         SchedulerConfig, SchedulerPolicy, SpeculativeConfig,
-                         TaskOption, TokenizerPoolConfig, VllmConfig,
-                         get_attr_docs, get_field)
+                         PoolerConfig, PoolType, PrefixCachingHashAlgo,
+                         PromptAdapterConfig, SchedulerConfig, SchedulerPolicy,
+                         SpeculativeConfig, TaskOption, TokenizerPoolConfig,
+                         VllmConfig, get_attr_docs, get_field)
 from vllm.executor.executor_base import ExecutorBase
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS
@@ -972,21 +972,16 @@ class EngineArgs:
                             "(only cuda platform is supported)")
 
         parser.add_argument(
-            '--calculate-kv-scales',
-            action='store_true',
-            help='This enables dynamic calculation of '
-            'k_scale and v_scale when kv-cache-dtype is fp8. '
-            'If calculate-kv-scales is false, the scales will '
-            'be loaded from the model checkpoint if available. '
-            'Otherwise, the scales will default to 1.0.')
-
-        parser.add_argument(
             '--padding-gap',
             type=int,
             default=EngineArgs.padding_gap,
-            help=
-            'the padding gap between fixed token lengths, we pad the request into a list of fixed length to save compilation time'
-            'if set to 0, we do exponential padding (always pad to the power of 2), if set to other numbers, we do incremental padding with padding_gap'
+            help="the padding gap between fixed token lengths, " \
+            "we pad the request into a list of fixed length " \
+            "to save from recompilation during model executing." \
+            "if set to 0, we do exponential padding " \
+            "(always pad to the power of 2), " \
+            "if set to other numbers," \
+            " we do incremental padding with padding_gap."
         )
 
         parser.add_argument(
