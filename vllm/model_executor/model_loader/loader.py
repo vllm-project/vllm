@@ -79,6 +79,8 @@ def device_loading_context(module: torch.nn.Module,
     for name, p in module.named_parameters():
         if p.device.type == "cpu":
             original_device_states[name] = p.device
+            # Disable for SPMD for now, may need to hack target device to be cpu
+            # for spmd path.
             p.data = p.data.to(target_device)
         # Parameters already on target device are not touched
 
@@ -447,13 +449,24 @@ class DefaultModelLoader(BaseModelLoader):
         device_config = vllm_config.device_config
         model_config = vllm_config.model_config
         target_device = torch.device(device_config.device)
+        # TODO read use_spmd from a env var.
+        use_spmd = True
+        if use_spmd:
+            target_device = torch.device("cpu")
         with set_default_torch_dtype(model_config.dtype):
             with target_device:
                 model = _initialize_model(vllm_config=vllm_config)
+            # orig_device = target_device
+            # target_device = torch.device("cpu")
+            # # For SPMD we init model on CPU, then use mark_sharding to shard
+            # # model and move shards to TPU.
+            # model = _initialize_model(vllm_config=vllm_config)
 
+            # Load full weights to CPU for now
             weights_to_load = {name for name, _ in model.named_parameters()}
             loaded_weights = model.load_weights(
                 self.get_all_weights(model_config, model))
+            logger.info(f"model type {type(model)}")
             self.counter_after_loading_weights = time.perf_counter()
             logger.info(
                 "Loading weights took %.2f seconds",
@@ -469,6 +482,10 @@ class DefaultModelLoader(BaseModelLoader):
                         f"checkpoint: {weights_not_loaded}")
 
             _process_weights_after_loading(model, model_config, target_device)
+
+            if use_spmd:
+                model = model.to('xla')
+                model.model = torch.compile(model.model, backend="openxla")
 
         return model.eval()
 
