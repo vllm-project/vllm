@@ -70,7 +70,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 
 # TESTING: install xformers from source to test 2.7.0 final RC
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv pip install --system -v -U --no-build-isolation git+https://github.com/facebookresearch/xformers.git@main#egg=xformers
+    uv pip install --system "git+https://github.com/facebookresearch/xformers@main#egg=xformers"
 
 # cuda arch list used by torch
 # can be useful for both `dev` and `test`
@@ -243,11 +243,16 @@ RUN --mount=type=bind,from=build,src=/workspace/dist,target=/vllm-workspace/dist
 RUN --mount=type=cache,target=/root/.cache/uv \
 . /etc/environment && \
 if [ "$TARGETPLATFORM" != "linux/arm64" ]; then \
-    uv pip install --system https://github.com/flashinfer-ai/flashinfer/releases/download/v0.2.1.post2/flashinfer_python-0.2.1.post2+cu124torch2.6-cp38-abi3-linux_x86_64.whl ; \
+    # TESTING: install xformers from source to test 2.7.0 final RC
+    uv pip install --system "git+https://github.com/flashinfer-ai/flashinfer@main" ; \
 fi
 COPY examples examples
 COPY benchmarks benchmarks
 COPY ./vllm/collect_env.py .
+
+RUN --mount=type=cache,target=/root/.cache/uv \
+. /etc/environment && \
+uv pip list
 
 # Although we build Flashinfer with AOT mode, there's still
 # some issues w.r.t. JIT compilation. Therefore we need to
