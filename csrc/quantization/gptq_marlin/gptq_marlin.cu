@@ -512,7 +512,6 @@ void marlin_mm(const void* A, const void* B, void* C, void* C_tmp, void* s,
                          cudaDevAttrMaxSharedMemoryPerBlockOptin, dev);
   TORCH_CHECK(max_shared_mem > 0);
 
-  int m_split_sizes[2] = {prob_m / 64 * 64, prob_m - prob_m / 64 * 64};
   int max_par = 16;
   if (prob_n <= 4096) max_par = 16 * 8;
 

@@ -656,11 +656,6 @@ __global__ void Marlin(
       stages * (g_idx_stage + zp_sh_stage) + sh_s_size +
       (sh_red_size > sh_b_size ? sh_red_size : sh_b_size);
 
-  // all remaining shared memory is used to cache A (input)
-  // sh_a_max_row is at least ` stages * 16 * thread_m_blocks `
-  int sh_a_max_row =
-      (max_shared_mem / 16 - shm_size_used) / (thread_k_blocks * 2);
-
   // Register storage for double buffer of shared memory reads.
   FragA frag_a[2][thread_m_blocks];
   I4 frag_b_quant[2][b_thread_vecs];
@@ -1643,7 +1638,6 @@ __global__ void Marlin(
       if (last || use_atomic_add)
         // only the last block in a slice actually writes the result
         write_result();
-      int old_slice_row = slice_row;
       slice_row = 0;
       slice_col_par++;
       slice_col++;
