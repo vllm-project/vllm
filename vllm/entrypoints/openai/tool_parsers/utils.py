@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
+import decimal
 import json
 from json import JSONDecodeError, JSONDecoder
 from typing import Any
@@ -121,3 +122,9 @@ def consume_space(i: int, s: str) -> int:
     while i < len(s) and s[i].isspace():
         i += 1
     return i
+
+
+def decimal_default(obj):
+    if isinstance(obj, decimal.Decimal):
+        return float(obj)
+    raise TypeError

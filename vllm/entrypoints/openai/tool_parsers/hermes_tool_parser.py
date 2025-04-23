@@ -15,6 +15,7 @@ from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
                                               FunctionCall, ToolCall)
 from vllm.entrypoints.openai.tool_parsers.abstract_tool_parser import (
     ToolParser, ToolParserManager)
+from vllm.entrypoints.openai.tool_parsers.utils import decimal_default
 from vllm.logger import init_logger
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.utils import random_uuid
@@ -209,8 +210,9 @@ class Hermes2ProToolParser(ToolParser):
                     id=f"chatcmpl-tool-{random_uuid()}",
                     function=DeltaFunctionCall(
                         name=function_name,
-                        arguments=json.dumps(arguments)).model_dump(
-                            exclude_none=True))
+                        arguments=json.dumps(
+                            arguments, default=decimal_default)).model_dump(
+                                exclude_none=True))
                 delta_tool_calls.append(delta_tool_call)
                 self.current_tool_id += 1
             else:
