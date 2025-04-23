@@ -9,15 +9,24 @@ from torch import nn, softmax
 from torch.nn import functional as F
 from torch.nn.functional import gumbel_softmax, pad
 
+from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
 from vllm.transformers_utils.configs.ovis2 import (AIMv2Config,
                                                    Aimv2VisualTokenizerConfig)
-from vllm.transformers_utils.processor import cached_get_image_processor
 
 IMAGE_INDICATOR_IDS = [-301, -302, -303, -304,
                        -305]  # kept for vocab prefixed tokens
+
+
+def st_argmax(y_soft: torch.Tensor, dim: int):  # straight-through softmax
+    index = y_soft.max(dim, keepdim=True)[1]
+    y_hard = torch.zeros_like(
+        y_soft, memory_format=torch.legacy_contiguous_format).scatter_(
+            dim, index, 1.0)
+    ret = y_hard - y_soft.detach() + y_soft
+    return ret
 
 
 class Aimv2VisualTokenizer(torch.nn.Module):
@@ -28,16 +37,13 @@ class Aimv2VisualTokenizer(torch.nn.Module):
                  prefix: str = "",
                  **kwargs):
         super().__init__()
-        self.image_processor = cached_get_image_processor(
-            kwargs['image_processor_name_or_path'], trust_remote_code=True)
         self.config = config
-        self.image_processor.do_center_crop = False
         self.backbone = AIMv2Model(
             config=config.backbone_config,  # noqa
             quant_config=quant_config,
             prefix=f"{prefix}.visual_tokenizer")
-        head_dim = config.vocab_size - len(
-            IMAGE_INDICATOR_IDS)  # reserved tokens for IMAGE_INDICATORS
+        # reserved tokens for IMAGE_INDICATORS
+        head_dim = config.vocab_size - len(IMAGE_INDICATOR_IDS)
         self.head = torch.nn.Sequential(
             ReplicatedLinear(
                 config.backbone_config.hidden_size * config.hidden_stride *
@@ -45,13 +51,6 @@ class Aimv2VisualTokenizer(torch.nn.Module):
                 head_dim,
                 bias=False,
             ), torch.nn.LayerNorm(head_dim))
-
-        assert all((self.image_processor.do_resize,
-                    not getattr(self.image_processor, 'do_center_crop', False),
-                    self.image_processor.do_rescale,
-                    self.image_processor.do_normalize)), (
-                        f"image_processor `{self.image_processor}`"
-                        "is not supported currently")
 
     @property
     def dtype(self):
@@ -61,28 +60,7 @@ class Aimv2VisualTokenizer(torch.nn.Module):
     def device(self):
         return self.backbone.device
 
-    def get_backbone(self):
-        return self.backbone
-
-    def get_image_processor(self):
-        return self.image_processor
-
-    def get_head(self):
-        return self.head
-
-    def get_image_size(self):
-        raise NotImplementedError
-
     def tokenize(self, logits):
-
-        def st_argmax(y_soft, dim):  # straight-through softmax
-            index = y_soft.max(dim, keepdim=True)[1]
-            y_hard = torch.zeros_like(
-                y_soft, memory_format=torch.legacy_contiguous_format).scatter_(
-                    dim, index, 1.0)
-            ret = y_hard - y_soft.detach() + y_soft
-            return ret
-
         if self.config.tokenize_function == 'softmax':
             tokens = softmax(logits, dim=-1)
         elif self.config.tokenize_function == 'gumbel_argmax':
@@ -120,10 +98,11 @@ class Aimv2VisualTokenizer(torch.nn.Module):
                                         self.config.hidden_stride,
                                         sqrt_l // self.config.hidden_stride,
                                         self.config.hidden_stride, d)
-            features = features.permute(
-                0, 1, 3, 2, 4, 5)  # [n, sqrt_l/hs, sqrt_l/hs, hs, hs, d]
-            features = features.flatten(
-                3)  # [n, sqrt_l/hs, sqrt_l/hs, hs*hs*d]
+            # [n, sqrt_l/hs, sqrt_l/hs, hs, hs, d]
+            features = features.permute(0, 1, 3, 2, 4, 5)
+            # [n, sqrt_l/hs, sqrt_l/hs, hs*hs*d]
+            features = features.flatten(3)
+            # [n, sqrt_l/hs*sqrt_l/hs, hs*hs*d]
             features = features.reshape(
                 n, -1,
                 self.config.hidden_stride * self.config.hidden_stride * d)
@@ -149,24 +128,6 @@ class Aimv2VisualTokenizer(torch.nn.Module):
                                      requires_grad=False)
         tokens = torch.cat((tokens, padding_tensor), dim=2)
         return tokens
-
-
-class RMSNorm(nn.Module):
-
-    def __init__(self, dim: int, eps: float = 1e-6):
-        super().__init__()
-        self.weight = nn.Parameter(torch.ones(dim))
-        self.eps = eps
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        output = self._norm(x.float()).type_as(x)
-        return output * self.weight
-
-    def extra_repr(self) -> str:
-        return f"{tuple(self.weight.shape)}, eps={self.eps}"
-
-    def _norm(self, x: torch.Tensor) -> torch.Tensor:
-        return x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps)
 
 
 class AIMv2SwiGLUFFN(nn.Module):
@@ -217,7 +178,7 @@ class AIMv2PatchEmbed(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = self.proj(x).flatten(2).transpose(1, 2)
-        x = self.norm(x)
+        x = self.norm.forward_native(x)
         return x
 
 
@@ -298,8 +259,8 @@ class AIMv2Block(nn.Module):
     def forward(self,
                 x: torch.Tensor,
                 mask: Optional[torch.Tensor] = None) -> torch.Tensor:
-        x = x + self.attn(self.norm_1(x), mask)
-        x = x + self.mlp(self.norm_2(x))
+        x = x + self.attn(self.norm_1.forward_native(x), mask)
+        x = x + self.mlp(self.norm_2.forward_native(x))
         return x
 
 

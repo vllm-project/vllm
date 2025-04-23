@@ -227,8 +227,7 @@ class Ovis2ForConditionalGeneration(nn.Module, SupportsMultiModal):
 
         self.vte = VisualEmbedding(
             self.config.visual_tokenizer_config.vocab_size,
-            self.config.hidden_size,
-            dtype=self.visual_tokenizer.dtype)
+            self.config.hidden_size)
 
         # TODO(Isotr0py): PP support
         # self.make_empty_intermediate_tensors = (
