@@ -235,7 +235,7 @@ class EagleProposer:
 # NOTE(woosuk): Currently, the below code is not used and we always use argmax
 # to sample the draft tokens. We will use this after we find a way to manage
 # the draft prob tensor.
-# Refer to https://github.com/vllm-project/vllm/pull/16899
+# Refer to https://github.com/vllm-project/vllm/pull/16899 for the details.
 # FIXME(woosuk): The logic here is duplicated with the main sampling code.
 # We should refactor this to reuse the same sampling implementation.
 def compute_probs_and_sample_next_token(
