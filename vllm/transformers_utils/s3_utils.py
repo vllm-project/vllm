@@ -45,12 +45,7 @@ def glob(s3=None,
         list[str]: List of full S3 paths allowed by the pattern
     """
     if s3 is None:
-        s3 = boto3.client(
-            's3',
-            aws_access_key_id=os.getenv("AWS_ACCESS_KEY_ID"),
-            aws_secret_access_key=os.getenv("AWS_SECRET_ACCESS_KEY"),
-            endpoint_url=os.getenv("AWS_ENDPOINT_URL"),
-            region_name=os.getenv("AWS_REGION_NAME"))
+        s3 = boto3.client("s3")
     if not path.endswith("/"):
         path = path + "/"
     bucket_name, _, paths = list_files(s3,
@@ -112,12 +107,7 @@ class S3Model:
     """
 
     def __init__(self) -> None:
-        self.s3 = boto3.client(
-            's3',
-            aws_access_key_id=os.getenv("AWS_ACCESS_KEY_ID"),
-            aws_secret_access_key=os.getenv("AWS_SECRET_ACCESS_KEY"),
-            endpoint_url=os.getenv("AWS_ENDPOINT_URL"),
-            region_name=os.getenv("AWS_REGION_NAME"))
+        self.s3 = boto3.client('s3')
         for sig in (signal.SIGINT, signal.SIGTERM):
             existing_handler = signal.getsignal(sig)
             signal.signal(sig, self._close_by_signal(existing_handler))
