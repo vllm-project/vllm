@@ -644,9 +644,8 @@ __global__ void Marlin(
   int4* sh_red = sh;
   int4* sh_g_idx = sh_b + (sh_red_size > sh_b_size ? sh_red_size : sh_b_size);
   int4* sh_zp = sh_g_idx + (stages * g_idx_stage);
-  constexpr int sh_s_size = has_act_order
-                                ? (act_s_max_num_groups * s_sh_stride)
-                                : (stages * s_sh_stage);
+  constexpr int sh_s_size = has_act_order ? (act_s_max_num_groups * s_sh_stride)
+                                          : (stages * s_sh_stage);
   int4* sh_s = sh_zp + (stages * zp_sh_stage);
   // shared memory reused by reduction should be smaller than
   // shared memory used by weight.
