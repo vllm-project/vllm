@@ -311,8 +311,8 @@ class QuarkConfig(QuantizationConfig):
         to_dict = lambda obj: cast(Dict[str, Any], obj) or {}
         return any([
             'fp8' in to_dict(
-                to_dict(layer_quant_config.get(layer_name)).get("weight")).get(
-                    "dtype")
+                to_dict(to_dict(layer_quant_config).get(layer_name)).get(
+                    "weight")).get("dtype")
             for layer_name in ["*v_proj", "*k_proj", "*q_proj"]
         ])
 
