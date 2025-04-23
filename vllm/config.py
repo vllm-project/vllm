@@ -2738,7 +2738,7 @@ class PromptAdapterConfig:
             self.max_cpu_prompt_adapters = self.max_prompt_adapters
 
     def verify_with_model_config(self, model_config: ModelConfig):
-        if self.prompt_adapter_dtype in (None, "auto"):
+        if self.prompt_adapter_dtype == "auto":
             self.prompt_adapter_dtype = model_config.dtype
         elif isinstance(self.prompt_adapter_dtype, str):
             self.prompt_adapter_dtype = getattr(torch,
