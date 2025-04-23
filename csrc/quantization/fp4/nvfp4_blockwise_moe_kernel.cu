@@ -33,15 +33,6 @@
 #define DEBUG
 using namespace cute;
 
-static int getSMVersion()
-{
-  int device;
-  cudaGetDevice(&device);
-  cudaDeviceProp deviceProp;
-  cudaGetDeviceProperties(&deviceProp, device);
-  return deviceProp.major * 10 + deviceProp.minor;
-}
-
 
 template <typename ElementAB, typename ElementC, typename ElementSF, typename ElementAccumulator, typename LayoutSFA, typename LayoutSFB, typename ScaleConfig>
 __global__ void __get_group_gemm_starts(
@@ -153,22 +144,6 @@ void run_get_group_gemm_starts(
 }
 
 
-#ifdef DEBUG
-template <typename T>
-void print(const torch::Tensor& tensor, std::string text){
-   torch::Tensor cpu_tensor = tensor.cpu();
-   std::cout << "Printing: " ;
-   auto data = cpu_tensor.data_ptr<T>(); 
-   auto num_elements = cpu_tensor.numel();
-   std::cout << text << " [" <<num_elements <<"]:\n";
-   for (decltype(num_elements) i = 0; i < num_elements; ++i)
-    {
-      std::cout << "  " << std::hex << std::showbase << reinterpret_cast<void *>(data[i]) << std::endl;
-    }
-    std::cout << std::dec; // Reset number formatting
-}
-#endif
-
 template <typename OutType>
 void run_fp4_blockwise_scaled_group_mm(
     torch::Tensor &output,
@@ -177,11 +152,11 @@ void run_fp4_blockwise_scaled_group_mm(
     const torch::Tensor &a_blockscale,
     const torch::Tensor &b_blockscales,
     const torch::Tensor &alphas,
-    const torch::Tensor &stride_a,
-    const torch::Tensor &stride_b,
-    const torch::Tensor &stride_c,
-    const torch::Tensor &layout_sfa,
-    const torch::Tensor &layout_sfb,
+    // const torch::Tensor &stride_a,
+    // const torch::Tensor &stride_b,
+    // const torch::Tensor &stride_c,
+    // const torch::Tensor &layout_sfa_old,
+    // const torch::Tensor &layout_sfb_old,
     const torch::Tensor &problem_sizes,
     const torch::Tensor &expert_offsets,
     const torch::Tensor &sf_offsets,
@@ -264,6 +239,11 @@ void run_fp4_blockwise_scaled_group_mm(
   torch::Tensor a_scales_ptrs = torch::empty(num_experts, options_int);
   torch::Tensor b_scales_ptrs = torch::empty(num_experts, options_int);
   torch::Tensor alpha_ptrs = torch::empty(num_experts, options_int);
+  torch::Tensor layout_sfa = torch::empty({num_experts, 5}, options_int);
+  torch::Tensor layout_sfb = torch::empty({num_experts, 5}, options_int);
+  torch::Tensor c_strides1 = torch::full({num_experts}, output.stride(0), options_int);
+  torch::Tensor a_strides1 = torch::full({num_experts}, a.stride(0) * 2, options_int);
+  torch::Tensor b_strides1 = torch::full({num_experts}, b.stride(1) * 2, options_int);
 
   run_get_group_gemm_starts<LayoutSFA, LayoutSFB, ScaleConfig>(
           a_ptrs, b_ptrs, out_ptrs, a_scales_ptrs,
@@ -271,17 +251,6 @@ void run_fp4_blockwise_scaled_group_mm(
           a, b, output, a_blockscale, b_blockscales,
           alphas, expert_offsets, sf_offsets, problem_sizes, M, N, K);
  
-  #ifdef DEBUG
-  // {
-  //   print<int64_t>(a_ptrs, "a_ptrs");
-  //   print<int64_t>(b_ptrs, "b_ptrs");
-  //   print<int64_t>(out_ptrs, "out_ptrs");
-  //   print<int64_t>(a_scales_ptrs, "a_scales_ptrs");
-  //   print<int64_t>(b_scales_ptrs, "b_scales_ptrs");
-  //   print<int64_t>(b_scales_ptrs, "alpha_ptrs");
-  // }
-  #endif
-
   // Create an instance of the GEMM
   Gemm gemm_op;
 
@@ -295,17 +264,20 @@ void run_fp4_blockwise_scaled_group_mm(
   scheduler.raster_order = RasterOrderOptions::AlongM;
   hw_info.device_id = a.get_device();
   hw_info.cluster_shape = 2;
-  hw_info.cluster_shape_fallback = 2; 
-  static auto mp_sm_count = cutlass::KernelHardwareInfo::query_device_multiprocessor_count(hw_info.device_id);
-  int max_sm_count = INT_MAX;
-  hw_info.sm_count = min(mp_sm_count, max_sm_count);
+  hw_info.cluster_shape_fallback = 2;
+  static std::unordered_map<int, int> cached_sm_counts;
+  if (cached_sm_counts.find(hw_info.device_id) == cached_sm_counts.end()) {
+    cached_sm_counts[hw_info.device_id] =
+       cutlass::KernelHardwareInfo::query_device_multiprocessor_count(hw_info.device_id);
+  }
+  hw_info.sm_count = min(cached_sm_counts[hw_info.device_id], INT_MAX);
 
   // Mainloop Arguments
   typename GemmKernel::MainloopArguments mainloop_args{
       static_cast<const ElementType **>(a_ptrs.data_ptr()), 
-      static_cast<StrideA *>(stride_a.data_ptr()),
+      static_cast<StrideA *>(a_strides1.data_ptr()),
       static_cast<const ElementType **>(b_ptrs.data_ptr()),
-      static_cast<StrideB *>(stride_b.data_ptr()),
+      static_cast<StrideB *>(b_strides1.data_ptr()),
       static_cast<const ElementSFType **>(a_scales_ptrs.data_ptr()),
       reinterpret_cast<LayoutSFA *>(layout_sfa.data_ptr()),
       static_cast<const ElementSFType **>(b_scales_ptrs.data_ptr()),
@@ -316,9 +288,9 @@ void run_fp4_blockwise_scaled_group_mm(
   typename GemmKernel::EpilogueArguments epilogue_args{
       {}, //epilogue.thread
       nullptr,
-      static_cast<StrideC *>(stride_c.data_ptr()),
+      static_cast<StrideC *>(c_strides1.data_ptr()),
       static_cast<ElementD **>(out_ptrs.data_ptr()),
-      static_cast<StrideC *>(stride_c.data_ptr())};
+      static_cast<StrideC *>(c_strides1.data_ptr())};
   auto& fusion_args = epilogue_args.thread;
   fusion_args.alpha_ptr_array = reinterpret_cast<float **>(alpha_ptrs.data_ptr()); 
   fusion_args.dAlpha = {_0{}, _0{}, 1};
@@ -359,22 +331,30 @@ constexpr auto SF_DTYPE = at::ScalarType::Float8_e4m3fn;
   CHECK_CONTIGUOUS(x, m);     \
   CHECK_TYPE(x, st, m)
 
-void cutlass_blockscaled_fp4_group_mm(
+static int getSMVersion()
+{
+  int device;
+  cudaGetDevice(&device);
+  cudaDeviceProp deviceProp;
+  cudaGetDeviceProperties(&deviceProp, device);
+  return deviceProp.major * 10 + deviceProp.minor;
+}
+
+
+
+void cutlass_fp4_group_mm(
     torch::Tensor &output,
     const torch::Tensor &a,
     const torch::Tensor &b,
     const torch::Tensor &a_blockscale,
     const torch::Tensor &b_blockscales,
     const torch::Tensor &alphas,
-    const torch::Tensor &stride_a,
-    const torch::Tensor &stride_b,
-    const torch::Tensor &stride_c,
-    const torch::Tensor &layout_sfa,
-    const torch::Tensor &layout_sfb,
     const torch::Tensor &problem_sizes,
     const torch::Tensor &expert_offsets,
     const torch::Tensor &sf_offsets)
 {
+    
+   #if defined ENABLE_NVFP4 && ENABLE_NVFP4
     // Input validation
     CHECK_INPUT(a, FLOAT4_E2M1X2, "a");
     CHECK_INPUT(b, FLOAT4_E2M1X2, "b"); 
@@ -388,8 +368,8 @@ void cutlass_blockscaled_fp4_group_mm(
             a_blockscale.dim())
     TORCH_CHECK(b_blockscales.dim() == 3, "expected b_blockscale to be of shape: " \
       " [num_experts, n, k // group_size], observed rank: ", b_blockscales.dim())
-    TORCH_CHECK(problem_sizes.dim() == 2, "problem_sizes must be 2D tensor");
-    TORCH_CHECK(problem_sizes.size(1) == 3, "problem_sizes must have shape (num_experts, 3)");
+    TORCH_CHECK(problem_sizes.dim() == 2, "problem_sizes must be  a 2D tensor");
+    TORCH_CHECK(problem_sizes.size(1) == 3, "problem_sizes must have the shape (num_experts, 3)");
     TORCH_CHECK(problem_sizes.size(0) == expert_offsets.size(0),
                 "Number of experts in problem_sizes must match expert_offsets");
     TORCH_CHECK(problem_sizes.dtype() == torch::kInt32, "problem_sizes must be int32.");
@@ -403,7 +383,6 @@ void cutlass_blockscaled_fp4_group_mm(
     {
       run_fp4_blockwise_scaled_group_mm<cutlass::bfloat16_t>(
           output, a, b, a_blockscale, b_blockscales, alphas,
-          stride_a, stride_b, stride_c, layout_sfa, layout_sfb,
           problem_sizes,
           expert_offsets,
           sf_offsets,
@@ -413,10 +392,15 @@ void cutlass_blockscaled_fp4_group_mm(
     {
       run_fp4_blockwise_scaled_group_mm<cutlass::half_t>(
           output, a, b, a_blockscale, b_blockscales, alphas, 
-          stride_a, stride_b, stride_c, layout_sfa, layout_sfb,
           problem_sizes,
           expert_offsets,
           sf_offsets,
           M, N, K);
     }
+   #else
+    TORCH_CHECK_NOT_IMPLEMENTED(false,
+                              "No compiled cutlass_fp4_group_mm kernel, vLLM must "
+                              "be compiled with ENABLE_NVFP4 for SM100+ and CUDA "
+                              "12.8 or above.");
+   #endif
 }

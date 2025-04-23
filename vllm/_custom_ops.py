@@ -10,7 +10,7 @@ import torch.library
 import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
-from vllm.scalar_type import ScalarType
+from vllm.scalar_type import ScalarType, scalar_types
 
 logger = init_logger(__name__)
 
@@ -784,14 +784,12 @@ def cutlass_fp4_moe_mm(a_tensors: torch.Tensor,
     This is used as the MoE gemm during NVFP4 Quantized FusedMoE forward.
     - a/b_tensors: the NVFP4 a_ptrs and b_ptrs tensors which are quantized
                      input and expert weights.
-    - a/b/c_strides: The data strides passed to grouped matrix multiplication.
     - a_/b_scales: The blockscales in FP8-E4M3 precision
-    - sfa/b_layouts: The layout metadata for the scaling factors to be computed
-                     by the kernel
-    - expert/sf_offsets: Indices that mark at which token index each expert begins
-                      its computation. The number of tokens computed with
-                      expert E is expert_offsets[E + 1] - expert_offsets[E]
-                      And the sf_size per expert is sf_offset[E+1] - sf_offset[E]
+    - expert_offsets/sf_offsets: Indices that mark at which token index 
+                    each expert begins its computation. The number of tokens 
+                    computed with expert E is expert_offsets[E + 1] - 
+                    expert_offsets[E] And the sf_size per expert is 
+                    sf_offset[E+1] - sf_offset[E]
     - problem_sizes: MxNxK sizes of each expert's multiplication in two grouped
                      MMs used in the fused MoE operation.
     """
@@ -800,26 +798,12 @@ def cutlass_fp4_moe_mm(a_tensors: torch.Tensor,
     e = b_tensors.shape[0]
     c_shape = (m_topk, n) 
     c = torch.empty(c_shape, device=device, dtype=out_dtype)
-    a_strides = torch.full((e, ),
-                            a_tensors.stride(0) * 2,
-                            device=device,
-                            dtype=torch.int64)
-    b_strides = torch.full((e, ),
-                            b_tensors.stride(1) * 2,
-                            device=device,
-                            dtype=torch.int64)
-    c_strides = torch.full((e, ),
-                            c.stride(0),
-                            device=device,
-                            dtype=torch.int64)
-    layout_sfa = torch.empty((e, 5), device=device, dtype=torch.int)
-    layout_sfb = torch.empty((e, 5), device=device, dtype=torch.int)
 
-    assert(n == problem_sizes[0,1])
-    torch.ops._C.cutlass_blockscaled_fp4_group_mm(c, a_tensors, b_tensors, a_scales,
-                        b_scales, alphas, a_strides, b_strides,
-                        c_strides, layout_sfa, layout_sfb, problem_sizes,
-                        expert_offsets, sf_offsets)
+    assert(n == problem_sizes[0,1]), ("The hidden size dimension must"
+                                      " match with group sizes")
+    torch.ops._C.cutlass_fp4_group_mm(c, a_tensors, b_tensors, a_scales,
+                        b_scales, alphas, problem_sizes, expert_offsets,
+                        sf_offsets)
     return c.to(out_dtype)
 
 # aqlm
@@ -1009,6 +993,70 @@ def scaled_fp4_quant(
     output_scale = output_scale.view(torch.float8_e4m3fn)
     return output, output_scale
 
+def scaled_expert_fp4_quant(
+    input_tensor: torch.Tensor,
+    input_global_scale: torch.Tensor,
+    expert_offsets: torch.Tensor,
+    use_expert_map: bool = False,
+    expert_map: Optional[torch.Tensor] = None,
+    use_dynamic_scaling: bool = True,
+) -> tuple[torch.Tensor, torch.Tensor,
+           torch.Tensor, torch.Tensor]:
+    """
+    Quantize input tensor to FP4 and return quantized tensor and scale, for
+    packed MoE Inputs.
+    TODO: @pavanimajety: Make this a cutlass-kernel.
+    Args:
+        input: The input tensor to be quantized to FP4
+        expert_map: The expert map tensor
+        input_global_scale: A scalar scaling factor for the entire tensor.
+        expert_offsets: The expert offsets tensor
+    Outputs:
+        rep_a_fp4: The quantized tensor in FP4
+        rep_a_blockscale: The blockscale tensor in FP8-E4M3
+        rep_a_gs: The global scale tensor with dynamic scaling
+        sf_offsets: The sf offsets tensor
+    """
+    assert not current_platform.is_rocm()
+    assert input_tensor.ndim == 2, (
+        f'input.ndim needs to be == 2, but got {input_tensor.ndim}.')
+    FLOAT4_E2M1_MAX = scalar_types.float4_e2m1fn.max()
+    FLOAT8_E4M3_MAX = torch.finfo(torch.float8_e4m3fn).max   
+    e = expert_offsets.shape[0]- 1
+    device = input_tensor.device
+    if use_expert_map:
+        rep_a =  input_tensor[expert_map] #replicated input using expert map
+    else:
+        rep_a =  input_tensor
+    m_numtopk, k = rep_a.shape
+    tokens_per_expert = expert_offsets[1:] - expert_offsets[:-1]
+    round_up = lambda x, y: (x + y - 1) // y * y
+    sf_sizes = round_up(tokens_per_expert, 128)
+    sf_k = round_up(k // 16, 4)
+    packed_k = k // 2
+    sf_offsets = torch.zeros(e+1, dtype=expert_offsets.dtype, device=device)
+    sf_offsets[1:] = torch.cumsum(sf_sizes, dim=0)
+ 
+    rep_a_fp4 = torch.empty(m_numtopk, packed_k, dtype=torch.uint8, device=device)
+    rep_a_blockscale = torch.empty(sum(sf_sizes), sf_k, dtype=torch.float8_e4m3fn, 
+                                                    device=device)
+    rep_a_gs = torch.empty(e,  dtype=torch.float32, device=device)
+    
+    for expert_id in range(e):
+        if tokens_per_expert[expert_id] == 0:
+            continue
+        sf_slice = slice(sf_offsets[expert_id],sf_offsets[expert_id+1])
+        a_slice = slice(expert_offsets[expert_id], expert_offsets[expert_id+1]) 
+        a_expert = rep_a[a_slice]
+        if use_dynamic_scaling:
+            a_expert_max = torch.abs(a_expert).max().to(torch.float32)
+            rep_a_gs[expert_id] = FLOAT8_E4M3_MAX * FLOAT4_E2M1_MAX / a_expert_max
+        else:
+            rep_a_gs[expert_id] = 1 / input_global_scale[expert_id]
+        rep_a_fp4[a_slice], rep_a_blockscale[sf_slice] = scaled_fp4_quant(
+                                                a_expert, rep_a_gs[expert_id])
+    
+    return rep_a_fp4, rep_a_blockscale, rep_a_gs, sf_offsets
 
 # fp8
 def scaled_fp8_quant(
