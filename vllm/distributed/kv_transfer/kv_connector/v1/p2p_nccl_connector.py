@@ -122,21 +122,17 @@ class P2pNcclConnector(KVConnectorBase_V1):
                 slot_mapping (torch.Tensor): the slot mapping. In shape
                     [num_tokens].
             """
-            dst_kv_cache_layer_shape = dst_kv_cache_layer.shape
+            dst_shape = dst_kv_cache_layer.shape
             if isinstance(attn_metadata, MLACommonMetadata):
-                num_pages = dst_kv_cache_layer_shape[0]
-                page_size = dst_kv_cache_layer_shape[1]
                 dst_kv_cache_layer = dst_kv_cache_layer.reshape(
-                    num_pages * page_size, -1)
-                dst_kv_cache_layer[slot_mapping, ...] = src_kv_cache
-                dst_kv_cache_layer.reshape(dst_kv_cache_layer_shape)
+                    -1, dst_shape[-1])
+                dst_kv_cache_layer[slot_mapping] = src_kv_cache
+                dst_kv_cache_layer = dst_kv_cache_layer.reshape(dst_shape)
             else:
-                num_pages = dst_kv_cache_layer_shape[1]
-                page_size = dst_kv_cache_layer_shape[2]
                 dst_kv_cache_layer = dst_kv_cache_layer.reshape(
-                    2, num_pages * page_size, -1)
-                dst_kv_cache_layer[:, slot_mapping, ...] = src_kv_cache
-                dst_kv_cache_layer.reshape(dst_kv_cache_layer_shape)
+                    2, -1, dst_shape[-1])
+                dst_kv_cache_layer[:, slot_mapping] = src_kv_cache
+                dst_kv_cache_layer = dst_kv_cache_layer.reshape(dst_shape)
 
         # Get the metadata
         metadata: KVConnectorMetadata = \
