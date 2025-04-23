@@ -275,6 +275,13 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
     wvSplitK_hf_sml_(const int K, const int M, const scalar_t* B,
                      const scalar_t* __restrict__ A, scalar_t* C,
                      const int _WvPrGrp, const int CuCount) {
+
+#if defined(__HIP__MI300__)
+  constexpr bool use_mfma = (std::is_same_v<scalar_t, __hip_bfloat16>);
+#else
+  constexpr bool use_mfma = false;
+#endif
+
   using scalar8 =
       __attribute__((__vector_size__((A_CHUNK / 2) * sizeof(float)))) float;
   using half4 =
@@ -348,10 +355,10 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
     //----------------------------------------------------
     for (int i = 0; i < YTILE; i++)
       for (int n = 0; n < N; n++)
-        if constexpr (std::is_same_v<scalar_t, half>)
+        if constexpr (!use_mfma)
           sum[n][i] = 0;
         else
-          sum4[n][i] = {0,0,0,0};
+          sum4[n][i] = {0, 0, 0, 0};
 
     bigType bigA[N][UNRL];
     bigType bigB[YTILE][UNRL];
@@ -412,22 +419,15 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
         for (uint32_t n = 0; n < N; n++) {
   #pragma unroll
           for (int y=0; y<YTILE; y++) {
-            if constexpr (std::is_same_v<scalar_t, half>)
+            if constexpr (!use_mfma)
   #pragma unroll
               for (uint32_t b = 0; b < A_CHUNK / 2; b++) { 
                 DOT2C(sum[n][y], bigA[n][k2].f[b], bigB[y][k2].f[b])
-	      }
-            if constexpr (std::is_same_v<scalar_t, __hip_bfloat16>)
-#if defined(__HIP__MI300__)
+            }
+            else
   #pragma unroll
               for (uint32_t b = 0; b < A_CHUNK / 4; b++)
-		sum4[n][y] = __builtin_amdgcn_mfma_f32_4x4x4bf16_1k(bigA[n][k2].h4[b], bigB[y][k2].h4[b], sum4[n][y], 0, 0, 0);
-#else
-  #pragma unroll
-              for (uint32_t b = 0; b < A_CHUNK / 2; b++) { 
-                DOT2C(sum[n][y], bigA[n][k2].f[b], bigB[y][k2].f[b])
-	      }
-#endif
+                sum4[n][y] = __builtin_amdgcn_mfma_f32_4x4x4bf16_1k(bigA[n][k2].h4[b], bigB[y][k2].h4[b], sum4[n][y], 0, 0, 0);
           }
         }
       }
@@ -436,7 +436,7 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
     //----------------------------------------------------
     // Final reduction step using shuffle
     //----------------------------------------------------
-    if constexpr (std::is_same_v<scalar_t, half>) {
+    if constexpr (!use_mfma) {
       for (int n = 0; n < N; n++) {
         for (int y = 0; y < YTILE; y++) {
           asm("s_nop 0\n\tv_add_f32 %0, %2, %3 row_shr:8 bound_ctrl:0 "
@@ -459,7 +459,7 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
             : "0"(sum[n][y]), "v"(sum[n][y]), "v"(sum[n][y]));
         }
       }
-    
+
       if (threadIdx.x == 63) {
         for (int n = 0; n < N; n++) {
           for (int i = 0; i < YTILE; i++) {
@@ -468,8 +468,7 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
           }
         }
       }
-    }
-    if constexpr (std::is_same_v<scalar_t, __hip_bfloat16>) {
+    } else {
   #pragma unroll
       for (int n = 0; n < N; n++) {
   #pragma unroll
@@ -536,6 +535,12 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
     wvSplitK_hf_(const int K, const int M, const scalar_t* B,
                  const scalar_t* __restrict__ A, scalar_t* C,
                  const int _WvPrGrp, const int CuCount) {
+#if defined(__HIP__MI300__)
+  constexpr bool use_mfma = (std::is_same_v<scalar_t, __hip_bfloat16>);
+#else
+  constexpr bool use_mfma = false;
+#endif
+
   using scalar8 =
       __attribute__((__vector_size__((A_CHUNK / 2) * sizeof(float)))) float;
   using half4 =
@@ -634,10 +639,10 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
     //----------------------------------------------------
     for (int i = 0; i < YTILE; i++)
       for (int n = 0; n < N; n++)
-        if constexpr (std::is_same_v<scalar_t, half>)
+        if constexpr (!use_mfma)
           sum[n][i] = 0;
         else
-          sum4[n][i] = {0,0,0,0};
+          sum4[n][i] = {0, 0, 0, 0};
 
     bigType bigA[N][UNRL];
     bigType bigB[YTILE][UNRL];
@@ -700,22 +705,15 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
           // - Remember the accumulation is happening for K-split of 64!
   #pragma unroll
 	  for (int y=0; y<YTILE; y++) {
-            if constexpr (std::is_same_v<scalar_t, half>)
-  #pragma unroll
-              for (uint32_t b = 0; b < A_CHUNK / 2; b++) { 
-                DOT2C(sum[n][y], bigA[n][k2].f[b], bigB[y][k2].f[b])
-	      }
-            if constexpr (std::is_same_v<scalar_t, __hip_bfloat16>)
-#if defined(__HIP__MI300__)
-  #pragma unroll
-              for (uint32_t b = 0; b < A_CHUNK / 4; b++)
-		sum4[n][y] = __builtin_amdgcn_mfma_f32_4x4x4bf16_1k(bigA[n][k2].h4[b], bigB[y][k2].h4[b], sum4[n][y], 0, 0, 0);
-#else
+            if constexpr (!use_mfma)
   #pragma unroll
               for (uint32_t b = 0; b < A_CHUNK / 2; b++) {
                 DOT2C(sum[n][y], bigA[n][k2].f[b], bigB[y][k2].f[b])
 	      }
-#endif
+            else
+  #pragma unroll
+              for (uint32_t b = 0; b < A_CHUNK / 4; b++)
+		sum4[n][y] = __builtin_amdgcn_mfma_f32_4x4x4bf16_1k(bigA[n][k2].h4[b], bigB[y][k2].h4[b], sum4[n][y], 0, 0, 0);
           }
         }
       }
@@ -724,7 +722,7 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
     //----------------------------------------------------
     // Final reduction step using shuffle
     //----------------------------------------------------
-    if constexpr (std::is_same_v<scalar_t, half>) {
+    if constexpr (!use_mfma) {
       for (int n = 0; n < N; n++) {
         for (int y = 0; y < YTILE; y++) {
           asm("s_nop 0\n\tv_add_f32 %0, %2, %3 row_shr:8 bound_ctrl:0 "
@@ -756,8 +754,7 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
           }
         }
       }
-    }
-    if constexpr (std::is_same_v<scalar_t, __hip_bfloat16>) {
+    } else {
   #pragma unroll
       for (int n = 0; n < N; n++) {
   #pragma unroll
@@ -837,6 +834,12 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
     wvSplitK_hf_big_(const int K, const int M, const scalar_t* B,
                      const scalar_t* __restrict__ A, scalar_t* C,
                      const int _WvPrGrp, const int CuCount) {
+#if defined(__HIP__MI300__)
+  constexpr bool use_mfma = (std::is_same_v<scalar_t, __hip_bfloat16>);
+#else
+  constexpr bool use_mfma = false;
+#endif
+
   using scalar8 =
       __attribute__((__vector_size__((A_CHUNK / 2) * sizeof(float)))) float;
   using half4 =
@@ -955,7 +958,7 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
     //----------------------------------------------------
     for (int i = 0; i < YTILE; i++)
       for (int n = 0; n < N; n++)
-        if constexpr (std::is_same_v<scalar_t, half>)
+        if constexpr (!use_mfma)
           sum[n][i] = 0;
         else
           sum4[n][i] = {0,0,0,0};
@@ -1044,22 +1047,15 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
           // - Remember the accumulation is happening for K-split of 64!
   #pragma unroll
 	  for (int y=0; y<YTILE; y++) {
-            if constexpr (std::is_same_v<scalar_t, half>)
+            if constexpr (!use_mfma)
   #pragma unroll
               for (uint32_t b = 0; b < A_CHUNK / 2; b++) {
                 DOT2C(sum[n][y], bigA[n][k2].f[b], bigB[y][k2].f[b])
 	      }
-            if constexpr (std::is_same_v<scalar_t, __hip_bfloat16>)
-#if defined(__HIP__MI300__)
+	    else
   #pragma unroll
               for (uint32_t b = 0; b < A_CHUNK / 4; b++)
 		sum4[n][y] = __builtin_amdgcn_mfma_f32_4x4x4bf16_1k(bigA[n][k2].h4[b], bigB[y][k2].h4[b], sum4[n][y], 0, 0, 0);
-#else
-  #pragma unroll
-              for (uint32_t b = 0; b < A_CHUNK / 2; b++) {
-                DOT2C(sum[n][y], bigA[n][k2].f[b], bigB[y][k2].f[b])
-	      }
-#endif
           }
         }
       }
@@ -1076,7 +1072,7 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
     //----------------------------------------------------
     // Final reduction step using shuffle
     //----------------------------------------------------
-    if constexpr (std::is_same_v<scalar_t, half>) {
+    if constexpr (!use_mfma) {
       for (int n = 0; n < N; n++) {
         for (int y = 0; y < YTILE; y++) {
           asm("s_nop 0\n\tv_add_f32 %0, %2, %3 row_shr:8 bound_ctrl:0 "
@@ -1108,8 +1104,7 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
           }
         }
       }
-    }
-    if constexpr (std::is_same_v<scalar_t, __hip_bfloat16>) {
+    } else {
   #pragma unroll
       for (int n = 0; n < N; n++) {
   #pragma unroll
