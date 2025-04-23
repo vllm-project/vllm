@@ -24,6 +24,7 @@ from vllm.entrypoints.chat_utils import (ChatCompletionMessageParam,
                                          resolve_chat_template_content_format)
 from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
+                                              ClassificationRequest,
                                               CompletionRequest,
                                               DetokenizeRequest,
                                               EmbeddingChatRequest,
@@ -219,13 +220,16 @@ class OpenAIServing:
     ) -> TextTokensPrompt:
         token_num = len(input_ids)
 
-        # Note: EmbeddingRequest and ScoreRequest doesn't have max_tokens
+        # Note: EmbeddingRequest, ClassificationRequest,
+        # and ScoreRequest doesn't have max_tokens
         if isinstance(request,
                       (EmbeddingChatRequest, EmbeddingCompletionRequest,
-                       ScoreRequest, RerankRequest)):
+                       ScoreRequest, RerankRequest, ClassificationRequest)):
+            operation = {
+                ScoreRequest: "score",
+                ClassificationRequest: "classification"
+            }.get(type(request), "embedding generation")
 
-            operation = "score" if isinstance(request, ScoreRequest) \
-                else "embedding generation"
             if token_num > self.max_model_len:
                 raise ValueError(
                     f"This model's maximum context length is "
