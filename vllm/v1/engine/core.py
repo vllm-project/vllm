@@ -384,7 +384,7 @@ class EngineCoreProc(EngineCore):
 
         except SystemExit:
             logger.debug("EngineCore exiting.")
-
+            raise
         except Exception as e:
             if engine_core is None:
                 logger.exception("EngineCore failed to start.")
