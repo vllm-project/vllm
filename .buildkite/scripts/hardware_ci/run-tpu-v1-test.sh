@@ -16,8 +16,7 @@ source /etc/environment
 # Run a simple end-to-end example.
 docker run --privileged --net host --shm-size=16G -it \
     -e "HF_TOKEN=$HF_TOKEN" --name tpu-test \
-    vllm-tpu /bin/bash -c "rm -r ~/.cache/vllm/xla_cache \
-    && python3 -m pip install git+https://github.com/thuml/depyf.git \
+    vllm-tpu /bin/bash -c "python3 -m pip install git+https://github.com/thuml/depyf.git \
     && python3 -m pip install pytest pytest-asyncio tpu-info \
     && python3 -m pip install lm_eval[api]==0.4.4 \
     && export VLLM_XLA_CACHE_PATH= \
