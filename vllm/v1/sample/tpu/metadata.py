@@ -31,8 +31,9 @@ class TPUSupportedSamplingMetadata:
 
     all_greedy: bool = True
 
-    # unsupported, you need to return an extra tensor of static size BxV
-    max_num_logprobs = None
+    # Maximum number of top logprobs requested in current batch.
+    # TODO use constant from sampler.py OR a bool
+    max_num_logprobs: Optional[int] = 24
 
     # TODO No penalties for now
     no_penalties: bool = True
@@ -115,4 +116,5 @@ class TPUSupportedSamplingMetadata:
             top_k=input_batch.top_k_cpu_tensor[:padded_num_reqs].to(
                 xla_device),
             min_p=input_batch.min_p_cpu_tensor[:padded_num_reqs].to(
-                xla_device))
+                xla_device),
+            max_num_logprobs=input_batch.max_num_logprobs)

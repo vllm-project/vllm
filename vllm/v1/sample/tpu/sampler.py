@@ -9,6 +9,7 @@ from vllm.v1.sample.ops.topk_topp_sampler import TopKTopPSampler
 from vllm.v1.sample.tpu.metadata import TPUSupportedSamplingMetadata
 
 _SAMPLING_EPS = 1e-5
+MAX_TOP_LOGPROBS_TO_GATHER = 24
 
 
 class Sampler(nn.Module):
@@ -26,22 +27,30 @@ class Sampler(nn.Module):
         # temperature scaling) for the top-k logprobs.
         # This is different from the V0 sampler, which uses the logits that
         # is used for sampling (after penalties and temperature scaling).
+        raw_logprobs = self.compute_logprobs(logits)
 
         # Use float32 for the logits.
         logits = logits.to(torch.float32)
         # Sample the next token.
         sampled = self.sample(logits, sampling_metadata)
 
+        # Gather the top_logprobs with corresponding tokens. Use a fixed number
+        # of logprobs as an alternative to having multiple pre-compiled graphs.
+        # Select the logprobs actually demanded by each request on CPU.
+        logprobs_tensors = self.gather_logprobs(raw_logprobs, 
+                                                MAX_TOP_LOGPROBS_TO_GATHER, 
+                                                token_ids=sampled)
+
         # Use int32 to reduce the tensor size.
         sampled = sampled.to(torch.int32)
 
-        # These are GPU tensors.
+        # These are TPU tensors.
         sampler_output = SamplerOutput(
             # The sampled tokens are expanded to 2D tensor with shape
             # [num_requests, 1], where each row represents one generated
             # token per request.
             sampled_token_ids=sampled.unsqueeze(-1),
-            logprobs_tensors=None,
+            logprobs_tensors=logprobs_tensors,
         )
         return sampler_output
 

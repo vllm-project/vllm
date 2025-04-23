@@ -36,7 +36,7 @@ from vllm.v1.kv_cache_interface import (AttentionSpec, FullAttentionSpec,
 from vllm.v1.outputs import (EMPTY_MODEL_RUNNER_OUTPUT, LogprobsTensors,
                              ModelRunnerOutput)
 from vllm.v1.sample.tpu.metadata import TPUSupportedSamplingMetadata
-from vllm.v1.sample.tpu.sampler import Sampler as TPUSampler
+from vllm.v1.sample.tpu.sampler import MAX_TOP_LOGPROBS_TO_GATHER, Sampler as TPUSampler
 from vllm.v1.utils import bind_kv_cache
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 
@@ -789,10 +789,11 @@ class TPUModelRunner:
             logits = self.structured_decode(require_struct_decoding,
                                             grammar_bitmask_padded, logits,
                                             arange)
-        selected_token_ids = self.sample_from_logits(logits,
-                                                     tpu_sampling_metadata)
+        selected_token_ids, logprobs = self.sample_from_logits(logits, tpu_sampling_metadata)
         # Remove padding on cpu and keep dynamic op outside of xla graph.
         selected_token_ids = selected_token_ids.cpu()[:num_reqs]
+        logprobs_lists = logprobs.tolists() \
+            if tpu_sampling_metadata.max_num_logprobs else None
 
         # Update the cache state concurrently. Code above will not block until
         # we use `selected_token_ids`. Add mark_step if post-processing changes
@@ -862,7 +863,7 @@ class TPUModelRunner:
             req_id_to_index=self.input_batch.req_id_to_index,
             sampled_token_ids=valid_sampled_token_ids,
             spec_token_ids=None,
-            logprobs=None,
+            logprobs=logprobs_lists,
             prompt_logprobs_dict=prompt_logprobs_dict,
         )
 
@@ -1113,6 +1114,7 @@ class TPUModelRunner:
                         self.device,
                         generate_params_if_all_greedy,
                     ))
+                print("COMPILING", sampling_metadata.max_num_logprobs)
                 sampling_metadata.all_greedy = all_greedy
                 self.sample_from_logits(dummy_logits, sampling_metadata)
             logger.info("  -- num_seqs: %d", num_reqs)
@@ -1256,10 +1258,16 @@ class TPUModelRunner:
             sampling_metadata: TPUSupportedSamplingMetadata) -> torch.Tensor:
         if sampling_metadata.all_greedy:
             out_tokens = torch.argmax(logits, dim=-1, keepdim=True)
+            # TODO skip if not needed and compile for it
+            logprobs = self.sampler.compute_logprobs(logits)
+            logprobs_tensors = self.sampler.gather_logprobs(logprobs, 
+                                    MAX_TOP_LOGPROBS_TO_GATHER, 
+                                    token_ids=out_tokens.squeeze(-1))
         else:
-            out_tokens = self.sampler(logits,
-                                      sampling_metadata).sampled_token_ids
-        return out_tokens
+            sampler_out = self.sampler(logits, sampling_metadata)
+            out_tokens = sampler_out.sampled_token_ids
+            logprobs_tensors = sampler_out.logprobs_tensors
+        return out_tokens, logprobs_tensors
 
     @torch.compile(backend="openxla", fullgraph=True, dynamic=False)
     def structured_decode(self, require_struct_decoding: torch.Tensor,

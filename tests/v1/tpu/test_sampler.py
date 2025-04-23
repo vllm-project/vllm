@@ -61,3 +61,30 @@ def test_sampler_different(model_name: str):
         # to have deterministic results over many tokens, tests the first ~20
         # tokens match.
         assert output[0].outputs[0].text[:20] == output[1].outputs[0].text[:20]
+
+@pytest.mark.parametrize("model_name", ["Qwen/Qwen2.5-1.5B-Instruct"])
+@pytest.mark.skipif(not current_platform.is_tpu(),
+                    reason="This test needs a TPU")
+def test_logprobs(model_name: str):
+    """
+    """
+    llm = LLM(model_name,
+              enforce_eager=False,
+              max_num_seqs=1,
+              max_model_len=512,
+              max_num_batched_tokens=512)
+    prompts = [
+        "Write a short story about a robot that dreams for the first time."
+    ]
+    # Greedy sampling
+    sampling_params = SamplingParams(temperature=0.0, max_tokens=64, logprobs=4)
+    output = llm.generate(prompts, sampling_params)
+    print(output)
+
+    sampling_params = SamplingParams(temperature=0.4, min_p=0.2, max_tokens=64, logprobs=4)
+    output = llm.generate(prompts, sampling_params)
+    print(output)
+
+    sampling_params = SamplingParams(temperature=0.4, min_p=0.2, max_tokens=64, logprobs=None)
+    output = llm.generate(prompts, sampling_params)
+    print(output)
