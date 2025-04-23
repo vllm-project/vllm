@@ -26,7 +26,7 @@ def _check_consistency(actual: AnyTokenizer, expected: AnyTokenizer):
     assert isinstance(actual, type(expected))
 
     assert actual.encode("prompt") == expected.encode("prompt")
-    assert set(actual.all_special_ids) == set(expected.all_special_ids)
-    assert set(actual.all_special_tokens) == set(expected.all_special_tokens)
-    assert set(actual.all_special_tokens_extended) == set(
-        expected.all_special_tokens_extended)
+    assert actual.all_special_ids == expected.all_special_ids
+    assert actual.all_special_tokens == expected.all_special_tokens
+    assert (actual.all_special_tokens_extended ==
+            expected.all_special_tokens_extended)

@@ -257,7 +257,7 @@ class MistralTokenizer(TokenizerBase):
     # the following attributes are set to fit vLLM's design and are used
     # by the guided structured output backends.
     @property
-    def all_special_tokens_extended(self) -> List[str]:
+    def all_special_tokens_extended(self) -> list[str]:
         from mistral_common.tokens.tokenizers.base import SpecialTokens
 
         # tekken defines its own extended special tokens list
@@ -271,11 +271,11 @@ class MistralTokenizer(TokenizerBase):
         ]
 
     @property
-    def all_special_tokens(self) -> List[str]:
+    def all_special_tokens(self) -> list[str]:
         return self.all_special_tokens_extended
 
     @property
-    def all_special_ids(self) -> List[int]:
+    def all_special_ids(self) -> list[int]:
         return [
             self.all_special_tokens.index(t) for t in self.all_special_tokens
         ]

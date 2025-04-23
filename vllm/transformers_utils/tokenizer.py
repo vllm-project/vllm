@@ -89,15 +89,15 @@ class _CachedTokenizerProxy:
 
     @cached_property
     def all_special_ids(self):
-        return set(self.__tokenizer.all_special_ids)
+        return self.__tokenizer.all_special_ids
 
     @cached_property
     def all_special_tokens(self):
-        return set(self.__tokenizer.all_special_tokens)
+        return self.__tokenizer.all_special_tokens
 
     @cached_property
     def all_special_tokens_extended(self):
-        return set(self.__tokenizer.all_special_tokens_extended)
+        return self.__tokenizer.all_special_tokens_extended
 
     @cached_property
     def max_token_id(self):
