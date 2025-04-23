@@ -180,6 +180,7 @@ design/v1/metrics
 :maxdepth: 2
 
 contributing/overview
+contributing/deprecation_policy
 contributing/profiling/profiling_index
 contributing/dockerfile/dockerfile
 contributing/model/index
