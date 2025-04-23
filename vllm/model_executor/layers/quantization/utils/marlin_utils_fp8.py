@@ -126,7 +126,7 @@ def prepare_fp8_layer_for_marlin(layer: torch.nn.Module,
         #  =>(repeat)=> (size_k // block_size[1], size_n)
         block_n = layer.weight_block_size[0]
         scales = scales.T.repeat_interleave(block_n, 1)
-        # size_n may not divisable by block_size[0]
+        # size_n may not divisible by block_size[0]
         scales = scales[:, :part_size_n]
 
     marlin_scales = marlin_permute_scales(s=scales,
@@ -225,7 +225,7 @@ def prepare_moe_fp8_layer_for_marlin(layer: torch.nn.Module,
             #  =>(repeat)=> (e, size_k // block_size[1], size_n)
             block_n = layer.weight_block_size[0]
             scales = scales.permute(0, 2, 1).repeat_interleave(block_n, 2)
-            # size_n may not divisable by block_size[0]
+            # size_n may not divisible by block_size[0]
             scales = scales[..., :size_n].contiguous()
 
         for i in range(e):
