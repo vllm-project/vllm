@@ -134,7 +134,7 @@ def shutdown(proc: Process, input_path: str, output_path: str):
         proc.terminate()
         proc.join(5)
 
-        if proc.is_alive() and (pid := proc.pid):
+        if proc.is_alive() and (pid := proc.pid) is not None:
             kill_process_tree(pid)
 
     # Remove zmq ipc socket files.
