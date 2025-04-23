@@ -204,7 +204,7 @@ class EngineArgs:
     max_cpu_loras: Optional[int] = LoRAConfig.max_cpu_loras
     lora_dtype: Optional[Union[str, torch.dtype]] = LoRAConfig.lora_dtype
     lora_extra_vocab_size: int = LoRAConfig.lora_extra_vocab_size
-    long_lora_scaling_factors: Optional[tuple[float]] = \
+    long_lora_scaling_factors: Optional[tuple[float, ...]] = \
         LoRAConfig.long_lora_scaling_factors
     # PromptAdapter fields
     enable_prompt_adapter: bool = False
@@ -355,9 +355,10 @@ class EngineArgs:
                         field_type = get_type_from_union(field_type, tuple)
                     dtypes = get_args(field_type)
                     dtype = dtypes[0]
-                    assert all(d is dtype for d in dtypes), (
-                        "All tuple elements must be of the same type. "
-                        f"Got {dtypes}.")
+                    assert all(
+                        d is dtype for d in dtypes if d is not Ellipsis
+                    ), ("All non-Ellipsis tuple elements must be of the same "
+                        f"type. Got {dtypes}.")
                     kwargs[name]["type"] = dtype
                     kwargs[name]["nargs"] = "+"
                 elif can_be_type(field_type, int):
