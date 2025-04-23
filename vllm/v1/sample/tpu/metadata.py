@@ -31,8 +31,9 @@ class TPUSupportedSamplingMetadata:
 
     all_greedy: bool = True
 
-    # Maximum number of top logprobs requested in current batch.
-    # TODO specify why bool
+    # Whether logprobs are to be gathered in this batch of request. To balance
+    # out compile time and runtime, a fixed `max_number_logprobs` value is used
+    # when gathering logprobs, regardless of the values specified in the batch.
     logprobs: bool = False
 
     # TODO No penalties for now
