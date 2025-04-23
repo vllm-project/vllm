@@ -141,7 +141,7 @@ def supported_schema():
             "long_description": {
                 "type": "string",
                 "minLength": 50,
-                "maxLength": 1000
+                "maxLength": 2000
             },
             "address": {
                 "type": "object",
