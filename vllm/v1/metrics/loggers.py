@@ -487,15 +487,12 @@ def setup_default_loggers(
     if not log_stats:
         return []
 
-    def logging_factory(vllm_config: VllmConfig, engine_num: int):
-        return (LoggingStatLogger(vllm_config, engine_num)
-                if logger.isEnabledFor(logging.INFO) else None)
-
-    factories: list[StatLoggerFactory] = [
-        PrometheusStatLogger, logging_factory
-    ]
     if custom_stat_loggers is not None:
         factories = custom_stat_loggers
+    else:
+        factories: list[StatLoggerFactory] = [PrometheusStatLogger]
+        if logger.isEnabledFor(logging.INFO):
+            factories.append(LoggingStatLogger)
 
     stat_loggers: list[list[StatLoggerBase]] = []
     for i in range(engine_num):
