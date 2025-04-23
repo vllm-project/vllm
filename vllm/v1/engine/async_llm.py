@@ -122,6 +122,7 @@ class AsyncLLM(EngineClient):
             usage_message.report_usage(
                 get_architecture_class_name(self.model_config),
                 usage_context,
+                self.vllm_config,
                 extra_kvs={
                     # Common configuration
                     "dtype":
