@@ -93,6 +93,7 @@ class MQLLMEngineClient(EngineClient):
         self._errored_with: Optional[BaseException] = None
 
         # Get the configs.
+        self.vllm_config = engine_config
         self.model_config = engine_config.model_config
         self.decoding_config = engine_config.decoding_config
 
@@ -376,6 +377,9 @@ class MQLLMEngineClient(EngineClient):
 
     async def get_tokenizer(self, lora_request: Optional[LoRARequest] = None):
         return await self.tokenizer.get_lora_tokenizer_async(lora_request)
+
+    async def get_vllm_config(self) -> VllmConfig:
+        return self.vllm_config
 
     async def get_decoding_config(self) -> DecodingConfig:
         return self.decoding_config
@@ -697,10 +701,10 @@ class MQLLMEngineClient(EngineClient):
         return await self._send_one_way_rpc_request(
             request=RPCSleepRequest(level), socket=self.input_socket)
 
-    async def wake_up(self) -> None:
+    async def wake_up(self, tags: Optional[list[str]] = None) -> None:
         """Wake up the engine"""
         return await self._send_one_way_rpc_request(
-            request=RPCWakeUpRequest.WAKE_UP, socket=self.input_socket)
+            request=RPCWakeUpRequest(tags), socket=self.input_socket)
 
     async def is_sleeping(self) -> bool:
         """Check whether the engine is sleeping"""
