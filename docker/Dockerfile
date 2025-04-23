@@ -162,6 +162,9 @@ ENV UV_HTTP_TIMEOUT=500
 COPY requirements/lint.txt requirements/lint.txt
 COPY requirements/test.txt requirements/test.txt
 COPY requirements/dev.txt requirements/dev.txt
+# Workaround for #17068
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv pip install --system mamba-ssm==2.2.4 --no-build-isolation
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip install --system -r requirements/dev.txt
 #################### DEV IMAGE ####################
@@ -265,6 +268,9 @@ ADD . /vllm-workspace/
 ENV UV_HTTP_TIMEOUT=500
 
 # install development dependencies (for testing)
+# Workaround for #17068
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv pip install --system mamba-ssm==2.2.4 --no-build-isolation
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip install --system -r requirements/dev.txt
 
