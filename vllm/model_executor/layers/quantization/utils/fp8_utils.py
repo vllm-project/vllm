@@ -119,8 +119,6 @@ def apply_w8a8_block_fp8_linear(
     input_2d = input.view(-1, input.shape[-1])
     output_shape = [*input.shape[:-1], weight.shape[0]]
 
-    # TODO is_shape_supported_by_cutlass is never used,
-    # as cutlass_block_fp8_supported is False
     use_cutlass = cutlass_block_fp8_supported and is_shape_supported_by_cutlass(
         weight, block_size, weight_scale, input_2d)
 
