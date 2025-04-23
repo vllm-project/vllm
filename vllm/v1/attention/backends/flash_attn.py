@@ -337,7 +337,7 @@ class FlashAttentionMetadataBuilder:
                     self.runner.attention_chunk_size,
                     self.runner.query_start_loc_np[:num_reqs + 1],
                     self.runner.seq_lens_np[:num_reqs],
-                    block_table,
+                    block_table_tensor,
                     self.kv_cache_spec.block_size,
                 )
             local_query_start_loc = torch.from_numpy(virt_q_cu_seqlens_np).to(
@@ -363,7 +363,8 @@ class FlashAttentionMetadataBuilder:
                 local_scheduler_metadata=local_scheduler_metadata,
             )
 
-        use_cascade = common_prefix_len > 0
+        # use_cascade = common_prefix_len > 0
+        use_cascade = False
 
         if use_cascade:
             cu_prefix_query_lens = torch.tensor([0, num_actual_tokens],

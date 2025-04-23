@@ -83,8 +83,7 @@ class KVCacheManager:
         # This is to avoid recomputing the block hashes for each call of
         # `get_computed_blocks` or `allocate_slots`.
         self.req_to_block_hashes: defaultdict[
-            str, list[list[BlockHashType]]] = defaultdict(
-                lambda: [[] for _ in range(self.num_kv_cache_groups)])
+            str, list[list[BlockHashType]]] = defaultdict(lambda: [])
 
         # {req_id: The number of cached blocks for each kv cache group}
         # This is used to track the number of cached blocks for each request.
@@ -136,7 +135,7 @@ class KVCacheManager:
         # The block hashes for the request may already be computed
         # if the scheduler has tried to schedule the request before.
         block_hashes = self.req_to_block_hashes[request.request_id]
-        if not block_hashes:
+        if len(block_hashes) == 0:
             block_hashes = [
                 hash_request_tokens(self.caching_hash_fn,
                                     g.kv_cache_spec.block_size, request, i)
@@ -165,13 +164,22 @@ class KVCacheManager:
         #     last_block_hash = block_hashes.pop()
         # else:
         #     last_block_hash = None
+        last_block_hashs: list[Optional[BlockHashType]] = []
+        for i in range(self.num_kv_cache_groups):
+            if len(
+                    block_hashes[i]
+            ) * self.specialized_managers[i].block_size == request.num_tokens:
+                last_block_hashs.append(block_hashes[i].pop())
+            else:
+                last_block_hashs.append(None)
 
         computed_blocks, num_computed_tokens = self.find_longest_cache_hit(
             request.request_id, block_hashes)
 
-        # if last_block_hash is not None:
-        #     # Add back the last block hash if it was removed.
-        #     block_hashes.append(last_block_hash)
+        for i in range(self.num_kv_cache_groups):
+            last_block_hash = last_block_hashs[i]
+            if last_block_hash is not None:
+                block_hashes[i].append(last_block_hash)
         if self.log_stats:
             assert self.prefix_cache_stats is not None
 
@@ -445,11 +453,14 @@ class KVCacheManager:
         # Use copy to avoid modifying the original block_hashes
         block_hashes = [block_hash.copy() for block_hash in block_hashes]
 
+        def shrink_length(block_hashes, length):
+            del block_hashes[length:]
+
         while max(num_computed_tokens) != min_computed_tokens:
             for i, manager in enumerate(self.specialized_managers):
                 if num_computed_tokens[i] > min_computed_tokens:
-                    del block_hashes[i][:min_computed_tokens //
-                                        manager.block_size]
+                    shrink_length(block_hashes[i],
+                                  min_computed_tokens // manager.block_size)
                     computed_blocks_group_i = (
                         manager.find_longest_cache_hit_multiple_calls(
                             request_id, block_hashes[i]))
@@ -458,6 +469,8 @@ class KVCacheManager:
                         manager.block_size
                     min_computed_tokens = min(min_computed_tokens,
                                               num_computed_tokens[i])
+                    shrink_length(block_hashes[i],
+                                  num_computed_tokens[i] // manager.block_size)
 
         # Get the non-constlist computed blocks
         computed_blocks = [
