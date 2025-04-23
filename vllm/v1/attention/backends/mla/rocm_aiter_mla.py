@@ -6,8 +6,7 @@ from typing import Any, Optional
 import torch
 
 import vllm.envs as envs
-from vllm.attention.ops.rocm_aiter_mla import (aiter_mla_decode_forward,
-                                               get_aiter_mla_metadata)
+from vllm.attention.ops.rocm_aiter_mla import aiter_mla_decode_forward
 from vllm.attention.ops.triton_merge_attn_states import merge_attn_states
 # yapf conflicts with isort for this docstring
 # yapf: disable
@@ -70,62 +69,65 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
         assert self.runner.block_size == 1, "AITER MLA" \
             "requires only block size 1."
 
-        self.paged_kv_indices: list[int] = []
-        self.paged_kv_indptr: list[int] = [0]
-        self.paged_kv_last_page_lens: list[int] = []
-        self.total_blocks = 0
+        self.block_size = self.runner.block_size
 
-    def _update_paged_kv_tensors(self, block_table: torch.Tensor,
-                                 seq_lens: torch.Tensor):
-        # Get the number of valid blocks based on sequence length.
-        # If seq_len = 16, block_size = 16,
-        # block_table_bound is 1 with 1 valid block.
-        # If seq_len = 15, block_size = 16,
-        # block_table_bound is 0 + 1 with 1 valid block.
+    def _get_paged_kv_tensors(
+            self, block_table: torch.Tensor,
+            seq_lens: torch.Tensor) -> tuple[torch.Tensor, ...]:
+        paged_kv_indices: list[int] = []
+        paged_kv_indptr: list[int] = [0]
+        paged_kv_last_page_lens: list[int] = []
+
+        device = self.runner.device
+        block_size = self.runner.block_size
+        total_blocks = 0
         for idx in range(seq_lens.shape[0]):
             seq_len = seq_lens[idx]
-            self.total_blocks += len(block_table[idx])
-            block_table_bound = seq_len // self.runner.block_size + 1 \
-                if seq_len % self.runner.block_size != 0 \
-                else seq_len // self.runner.block_size
-            self.paged_kv_indices.extend(block_table[idx][:block_table_bound])
-            self.paged_kv_indptr.append(self.paged_kv_indptr[-1] +
-                                        block_table_bound)
-
-            last_page_len = seq_len % self.runner.block_size
+            total_blocks += seq_len
+            block_table_list = block_table.tolist()[idx]
+            block_table_list.insert(0, 0)
+            block_table_bound = seq_len // block_size + 1 \
+                if seq_len % block_size != 0 \
+                else seq_len // block_size
+            paged_kv_indices.extend(block_table_list[:block_table_bound])
+            paged_kv_indptr.append(paged_kv_indptr[-1] + block_table_bound)
+            last_page_len = seq_len % block_size
             if last_page_len == 0:
-                last_page_len = self.runner.block_size
-            self.paged_kv_last_page_lens.append(last_page_len)
+                last_page_len = block_size
+            paged_kv_last_page_lens.append(last_page_len)
+
+        if self.runner.use_cuda_graph:
+            cudagraph_batch_size = self.runner.cudagraph_batch_sizes[-1]
+            last_paged_kv_indptr = paged_kv_indptr[-1]
+            paged_kv_indptr.extend([last_paged_kv_indptr] *
+                                   cudagraph_batch_size)
+            paged_kv_last_page_lens.extend([0] * cudagraph_batch_size)
+
+        paged_kv_indices.extend([0] * (total_blocks - len(paged_kv_indices)))
+        paged_kv_indices_tensor = torch.tensor(paged_kv_indices,
+                                               device=device,
+                                               dtype=torch.int)
+        paged_kv_indptr_tensor = torch.tensor(paged_kv_indptr,
+                                              device=device,
+                                              dtype=torch.int)
+        paged_last_page_lens_tensor = torch.tensor(paged_kv_last_page_lens,
+                                                   device=device,
+                                                   dtype=torch.int)
+        return (
+            paged_kv_indices_tensor,
+            paged_kv_indptr_tensor,
+            paged_last_page_lens_tensor,
+        )
 
     def _build_decode(self, input_positions: torch.Tensor,
                       block_table: torch.Tensor,
                       seq_lens: torch.Tensor) -> AiterMLADecodeMetadata:
-        self._update_paged_kv_tensors(block_table, seq_lens)
 
-        if len(self.paged_kv_indptr) > 0:
-            device = self.runner.device
-            self.paged_kv_indices.extend(
-                [0] * (self.total_blocks - len(self.paged_kv_indices)))
-            paged_kv_indices = torch.tensor(self.paged_kv_indices,
-                                            device=device,
-                                            dtype=torch.int)
-            paged_kv_indptr = torch.tensor(self.paged_kv_indptr,
-                                           device=device,
-                                           dtype=torch.int)
-            paged_last_page_lens = torch.tensor(self.paged_kv_last_page_lens,
-                                                device=device,
-                                                dtype=torch.int)
-        else:
-            (
-                paged_kv_indices,
-                paged_kv_indptr,
-                paged_last_page_lens
-            ) = get_aiter_mla_metadata(
-                    max_batch_size=self.runner.max_num_reqs,
-                    block_size=self.runner.block_size,
-                    max_block_per_batch=self.runner\
-                    .max_num_blocks_per_req,
-                    device=self.runner.device)
+        (
+            paged_kv_indices,
+            paged_kv_indptr,
+            paged_last_page_lens,
+        ) = self._get_paged_kv_tensors(block_table, seq_lens)
 
         return AiterMLADecodeMetadata(
             input_positions=input_positions,
