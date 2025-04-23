@@ -309,6 +309,9 @@ class InductorAdaptor(CompilerInterface):
                 inner_compile=hijacked_compile_fx_inner,
                 config_patches=current_config)
 
+        # We treat VLLM_DISABLE_COMPILE_CACHE as the overall switch for torch
+        # compilation cache. So turn off the checks if we disable the
+        # compilation cache.
         if not envs.VLLM_DISABLE_COMPILE_CACHE:
             assert hash_str is not None, (
                 "failed to get the hash of the compiled graph")
