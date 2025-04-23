@@ -9,14 +9,15 @@ from vllm.v1.sample.ops.topk_topp_sampler import TopKTopPSampler
 from vllm.v1.sample.tpu.metadata import TPUSupportedSamplingMetadata
 
 _SAMPLING_EPS = 1e-5
-MAX_TOP_LOGPROBS_TO_GATHER = 24
 
 
 class Sampler(nn.Module):
 
-    def __init__(self):
+    def __init__(self, max_logprobs: int):
         super().__init__()
         self.topk_topp_sampler = TopKTopPSampler()
+        # Gather a fixed amount of top logprobs. Defaults to 20.
+        self.max_logprobs = max_logprobs
 
     def forward(
         self,
@@ -37,9 +38,12 @@ class Sampler(nn.Module):
         # Gather the top_logprobs with corresponding tokens. Use a fixed number
         # of logprobs as an alternative to having multiple pre-compiled graphs.
         # Select the logprobs actually demanded by each request on CPU.
-        logprobs_tensors = self.gather_logprobs(raw_logprobs, 
-                                                MAX_TOP_LOGPROBS_TO_GATHER, 
-                                                token_ids=sampled)
+        if sampling_metadata.logprobs:
+            logprobs_tensors = self.gather_logprobs(raw_logprobs,
+                                                    self.max_logprobs,
+                                                    token_ids=sampled)
+        else:
+            logprobs_tensors = None
 
         # Use int32 to reduce the tensor size.
         sampled = sampled.to(torch.int32)

@@ -36,7 +36,7 @@ from vllm.v1.kv_cache_interface import (AttentionSpec, FullAttentionSpec,
 from vllm.v1.outputs import (EMPTY_MODEL_RUNNER_OUTPUT, LogprobsTensors,
                              ModelRunnerOutput)
 from vllm.v1.sample.tpu.metadata import TPUSupportedSamplingMetadata
-from vllm.v1.sample.tpu.sampler import MAX_TOP_LOGPROBS_TO_GATHER, Sampler as TPUSampler
+from vllm.v1.sample.tpu.sampler import Sampler as TPUSampler
 from vllm.v1.utils import bind_kv_cache
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 
@@ -793,7 +793,7 @@ class TPUModelRunner:
         # Remove padding on cpu and keep dynamic op outside of xla graph.
         selected_token_ids = selected_token_ids.cpu()[:num_reqs]
         logprobs_lists = logprobs.tolists() \
-            if tpu_sampling_metadata.max_num_logprobs else None
+            if tpu_sampling_metadata.logprobs else None
 
         # Update the cache state concurrently. Code above will not block until
         # we use `selected_token_ids`. Add mark_step if post-processing changes
@@ -896,7 +896,7 @@ class TPUModelRunner:
         xm.mark_step()
         xm.wait_device_ops()
         self.model = model
-        self.sampler = TPUSampler()
+        self.sampler = TPUSampler(self.model_config.max_logprobs)
 
     @torch.no_grad()
     def _dummy_run(self, num_tokens: int) -> None:
@@ -1107,16 +1107,17 @@ class TPUModelRunner:
             # because some operations in the sampler require it to be static.
             for all_greedy in [False, True]:
                 generate_params_if_all_greedy = not all_greedy
-                sampling_metadata = (
-                    TPUSupportedSamplingMetadata.from_input_batch(
-                        self.input_batch,
-                        num_reqs,
-                        self.device,
-                        generate_params_if_all_greedy,
-                    ))
-                print("COMPILING", sampling_metadata.max_num_logprobs)
-                sampling_metadata.all_greedy = all_greedy
-                self.sample_from_logits(dummy_logits, sampling_metadata)
+                for top_logprobs in [False, True]:
+                    sampling_metadata = (
+                        TPUSupportedSamplingMetadata.from_input_batch(
+                            self.input_batch,
+                            num_reqs,
+                            self.device,
+                            generate_params_if_all_greedy,
+                        ))
+                    sampling_metadata.logprobs = top_logprobs
+                    sampling_metadata.all_greedy = all_greedy
+                    self.sample_from_logits(dummy_logits, sampling_metadata)
             logger.info("  -- num_seqs: %d", num_reqs)
         xm.wait_device_ops()
         end = time.perf_counter()
@@ -1259,14 +1260,19 @@ class TPUModelRunner:
         """
         Sample with xla-friendly function. This function is to be traced 
         separately from `forward` for lighter compilation overhead.
+        Optionally (in a separate graph) returns top-logprobs too, by gathering
+        a fixed maximum number of logprobs for the whole batch, 20 by default.
         """
         if sampling_metadata.all_greedy:
             out_tokens = torch.argmax(logits, dim=-1, keepdim=True)
-            # TODO skip if not needed and compile for it
-            logprobs = self.sampler.compute_logprobs(logits)
-            logprobs_tensors = self.sampler.gather_logprobs(logprobs, 
-                                    MAX_TOP_LOGPROBS_TO_GATHER, 
-                                    token_ids=out_tokens.squeeze(-1))
+            if sampling_metadata.logprobs:
+                logprobs = self.sampler.compute_logprobs(logits)
+                logprobs_tensors = self.sampler.gather_logprobs(
+                    logprobs,
+                    self.model_config.max_logprobs,
+                    token_ids=out_tokens.squeeze(-1))
+            else:
+                logprobs_tensors = None
         else:
             sampler_out = self.sampler(logits, sampling_metadata)
             out_tokens = sampler_out.sampled_token_ids
