@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
-from argparse import ArgumentTypeError
+from argparse import ArgumentError, ArgumentTypeError
 
 import pytest
 
@@ -10,7 +10,7 @@ from vllm.utils import FlexibleArgumentParser
 
 
 @pytest.mark.parametrize(("arg", "expected"), [
-    (None, None),
+    (None, dict()),
     ("image=16", {
         "image": 16
     }),
@@ -24,6 +24,10 @@ from vllm.utils import FlexibleArgumentParser
     }),
 ])
 def test_limit_mm_per_prompt_parser(arg, expected):
+    """This functionality is deprecated and will be removed in the future.
+    This argument should be passed as JSON string instead.
+    
+    TODO: Remove with nullable_kvs."""
     parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
     if arg is None:
         args = parser.parse_args([])
@@ -53,12 +57,20 @@ def test_compilation_config():
     assert args.compilation_config.level == 3
 
     # set to string form of a dict
-    args = parser.parse_args(["--compilation-config", "{'level': 3}"])
-    assert args.compilation_config.level == 3
+    args = parser.parse_args([
+        "--compilation-config",
+        "{'level': 3, 'cudagraph_capture_sizes': [1, 2, 4, 8]}",
+    ])
+    assert (args.compilation_config.level == 3 and
+            args.compilation_config.cudagraph_capture_sizes == [1, 2, 4, 8])
 
     # set to string form of a dict
-    args = parser.parse_args(["--compilation-config={'level': 3}"])
-    assert args.compilation_config.level == 3
+    args = parser.parse_args([
+        "--compilation-config="
+        "{'level': 3, 'cudagraph_capture_sizes': [1, 2, 4, 8]}",
+    ])
+    assert (args.compilation_config.level == 3 and
+            args.compilation_config.cudagraph_capture_sizes == [1, 2, 4, 8])
 
 
 def test_prefix_cache_default():
@@ -142,3 +154,39 @@ def test_composite_arg_parser(arg, expected, option):
     else:
         args = parser.parse_args([f"--{option}", arg])
     assert getattr(args, option.replace("-", "_")) == expected
+
+
+def test_human_readable_model_len():
+    # `exit_on_error` disabled to test invalid values below
+    parser = EngineArgs.add_cli_args(
+        FlexibleArgumentParser(exit_on_error=False))
+
+    args = parser.parse_args([])
+    assert args.max_model_len is None
+
+    args = parser.parse_args(["--max-model-len", "1024"])
+    assert args.max_model_len == 1024
+
+    # Lower
+    args = parser.parse_args(["--max-model-len", "1m"])
+    assert args.max_model_len == 1_000_000
+    args = parser.parse_args(["--max-model-len", "10k"])
+    assert args.max_model_len == 10_000
+
+    # Capital
+    args = parser.parse_args(["--max-model-len", "3K"])
+    assert args.max_model_len == 1024 * 3
+    args = parser.parse_args(["--max-model-len", "10M"])
+    assert args.max_model_len == 2**20 * 10
+
+    # Decimal values
+    args = parser.parse_args(["--max-model-len", "10.2k"])
+    assert args.max_model_len == 10200
+    # ..truncated to the nearest int
+    args = parser.parse_args(["--max-model-len", "10.212345k"])
+    assert args.max_model_len == 10212
+
+    # Invalid (do not allow decimals with binary multipliers)
+    for invalid in ["1a", "pwd", "10.24", "1.23M"]:
+        with pytest.raises(ArgumentError):
+            args = parser.parse_args(["--max-model-len", invalid])

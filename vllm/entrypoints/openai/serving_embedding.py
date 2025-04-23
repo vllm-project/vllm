@@ -80,9 +80,6 @@ class OpenAIServingEmbedding(OpenAIServing):
             return error_check_ret
 
         encoding_format = request.encoding_format
-        if request.dimensions is not None:
-            return self.create_error_response(
-                "dimensions is currently not supported")
 
         model_name = self._get_model_name(request.model)
         request_id = f"embd-{self._base_request_id(raw_request)}"
@@ -98,6 +95,13 @@ class OpenAIServingEmbedding(OpenAIServing):
                     "truncate_prompt_tokens value is "
                     "greater than max_model_len."
                     " Please, select a smaller truncation size.")
+
+        pooling_params = request.to_pooling_params()
+
+        try:
+            pooling_params.verify(self.model_config)
+        except ValueError as e:
+            return self.create_error_response(str(e))
 
         try:
             (
@@ -146,8 +150,6 @@ class OpenAIServingEmbedding(OpenAIServing):
         # Schedule the request and get the result generator.
         generators: list[AsyncGenerator[PoolingRequestOutput, None]] = []
         try:
-            pooling_params = request.to_pooling_params()
-
             for i, engine_prompt in enumerate(engine_prompts):
                 request_id_item = f"{request_id}-{i}"
 

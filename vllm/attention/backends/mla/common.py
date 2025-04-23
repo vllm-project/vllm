@@ -83,8 +83,8 @@ spda_o = scaled_dot_product_attention(
 return spda_o @ W_O
 
 NOTE: in the actual code, 
-    `kv_b_proj` is [W_UK; W_UV] concatnated per head
-    `q_b_proj` is [W_UQ; W_QR] concatnated per head
+    `kv_b_proj` is [W_UK; W_UV] concatenated per head
+    `q_b_proj` is [W_UQ; W_QR] concatenated per head
     `out_proj` is W_O
 
 
@@ -204,6 +204,7 @@ from vllm.attention.backends.abstract import (AttentionBackend, AttentionLayer,
 from vllm.attention.backends.utils import (PAD_SLOT_ID, compute_slot_mapping,
                                            compute_slot_mapping_start_idx,
                                            is_block_tables_empty)
+from vllm.attention.ops.merge_attn_states import merge_attn_states
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                LinearBase, RowParallelLinear,
                                                UnquantizedLinearMethod)
@@ -217,9 +218,7 @@ from vllm.vllm_flash_attn.fa_utils import get_flash_attn_version
 
 if HAS_TRITON:
     from vllm.attention.ops.triton_flash_attention import triton_attention
-    from vllm.attention.ops.triton_merge_attn_states import merge_attn_states
 else:
-    merge_attn_states = None
     triton_attention = None
 
 try:
@@ -667,7 +666,7 @@ class MLACommonMetadata(AttentionMetadata):
             assert num_seqs > num_queries
 
         if turn_prefills_into_decodes:
-            # When Mutli-Step is enabled with Chunked-Prefill, prefills and
+            # When Multi-Step is enabled with Chunked-Prefill, prefills and
             # decodes are scheduled together. In the first step, all the
             # prefills turn into decodes. This update reflects that
             # conversion.
@@ -712,12 +711,24 @@ class MLACommonMetadata(AttentionMetadata):
             self.seq_lens[i] += 1
         self.max_decode_seq_len = max(self.seq_lens)
 
+        self._ops_advance_step(num_seqs=num_seqs,
+                               num_queries=num_queries,
+                               block_size=block_size,
+                               input_tokens=model_input.input_tokens,
+                               sampled_token_ids=sampled_token_ids,
+                               input_positions=model_input.input_positions)
+
+    def _ops_advance_step(self, num_seqs: int, num_queries: int,
+                          block_size: int, input_tokens: torch.Tensor,
+                          sampled_token_ids: torch.Tensor,
+                          input_positions: torch.Tensor) -> None:
+        # here we use advance_step_flashinfo to update the paged_kv_* tensors
         ops.advance_step_flashattn(num_seqs=num_seqs,
                                    num_queries=num_queries,
                                    block_size=block_size,
-                                   input_tokens=model_input.input_tokens,
+                                   input_tokens=input_tokens,
                                    sampled_token_ids=sampled_token_ids,
-                                   input_positions=model_input.input_positions,
+                                   input_positions=input_positions,
                                    seq_lens=self.seq_lens_tensor,
                                    slot_mapping=self.slot_mapping,
                                    block_tables=self.block_tables)
@@ -728,6 +739,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[T], Generic[T]):
     NOTE: Please read the comment at the top of the file before trying to 
     understand this class
     """
+    BLOCK_TABLE_EXTENDER: list[list[int]] = []
 
     def __init__(self, input_builder: "ModelInputForGPUBuilder"):
         self.input_builder = input_builder
@@ -878,8 +890,10 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[T], Generic[T]):
         num_seqs = len(seq_lens)
         if use_captured_graph:
             self.slot_mapping.extend([PAD_SLOT_ID] * cuda_graph_pad_size)
-            self.block_tables.extend([] * cuda_graph_pad_size)
+            self.block_tables.extend(self.__class__.BLOCK_TABLE_EXTENDER *
+                                     cuda_graph_pad_size)
             num_decode_tokens = batch_size - self.num_prefill_tokens
+
             block_tables = self._get_graph_runner_block_tables(
                 num_seqs, self.block_tables)
         else:
@@ -1044,8 +1058,8 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
         self.q_proj = q_proj
         self.kv_b_proj = kv_b_proj
         self.o_proj = o_proj
-        self.triton_fa_func = triton_attention
 
+        self.triton_fa_func = triton_attention
         # Handle the differences between the flash_attn_varlen from flash_attn
         # and the one from vllm_flash_attn. The former is used on RoCM and the
         # latter has an additional parameter to control FA2 vs FA3
@@ -1055,6 +1069,77 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
             self.flash_attn_varlen_func = \
                 functools.partial(flash_attn_varlen_func,
                                   fa_version=self.vllm_flash_attn_version)
+
+        # For MLA the v head dim is smaller than qk head dim so we pad out
+        # v with 0s to match the qk head dim for attention backends that do
+        # not support different headdims
+        # We don't need to pad V if we are on a hopper system with FA3
+        self._pad_v = self.vllm_flash_attn_version is None or not (
+            self.vllm_flash_attn_version == 3
+            and current_platform.get_device_capability()[0] == 9)
+
+    def _flash_attn_varlen_diff_headdims(self, q, k, v, softmax_scale,
+                                         return_softmax_lse, **kwargs):
+        maybe_padded_v = v
+        if self._pad_v:
+            maybe_padded_v = torch.nn.functional.pad(
+                v, [0, q.shape[-1] - v.shape[-1]], value=0)
+
+        if is_hip and envs.VLLM_USE_TRITON_FLASH_ATTN \
+            and not return_softmax_lse:
+            attn_out = self.triton_fa_func(
+                q,
+                k,
+                maybe_padded_v,
+                None,  # output
+                kwargs["cu_seqlens_q"],
+                kwargs["cu_seqlens_k"],
+                kwargs["max_seqlen_q"],
+                kwargs["max_seqlen_k"],
+                kwargs["causal"],
+                softmax_scale,
+                None,  # bias
+            )
+        if is_vllm_fa:
+            attn_out = self.flash_attn_varlen_func(
+                q=q,
+                k=k,
+                v=maybe_padded_v,
+                return_softmax_lse=return_softmax_lse,
+                softmax_scale=softmax_scale,
+                **kwargs,
+            )
+        else:
+            # Use return_attn_probs instead of return_softmax_lse for RoCM
+            attn_out = self.flash_attn_varlen_func(
+                q=q,
+                k=k,
+                v=maybe_padded_v,
+                return_attn_probs=return_softmax_lse,
+                softmax_scale=softmax_scale,
+                **kwargs,
+            )
+
+        # Unpack the output if there is multiple results,
+        # triton always returns (output, softmax_lse),
+        # vllm_flash_attn returns (output, softmax_lse) when
+        #  `return_softmax_lse = True`
+        # flash_attn (RoCM) returns (output, softmax_lse, ...) when
+        #  `return_attn_probs = True`
+        rest = None
+        if isinstance(attn_out, tuple):
+            attn_out, *rest = attn_out
+
+        # unpad if necessary
+        if self._pad_v:
+            attn_out = attn_out[..., :v.shape[-1]]
+
+        # Remain consistent with old `flash_attn_varlen_func` where there
+        # is only one output tensor if `return_softmax_lse` is False.
+        if return_softmax_lse:
+            assert rest is not None
+            return attn_out, rest[0]
+        return attn_out
 
     def _v_up_proj_and_o_proj(self, x):
         # Convert from (B, N, L) to (N, B, L)
@@ -1177,40 +1262,19 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
             k = torch.cat((k_nope, k_pe.expand((*k_nope.shape[:-1], -1))),
                           dim=-1)
 
-            # For MLA the v head dim is smaller than qk head dim so we pad
-            # out v with 0s to match the qk head dim
-            v_padded = torch.nn.functional.pad(v,
-                                               [0, q.shape[-1] - v.shape[-1]],
-                                               value=0)
-
-            if is_vllm_fa:
-                attn_output, attn_softmax_lse = self.flash_attn_varlen_func(
-                    q=q,
-                    k=k,
-                    v=v_padded,
-                    cu_seqlens_q=prefill_metadata.query_start_loc,
-                    cu_seqlens_k=prefill_metadata.context_chunk_cu_seq_lens[i],
-                    max_seqlen_q=prefill_metadata.max_query_len,
-                    max_seqlen_k=prefill_metadata.
-                    context_chunk_max_seq_lens[i],
-                    softmax_scale=self.scale,
-                    causal=False,  # Context is unmasked
-                    return_softmax_lse=True,
-                )
-            else:
-                attn_output, attn_softmax_lse, _ = self.flash_attn_varlen_func(
-                    q=q,
-                    k=k,
-                    v=v_padded,
-                    cu_seqlens_q=prefill_metadata.query_start_loc,
-                    cu_seqlens_k=prefill_metadata.context_chunk_cu_seq_lens[i],
-                    max_seqlen_q=prefill_metadata.max_query_len,
-                    max_seqlen_k=prefill_metadata.
-                    context_chunk_max_seq_lens[i],
-                    softmax_scale=self.scale,
-                    causal=False,  # Context is unmasked
-                    return_attn_probs=True,
-                )
+            attn_output, attn_softmax_lse = \
+                self._flash_attn_varlen_diff_headdims(
+                q=q,
+                k=k,
+                v=v,
+                cu_seqlens_q=prefill_metadata.query_start_loc,
+                cu_seqlens_k=prefill_metadata.context_chunk_cu_seq_lens[i],
+                max_seqlen_q=prefill_metadata.max_query_len,
+                max_seqlen_k=prefill_metadata.context_chunk_max_seq_lens[i],
+                softmax_scale=self.scale,
+                causal=False,  # Context is unmasked
+                return_softmax_lse=True,
+            )
 
             if output is None:
                 output = attn_output
@@ -1253,58 +1317,22 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
 
         k = torch.cat((k_nope, k_pe.expand((*k_nope.shape[:-1], -1))), dim=-1)
 
-        # For MLA the v head dim is smaller than qk head dim so we pad out
-        # v with 0s to match the qk head dim
-        v_padded = torch.nn.functional.pad(v, [0, q.shape[-1] - v.shape[-1]],
-                                           value=0)
-
-        if is_hip and envs.VLLM_USE_TRITON_FLASH_ATTN and not has_context:
-            output = self.triton_fa_func(
-                q,
-                k,
-                v_padded,
-                None,
-                prefill_metadata.query_start_loc,
-                prefill_metadata.query_start_loc,
-                prefill_metadata.max_prefill_seq_len,
-                prefill_metadata.max_prefill_seq_len,
-                True,  # causal
-                self.scale,
-                None,  # attn_mask is None unless applying ALiBi mask
-            )
-            ## triton flash attention always return 2 objects
-            if not has_context:
-                output = output[0]
-        elif is_vllm_fa:
-            output = self.flash_attn_varlen_func(
-                q=q,
-                k=k,
-                v=v_padded,
-                cu_seqlens_q=prefill_metadata.query_start_loc,
-                cu_seqlens_k=prefill_metadata.query_start_loc,
-                max_seqlen_q=prefill_metadata.max_prefill_seq_len,
-                max_seqlen_k=prefill_metadata.max_prefill_seq_len,
-                softmax_scale=self.scale,
-                causal=True,
-                return_softmax_lse=has_context,
-            )
-        else:
-            output = self.flash_attn_varlen_func(
-                q=q,
-                k=k,
-                v=v_padded,
-                cu_seqlens_q=prefill_metadata.query_start_loc,
-                cu_seqlens_k=prefill_metadata.query_start_loc,
-                max_seqlen_q=prefill_metadata.max_prefill_seq_len,
-                max_seqlen_k=prefill_metadata.max_prefill_seq_len,
-                softmax_scale=self.scale,
-                causal=True,
-                return_attn_probs=has_context,
-            )
+        output = self._flash_attn_varlen_diff_headdims(
+            q=q,
+            k=k,
+            v=v,
+            cu_seqlens_q=prefill_metadata.query_start_loc,
+            cu_seqlens_k=prefill_metadata.query_start_loc,
+            max_seqlen_q=prefill_metadata.max_prefill_seq_len,
+            max_seqlen_k=prefill_metadata.max_prefill_seq_len,
+            softmax_scale=self.scale,
+            causal=True,
+            return_softmax_lse=has_context,
+        )
 
         if has_context:
             # ROCm flash_attn_varlen_func will return 3 objects instead of 2
-            suffix_output, suffix_lse, *rest = output
+            suffix_output, suffix_lse = output
             context_output, context_lse = self._compute_prefill_context( \
                 q, kv_c_and_k_pe_cache, attn_metadata)
 
@@ -1317,12 +1345,7 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
                 suffix_lse=suffix_lse,
             )
 
-        # slice by `:v.shape[-1]` in order to remove v headdim padding
-        output = output\
-            .view(-1, self.num_heads, q.shape[-1])[..., :v.shape[-1]]\
-                .reshape(-1, self.num_heads * v.shape[-1])
-
-        return self.o_proj(output)[0]
+        return self.o_proj(output.flatten(start_dim=-2))[0]
 
     @abstractmethod
     def _forward_decode(

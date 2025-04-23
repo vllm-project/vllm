@@ -48,7 +48,6 @@ class HybridKVCacheManager:
         max_model_len: int,
         enable_caching: bool = True,
         caching_hash_algo: str = "builtin",
-        num_preallocate_tokens: int = 64,
         log_stats: bool = False,
     ) -> None:
         # TODO: adjust the name for item in one group, list of items in all
@@ -62,29 +61,11 @@ class HybridKVCacheManager:
         ]
         self.enable_caching = enable_caching
         self.caching_hash_fn = sha256 if caching_hash_algo == "sha256" else hash
-        # FIXME: make prefix cache stats conditional on log_stats
         self.log_stats = log_stats
-        # NOTE(woosuk): To avoid frequent block allocation, we preallocate some
-        # blocks for each request. For example, when a request reaches the end
-        # of its block table, we preallocate N blocks in advance. This way, we
-        # reduce the overhead of updating free_block_ids and ref_cnts for each
-        # request every step (at the cost of some memory waste).
-        # NOTE(woosuk): This is different from the "lookahead" slots since this
-        # does not guarantee that the request always has N empty blocks. After
-        # the request gets N empty blocks, it starts to use the blocks without
-        # further allocation. When it uses up all the N empty blocks, it gets
-        # N new empty blocks.
-        # NOTE(Chen): For simplicity, we keep the number of preallocated blocks
-        # the same for all layers, which will result in different
-        # preallocated tokens for different layers if their block sizes are
-        # different.
-        self.num_preallocate_blocks = cdiv(
-            num_preallocate_tokens,
-            max(g.kv_cache_spec.block_size
-                for g in kv_cache_config.kv_cache_groups))
+        # FIXME: make prefix cache stats conditional on log_stats
+        self.prefix_cache_stats = PrefixCacheStats() if log_stats else None
 
         self.block_pool = BlockPool(self.num_gpu_blocks, enable_caching)
-
         self.specialized_managers = [
             get_specialized_manager(
                 kv_cache_spec=g.kv_cache_spec,
@@ -112,8 +93,7 @@ class HybridKVCacheManager:
         # This is used to track the number of cached blocks for each request.
         # This is only used to track the RUNNING requests, we do not track the
         # data for reempted ones.
-        self.num_cached_block: dict[str, list[int]] = {}
-        self.prefix_cache_stats = PrefixCacheStats()
+        self.num_cached_block: dict[str, int] = {}
 
     @property
     def usage(self) -> float:
@@ -124,12 +104,14 @@ class HybridKVCacheManager:
         """
         return self.block_pool.get_usage()
 
-    def make_prefix_cache_stats(self) -> PrefixCacheStats:
+    def make_prefix_cache_stats(self) -> Optional[PrefixCacheStats]:
         """Get (and reset) the prefix cache stats.
 
         Returns:
-            The current prefix caching stats.
+            The current prefix caching stats, or None if logging is disabled.
         """
+        if not self.log_stats:
+            return None
         stats = self.prefix_cache_stats
         self.prefix_cache_stats = PrefixCacheStats()
         return stats
@@ -165,51 +147,60 @@ class HybridKVCacheManager:
             ]
             self.req_to_block_hashes[request.request_id] = block_hashes
 
-        self.prefix_cache_stats.requests += 1
-        if request.sampling_params.prompt_logprobs is None:
-            # TODO: Fix last block problem
+        if self.log_stats:
+            assert self.prefix_cache_stats is not None
+            self.prefix_cache_stats.requests += 1
+        # When the request requires prompt logprobs, we skip prefix caching.
+        if request.sampling_params.prompt_logprobs is not None:
+            return [], 0
+
+        # TODO: Fix last block problem
             # if len(block_hashes) * self.block_size == request.num_tokens:
-            #     # When prompt length is divisible by the block size and all
-            #     # blocks are cached, we need to recompute the last token. This
-            #     # have to be achieved by re-computing an entire block because
-            #     # allocate_slots() assumes num_computed_tokens is always a
-            #     # multiple of the block size. To achieve this, remove the last
-            #     # block hash from the block_hashes for find_longest_cache_hit
-            #     # This limitation can potentially be removed in the future to
-            #     # slightly improve the performance.
-            #     last_block_hash = block_hashes.pop()
-            # else:
-            #     last_block_hash = None
+        #     # When prompt length is divisible by the block size and all
+        #     # blocks are cached, we need to recompute the last token. This
+        #     # have to be achieved by re-computing an entire block because
+        #     # allocate_slots() assumes num_computed_tokens is always a
+        #     # multiple of the block size. To achieve this, remove the last
+        #     # block hash from the block_hashes for find_longest_cache_hit
+        #     # This limitation can potentially be removed in the future to
+        #     # slightly improve the performance.
+        #     last_block_hash = block_hashes.pop()
+        # else:
+        #     last_block_hash = None
 
-            computed_blocks, num_computed_tokens = self.find_longest_cache_hit(
-                request.request_id, block_hashes)
+        computed_blocks, num_computed_tokens = self.find_longest_cache_hit(
+            request.request_id, block_hashes)
 
-            # if last_block_hash is not None:
-            #     # Add back the last block hash if it was removed.
-            #     block_hashes.append(last_block_hash)
+        # if last_block_hash is not None:
+        #     # Add back the last block hash if it was removed.
+        #     block_hashes.append(last_block_hash)
+        if self.log_stats:
+            assert self.prefix_cache_stats is not None
 
             self.prefix_cache_stats.queries += len(block_hashes)
             self.prefix_cache_stats.hits += len(computed_blocks)
-            return HybridKVCacheBlocks(computed_blocks), num_computed_tokens
-        else:
-            # Skip cache hits for prompt logprobs
-            return HybridKVCacheBlocks([]), 0
+        return HybridKVCacheBlocks(computed_blocks), num_computed_tokens
 
     def allocate_slots(
         self,
         request: Request,
         num_tokens: int,
         new_computed_blocks: Optional[KVCacheBlocksInterface] = None,
+        num_lookahead_tokens: int = 0,,
         num_new_computed_tokens: int = 0,
     ) -> Optional[HybridKVCacheBlocks]:
         """Add slots for a request with new tokens to append.
 
         Args:
             request: The request to allocate slots.
-            num_tokens: The number of tokens to allocate. Note that this does
-                not include the tokens that have already been computed.
+            num_tokens: The number of tokens to allocate, including external
+                tokens. Note that this does not include tokens that have
+                already been computed locally (i.e. new_computed_blocks).
             new_computed_blocks: A list of new computed blocks just hitting the
                 prefix caching.
+            num_lookahead_tokens: The number of speculative tokens to allocate.
+                This is used by spec decode proposers with kv-cache such 
+                as eagle.
             num_new_computed_tokens: The number of new computed tokens in the
                 new_computed_blocks.
 
@@ -263,7 +254,7 @@ class HybridKVCacheManager:
         num_new_blocks: list[int] = []
         for i in range(self.num_kv_cache_groups):
             num_required_blocks_i = cdiv(
-                num_computed_tokens + num_tokens,
+                num_computed_tokens + num_tokens + num_lookahead_tokens,
                 self.specialized_managers[i].block_size)
             num_new_blocks.append(num_required_blocks_i - len(req_blocks[i]) -
                                   len(new_computed_block_list[i]))
@@ -295,37 +286,22 @@ class HybridKVCacheManager:
             req_blocks[i].extend(new_computed_block_list[i])
 
         # Start to handle new blocks
-        new_blocks: list[list[KVCacheBlock]] = []
-        # Truncate the number of pre-allocated blocks to ensure that we can
-        # have at least `num_new_blocks` free blocks for each layer.
-        num_preallocate_blocks = min(
-            self.num_preallocate_blocks,
-            (self.block_pool.get_num_free_blocks() - total_num_new_blocks) //
-            len(self.specialized_managers))
 
-        for i in range(self.num_kv_cache_groups):
-            if num_new_blocks[i] <= 0:
-                # No new block is needed.
-                new_blocks.append([])
-            else:
-                # Get new blocks from the free block pool considering
-                # preallocated blocks.
-                num_block_to_allocate = min(
-                    num_new_blocks[i] + num_preallocate_blocks,
-                    # Should not exceed the maximum number of blocks per request
-                    # This is especially because the block table has the shape
-                    # [..., max_num_blocks_per_req].
-                    # TODO(woosuk): Check and reject requests if
-                    # num_prompt_tokens + max_tokens > max_model_len.
-                    # Don't need self.block_pool.get_num_free_blocks() as in
-                    # KVCacheManager because we already considered it when
-                    # calculating num_preallocate_blocks
-                    self.max_num_blocks_per_req[i] - len(req_blocks[i]),
-                )
-
-                assert num_block_to_allocate > 0
-                assert num_block_to_allocate <= \
-                    self.block_pool.get_num_free_blocks()
+        if num_new_blocks <= 0:
+            # No new block is needed.
+            new_blocks = []
+        else:
+            # Get new blocks from the free block pool.
+            # TODO: to group
+            num_new_blocks = min(
+                num_new_blocks,
+                self.block_pool.get_num_free_blocks(),
+                # Should not exceed the maximum number of blocks per request.
+                # This is especially because the block table has the shape
+                # [..., max_num_blocks_per_req].
+                self.max_num_blocks_per_req - len(req_blocks),
+            )
+            assert num_new_blocks > 0
 
                 # Concatenate the computed block IDs and the new block IDs.
                 new_blocks_this_layer = self.block_pool.get_new_blocks(
@@ -383,17 +359,19 @@ class HybridKVCacheManager:
 
     def reset_prefix_cache(self) -> bool:
         """Reset prefix cache. This function may be used in RLHF
-        flows to invalid prefix caching after the weights are updated,
+        flows to invalidate prefix caching after the weights are updated,
         or used for resetting prefix caching status for benchmarking.
 
         Returns:
             bool: True if the prefix cache is successfully reset,
             False otherwise.
         """
-        if self.block_pool.reset_prefix_cache():
+        if not self.block_pool.reset_prefix_cache():
+            return False
+        if self.log_stats:
+            assert self.prefix_cache_stats is not None
             self.prefix_cache_stats.reset = True
-            return True
-        return False
+        return True
 
     def get_num_common_prefix_blocks(
         self,

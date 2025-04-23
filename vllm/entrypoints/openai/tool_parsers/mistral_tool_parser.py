@@ -70,6 +70,19 @@ class MistralToolParser(ToolParser):
                 "Mistral Tool Parser could not locate the tool call token in "
                 "the tokenizer!")
 
+    def adjust_request(
+            self, request: ChatCompletionRequest) -> ChatCompletionRequest:
+        if not isinstance(
+                self.model_tokenizer, MistralTokenizer
+        ) and request.tools and request.tool_choice != 'none':
+            # Do not skip special tokens when using chat template
+            # with Mistral parser as TOOL_CALL token is needed
+            # for tool detection.
+            # Note: we don't want skip_special_tokens=False
+            # with MistralTokenizer as it is incompatible
+            request.skip_special_tokens = False
+        return request
+
     def extract_tool_calls(
         self,
         model_output: str,
