@@ -88,7 +88,7 @@ def rocm_unquantized_gemm(x: torch.Tensor,
         out = ops.wvSplitK(weight, x_view, cu_count)
         return out.view(*x.shape[:-1], weight.shape[0])
     elif m % 4 == 0 and n == 1 and k <= 8192:
-        out = ops.LLMM1(weight, x_view, out, 4)
+        out = ops.LLMM1(weight, x_view, 4)
         return out.view(*x.shape[:-1], weight.shape[0])
     return torch.nn.functional.linear(x, weight, bias)
 
