@@ -9,7 +9,7 @@ import torch
 import vllm.envs
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
-from vllm.sampling_params import SamplingParams
+from vllm.sampling_params import GuidedDecodingParams, SamplingParams
 from vllm.transformers_utils.tokenizer_group import init_tokenizer_from_configs
 from vllm.transformers_utils.tokenizers.mistral import MistralTokenizer
 from vllm.utils import LazyLoader
@@ -32,15 +32,23 @@ class XgrammarBackend(StructuredOutputBackend):
 
     def __init__(self, vllm_config: VllmConfig):
         self.vllm_config = vllm_config
-        self.disable_any_whitespace = (
-            "disable-any-whitespace"
-            in vllm_config.decoding_config.guided_decoding_backend)
         tokenizer_group = init_tokenizer_from_configs(
             model_config=vllm_config.model_config,
             scheduler_config=vllm_config.scheduler_config,
             parallel_config=vllm_config.parallel_config,
             lora_config=vllm_config.lora_config)  # type: ignore[arg-type]
         tokenizer_group.ping()
+
+        self.disable_any_whitespace = False
+        backend_options = GuidedDecodingParams(
+            backend=vllm_config.decoding_config.guided_decoding_backend
+        ).backend_options()
+        for option in backend_options:
+            if option == "disable-any-whitespace":
+                self.disable_any_whitespace = True
+            else:
+                raise ValueError(
+                    f"Unsupported option for the xgrammar backend: {option}")
 
         tokenizer = tokenizer_group.get_lora_tokenizer(None)
         self.vocab_size = vllm_config.model_config.get_vocab_size()

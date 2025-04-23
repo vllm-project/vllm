@@ -18,7 +18,8 @@ import vllm.envs as envs
 from vllm import version
 from vllm.config import (BlockSize, CacheConfig, CacheDType, CompilationConfig,
                          ConfigFormat, ConfigType, DecodingConfig, Device,
-                         DeviceConfig, DistributedExecutorBackend, HfOverrides,
+                         DeviceConfig, DistributedExecutorBackend,
+                         GuidedDecodingBackendV1, HfOverrides,
                          KVTransferConfig, LoadConfig, LoadFormat, LoRAConfig,
                          ModelConfig, ModelImpl, MultiModalConfig,
                          ObservabilityConfig, ParallelConfig, PoolerConfig,
@@ -1370,14 +1371,13 @@ class EngineArgs:
                                recommend_to_remove=True)
             return False
 
-        # Xgrammar and Guidance are supported.
-        SUPPORTED_GUIDED_DECODING = [
-            "xgrammar", "xgrammar:disable-any-whitespace", "guidance",
-            "guidance:disable-any-whitespace", "auto"
-        ]
-        if self.guided_decoding_backend not in SUPPORTED_GUIDED_DECODING:
-            _raise_or_fallback(feature_name="--guided-decoding-backend",
-                               recommend_to_remove=False)
+        # remove backend options when doing this check
+        if self.guided_decoding_backend.split(':')[0] \
+            not in get_args(GuidedDecodingBackendV1):
+            _raise_or_fallback(
+                feature_name=
+                f"--guided-decoding-backend={self.guided_decoding_backend}",
+                recommend_to_remove=False)
             return False
 
         # Need at least Ampere for now (FA support required).
