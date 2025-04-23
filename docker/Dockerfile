@@ -240,10 +240,15 @@ RUN --mount=type=bind,from=build,src=/workspace/dist,target=/vllm-workspace/dist
 # $ ls dist
 # $ # upload the wheel to a public location, e.g. https://wheels.vllm.ai/flashinfer/524304395bd1d8cd7d07db083859523fcaa246a4/flashinfer_python-0.2.1.post1+cu124torch2.5-cp38-abi3-linux_x86_64.whl
 
+# TESTING: install xformers from source to test 2.7.0 final RC
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv pip install --system --no-build-isolation "git+https://github.com/facebookresearch/xformers@main#egg=xformers"
+
 RUN --mount=type=cache,target=/root/.cache/uv \
 . /etc/environment && \
 if [ "$TARGETPLATFORM" != "linux/arm64" ]; then \
     # TESTING: install FlashInfer from source to test 2.7.0 final RC
+    FLASHINFER_ENABLE_AOT=1 TORCH_CUDA_ARCH_LIST='7.5 8.0 8.6 8.9 9.0+PTX' \
     uv pip install --system --no-build-isolation "git+https://github.com/flashinfer-ai/flashinfer@main" ; \
 fi
 COPY examples examples
