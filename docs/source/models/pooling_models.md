@@ -28,10 +28,10 @@ The selected option sets the default pooler used to extract the final hidden sta
 - * Embedding (`embed`)
   * `LAST`
   * ✅︎
-  * ✗
+  * ❌
 - * Classification (`classify`)
   * `LAST`
-  * ✗
+  * ❌
   * ✅︎
 - * Sentence Pair Scoring (`score`)
   * \*
@@ -39,8 +39,8 @@ The selected option sets the default pooler used to extract the final hidden sta
   * \*
 - * Reward Modeling (`reward`)
   * `ALL`
-  * ✗
-  * ✗
+  * ❌
+  * ❌
 :::
 
 \*The default pooler is always defined by the model.
@@ -68,6 +68,8 @@ The {class}`~vllm.LLM.encode` method is available to all pooling models in vLLM.
 It returns the extracted hidden states directly, which is useful for reward models.
 
 ```python
+from vllm import LLM
+
 llm = LLM(model="Qwen/Qwen2.5-Math-RM-72B", task="reward")
 (output,) = llm.encode("Hello, my name is")
 
@@ -81,6 +83,8 @@ The {class}`~vllm.LLM.embed` method outputs an embedding vector for each prompt.
 It is primarily designed for embedding models.
 
 ```python
+from vllm import LLM
+
 llm = LLM(model="intfloat/e5-mistral-7b-instruct", task="embed")
 (output,) = llm.embed("Hello, my name is")
 
@@ -88,7 +92,7 @@ embeds = output.outputs.embedding
 print(f"Embeddings: {embeds!r} (size={len(embeds)})")
 ```
 
-A code example can be found here: <gh-file:examples/offline_inference/embedding.py>
+A code example can be found here: <gh-file:examples/offline_inference/basic/embed.py>
 
 ### `LLM.classify`
 
@@ -96,6 +100,8 @@ The {class}`~vllm.LLM.classify` method outputs a probability vector for each pro
 It is primarily designed for classification models.
 
 ```python
+from vllm import LLM
+
 llm = LLM(model="jason9693/Qwen2.5-1.5B-apeach", task="classify")
 (output,) = llm.classify("Hello, my name is")
 
@@ -103,13 +109,12 @@ probs = output.outputs.probs
 print(f"Class Probabilities: {probs!r} (size={len(probs)})")
 ```
 
-A code example can be found here: <gh-file:examples/offline_inference/classification.py>
+A code example can be found here: <gh-file:examples/offline_inference/basic/classify.py>
 
 ### `LLM.score`
 
 The {class}`~vllm.LLM.score` method outputs similarity scores between sentence pairs.
-It is primarily designed for [cross-encoder models](https://www.sbert.net/examples/applications/cross-encoder/README.html).
-These types of models serve as rerankers between candidate query-document pairs in RAG systems.
+It is designed for embedding models and cross encoder models. Embedding models use cosine similarity, and [cross-encoder models](https://www.sbert.net/examples/applications/cross-encoder/README.html) serve as rerankers between candidate query-document pairs in RAG systems.
 
 :::{note}
 vLLM can only perform the model inference component (e.g. embedding, reranking) of RAG.
@@ -117,6 +122,8 @@ To handle RAG at a higher level, you should use integration frameworks such as [
 :::
 
 ```python
+from vllm import LLM
+
 llm = LLM(model="BAAI/bge-reranker-v2-m3", task="score")
 (output,) = llm.score("What is the capital of France?",
                       "The capital of Brazil is Brasilia.")
@@ -125,7 +132,7 @@ score = output.outputs.score
 print(f"Score: {score}")
 ```
 
-A code example can be found here: <gh-file:examples/offline_inference/scoring.py>
+A code example can be found here: <gh-file:examples/offline_inference/basic/score.py>
 
 ## Online Serving
 

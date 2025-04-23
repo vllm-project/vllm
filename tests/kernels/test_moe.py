@@ -5,6 +5,8 @@ Run `pytest tests/kernels/test_moe.py`.
 """
 import pytest
 import torch
+from torch.nn import Parameter
+from torch.nn import functional as F
 from transformers import MixtralConfig
 from transformers.models.mixtral.modeling_mixtral import MixtralSparseMoeBlock
 
@@ -26,6 +28,7 @@ from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
 
 NUM_EXPERTS = [8, 64]
+EP_SIZE = [1, 4]
 TOP_KS = [2, 6]
 
 
@@ -34,24 +37,64 @@ TOP_KS = [2, 6]
 @pytest.mark.parametrize("k", [128, 511, 1024])
 @pytest.mark.parametrize("e", NUM_EXPERTS)
 @pytest.mark.parametrize("topk", TOP_KS)
+@pytest.mark.parametrize("ep_size", EP_SIZE)
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("padding", [True, False])
 def test_fused_moe(
     m: int,
     n: int,
     k: int,
     e: int,
     topk: int,
+    ep_size: int,
     dtype: torch.dtype,
+    padding: bool,
 ):
     a = torch.randn((m, k), device="cuda", dtype=dtype) / 10
     w1 = torch.randn((e, 2 * n, k), device="cuda", dtype=dtype) / 10
     w2 = torch.randn((e, k, n), device="cuda", dtype=dtype) / 10
 
     score = torch.randn((m, e), device="cuda", dtype=dtype)
-    triton_output = fused_moe(a, w1, w2, score, topk, renormalize=False)
-    torch_output = torch_moe(a, w1, w2, score, topk)
+
+    if ep_size > 1:
+        local_e = e // ep_size
+        e_ids = torch.randint(0,
+                              e, (local_e, ),
+                              device="cuda",
+                              dtype=torch.int32)
+        e_map = torch.full((e, ), -1, device="cuda", dtype=torch.int32)
+        e_map[e_ids] = torch.arange(local_e, device="cuda", dtype=torch.int32)
+        w1 = w1[e_ids]
+        w2 = w2[e_ids]
+    else:
+        e_map = None
+
+    torch_output = torch_moe(a, w1, w2, score, topk, e_map)
+    iterative_output = iterative_moe(a,
+                                     w1,
+                                     w2,
+                                     score,
+                                     topk,
+                                     global_num_experts=e,
+                                     expert_map=e_map,
+                                     renormalize=False)
+
+    # Pad the weight if moe padding is enabled
+    if padding:
+        w1 = F.pad(w1, (0, 128), "constant", 0)[..., 0:-128]
+        torch.cuda.empty_cache()
+        w2 = F.pad(w2, (0, 128), "constant", 0)[..., 0:-128]
+        torch.cuda.empty_cache()
+
+    triton_output = fused_moe(a,
+                              w1,
+                              w2,
+                              score,
+                              topk,
+                              global_num_experts=e,
+                              expert_map=e_map,
+                              renormalize=False)
     torch.testing.assert_close(triton_output, torch_output, atol=2e-2, rtol=0)
-    iterative_output = iterative_moe(a, w1, w2, score, topk, renormalize=False)
     torch.testing.assert_close(iterative_output,
                                torch_output,
                                atol=2e-2,
@@ -63,13 +106,14 @@ def test_fused_moe(
 @pytest.mark.parametrize("k", [128, 1024])
 @pytest.mark.parametrize("e", NUM_EXPERTS)
 @pytest.mark.parametrize("topk", TOP_KS)
+@pytest.mark.parametrize("ep_size", EP_SIZE)
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 @pytest.mark.parametrize("group_size", [64, 128])
 @pytest.mark.parametrize("has_zp", [True, False])
 @pytest.mark.parametrize("weight_bits", [4, 8])
 def test_fused_moe_wn16(m: int, n: int, k: int, e: int, topk: int,
-                        dtype: torch.dtype, group_size: int, has_zp: bool,
-                        weight_bits: int):
+                        ep_size: int, dtype: torch.dtype, group_size: int,
+                        has_zp: bool, weight_bits: int):
     print(m, n, k, e, topk, dtype, group_size, has_zp, weight_bits)
     a = torch.randn((m, k), device="cuda", dtype=dtype) / 10
     w1 = torch.randn((e, 2 * n, k), device="cuda", dtype=dtype) / 10
@@ -130,6 +174,25 @@ def test_fused_moe_wn16(m: int, n: int, k: int, e: int, topk: int,
         if has_zp:
             w_qzeros[expert_id] = qzeros
 
+    if ep_size > 1:
+        local_e = e // ep_size
+        e_ids = torch.randint(0,
+                              e, (local_e, ),
+                              device="cuda",
+                              dtype=torch.int32)
+        e_map = torch.full((e, ), -1, device="cuda", dtype=torch.int32)
+        e_map[e_ids] = torch.arange(local_e, device="cuda", dtype=torch.int32)
+        w1_ref = w1_ref[e_ids]
+        w2_ref = w2_ref[e_ids]
+        w1_qweight = w1_qweight[e_ids]
+        w2_qweight = w2_qweight[e_ids]
+        w1_scales = w1_scales[e_ids]
+        w2_scales = w2_scales[e_ids]
+        w1_qzeros = w1_qzeros[e_ids]
+        w2_qzeros = w2_qzeros[e_ids]
+    else:
+        e_map = None
+
     triton_output = fused_moe(a,
                               w1_qweight,
                               w2_qweight,
@@ -138,21 +201,30 @@ def test_fused_moe_wn16(m: int, n: int, k: int, e: int, topk: int,
                               renormalize=False,
                               use_int4_w4a16=weight_bits == 4,
                               use_int8_w8a16=weight_bits == 8,
+                              global_num_experts=e,
+                              expert_map=e_map,
                               w1_scale=w1_scales,
                               w2_scale=w2_scales,
                               w1_zp=w1_qzeros if has_zp else None,
                               w2_zp=w2_qzeros if has_zp else None,
                               block_shape=[0, group_size])
-    torch_output = torch_moe(a, w1_ref, w2_ref, score, topk)
+    torch_output = torch_moe(a, w1_ref, w2_ref, score, topk, e_map)
     torch.testing.assert_close(triton_output, torch_output, atol=2e-2, rtol=0)
 
 
 @pytest.mark.parametrize("dtype",
                          [torch.float32, torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("padding", [True, False])
+@pytest.mark.parametrize(
+    "use_rocm_aiter", [True, False] if current_platform.is_rocm() else [False])
 @torch.inference_mode()
-def test_mixtral_moe(dtype: torch.dtype):
+def test_mixtral_moe(dtype: torch.dtype, padding: bool, use_rocm_aiter: bool,
+                     monkeypatch):
     """Make sure our Mixtral MoE implementation agrees with the one from
     huggingface."""
+
+    if use_rocm_aiter:
+        monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1")
 
     # Instantiate our and huggingface's MoE blocks
     config = MixtralConfig()
@@ -164,6 +236,7 @@ def test_mixtral_moe(dtype: torch.dtype):
         intermediate_size=config.intermediate_size,
         params_dtype=dtype,
         tp_size=1,
+        dp_size=1,
     ).cuda()
 
     # Load the weights
@@ -179,6 +252,17 @@ def test_mixtral_moe(dtype: torch.dtype):
     # vLLM uses 1D query [num_tokens, hidden_dim]
     vllm_inputs = hf_inputs.flatten(0, 1)
 
+    # Pad the weight if moe padding is enabled
+    if padding:
+        vllm_moe.experts.w13_weight = Parameter(F.pad(
+            vllm_moe.experts.w13_weight, (0, 128), "constant", 0)[..., 0:-128],
+                                                requires_grad=False)
+        torch.cuda.empty_cache()
+        vllm_moe.experts.w2_weight = Parameter(F.pad(
+            vllm_moe.experts.w2_weight, (0, 128), "constant", 0)[..., 0:-128],
+                                               requires_grad=False)
+        torch.cuda.empty_cache()
+
     # Run forward passes for both MoE blocks
     hf_states, _ = hf_moe.forward(hf_inputs)
     vllm_states = vllm_moe.forward(vllm_inputs)
@@ -189,10 +273,18 @@ def test_mixtral_moe(dtype: torch.dtype):
         torch.bfloat16: 1e-2,
     }
 
-    torch.testing.assert_close(hf_states.flatten(0, 1),
-                               vllm_states,
-                               rtol=mixtral_moe_tol[dtype],
-                               atol=mixtral_moe_tol[dtype])
+    if use_rocm_aiter:
+        # The values of rtol and atol are set based on the tests in ROCM AITER package. # noqa: E501
+        # https://github.com/ROCm/aiter/blob/dfed377f4be7da96ca2d75ac0761f569676f7240/op_tests/test_moe.py#L174  # noqa: E501
+        torch.testing.assert_close(hf_states.flatten(0, 1),
+                                   vllm_states,
+                                   rtol=0.01,
+                                   atol=100)
+    else:
+        torch.testing.assert_close(hf_states.flatten(0, 1),
+                                   vllm_states,
+                                   rtol=mixtral_moe_tol[dtype],
+                                   atol=mixtral_moe_tol[dtype])
 
 
 @pytest.mark.parametrize("m", [1, 33, 64, 222])

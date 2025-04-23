@@ -30,6 +30,7 @@ class QuarkConfig(QuantizationConfig):
                  kv_cache_group: Optional[List[str]] = None,
                  kv_cache_config: Optional[Dict[str, Any]] = None,
                  pack_method: str = "reorder"):
+        super().__init__()
         if kv_cache_group is None:
             kv_cache_group = []
         self.quant_config = quant_config

@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import random
-from typing import Type
 
 import pytest
 import torch
@@ -86,7 +85,7 @@ def test_act_and_mul(
 @pytest.mark.parametrize("device", CUDA_DEVICES)
 @torch.inference_mode()
 def test_activation(
-    activation: Type[torch.nn.Module],
+    activation: type[torch.nn.Module],
     num_tokens: int,
     d: int,
     dtype: torch.dtype,

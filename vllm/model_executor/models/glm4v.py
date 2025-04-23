@@ -4,7 +4,8 @@
 # https://github.com/THUDM/CogAgent
 """Inference-only CogAgent model compatible with THUDM weights."""
 from argparse import Namespace
-from typing import List, Literal, Mapping, Optional, TypedDict, Union
+from collections.abc import Mapping, Sequence
+from typing import Literal, Optional, TypedDict, Union
 
 import torch
 from torch import nn
@@ -15,7 +16,6 @@ from transformers import PreTrainedTokenizer, TensorType
 from transformers.image_utils import ImageInput
 from transformers.tokenization_utils_base import TextInput
 
-from vllm.attention import AttentionMetadata
 from vllm.attention.layer import MultiHeadAttention
 from vllm.config import VllmConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
@@ -28,18 +28,19 @@ from vllm.model_executor.layers.linear import (ColumnParallelLinear,
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.inputs import MultiModalKwargs, NestedTensors
+from vllm.multimodal.inputs import MultiModalKwargs
 from vllm.multimodal.parse import MultiModalDataItems
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
                                         BaseProcessingInfo, BatchFeature,
                                         MultiModalFieldConfig,
-                                        PromptReplacement)
+                                        PromptReplacement, PromptUpdate)
 from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs import ChatGLMConfig
 
 from .chatglm import ChatGLMBaseModel, ChatGLMModel
-from .interfaces import SupportsLoRA, SupportsMultiModal, SupportsPP
+from .interfaces import (MultiModalEmbeddings, SupportsLoRA,
+                         SupportsMultiModal, SupportsPP)
 from .utils import flatten_bn, merge_multimodal_embeddings
 
 
@@ -416,18 +417,15 @@ class GLM4VProcessor:
 
 class GLM4VProcessingInfo(BaseProcessingInfo):
 
-    def get_tokenizer(self):
-        tokenizer = self.ctx.tokenizer
-        assert isinstance(tokenizer, PreTrainedTokenizer)
-        return tokenizer
-
     def get_hf_config(self):
         return self.ctx.get_hf_config(ChatGLMConfig)
 
-    def get_hf_processor(self) -> GLM4VProcessor:
-        return GLM4VProcessor(
-            self.get_hf_config(),
-            self.get_tokenizer(),
+    def get_hf_processor(self, **kwargs: object) -> GLM4VProcessor:
+        return self.ctx.init_processor(
+            GLM4VProcessor,
+            config=self.get_hf_config(),
+            tokenizer=self.get_tokenizer(),
+            **kwargs,
         )
 
     def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
@@ -484,6 +482,14 @@ class GLM4VDummyInputsBuilder(BaseDummyInputsBuilder[GLM4VProcessingInfo]):
 
 class GLM4VMultiModalProcessor(BaseMultiModalProcessor[GLM4VProcessingInfo]):
 
+    def _hf_processor_applies_updates(
+        self,
+        prompt_text: str,
+        mm_items: MultiModalDataItems,
+        hf_processor_mm_kwargs: Mapping[str, object],
+    ) -> bool:
+        return False
+
     def _get_mm_fields_config(
         self,
         hf_inputs: BatchFeature,
@@ -491,12 +497,12 @@ class GLM4VMultiModalProcessor(BaseMultiModalProcessor[GLM4VProcessingInfo]):
     ) -> Mapping[str, MultiModalFieldConfig]:
         return dict(pixel_values=MultiModalFieldConfig.batched("image"))
 
-    def _get_prompt_replacements(
+    def _get_prompt_updates(
         self,
         mm_items: MultiModalDataItems,
         hf_processor_mm_kwargs: Mapping[str, object],
         out_mm_kwargs: MultiModalKwargs,
-    ) -> list[PromptReplacement]:
+    ) -> Sequence[PromptUpdate]:
         hf_config = self.info.get_hf_config()
 
         boi_token_id = hf_config.boi_token_id
@@ -529,21 +535,6 @@ class GLM4VForCausalLM(ChatGLMBaseModel, SupportsLoRA, SupportsPP,
         "dense_h_to_4h": ["dense_h_to_4h"],
         "merged_proj": ["gate_proj", "dense_h_to_4h"]
     }
-    # LoRA specific attributes
-    supported_lora_modules = [
-        "query_key_value",
-        "dense",
-        "dense_h_to_4h",
-        "dense_4h_to_h",
-        # vision
-        "fc1",
-        "fc2",
-        "merged_proj",
-        "linear_proj"
-    ]
-
-    embedding_modules = {}
-    embedding_padding_modules = []
 
     def get_mm_mapping(self) -> MultiModelKeys:
         """
@@ -587,7 +578,7 @@ class GLM4VForCausalLM(ChatGLMBaseModel, SupportsLoRA, SupportsPP,
         pixel_values = kwargs.pop("pixel_values", None)
 
         if pixel_values is not None:
-            if not isinstance(pixel_values, torch.Tensor):
+            if not isinstance(pixel_values, (torch.Tensor, list)):
                 raise ValueError("Incorrect type of pixel values. "
                                  f"Got type: {type(pixel_values)}")
 
@@ -605,7 +596,8 @@ class GLM4VForCausalLM(ChatGLMBaseModel, SupportsLoRA, SupportsPP,
 
         return self.transformer.vision(pixel_values)
 
-    def get_multimodal_embeddings(self, **kwargs) -> Optional[NestedTensors]:
+    def get_multimodal_embeddings(
+            self, **kwargs: object) -> Optional[MultiModalEmbeddings]:
         image_input = self._parse_and_validate_image_input(**kwargs)
         if image_input is None:
             return None
@@ -616,7 +608,7 @@ class GLM4VForCausalLM(ChatGLMBaseModel, SupportsLoRA, SupportsPP,
     def get_input_embeddings(
         self,
         input_ids: torch.Tensor,
-        multimodal_embeddings: Optional[NestedTensors] = None,
+        multimodal_embeddings: Optional[MultiModalEmbeddings] = None,
     ) -> torch.Tensor:
         inputs_embeds = self.transformer.get_input_embeddings(input_ids)
 
@@ -638,8 +630,6 @@ class GLM4VForCausalLM(ChatGLMBaseModel, SupportsLoRA, SupportsPP,
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        kv_caches: List[torch.Tensor],
-        attn_metadata: AttentionMetadata,
         intermediate_tensors: Optional[IntermediateTensors] = None,
         inputs_embeds: Optional[torch.Tensor] = None,
         **kwargs: object,
@@ -655,8 +645,7 @@ class GLM4VForCausalLM(ChatGLMBaseModel, SupportsLoRA, SupportsPP,
                                                       vision_embeddings)
             input_ids = None
 
-        hidden_states = self.transformer(input_ids, positions, kv_caches,
-                                         attn_metadata, intermediate_tensors,
-                                         inputs_embeds)
+        hidden_states = self.transformer(input_ids, positions,
+                                         intermediate_tensors, inputs_embeds)
 
         return hidden_states

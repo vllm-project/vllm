@@ -1,11 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 
-from typing import List, Optional, Tuple, Type, overload
+from typing import Optional, overload
 
 import pytest
 import torch
-from transformers import (AutoConfig, AutoModelForVision2Seq, AutoTokenizer,
-                          BatchEncoding)
+from transformers import AutoConfig, AutoModelForImageTextToText, AutoTokenizer
 
 from vllm import LLM, SamplingParams
 from vllm.attention.backends.flash_attn import FlashAttentionMetadata
@@ -17,6 +16,7 @@ from vllm.sequence import SampleLogprobs
 
 from ....conftest import (IMAGE_ASSETS, HfRunner, PromptImageInput, VllmRunner,
                           _ImageAssets)
+from ....quantization.utils import is_quant_method_supported
 from ....utils import large_gpu_test
 from ...utils import check_logprobs_close
 
@@ -64,7 +64,7 @@ prompt_data = {
 }
 
 
-def vllm_to_hf_output(vllm_output: Tuple[List[int], str,
+def vllm_to_hf_output(vllm_output: tuple[list[int], str,
                                          Optional[SampleLogprobs]],
                       model: str):
     """Sanitize vllm output to be comparable with hf output."""
@@ -91,9 +91,9 @@ def vllm_to_hf_output(vllm_output: Tuple[List[int], str,
 def _get_inputs(
     image_assets: _ImageAssets,
     *,
-    size_factors: Optional[List[float]] = None,
-    sizes: Optional[List[Tuple[int, int]]] = None,
-) -> List[Tuple[List[str], PromptImageInput]]:
+    size_factors: Optional[list[float]] = None,
+    sizes: Optional[list[tuple[int, int]]] = None,
+) -> list[tuple[list[str], PromptImageInput]]:
     images = [asset.pil_image for asset in image_assets]
 
     if size_factors is not None:
@@ -123,12 +123,12 @@ def _get_inputs(
 
 @overload
 def run_test(
-    hf_runner: Type[HfRunner],
-    vllm_runner: Type[VllmRunner],
+    hf_runner: type[HfRunner],
+    vllm_runner: type[VllmRunner],
     image_assets: _ImageAssets,
     model: str,
     *,
-    size_factors: List[float],
+    size_factors: list[float],
     dtype: str,
     max_tokens: int,
     num_logprobs: int,
@@ -140,12 +140,12 @@ def run_test(
 
 @overload
 def run_test(
-    hf_runner: Type[HfRunner],
-    vllm_runner: Type[VllmRunner],
+    hf_runner: type[HfRunner],
+    vllm_runner: type[VllmRunner],
     image_assets: _ImageAssets,
     model: str,
     *,
-    sizes: List[Tuple[int, int]],
+    sizes: list[tuple[int, int]],
     dtype: str,
     max_tokens: int,
     num_logprobs: int,
@@ -156,13 +156,13 @@ def run_test(
 
 
 def run_test(
-    hf_runner: Type[HfRunner],
-    vllm_runner: Type[VllmRunner],
+    hf_runner: type[HfRunner],
+    vllm_runner: type[VllmRunner],
     image_assets: _ImageAssets,
     model: str,
     *,
-    size_factors: Optional[List[float]] = None,
-    sizes: Optional[List[Tuple[int, int]]] = None,
+    size_factors: Optional[list[float]] = None,
+    sizes: Optional[list[tuple[int, int]]] = None,
     dtype: str,
     max_tokens: int,
     num_logprobs: int,
@@ -183,9 +183,9 @@ def run_test(
 
 
 def _run_test(
-    hf_runner: Type[HfRunner],
-    vllm_runner: Type[VllmRunner],
-    inputs: List[Tuple[List[str], PromptImageInput]],
+    hf_runner: type[HfRunner],
+    vllm_runner: type[VllmRunner],
+    inputs: list[tuple[list[str], PromptImageInput]],
     model: str,
     *,
     dtype: str,
@@ -212,10 +212,9 @@ def _run_test(
     with vllm_runner(model,
                      dtype=dtype,
                      max_model_len=4096,
-                     max_num_seqs=2,
+                     max_num_seqs=3,
                      tensor_parallel_size=tensor_parallel_size,
                      distributed_executor_backend=distributed_executor_backend,
-                     enforce_eager=True,
                      limit_mm_per_prompt={"image": _LIMIT_IMAGE_PER_PROMPT
                                           }) as vllm_model:
         vllm_outputs_per_image = [
@@ -226,14 +225,10 @@ def _run_test(
             for prompts, images in inputs
         ]
 
-    def process(hf_inputs: BatchEncoding, **kwargs):
-        return hf_inputs
-
     with hf_runner(model,
                    dtype=dtype,
                    model_kwargs={"device_map": "auto"},
-                   postprocess_inputs=process,
-                   auto_cls=AutoModelForVision2Seq) as hf_model:
+                   auto_cls=AutoModelForImageTextToText) as hf_model:
         hf_outputs_per_image = [
             hf_model.generate_greedy_logprobs_limit(prompts,
                                                     max_tokens,
@@ -422,6 +417,48 @@ def test_models_interleaved_images(hf_runner, vllm_runner, image_assets, model,
 @large_gpu_test(min_gb=48)
 @pytest.mark.core_model
 @pytest.mark.parametrize("model", models)
+@pytest.mark.parametrize("dtype", ["float16"])
+@pytest.mark.parametrize("max_tokens", [32])
+@pytest.mark.skipif(not is_quant_method_supported("bitsandbytes"),
+                    reason='bitsandbytes is not supported on this GPU type.')
+def test_bnb_regression(
+    image_assets: _ImageAssets,
+    model: str,
+    dtype: str,
+    max_tokens: int,
+):
+    stop_sign = image_assets[0].pil_image
+    prompts = [
+        {
+            "prompt": "<|begin_of_text|>The content of the image <|image|> is",
+            "multi_modal_data": {
+                "image": stop_sign
+            },
+        },
+        {
+            "prompt":
+            "The color of the sky is blue but sometimes it can also be",
+        },
+    ]
+    # Test regression about QKVCrossParallelLinear
+    llm = LLM(
+        model=model,
+        dtype=dtype,
+        max_model_len=4096,
+        max_num_seqs=2,
+        quantization="bitsandbytes",
+    )
+    sampling_params = SamplingParams(
+        temperature=0,
+        max_tokens=max_tokens,
+    )
+    outputs = llm.generate(prompts, sampling_params)
+    assert outputs
+
+
+@large_gpu_test(min_gb=48)
+@pytest.mark.core_model
+@pytest.mark.parametrize("model", models)
 @pytest.mark.parametrize("dtype", ["bfloat16"])
 @pytest.mark.parametrize("max_tokens", [32])
 def test_explicit_implicit_prompt(
@@ -463,7 +500,6 @@ def test_explicit_implicit_prompt(
         max_model_len=4096,
         max_num_seqs=2,
         tensor_parallel_size=1,
-        enforce_eager=True,
     )
     sampling_params = SamplingParams(
         temperature=0,
@@ -495,14 +531,14 @@ def test_regression(vllm_runner, image_assets, model, dtype, max_tokens,
             max_model_len=4096,
             max_num_seqs=2,
             tensor_parallel_size=1,
-            enforce_eager=True,
             limit_mm_per_prompt={"image":
                                  _LIMIT_IMAGE_PER_PROMPT}) as vllm_model:
 
         # Regression tests for https://github.com/vllm-project/vllm/issues/10648
 
-        # Number of image tags is greater than the number of images provided
-        prompt = "<|begin_of_text|><|image|><|image|> Compare the two images"  # noqa: E501
+        # Number of groups of image tokens is greater than the number of images
+        # provided (the whitespace between the tags is necessary)
+        prompt = "<|begin_of_text|><|image|> <|image|> Compare the two images"  # noqa: E501
         image = stop_sign
         with pytest.raises(ValueError):
             vllm_model.generate_greedy_logprobs([prompt],

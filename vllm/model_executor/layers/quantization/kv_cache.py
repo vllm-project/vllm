@@ -26,11 +26,14 @@ class BaseKVCacheMethod(QuantizeMethodBase):
 
     def create_weights(self, layer: torch.nn.Module):
         """
-        Create "weight" (aka k_scale and v_scale) for an attention layer.
+        Create "weight" (aka q_scale, k_scale and v_scale)
+        for an attention layer.
         """
-        # Initialize the KV cache scales to -1.0, which is an invalid value.
-        # If the k/v_scale appears in the checkpoint, it will be
+        # Initialize the Q and KV cache scales to -1.0, an invalid value.
+        # If the q and k/v_scales appear in the checkpoint, it will be
         # overwritten when loading weights.
+        layer.q_scale = torch.nn.Parameter(torch.tensor(-1.0),
+                                           requires_grad=False)
         layer.k_scale = torch.nn.Parameter(torch.tensor(-1.0),
                                            requires_grad=False)
         layer.v_scale = torch.nn.Parameter(torch.tensor(-1.0),
@@ -50,7 +53,7 @@ class BaseKVCacheMethod(QuantizeMethodBase):
                 # We prefer to use separate k_scale and v_scale if present
                 k_scale = layer.k_scale.to("cpu").tolist()
                 v_scale = layer.v_scale.to("cpu").tolist()
-                if current_platform.is_rocm():
+                if current_platform.is_fp8_fnuz():
                     k_scale *= 2
                     v_scale *= 2
             elif layer.k_scale < 0.0 and layer.v_scale < 0.0:
@@ -66,7 +69,7 @@ class BaseKVCacheMethod(QuantizeMethodBase):
                 scale_to_duplicate = max(layer.k_scale, layer.v_scale)
                 k_scale = scale_to_duplicate.to("cpu").tolist()
                 v_scale = scale_to_duplicate.to("cpu").tolist()
-                if current_platform.is_rocm():
+                if current_platform.is_fp8_fnuz():
                     k_scale *= 2
                     v_scale *= 2
 
@@ -74,6 +77,13 @@ class BaseKVCacheMethod(QuantizeMethodBase):
                     v_scale, float):
                 raise ValueError("Only support per-tensor scaling factor "
                                  "for fp8 KV cache")
+
+            if layer.q_scale < 0.0:
+                logger.warning_once(
+                    "Checkpoint does not provide a q scaling factor. "
+                    "Setting it to k_scale. This only matters for "
+                    "the flash-attn backend.")
+                layer._q_scale.copy_(k_scale)
 
             # These are used in the final Attention.forward()
             layer._k_scale.copy_(k_scale)

@@ -9,13 +9,15 @@ from typing import (TYPE_CHECKING, Any, Generic, NamedTuple, Optional, TypeVar,
 import numpy as np
 import torch
 from PIL.Image import Image
+from transformers import BatchFeature
 from typing_extensions import TypeAlias, TypeGuard, assert_never
 
 from vllm.utils import is_list_of
 
 from .audio import resample_audio
 from .inputs import (AudioItem, HfAudioItem, HfImageItem, HfVideoItem,
-                     ImageItem, ModalityData, MultiModalDataDict, VideoItem)
+                     ImageItem, ModalityData, MultiModalDataDict,
+                     MultiModalFieldConfig, MultiModalKwargs, VideoItem)
 
 _T = TypeVar("_T")
 _I = TypeVar("_I")
@@ -111,10 +113,72 @@ class EmbeddingItems(ModalityDataItems[Union[torch.Tensor, list[torch.Tensor]],
         return len(self.get(item_idx))
 
 
+class DictEmbeddingItems(ModalityDataItems[Mapping[str, torch.Tensor],
+                                           Mapping[str, torch.Tensor]]):
+    """
+    Base class for data items that are expressed as a dictionary of tensors.
+
+    Usually, the dictionary keys correspond to the outputs of HF processor.
+    """
+
+    def __init__(
+        self,
+        data: Mapping[str, torch.Tensor],
+        modality: str,
+        required_fields: set[str],
+        fields_factory: Callable[
+            [Mapping[str, torch.Tensor]],
+            Mapping[str, MultiModalFieldConfig],
+        ],
+    ) -> None:
+        super().__init__(data, modality)
+
+        missing_required_data_keys = required_fields - data.keys()
+        if missing_required_data_keys:
+            data_keys = set(data.keys())
+            msg = (f"The data should contain the fields: {required_fields}, "
+                   f"but only found the following keys: {data_keys}")
+            raise ValueError(msg)
+
+        fields_config = fields_factory(data)
+        missing_required_fields = required_fields - fields_config.keys()
+        if missing_required_fields:
+            fields = set(fields_config.keys())
+            msg = f"{required_fields=} should be a subset of {fields=}"
+            raise ValueError(msg)
+
+        self.fields_config = fields_config
+        self.required_fields = required_fields
+
+        self._kwargs = MultiModalKwargs.from_hf_inputs(
+            BatchFeature(dict(data)),
+            fields_config,
+        )
+
+    def get_count(self) -> int:
+        return self._kwargs.get_item_count(self.modality)
+
+    def get(self, index: int) -> Mapping[str, torch.Tensor]:
+        return {
+            k: v.data
+            for k, v in self._kwargs.get_item(self.modality, index).items()
+        }
+
+    def get_processor_data(self) -> Mapping[str, object]:
+        return {}
+
+    def get_passthrough_data(self) -> Mapping[str, object]:
+        return self.data
+
+
 class AudioProcessorItems(ProcessorBatchItems[HfAudioItem]):
 
     def __init__(self, data: Sequence[HfAudioItem]) -> None:
         super().__init__(data, "audio")
+
+    def get_audio_length(self, item_idx: int) -> int:
+        audio = self.get(item_idx)
+        return len(audio)
 
 
 class AudioEmbeddingItems(EmbeddingItems):
@@ -231,7 +295,7 @@ class MultiModalDataItems(UserDict[str, ModalityDataItems[Any, Any]]):
 
 
 ModalityDataParser: TypeAlias = Callable[[ModalityData[Any]],
-                                         ModalityDataItems[Any, Any]]
+                                         Optional[ModalityDataItems[Any, Any]]]
 
 
 class MultiModalDataParser:
@@ -255,7 +319,15 @@ class MultiModalDataParser:
         if isinstance(data, torch.Tensor):
             return data.ndim == 3
         if is_list_of(data, torch.Tensor):
-            return len(data) == 0 or data[0].ndim == 2
+            return data[0].ndim == 2
+
+        return False
+
+    def _is_empty(self, data: object) -> TypeGuard[None]:
+        if isinstance(data, list):
+            return len(data) == 0
+        if isinstance(data, (np.ndarray, torch.Tensor)):
+            return data.size == 0
 
         return False
 
@@ -277,7 +349,12 @@ class MultiModalDataParser:
     def _parse_audio_data(
         self,
         data: ModalityData[AudioItem],
-    ) -> ModalityDataItems[Any, Any]:
+    ) -> Optional[ModalityDataItems[Any, Any]]:
+        # also check single audio item with sampling rate
+        if self._is_empty(data) or (isinstance(data, tuple)
+                                    and self._is_empty(data[0])):
+            return None
+
         if self._is_embeddings(data):
             return AudioEmbeddingItems(data)
 
@@ -314,7 +391,10 @@ class MultiModalDataParser:
     def _parse_image_data(
         self,
         data: ModalityData[ImageItem],
-    ) -> ModalityDataItems[Any, Any]:
+    ) -> Optional[ModalityDataItems[Any, Any]]:
+        if self._is_empty(data):
+            return None
+
         if self._is_embeddings(data):
             return ImageEmbeddingItems(data)
 
@@ -332,7 +412,10 @@ class MultiModalDataParser:
     def _parse_video_data(
         self,
         data: ModalityData[VideoItem],
-    ) -> ModalityDataItems[Any, Any]:
+    ) -> Optional[ModalityDataItems[Any, Any]]:
+        if self._is_empty(data):
+            return None
+
         if self._is_embeddings(data):
             return VideoEmbeddingItems(data)
 
@@ -363,6 +446,8 @@ class MultiModalDataParser:
             if k not in subparsers:
                 raise ValueError(f"Unsupported modality: {k}")
 
-            mm_items[k] = subparsers[k](v)
+            # ignore empty embedding data
+            if (parsed_data := subparsers[k](v)) is not None:
+                mm_items[k] = parsed_data
 
         return mm_items

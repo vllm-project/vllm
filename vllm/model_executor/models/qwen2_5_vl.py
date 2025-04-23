@@ -33,12 +33,10 @@ import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange
 from transformers import BatchFeature
-from transformers.models.qwen2_5_vl import (Qwen2_5_VLImageProcessor,
-                                            Qwen2_5_VLProcessor)
+from transformers.models.qwen2_5_vl import Qwen2_5_VLProcessor
 from transformers.models.qwen2_5_vl.configuration_qwen2_5_vl import (
     Qwen2_5_VLConfig, Qwen2_5_VLVisionConfig)
 
-from vllm.attention import AttentionMetadata
 from vllm.config import VllmConfig
 from vllm.distributed import parallel_state, tensor_model_parallel_all_gather
 from vllm.distributed import utils as dist_utils
@@ -61,11 +59,12 @@ from vllm.platforms import _Backend, current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.config import uses_mrope
 
-from .interfaces import SupportsLoRA, SupportsMultiModal, SupportsPP
+from .interfaces import (MultiModalEmbeddings, SupportsLoRA,
+                         SupportsMultiModal, SupportsPP)
 from .qwen2_vl import Qwen2VLDummyInputsBuilder as Qwen2_5_VLDummyInputsBuilder
 from .qwen2_vl import (Qwen2VLMultiModalProcessor, Qwen2VLProcessingInfo,
                        apply_rotary_pos_emb_vision)
-from .utils import (AutoWeightsLoader, WeightsMapper,
+from .utils import (AutoWeightsLoader, WeightsMapper, cast_overflow_tensors,
                     init_vllm_registered_model, maybe_prefix,
                     merge_multimodal_embeddings)
 from .vision import get_vit_attn_backend
@@ -258,10 +257,12 @@ class Qwen2_5_VisionAttention(nn.Module):
         return q, k, v
 
     def forward(
-        self,
-        x: torch.Tensor,
-        cu_seqlens: torch.Tensor,
-        rotary_pos_emb: torch.Tensor,
+            self,
+            x: torch.Tensor,
+            cu_seqlens: torch.Tensor,
+            rotary_pos_emb: torch.Tensor,
+            max_seqlen: Optional[int] = None,  # Only used for Flash Attention
+            seqlens: Optional[list[int]] = None,  # Only used for xFormers
     ) -> torch.Tensor:
         # [s, b, c] --> [s, b, head * 3 * head_dim]
         x, _ = self.qkv(x)
@@ -288,7 +289,6 @@ class Qwen2_5_VisionAttention(nn.Module):
 
             q, k, v = (rearrange(x, "b s ... -> (b s) ...") for x in [q, k, v])
 
-            max_seqlen = (cu_seqlens[1:] - cu_seqlens[:-1]).max().item()
             output = flash_attn_varlen_func(q,
                                             k,
                                             v,
@@ -328,9 +328,9 @@ class Qwen2_5_VisionAttention(nn.Module):
             from xformers import ops as xops
             from xformers.ops.fmha.attn_bias import BlockDiagonalMask
 
-            seqlens = (cu_seqlens[1:] - cu_seqlens[:-1]).tolist()
             attn_bias = BlockDiagonalMask.from_seqlens(q_seqlen=seqlens,
-                                                       kv_seqlen=None)
+                                                       kv_seqlen=None,
+                                                       device=q.device)
 
             context_layer = xops.memory_efficient_attention_forward(
                 q, k, v, attn_bias=attn_bias, p=0, scale=None)
@@ -370,11 +370,20 @@ class Qwen2_5_VisionBlock(nn.Module):
                                      quant_config=quant_config,
                                      prefix=f"{prefix}.mlp")
 
-    def forward(self, x: torch.Tensor, cu_seqlens: torch.Tensor,
-                rotary_pos_emb: torch.Tensor) -> torch.Tensor:
+    def forward(
+            self,
+            x: torch.Tensor,
+            cu_seqlens: torch.Tensor,
+            rotary_pos_emb: torch.Tensor,
+            max_seqlen: Optional[int] = None,  # Only used for Flash Attention
+            seqlens: Optional[list[int]] = None,  # Only used for xFormers
+    ) -> torch.Tensor:
         x = x + self.attn(self.norm1(x),
                           cu_seqlens=cu_seqlens,
-                          rotary_pos_emb=rotary_pos_emb)
+                          rotary_pos_emb=rotary_pos_emb,
+                          max_seqlen=max_seqlen,
+                          seqlens=seqlens)
+
         x = x + self.mlp(self.norm2(x))
         return x
 
@@ -534,6 +543,7 @@ class Qwen2_5_VisionTransformer(nn.Module):
             quant_config=quant_config,
             prefix=f"{prefix}.merger",
         )
+        self.attn_backend: _Backend = get_vit_attn_backend(support_fa=True)
 
     @property
     def dtype(self) -> torch.dtype:
@@ -603,6 +613,17 @@ class Qwen2_5_VisionTransformer(nn.Module):
         window_index = torch.cat(window_index, dim=0)
         return window_index, cu_window_seqlens
 
+    def compute_attn_mask_seqlen(
+        self,
+        cu_seqlens: torch.Tensor,
+    ) -> tuple[Optional[int], Optional[list[int]]]:
+        max_seqlen, seqlens = None, None
+        if self.attn_backend == _Backend.FLASH_ATTN:
+            max_seqlen = (cu_seqlens[1:] - cu_seqlens[:-1]).max().item()
+        elif self.attn_backend == _Backend.XFORMERS:
+            seqlens = (cu_seqlens[1:] - cu_seqlens[:-1]).tolist()
+        return max_seqlen, seqlens
+
     def forward(
         self,
         x: torch.Tensor,
@@ -658,14 +679,34 @@ class Qwen2_5_VisionTransformer(nn.Module):
 
         # transformers
         hidden_states = hidden_states.unsqueeze(1)
+
+        # pre-compute seqlens for window/full attn to reduce cuMemcpy operations
+        max_seqlen_full, seqlens_full = self.compute_attn_mask_seqlen(
+            cu_seqlens)
+        max_seqlen_window, seqlens_window = self.compute_attn_mask_seqlen(
+            cu_window_seqlens)
         for layer_num, blk in enumerate(self.blocks):
             if layer_num in self.fullatt_block_indexes:
                 cu_seqlens_now = cu_seqlens
+                max_seqlen_now = max_seqlen_full
+                seqlens_now = seqlens_full
             else:
                 cu_seqlens_now = cu_window_seqlens
-            hidden_states = blk(hidden_states,
-                                cu_seqlens=cu_seqlens_now,
-                                rotary_pos_emb=rotary_pos_emb)
+                max_seqlen_now = max_seqlen_window
+                seqlens_now = seqlens_window
+
+            hidden_states = blk(
+                hidden_states,
+                cu_seqlens=cu_seqlens_now,
+                rotary_pos_emb=rotary_pos_emb,
+                max_seqlen=max_seqlen_now,
+                seqlens=seqlens_now,
+            )
+
+        # For Qwen2.5-VL-3B, float16 will overflow at last block
+        # for long visual tokens sequences.
+        if hidden_states.dtype == torch.float16:
+            hidden_states = cast_overflow_tensors(hidden_states)
 
         # adapter
         hidden_states = self.merger(hidden_states)
@@ -713,39 +754,20 @@ class Qwen2_5_VLProcessingInfo(Qwen2VLProcessingInfo):
         *,
         min_pixels: Optional[int] = None,
         max_pixels: Optional[int] = None,
-        fps: Optional[float] = 2.0,
+        size: Optional[dict[str, int]] = None,
+        fps: Optional[Union[float, List[float]]] = None,
+        **kwargs: object,
     ) -> Qwen2_5_VLProcessor:
-        hf_processor = self.ctx.get_hf_processor(Qwen2_5_VLProcessor)
-        image_processor = hf_processor.image_processor  # type: ignore
-        assert isinstance(image_processor, Qwen2_5_VLImageProcessor)
+        if fps is not None:
+            kwargs["fps"] = fps
 
-        if min_pixels:
-            image_processor.min_pixels = min_pixels
-        if max_pixels:
-            image_processor.max_pixels = max_pixels
-        if max_pixels or min_pixels:
-            image_processor.size = {
-                "min_pixels": image_processor.min_pixels,
-                "max_pixels": image_processor.max_pixels,
-            }
-
-        return hf_processor
-
-    def get_image_processor(
-        self,
-        *,
-        min_pixels: Optional[int] = None,
-        max_pixels: Optional[int] = None,
-        fps: Optional[float] = 2.0,
-    ) -> Qwen2_5_VLImageProcessor:
-        hf_processor = self.get_hf_processor(
-            min_pixels=min_pixels,
-            max_pixels=max_pixels,
-            fps=fps,
+        return self.ctx.get_hf_processor(
+            Qwen2_5_VLProcessor,
+            image_processor=self.get_image_processor(min_pixels=min_pixels,
+                                                     max_pixels=max_pixels,
+                                                     size=size),
+            **kwargs,
         )
-        image_processor = hf_processor.image_processor  # type: ignore
-        assert isinstance(image_processor, Qwen2_5_VLImageProcessor)
-        return image_processor
 
 
 class Qwen2_5_VLMultiModalProcessor(Qwen2VLMultiModalProcessor):
@@ -778,25 +800,6 @@ class Qwen2_5_VLForConditionalGeneration(nn.Module, SupportsMultiModal,
             "up_proj",
         ],
     }
-    # LoRA specific attributes, TODO: double check
-    supported_lora_modules = [
-        "qkv_proj",
-        "o_proj",
-        "gate_up_proj",
-        "down_proj",
-        "gate_proj"
-        "up_proj",
-        # vision tower
-        "qkv",
-        "attn.proj",  # Distinguish patch_embed.proj
-        "fc1",
-        "fc2",
-        # projector
-        "mlp.0",
-        "mlp.2"
-    ]
-    embedding_modules = {}
-    embedding_padding_modules = []
 
     # To ensure correct weight loading and mapping.
     hf_to_vllm_mapper = WeightsMapper(orig_to_new_prefix={
@@ -989,7 +992,7 @@ class Qwen2_5_VLForConditionalGeneration(nn.Module, SupportsMultiModal,
         return modalities
 
     def get_multimodal_embeddings(
-            self, **kwargs) -> Optional[tuple[torch.Tensor, ...]]:
+            self, **kwargs: object) -> Optional[MultiModalEmbeddings]:
 
         modalities = self._parse_and_validate_multimodal_inputs(**kwargs)
         if not modalities:
@@ -1015,7 +1018,7 @@ class Qwen2_5_VLForConditionalGeneration(nn.Module, SupportsMultiModal,
     def get_input_embeddings(
         self,
         input_ids: torch.Tensor,
-        multimodal_embeddings: Optional[tuple[torch.Tensor, ...]] = None,
+        multimodal_embeddings: Optional[MultiModalEmbeddings] = None,
     ) -> torch.Tensor:
         inputs_embeds = self.language_model.get_input_embeddings(input_ids)
         if multimodal_embeddings is not None:
@@ -1027,10 +1030,9 @@ class Qwen2_5_VLForConditionalGeneration(nn.Module, SupportsMultiModal,
     def get_input_embeddings_v0(
         self,
         input_ids: torch.Tensor,
-        image_input: Optional[tuple[torch.Tensor, ...]] = None,
-        video_input: Optional[tuple[torch.Tensor, ...]] = None,
+        image_input: Optional[Qwen2_5_VLImageInputs] = None,
+        video_input: Optional[Qwen2_5_VLVideoInputs] = None,
     ) -> torch.Tensor:
-
         inputs_embeds = self.get_input_embeddings(input_ids)
         if image_input is not None:
             image_embeds = self._process_image_input(image_input)
@@ -1055,8 +1057,6 @@ class Qwen2_5_VLForConditionalGeneration(nn.Module, SupportsMultiModal,
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        kv_caches: List[torch.Tensor],
-        attn_metadata: AttentionMetadata,
         intermediate_tensors: Optional[IntermediateTensors] = None,
         inputs_embeds: Optional[torch.Tensor] = None,
         **kwargs: object,
@@ -1110,8 +1110,6 @@ class Qwen2_5_VLForConditionalGeneration(nn.Module, SupportsMultiModal,
         hidden_states = self.language_model.model(
             input_ids=input_ids,
             positions=positions,
-            kv_caches=kv_caches,
-            attn_metadata=attn_metadata,
             intermediate_tensors=intermediate_tensors,
             inputs_embeds=inputs_embeds,
         )

@@ -2,7 +2,7 @@
 
 import random
 from dataclasses import dataclass
-from typing import List, Optional, Tuple, Union
+from typing import Optional, Union
 
 import torch
 from transformers import PreTrainedTokenizer, PreTrainedTokenizerFast
@@ -20,7 +20,7 @@ NUM_SAMPLE_LOGPROBS_UNDER_TEST = 5
 # Number of prompt logprobs to request when testing prompt logprobs
 NUM_PROMPT_LOGPROBS_UNDER_TEST = 7
 
-TOKENIZER_NAME = "/mnt/weka/data/pytorch/mistral/Mistral-7B-Instruct-v0.3"
+TOKENIZER_NAME = "/mnt/weka/data/pytorch/llama3.2/Meta-Llama-3.2-1B"
 
 FULL_STRINGS = [
     "My name is Robert from Neural Magic and I love working on vLLM so much!",
@@ -29,9 +29,6 @@ FULL_STRINGS = [
 ]
 STOP_STRINGS = ["I love working on", "company by far", "brother in"]
 PROMPT_LEN = 5
-
-PLP_APC_UNSUPPORTED_MSG = ("Prefix caching with prompt logprobs not yet "
-                           "supported on VLLM V1.")
 
 random.seed(42)
 
@@ -61,7 +58,7 @@ def _create_random_top_logprob_test_vector(
 
 
 def _create_random_top_logprob_test_matrix(
-    shape: Tuple,
+    shape: tuple,
     lower: float,
     upper: float,
 ) -> torch.Tensor:
@@ -90,7 +87,7 @@ def _create_random_top_token_test_vector(
         lower: int,
         upper: int,
         sampled_token_id: int,
-        adjust_num_logprobs: bool = True) -> Tuple[torch.Tensor, int]:
+        adjust_num_logprobs: bool = True) -> tuple[torch.Tensor, int]:
     """Create a random vector of top logprob token indices
 
     Use to create fake sample logprobs for testing. The sampled token
@@ -141,11 +138,11 @@ def _create_random_top_token_test_vector(
 
 
 def _create_random_top_token_test_matrix(
-    shape: Tuple[int, int],
+    shape: tuple[int, int],
     lower: int,
     upper: int,
-    tokens_list: List[int],
-) -> Tuple[torch.Tensor, torch.Tensor]:
+    tokens_list: list[int],
+) -> tuple[torch.Tensor, torch.Tensor]:
     """Create a random matrix of top logprob token indices
 
     Use to create fake prompt logprobs for testing.
@@ -160,7 +157,7 @@ def _create_random_top_token_test_matrix(
       upper: upper range of token ids
 
     Returns:
-      Tuple containing:
+      tuple containing:
       - 2D num_tokens x num_logprobs+1 torch Tensor of token ids
       - 1D tensor of ranks of prompt tokens in their respective
         rows, or random values
@@ -206,10 +203,10 @@ def decode_token(
 
 
 def generate_dummy_sample_logprobs(
-    sampled_tokens_list: List,
+    sampled_tokens_list: list,
     num_logprobs: int,
     tokenizer: PreTrainedTokenizer,
-) -> List[Tuple[List[int], List[float], int]]:
+) -> list[tuple[list[int], list[float], int]]:
     """Generate dummy sample logprobs
 
     Generate a test data structure which imitates the list of sample logprobs
@@ -221,7 +218,7 @@ def generate_dummy_sample_logprobs(
       tokenizer: model tokenizer to use for detokenization
 
     Returns
-      List of (top token ids vector, logprobs vector, sampled token rank)
+      list of (top token ids vector, logprobs vector, sampled token rank)
       Python lists tuples; in each tuple the logprobs and top token ids
       vectors have the same length which is either `num_logprobs` or
       `num_logprobs+1`. Sampled token rank is the rank (index+1) of the
@@ -253,7 +250,7 @@ def generate_dummy_sample_logprobs(
 
 
 def generate_dummy_prompt_logprobs_tensors(
-    prompt_tokens_list: List,
+    prompt_tokens_list: list,
     num_logprobs: int,
     tokenizer: PreTrainedTokenizer,
 ) -> LogprobsTensors:
@@ -269,7 +266,7 @@ def generate_dummy_prompt_logprobs_tensors(
       tokenizer: model tokenizer to use for detokenization
 
     Returns
-      Single Tuple of (logprobs matrix, top token ids matrix) torch Tensor,
+      Single tuple of (logprobs matrix, top token ids matrix) torch Tensor,
       where both matrices have dimensions
       num_prompt_tokens x num_logprobs
     """
@@ -301,19 +298,19 @@ class DummyOutputProcessorTestVectors:
     tokenizer: GeneralTokenizerType
     tokenizer_group: BaseTokenizerGroup
     vllm_config: EngineArgs
-    full_tokens: List[List[int]]  # Prompt + generated tokens
-    prompt_tokens: List[List[int]]
-    generation_tokens: List[List[int]]
+    full_tokens: list[list[int]]  # Prompt + generated tokens
+    prompt_tokens: list[list[int]]
+    generation_tokens: list[list[int]]
     # Each request is associated with a tuple of
     # (top tokens, top logprobs, ranks) prompt logprobs tensors
-    prompt_logprobs: List[LogprobsTensors]
+    prompt_logprobs: list[LogprobsTensors]
     # Each request is associated with a sample logprobs; a request's
     # sample logprobs are a list of (top tokens, top logprobs, ranks)
     # sample logprobs tensors at each sequence position
-    generation_logprobs: List[List[Tuple[List[int], List[float], int]]]
-    prompt_strings: List[str]
-    prompt_strings_len: List[int]
-    generation_strings: List[str]
+    generation_logprobs: list[list[tuple[list[int], list[float], int]]]
+    prompt_strings: list[str]
+    prompt_strings_len: list[int]
+    generation_strings: list[str]
 
 
 class MockEngineCore:
@@ -321,34 +318,42 @@ class MockEngineCore:
 
     def __init__(
         self,
-        tokens_list: List[List[int]],
+        tokens_list: list[list[int]],
         # For each request, for each sampled token offset,
         # a tuple of
         # (list of topk token ids, list of sample logprob vals, rank)
-        generated_logprobs_raw: Optional[List[List[Tuple[List[int],
-                                                         List[float],
+        generated_logprobs_raw: Optional[list[list[tuple[list[int],
+                                                         list[float],
                                                          int]]]] = None,
         # For each request, a tuple of
         # (prompt logprob val matrix, prompt logprob tok id matrix);
         # each matrix has dimensions
         # (num prompt toks) x (num prompt logprobs+1)
-        prompt_logprobs_raw: Optional[List[LogprobsTensors]] = None,
+        prompt_logprobs_raw: Optional[list[LogprobsTensors]] = None,
+        eos_token_id: Optional[int] = None,
+        stop_token_ids: Optional[list[int]] = None,
+        ignore_eos: bool = False,
     ) -> None:
+        self.num_requests = len(tokens_list)
         self.tokens_list = tokens_list
         self.current_idx = 0
         self.generated_logprobs_raw = generated_logprobs_raw
         self.do_logprobs = generated_logprobs_raw is not None
         self.prompt_logprobs_raw = prompt_logprobs_raw
         self.do_prompt_logprobs = prompt_logprobs_raw is not None
+        self.request_finished = [False for _ in range(self.num_requests)]
+        self.eos_token_id = eos_token_id
+        self.stop_token_ids = stop_token_ids
+        self.ignore_eos = ignore_eos
 
-    def get_outputs(self) -> List[EngineCoreOutput]:
+    def get_outputs(self) -> list[EngineCoreOutput]:
         do_logprobs = self.do_logprobs
         do_prompt_logprobs = self.do_prompt_logprobs
         token_idx = self.current_idx
 
         outputs = []
         for req_idx, token_ids in enumerate(self.tokens_list):
-            if len(token_ids) > token_idx:
+            if not self.request_finished[req_idx]:
                 if do_logprobs:
                     assert self.generated_logprobs_raw is not None
                     (logprobs_token_ids_, logprobs_, sampled_token_ranks_) = (
@@ -368,14 +373,23 @@ class MockEngineCore:
                         prompt_logprobs = None
                 else:
                     prompt_logprobs = None
+                new_token_id = token_ids[token_idx]
                 output = EngineCoreOutput(
                     request_id=f"request-{req_idx}",
-                    new_token_ids=[token_ids[token_idx]],
+                    new_token_ids=[new_token_id],
                     new_logprobs=logprobs,
                     new_prompt_logprobs_tensors=prompt_logprobs,
                 )
                 if token_idx == len(token_ids) - 1:
+                    output.finish_reason = FinishReason.LENGTH
+                    self.request_finished[req_idx] = True
+                if not self.ignore_eos and new_token_id == self.eos_token_id:
                     output.finish_reason = FinishReason.STOP
+                    self.request_finished[req_idx] = True
+                if new_token_id in (self.stop_token_ids or ()):
+                    output.finish_reason = FinishReason.STOP
+                    output.stop_reason = new_token_id
+                    self.request_finished[req_idx] = True
                 outputs.append(output)
 
         self.current_idx += 1

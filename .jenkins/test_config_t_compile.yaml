@@ -176,18 +176,12 @@ stages:
       command: export VLLM_SKIP_WARMUP=true && pip install -e tests/vllm_test_utils && PT_HPU_LAZY_MODE=0 pytest -v tests/entrypoints/llm/test_guided_generate.py -s -vvv --log-cli-level=INFO
   - name: test_v1_basic_uts
     steps:
-    - name: test_v1_core_engine_worker_g2
+    - name: test_v1_core_engine_worker_entrypoints_g2
       flavor: g2
-      command: export PT_HPU_LAZY_MODE=0 && export VLLM_T_COMPILE_FULLGRAPH=True && export VLLM_SKIP_WARMUP=true && pytest -v tests/v1/core tests/v1/engine tests/v1/worker  -s -vvv --log-cli-level=INFO 
-    - name: test_v1_core_engine_worker_g3
+      command:  export PT_HPU_LAZY_MODE=0 && export VLLM_USE_V1=1 && export VLLM_SKIP_WARMUP=true && pytest -v -s -vvv --log-cli-level=INFO tests/v1/core && pytest -v -s -vvv --log-cli-level=INFO tests/v1/engine && pytest -v -s -vvv --log-cli-level=INFO tests/v1/worker && pytest -v -s -vvv --log-cli-level=INFO tests/v1/entrypoints 
+    - name: test_v1_core_engine_worker_entrypoints_g3
       flavor: g3
-      command: export PT_HPU_LAZY_MODE=0 && export VLLM_T_COMPILE_FULLGRAPH=True && export VLLM_SKIP_WARMUP=true && pytest -v tests/v1/core tests/v1/engine tests/v1/worker  -s -vvv --log-cli-level=INFO 
-    - name: test_v1_entrypoints_g2
-      flavor: g2
-      command: export PT_HPU_LAZY_MODE=0 && export VLLM_T_COMPILE_FULLGRAPH=True && export VLLM_SKIP_WARMUP=true && pytest -v tests/v1/entrypoints  -s -vvv --log-cli-level=INFO 
-    - name: test_v1_entrypoints_g3
-      flavor: g3
-      command: export PT_HPU_LAZY_MODE=0 && export VLLM_T_COMPILE_FULLGRAPH=True && export VLLM_SKIP_WARMUP=true && pytest -v tests/v1/entrypoints  -s -vvv --log-cli-level=INFO 
+      command: export PT_HPU_LAZY_MODE=0 && export VLLM_USE_V1=1 && export VLLM_SKIP_WARMUP=true && pytest -v -s -vvv --log-cli-level=INFO tests/v1/core && pytest -v -s -vvv --log-cli-level=INFO tests/v1/engine && pytest -v -s -vvv --log-cli-level=INFO tests/v1/worker && pytest -v -s -vvv --log-cli-level=INFO tests/v1/entrypoints        
   - name: benchmarks
     steps:
     - name: benchmark_llama_3_1_8b_bf16

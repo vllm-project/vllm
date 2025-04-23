@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
-from functools import lru_cache
+import os
+from functools import cache, lru_cache, wraps
 from typing import TYPE_CHECKING, Dict, List, Optional
 
 import torch
@@ -11,11 +12,19 @@ from vllm.logger import init_logger
 from .interface import DeviceCapability, Platform, PlatformEnum, _Backend
 
 if TYPE_CHECKING:
-    from vllm.config import VllmConfig
+    from vllm.config import ModelConfig, VllmConfig
 else:
+    ModelConfig = None
     VllmConfig = None
 
 logger = init_logger(__name__)
+
+try:
+    from amdsmi import (AmdSmiException, amdsmi_get_gpu_asic_info,
+                        amdsmi_get_processor_handles, amdsmi_init,
+                        amdsmi_shut_down, amdsmi_topo_get_link_type)
+except ImportError as e:
+    logger.warning("Failed to import from amdsmi with %r", e)
 
 try:
     import vllm._C  # noqa: F401
@@ -53,6 +62,61 @@ _ROCM_PARTIALLY_SUPPORTED_MODELS: Dict[str, str] = {
      "by setting `VLLM_USE_TRITON_FLASH_ATTN=0`")
 }
 
+# Prevent use of clashing `{CUDA/HIP}_VISIBLE_DEVICES``
+if "HIP_VISIBLE_DEVICES" in os.environ:
+    val = os.environ["HIP_VISIBLE_DEVICES"]
+    if cuda_val := os.environ.get("CUDA_VISIBLE_DEVICES", None):
+        assert val == cuda_val
+    else:
+        os.environ["CUDA_VISIBLE_DEVICES"] = val
+
+# AMDSMI utils
+# Note that NVML is not affected by `{CUDA/HIP}_VISIBLE_DEVICES`,
+# all the related functions work on real physical device ids.
+# the major benefit of using AMDSMI is that it will not initialize CUDA
+
+
+def with_amdsmi_context(fn):
+
+    @wraps(fn)
+    def wrapper(*args, **kwargs):
+        amdsmi_init()
+        try:
+            return fn(*args, **kwargs)
+        finally:
+            amdsmi_shut_down()
+
+    return wrapper
+
+
+def device_id_to_physical_device_id(device_id: int) -> int:
+    if "CUDA_VISIBLE_DEVICES" in os.environ:
+        device_ids = os.environ["CUDA_VISIBLE_DEVICES"].split(",")
+        physical_device_id = device_ids[device_id]
+        return int(physical_device_id)
+    else:
+        return device_id
+
+
+@cache
+def use_rocm_custom_paged_attention(qtype: torch.dtype, head_size: int,
+                                    block_size: int, gqa_ratio: int,
+                                    max_seq_len: int,
+                                    sliding_window: int) -> bool:
+
+    GPU_ARCH = torch.cuda.get_device_properties("cuda").gcnArchName
+    ON_NAVI = "gfx1" in GPU_ARCH
+    ON_MI250_MI300 = any(arch in GPU_ARCH for arch in ["gfx90a", "gfx942"])
+
+    # rocm custom page attention not support on navi (gfx1*)
+    return (ON_MI250_MI300 and not ON_NAVI
+            and (sliding_window == 0 or sliding_window == (-1, -1))
+            and (qtype == torch.half or qtype == torch.bfloat16)
+            and (head_size == 64 or head_size == 128)
+            and (block_size == 16 or block_size == 32)
+            and (gqa_ratio >= 1 and gqa_ratio <= 16) and max_seq_len <= 32768
+            and envs.VLLM_ROCM_CUSTOM_PAGED_ATTN)
+
 
 class RocmPlatform(Platform):
     _enum = PlatformEnum.ROCM
@@ -78,8 +142,9 @@ class RocmPlatform(Platform):
         selected_backend = (_Backend.ROCM_FLASH if selected_backend
                             == _Backend.FLASH_ATTN else selected_backend)
         if envs.VLLM_USE_V1:
-            logger.info("Using ROCm Attention backend on V1 engine.")
-            return "vllm.v1.attention.backends.rocm_attn.ROCmAttentionBackend"
+            logger.info("Using Triton Attention backend on V1 engine.")
+            return ("vllm.v1.attention.backends."
+                    "triton_attn.TritonAttentionBackend")
         if selected_backend == _Backend.ROCM_FLASH:
             if not cls.has_device_capability(90):
                 # not Instinct series GPUs.
@@ -91,18 +156,43 @@ class RocmPlatform(Platform):
 
     @classmethod
     @lru_cache(maxsize=8)
-    def get_device_capability(cls, device_id: int = 0) -> DeviceCapability:
+    def get_device_capability(cls,
+                              device_id: int = 0
+                              ) -> Optional[DeviceCapability]:
         major, minor = torch.cuda.get_device_capability(device_id)
         return DeviceCapability(major=major, minor=minor)
 
+    @staticmethod
+    @with_amdsmi_context
+    def is_fully_connected(physical_device_ids: List[int]) -> bool:
+        """
+        Query if the set of gpus are fully connected by xgmi (1 hop)
+        """
+        handles = [
+            amdsmi_get_processor_handles()[i] for i in physical_device_ids
+        ]
+        for i, handle in enumerate(handles):
+            for j, peer_handle in enumerate(handles):
+                if i < j:
+                    try:
+                        link_type = amdsmi_topo_get_link_type(
+                            handle, peer_handle)
+                        # type is 2 for XGMI
+                        if link_type["hops"] != 1 or link_type["type"] != 2:
+                            return False
+                    except AmdSmiException as error:
+                        logger.error("AMD 1 hop XGMI detection failed.",
+                                     exc_info=error)
+                        return False
+        return True
+
     @classmethod
+    @with_amdsmi_context
     @lru_cache(maxsize=8)
     def get_device_name(cls, device_id: int = 0) -> str:
-        # NOTE: When using V1 this function is called when overriding the
-        # engine args. Calling torch.cuda.get_device_name(device_id) here
-        # will result in the ROCm context being initialized before other
-        # processes can be created.
-        return "AMD"
+        physical_device_id = device_id_to_physical_device_id(device_id)
+        handle = amdsmi_get_processor_handles()[physical_device_id]
+        return amdsmi_get_gpu_asic_info(handle)["market_name"]
 
     @classmethod
     def get_device_total_memory(cls, device_id: int = 0) -> int:
@@ -132,7 +222,7 @@ class RocmPlatform(Platform):
                 if envs.VLLM_USE_V1:
                     raise NotImplementedError(
                         "Multi-step scheduling is not supported (and not "
-                        "needed) on VLLM V1. Please launch without "
+                        "needed) on vLLM V1. Please launch without "
                         "--num-scheduler-steps.")
                 else:
                     parallel_config.worker_cls = \
@@ -140,7 +230,7 @@ class RocmPlatform(Platform):
             elif vllm_config.speculative_config:
                 if envs.VLLM_USE_V1:
                     raise NotImplementedError(
-                        "Speculative decoding is not yet supported on VLLM V1."
+                        "Speculative decoding is not yet supported on vLLM V1."
                     )
                 else:
                     parallel_config.worker_cls = \
@@ -186,3 +276,40 @@ class RocmPlatform(Platform):
         torch.cuda.reset_peak_memory_stats(device)
         return torch.cuda.mem_get_info(device)[1] - torch.cuda.mem_get_info(
             device)[0]
+
+    @classmethod
+    def get_device_communicator_cls(cls) -> str:
+        return "vllm.distributed.device_communicators.cuda_communicator.CudaCommunicator"  # noqa
+
+    @classmethod
+    def supports_fp8(cls) -> bool:
+        gcn_arch = torch.cuda.get_device_properties(0).gcnArchName
+        return any(gfx in gcn_arch for gfx in ['gfx94', 'gfx95', 'gfx12'])
+
+    @classmethod
+    def is_fp8_fnuz(cls) -> bool:
+        # only device 0 is checked, this assumes MI300 platforms are homogeneous
+        return 'gfx94' in torch.cuda.get_device_properties(0).gcnArchName
+
+    @classmethod
+    def fp8_dtype(cls) -> torch.dtype:
+        if cls.is_fp8_fnuz():
+            return torch.float8_e4m3fnuz
+        else:
+            return torch.float8_e4m3fn
+
+    @classmethod
+    def supports_v1(cls, model_config: ModelConfig) -> bool:
+        # V1 support on AMD gpus is experimental
+        return True
+
+    @classmethod
+    def supports_structured_output(cls) -> bool:
+        return True
+
+    @classmethod
+    def use_custom_allreduce(cls) -> bool:
+        # We only enable custom allreduce for MI300 series
+        gcn_arch = torch.cuda.get_device_properties(0).gcnArchName
+        supported_archs = ['gfx94']
+        return any(gfx in gcn_arch for gfx in supported_archs)

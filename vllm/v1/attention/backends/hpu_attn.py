@@ -5,7 +5,7 @@
 ###############################################################################
 
 from dataclasses import dataclass
-from typing import Optional, Type
+from typing import Optional
 
 import torch
 
@@ -24,7 +24,7 @@ class HPUAttentionBackendV1(HPUAttentionBackend):
         return "HPU_ATTN_V1"
 
     @staticmethod
-    def get_metadata_cls() -> Type["AttentionMetadata"]:
+    def get_metadata_cls() -> type["AttentionMetadata"]:
         return HPUAttentionMetadataV1
 
 

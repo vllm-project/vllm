@@ -2,9 +2,10 @@
 
 import asyncio
 import tempfile
+from collections.abc import Awaitable
 from http import HTTPStatus
 from io import StringIO
-from typing import Awaitable, Callable, List, Optional
+from typing import Callable, Optional
 
 import aiohttp
 import torch
@@ -26,7 +27,7 @@ from vllm.entrypoints.openai.serving_chat import OpenAIServingChat
 from vllm.entrypoints.openai.serving_embedding import OpenAIServingEmbedding
 from vllm.entrypoints.openai.serving_models import (BaseModelPath,
                                                     OpenAIServingModels)
-from vllm.entrypoints.openai.serving_score import OpenAIServingScores
+from vllm.entrypoints.openai.serving_score import ServingScores
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils import FlexibleArgumentParser, random_uuid
 from vllm.version import __version__ as VLLM_VERSION
@@ -143,7 +144,7 @@ async def read_file(path_or_url: str) -> str:
 
 
 async def write_local_file(output_path: str,
-                           batch_outputs: List[BatchRequestOutput]) -> None:
+                           batch_outputs: list[BatchRequestOutput]) -> None:
     """
     Write the responses to a local file.
     output_path: The path to write the responses to.
@@ -204,7 +205,7 @@ async def upload_data(output_url: str, data_or_file: str,
                                 f"Error message: {str(e)}.") from e
 
 
-async def write_file(path_or_url: str, batch_outputs: List[BatchRequestOutput],
+async def write_file(path_or_url: str, batch_outputs: list[BatchRequestOutput],
                      output_tmp_dir: str) -> None:
     """
     Write batch_outputs to a file or upload to a URL.
@@ -342,7 +343,7 @@ async def main(args):
         chat_template=None,
         chat_template_content_format="auto",
     ) if model_config.task == "embed" else None
-    openai_serving_scores = (OpenAIServingScores(
+    openai_serving_scores = (ServingScores(
         engine,
         model_config,
         openai_serving_models,
@@ -353,7 +354,7 @@ async def main(args):
     logger.info("Reading batch from %s...", args.input_file)
 
     # Submit all requests in the file to the engine "concurrently".
-    response_futures: List[Awaitable[BatchRequestOutput]] = []
+    response_futures: list[Awaitable[BatchRequestOutput]] = []
     for request_json in (await read_file(args.input_file)).strip().split("\n"):
         # Skip empty lines.
         request_json = request_json.strip()
@@ -364,9 +365,9 @@ async def main(args):
 
         # Determine the type of request and run it.
         if request.url == "/v1/chat/completions":
-            handler_fn = (None if openai_serving_chat is None else
-                          openai_serving_chat.create_chat_completion)
-            if handler_fn is None:
+            chat_handler_fn = (None if openai_serving_chat is None else
+                               openai_serving_chat.create_chat_completion)
+            if chat_handler_fn is None:
                 response_futures.append(
                     make_async_error_request_output(
                         request,
@@ -375,12 +376,13 @@ async def main(args):
                     ))
                 continue
 
-            response_futures.append(run_request(handler_fn, request, tracker))
+            response_futures.append(
+                run_request(chat_handler_fn, request, tracker))
             tracker.submitted()
         elif request.url == "/v1/embeddings":
-            handler_fn = (None if openai_serving_embedding is None else
-                          openai_serving_embedding.create_embedding)
-            if handler_fn is None:
+            embed_handler_fn = (None if openai_serving_embedding is None else
+                                openai_serving_embedding.create_embedding)
+            if embed_handler_fn is None:
                 response_futures.append(
                     make_async_error_request_output(
                         request,
@@ -388,12 +390,13 @@ async def main(args):
                     ))
                 continue
 
-            response_futures.append(run_request(handler_fn, request, tracker))
+            response_futures.append(
+                run_request(embed_handler_fn, request, tracker))
             tracker.submitted()
         elif request.url == "/v1/score":
-            handler_fn = (None if openai_serving_scores is None else
-                          openai_serving_scores.create_score)
-            if handler_fn is None:
+            score_handler_fn = (None if openai_serving_scores is None else
+                                openai_serving_scores.create_score)
+            if score_handler_fn is None:
                 response_futures.append(
                     make_async_error_request_output(
                         request,
@@ -401,7 +404,8 @@ async def main(args):
                     ))
                 continue
 
-            response_futures.append(run_request(handler_fn, request, tracker))
+            response_futures.append(
+                run_request(score_handler_fn, request, tracker))
             tracker.submitted()
         else:
             response_futures.append(

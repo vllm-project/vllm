@@ -1,14 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
-import codecs
 import json
 from abc import ABC, abstractmethod
 from collections import defaultdict, deque
+from collections.abc import Awaitable, Iterable
 from functools import cache, lru_cache, partial
 from pathlib import Path
-from typing import (Any, Awaitable, Callable, Dict, Generic, Iterable, List,
-                    Literal, Optional, Tuple, TypeVar, Union, cast)
+from typing import (Any, Callable, Generic, Literal, Optional, TypeVar, Union,
+                    cast)
 
 import jinja2.nodes
 import transformers.utils.chat_template_utils as hf_chat_utils
@@ -29,13 +29,15 @@ from openai.types.chat.chat_completion_content_part_input_audio_param import (
     InputAudio)
 # yapf: enable
 # pydantic needs the TypedDict from typing_extensions
-from transformers import PreTrainedTokenizer, PreTrainedTokenizerFast
+from transformers import (PreTrainedTokenizer, PreTrainedTokenizerFast,
+                          ProcessorMixin)
 from typing_extensions import Required, TypeAlias, TypedDict
 
 from vllm.config import ModelConfig
 from vllm.logger import init_logger
 from vllm.multimodal import MultiModalDataDict
 from vllm.multimodal.utils import MediaConnector
+from vllm.transformers_utils.processor import cached_get_processor
 from vllm.transformers_utils.tokenizer import AnyTokenizer, MistralTokenizer
 
 logger = init_logger(__name__)
@@ -52,6 +54,17 @@ class ChatCompletionContentPartAudioParam(TypedDict, total=False):
     audio_url: Required[AudioURL]
 
     type: Required[Literal["audio_url"]]
+    """The type of the content part."""
+
+
+class ChatCompletionContentPartImageEmbedsParam(TypedDict, total=False):
+    image_embeds: Required[Union[str, dict[str, str]]]
+    """
+    The image embeddings. It can be either:
+    - A single base64 string.
+    - A dictionary where each value is a base64 string.
+    """
+    type: Required[Literal["image_embeds"]]
     """The type of the content part."""
 
 
@@ -108,6 +121,7 @@ ChatCompletionContentPartParam: TypeAlias = Union[
     ChatCompletionContentPartInputAudioParam,
     ChatCompletionContentPartVideoParam, ChatCompletionContentPartRefusalParam,
     CustomChatCompletionContentSimpleImageParam,
+    ChatCompletionContentPartImageEmbedsParam,
     CustomChatCompletionContentSimpleAudioParam,
     CustomChatCompletionContentSimpleVideoParam, str]
 
@@ -117,7 +131,7 @@ class CustomChatCompletionMessageParam(TypedDict, total=False):
     role: Required[str]
     """The role of the message's author."""
 
-    content: Union[str, List[ChatCompletionContentPartParam]]
+    content: Union[str, list[ChatCompletionContentPartParam]]
     """The contents of the message."""
 
     name: str
@@ -143,7 +157,7 @@ class ConversationMessage(TypedDict, total=False):
     role: Required[str]
     """The role of the message's author."""
 
-    content: Union[Optional[str], List[Dict[str, str]]]
+    content: Union[Optional[str], list[dict[str, str]]]
     """The contents of the message"""
 
     tool_call_id: Optional[str]
@@ -292,24 +306,80 @@ def _detect_content_format(
         return "openai"
 
 
+def resolve_mistral_chat_template(
+    chat_template: Optional[str],
+    **kwargs: Any,
+) -> Optional[str]:
+    if chat_template is not None:
+        logger.warning_once(
+            "'chat_template' cannot be overridden for mistral tokenizer.")
+    if "add_generation_prompt" in kwargs:
+        logger.warning_once(
+            "'add_generation_prompt' is not supported for mistral tokenizer, "
+            "so it will be ignored.")
+    if "continue_final_message" in kwargs:
+        logger.warning_once(
+            "'continue_final_message' is not supported for mistral tokenizer, "
+            "so it will be ignored.")
+    return None
+
+def resolve_hf_chat_template(
+    tokenizer: Union[PreTrainedTokenizer, PreTrainedTokenizerFast],
+    chat_template: Optional[str],
+    tools: Optional[list[dict[str, Any]]],
+    *,
+    trust_remote_code: bool,
+) -> Optional[str]:
+    # 1st priority: The given chat template
+    if chat_template is not None:
+        return chat_template
+
+    # 2nd priority: AutoProcessor chat template, unless tool calling is enabled
+    if tools is None:
+        try:
+            processor = cached_get_processor(
+                tokenizer.name_or_path,
+                processor_cls=(PreTrainedTokenizer, PreTrainedTokenizerFast,
+                               ProcessorMixin),
+                trust_remote_code=trust_remote_code,
+            )
+            if isinstance(processor, ProcessorMixin) and \
+                processor.chat_template is not None:
+                return processor.chat_template
+        except Exception:
+            logger.debug("Failed to load AutoProcessor chat template for %s",
+                        tokenizer.name_or_path, exc_info=True)
+
+    # 3rd priority: AutoTokenizer chat template
+    try:
+        return tokenizer.get_chat_template(chat_template, tools=tools)
+    except Exception:
+        logger.debug("Failed to load AutoTokenizer chat template for %s",
+                     tokenizer.name_or_path, exc_info=True)
+
+    return None
+
+
 def _resolve_chat_template_content_format(
     chat_template: Optional[str],
+    tools: Optional[list[dict[str, Any]]],
     given_format: ChatTemplateContentFormatOption,
     tokenizer: AnyTokenizer,
+    *,
+    trust_remote_code: bool,
 ) -> _ChatTemplateContentFormat:
     if isinstance(tokenizer, (PreTrainedTokenizer, PreTrainedTokenizerFast)):
-        tokenizer_chat_template = tokenizer.chat_template
+        hf_chat_template = resolve_hf_chat_template(
+            tokenizer,
+            chat_template=chat_template,
+            trust_remote_code=trust_remote_code,
+            tools=tools,
+        )
     else:
-        tokenizer_chat_template = None
+        hf_chat_template = None
 
-    jinja_text: Optional[str]
-    if isinstance(tokenizer_chat_template, str) and chat_template is None:
-        jinja_text = tokenizer_chat_template
-    elif (isinstance(tokenizer_chat_template, dict)
-            and chat_template in tokenizer_chat_template):
-        jinja_text = tokenizer_chat_template[chat_template]
-    else:
-        jinja_text = load_chat_template(chat_template, is_literal=True)
+    jinja_text = (hf_chat_template if isinstance(hf_chat_template, str)
+                  else load_chat_template(chat_template, is_literal=True))
 
     detected_format = ("string" if jinja_text is None else
                        _detect_content_format(jinja_text, default="string"))
@@ -318,17 +388,11 @@ def _resolve_chat_template_content_format(
 
 
 @lru_cache
-def resolve_chat_template_content_format(
+def _log_chat_template_content_format(
     chat_template: Optional[str],
     given_format: ChatTemplateContentFormatOption,
-    tokenizer: AnyTokenizer,
-) -> _ChatTemplateContentFormat:
-    detected_format = _resolve_chat_template_content_format(
-        chat_template,
-        given_format,
-        tokenizer,
-    )
-
+    detected_format: ChatTemplateContentFormatOption,
+):
     logger.info(
         "Detected the chat template content format to be '%s'. "
         "You can set `--chat-template-content-format` to override this.",
@@ -346,10 +410,33 @@ def resolve_chat_template_content_format(
             detected_format,
         )
 
+
+def resolve_chat_template_content_format(
+    chat_template: Optional[str],
+    tools: Optional[list[dict[str, Any]]],
+    given_format: ChatTemplateContentFormatOption,
+    tokenizer: AnyTokenizer,
+    *,
+    trust_remote_code: bool = False,
+) -> _ChatTemplateContentFormat:
+    detected_format = _resolve_chat_template_content_format(
+        chat_template,
+        tools,
+        given_format,
+        tokenizer,
+        trust_remote_code=trust_remote_code,
+    )
+
+    _log_chat_template_content_format(
+        chat_template,
+        given_format=given_format,
+        detected_format=detected_format,
+    )
+
     return detected_format
 
 
-ModalityStr = Literal["image", "audio", "video"]
+ModalityStr = Literal["image", "audio", "video", "image_embeds"]
 _T = TypeVar("_T")
 
 
@@ -390,14 +477,18 @@ class BaseMultiModalItemTracker(ABC, Generic[_T]):
         hf_config = self._model_config.hf_config
         model_type = hf_config.model_type
 
-        if modality == "image":
+        if modality in ("image", "image_embeds"):
+            if model_type == "chatglm":
+                return "<|begin_of_image|><|endoftext|><|end_of_image|>"
             if model_type == "phi3_v":
                 # Workaround since this token is not defined in the tokenizer
                 return f"<|image_{current_count}|>"
+            if model_type == "phi4mm":
+                return "<|endoftext10|>"  # 200010 (see vocab.json in hf model)
             if model_type in ("minicpmo", "minicpmv"):
                 return "(<image>./</image>)"
-            if model_type in ("blip-2", "chatglm", "fuyu", "paligemma",
-                              "pixtral"):
+            if model_type in ("blip-2", "florence2", "fuyu", "paligemma",
+                              "pixtral", "mistral3"):
                 # These models do not use image tokens in the prompt
                 return None
             if model_type == "qwen":
@@ -405,8 +496,9 @@ class BaseMultiModalItemTracker(ABC, Generic[_T]):
             if model_type.startswith("llava"):
                 return self._cached_token_str(self._tokenizer,
                                               hf_config.image_token_index)
-            if model_type in ("chameleon", "deepseek_vl_v2", "internvl_chat",
-                              "NVLM_D", "h2ovl_chat"):
+            if model_type in ("aya_vision", "chameleon", "deepseek_vl_v2",
+                              "internvl_chat", "skywork_chat", "NVLM_D",
+                              "h2ovl_chat", "idefics3"):
                 return "<image>"
             if model_type == "mllama":
                 return "<|image|>"
@@ -414,15 +506,17 @@ class BaseMultiModalItemTracker(ABC, Generic[_T]):
                 return "<|vision_start|><|image_pad|><|vision_end|>"
             if model_type == "molmo":
                 return ""
-            if model_type == "idefics3":
-                return "<image>"
             if model_type == "aria":
                 return "<|fim_prefix|><|img|><|fim_suffix|>"
+            if model_type == "gemma3":
+                return "<start_of_image>"
 
             raise TypeError(f"Unknown {modality} model type: {model_type}")
         elif modality == "audio":
             if model_type == "ultravox":
                 return "<|audio|>"
+            if model_type == "phi4mm":
+                return "<|endoftext11|>"  # 200011 (see vocab.json in hf model)
             if model_type == "qwen2_audio":
                 return (f"Audio {current_count}: "
                         f"<|audio_bos|><|AUDIO|><|audio_eos|>")
@@ -465,10 +559,27 @@ class BaseMultiModalItemTracker(ABC, Generic[_T]):
 class MultiModalItemTracker(BaseMultiModalItemTracker[object]):
 
     def all_mm_data(self) -> Optional[MultiModalDataDict]:
-        if self._items_by_modality:
-            return dict(self._items_by_modality)
+        if not self._items_by_modality:
+            return None
+        mm_inputs = {}
+        items_by_modality = dict(self._items_by_modality)
+        if "image" in items_by_modality and "image_embeds" in items_by_modality:
+            raise ValueError(\
+                "Mixing raw image and embedding inputs is not allowed")
 
-        return None
+        if "image_embeds" in items_by_modality:
+            image_embeds_lst = items_by_modality["image_embeds"]
+            if len(image_embeds_lst) > 1:
+                raise ValueError(\
+                    "Only one message can have {'type': 'image_embeds'}")
+            mm_inputs["image"] = image_embeds_lst[0]
+        if "image" in items_by_modality:
+            mm_inputs["image"] = items_by_modality["image"] # A list of images
+        if "audio" in items_by_modality:
+            mm_inputs["audio"] = items_by_modality["audio"] # A list of audios
+        if "video" in items_by_modality:
+            mm_inputs["video"] = items_by_modality["video"] # A list of videos
+        return mm_inputs
 
     def create_parser(self) -> "BaseMultiModalContentParser":
         return MultiModalContentParser(self)
@@ -477,13 +588,31 @@ class MultiModalItemTracker(BaseMultiModalItemTracker[object]):
 class AsyncMultiModalItemTracker(BaseMultiModalItemTracker[Awaitable[object]]):
 
     async def all_mm_data(self) -> Optional[MultiModalDataDict]:
-        if self._items_by_modality:
-            return {
+        if not self._items_by_modality:
+            return None
+        mm_inputs = {}
+        items_by_modality = {
                 modality: await asyncio.gather(*items)
                 for modality, items in self._items_by_modality.items()
             }
 
-        return None
+        if "image" in items_by_modality and "image_embeds" in items_by_modality:
+            raise ValueError(
+                "Mixing raw image and embedding inputs is not allowed")
+
+        if "image_embeds" in items_by_modality:
+            image_embeds_lst = items_by_modality["image_embeds"]
+            if len(image_embeds_lst) > 1:
+                raise ValueError(
+                    "Only one message can have {'type': 'image_embeds'}")
+            mm_inputs["image"] = image_embeds_lst[0]
+        if "image" in items_by_modality:
+            mm_inputs["image"] = items_by_modality["image"] # A list of images
+        if "audio" in items_by_modality:
+            mm_inputs["audio"] = items_by_modality["audio"] # A list of audios
+        if "video" in items_by_modality:
+            mm_inputs["video"] = items_by_modality["video"] # A list of videos
+        return mm_inputs
 
     def create_parser(self) -> "BaseMultiModalContentParser":
         return AsyncMultiModalContentParser(self)
@@ -495,17 +624,22 @@ class BaseMultiModalContentParser(ABC):
         super().__init__()
 
         # multimodal placeholder_string : count
-        self._placeholder_counts: Dict[str, int] = defaultdict(lambda: 0)
+        self._placeholder_counts: dict[str, int] = defaultdict(lambda: 0)
 
     def _add_placeholder(self, placeholder: Optional[str]):
         if placeholder:
             self._placeholder_counts[placeholder] += 1
 
-    def mm_placeholder_counts(self) -> Dict[str, int]:
+    def mm_placeholder_counts(self) -> dict[str, int]:
         return dict(self._placeholder_counts)
 
     @abstractmethod
     def parse_image(self, image_url: str) -> None:
+        raise NotImplementedError
+
+    @abstractmethod
+    def parse_image_embeds(self,
+                           image_embeds: Union[str, dict[str, str]]) -> None:
         raise NotImplementedError
 
     @abstractmethod
@@ -536,6 +670,21 @@ class MultiModalContentParser(BaseMultiModalContentParser):
         image = self._connector.fetch_image(image_url)
 
         placeholder = self._tracker.add("image", image)
+        self._add_placeholder(placeholder)
+
+    def parse_image_embeds(self,
+                           image_embeds: Union[str, dict[str, str]]) -> None:
+        if isinstance(image_embeds, dict):
+            embeds = {
+                k: self._connector.fetch_image_embedding(v)
+                for k, v in image_embeds.items()
+            }
+            placeholder = self._tracker.add("image_embeds", embeds)
+
+        if isinstance(image_embeds, str):
+            embedding = self._connector.fetch_image_embedding(image_embeds)
+            placeholder = self._tracker.add("image_embeds", embedding)
+
         self._add_placeholder(placeholder)
 
     def parse_audio(self, audio_url: str) -> None:
@@ -572,6 +721,25 @@ class AsyncMultiModalContentParser(BaseMultiModalContentParser):
         image_coro = self._connector.fetch_image_async(image_url)
 
         placeholder = self._tracker.add("image", image_coro)
+        self._add_placeholder(placeholder)
+
+    def parse_image_embeds(self,
+                           image_embeds: Union[str, dict[str, str]]) -> None:
+        future: asyncio.Future[Union[str, dict[str, str]]] = asyncio.Future()
+
+        if isinstance(image_embeds, dict):
+            embeds = {
+                k: self._connector.fetch_image_embedding(v)
+                for k, v in image_embeds.items()
+            }
+            future.set_result(embeds)
+
+        if isinstance(image_embeds, str):
+            embedding = self._connector.\
+                fetch_image_embedding(image_embeds)
+            future.set_result(embedding)
+
+        placeholder = self._tracker.add("image_embeds", future)
         self._add_placeholder(placeholder)
 
     def parse_audio(self, audio_url: str) -> None:
@@ -616,7 +784,7 @@ def validate_chat_template(chat_template: Optional[Union[Path, str]]):
             f"{type(chat_template)} is not a valid chat template type")
 
 
-def load_chat_template(
+def _load_chat_template(
     chat_template: Optional[Union[Path, str]],
     *,
     is_literal: bool = False,
@@ -629,7 +797,7 @@ def load_chat_template(
             raise TypeError("chat_template is expected to be read directly "
                             "from its value")
 
-        return codecs.decode(chat_template, "unicode_escape")
+        return chat_template
 
     try:
         with open(chat_template) as f:
@@ -647,17 +815,28 @@ def load_chat_template(
 
         # If opening a file fails, set chat template to be args to
         # ensure we decode so our escape are interpreted correctly
-        return load_chat_template(chat_template, is_literal=True)
+        return _load_chat_template(chat_template, is_literal=True)
+
+
+_cached_load_chat_template = lru_cache(_load_chat_template)
+
+
+def load_chat_template(
+    chat_template: Optional[Union[Path, str]],
+    *,
+    is_literal: bool = False,
+) -> Optional[str]:
+    return _cached_load_chat_template(chat_template, is_literal=is_literal)
 
 
 # TODO: Let user specify how to insert multimodal tokens into prompt
 # (similar to chat template)
-def _get_full_multimodal_text_prompt(placeholder_counts: Dict[str, int],
+def _get_full_multimodal_text_prompt(placeholder_counts: dict[str, int],
                                      text_prompt: str) -> str:
     """Combine multimodal prompts for a multimodal language model."""
 
     # Look through the text prompt to check for missing placeholders
-    missing_placeholders: List[str] = []
+    missing_placeholders: list[str] = []
     for placeholder in placeholder_counts:
 
         # For any existing placeholder in the text prompt, we leave it as is
@@ -679,15 +858,16 @@ def _get_full_multimodal_text_prompt(placeholder_counts: Dict[str, int],
 # No need to validate using Pydantic again
 _TextParser = partial(cast, ChatCompletionContentPartTextParam)
 _ImageParser = partial(cast, ChatCompletionContentPartImageParam)
+_ImageEmbedsParser = partial(cast, ChatCompletionContentPartImageEmbedsParam)
 _AudioParser = partial(cast, ChatCompletionContentPartAudioParam)
 _InputAudioParser = partial(cast, ChatCompletionContentPartInputAudioParam)
 _RefusalParser = partial(cast, ChatCompletionContentPartRefusalParam)
 _VideoParser = partial(cast, ChatCompletionContentPartVideoParam)
 
-_ContentPart: TypeAlias = Union[str, Dict[str, str], InputAudio]
+_ContentPart: TypeAlias = Union[str, dict[str, str], InputAudio]
 
 # Define a mapping from part types to their corresponding parsing functions.
-MM_PARSER_MAP: Dict[
+MM_PARSER_MAP: dict[
     str,
     Callable[[ChatCompletionContentPartParam], _ContentPart],
 ] = {
@@ -695,6 +875,8 @@ MM_PARSER_MAP: Dict[
     lambda part: _TextParser(part).get("text", ""),
     "image_url":
     lambda part: _ImageParser(part).get("image_url", {}).get("url", ""),
+    "image_embeds":
+    lambda part: _ImageEmbedsParser(part).get("image_embeds", {}),
     "audio_url":
     lambda part: _AudioParser(part).get("audio_url", {}).get("url", ""),
     "input_audio":
@@ -749,7 +931,7 @@ def _parse_chat_message_content_mm_part(
                                 part)
             return "audio_url", audio_params.get("audio_url", "")
         if part.get("input_audio") is not None:
-            input_audio_params = cast(Dict[str, str], part)
+            input_audio_params = cast(dict[str, str], part)
             return "input_audio", input_audio_params
         if part.get("video_url") is not None:
             video_params = cast(CustomChatCompletionContentSimpleVideoParam,
@@ -764,6 +946,7 @@ def _parse_chat_message_content_mm_part(
 
 
 VALID_MESSAGE_CONTENT_MM_PART_TYPES = ("text", "refusal", "image_url",
+                                       "image_embeds",
                                        "audio_url", "input_audio", "video_url")
 
 
@@ -773,7 +956,7 @@ def _parse_chat_message_content_parts(
     mm_tracker: BaseMultiModalItemTracker,
     *,
     wrap_dicts: bool,
-) -> List[ConversationMessage]:
+) -> list[ConversationMessage]:
     content = list[_ContentPart]()
 
     mm_parser = mm_tracker.create_parser()
@@ -791,7 +974,7 @@ def _parse_chat_message_content_parts(
         # Parsing wraps images and texts as interleaved dictionaries
         return [ConversationMessage(role=role,
                                     content=content)]  # type: ignore
-    texts = cast(List[str], content)
+    texts = cast(list[str], content)
     text_prompt = "\n".join(texts)
     mm_placeholder_counts = mm_parser.mm_placeholder_counts()
     if mm_placeholder_counts:
@@ -823,7 +1006,7 @@ def _parse_chat_message_content_part(
     # content is empty, log a warning and skip
     if part_type in VALID_MESSAGE_CONTENT_MM_PART_TYPES and not content:
         logger.warning(
-            "Skipping multimodal part (type: '%s')"
+            "Skipping multimodal part (type: '%s') "
             "with empty / unparsable content.", part_type)
         return None
 
@@ -838,7 +1021,10 @@ def _parse_chat_message_content_part(
         str_content = cast(str, content)
         mm_parser.parse_image(str_content)
         return {'type': 'image'} if wrap_dicts else None
-
+    if part_type == "image_embeds":
+        content = cast(Union[str, dict[str, str]], content)
+        mm_parser.parse_image_embeds(content)
+        return {'type': 'image'} if wrap_dicts else None
     if part_type == "audio_url":
         str_content = cast(str, content)
         mm_parser.parse_audio(str_content)
@@ -866,7 +1052,7 @@ def _parse_chat_message_content(
     message: ChatCompletionMessageParam,
     mm_tracker: BaseMultiModalItemTracker,
     content_format: _ChatTemplateContentFormat,
-) -> List[ConversationMessage]:
+) -> list[ConversationMessage]:
     role = message["role"]
     content = message.get("content")
 
@@ -900,7 +1086,7 @@ def _parse_chat_message_content(
     return result
 
 
-def _postprocess_messages(messages: List[ConversationMessage]) -> None:
+def _postprocess_messages(messages: list[ConversationMessage]) -> None:
     # per the Transformers docs & maintainers, tool call arguments in
     # assistant-role messages with tool_calls need to be dicts not JSON str -
     # this is how tool-use chat templates will expect them moving forwards
@@ -916,12 +1102,12 @@ def _postprocess_messages(messages: List[ConversationMessage]) -> None:
 
 
 def parse_chat_messages(
-    messages: List[ChatCompletionMessageParam],
+    messages: list[ChatCompletionMessageParam],
     model_config: ModelConfig,
     tokenizer: AnyTokenizer,
     content_format: _ChatTemplateContentFormat,
-) -> Tuple[List[ConversationMessage], Optional[MultiModalDataDict]]:
-    conversation: List[ConversationMessage] = []
+) -> tuple[list[ConversationMessage], Optional[MultiModalDataDict]]:
+    conversation: list[ConversationMessage] = []
     mm_tracker = MultiModalItemTracker(model_config, tokenizer)
 
     for msg in messages:
@@ -939,12 +1125,12 @@ def parse_chat_messages(
 
 
 def parse_chat_messages_futures(
-    messages: List[ChatCompletionMessageParam],
+    messages: list[ChatCompletionMessageParam],
     model_config: ModelConfig,
     tokenizer: AnyTokenizer,
     content_format: _ChatTemplateContentFormat,
-) -> Tuple[List[ConversationMessage], Awaitable[Optional[MultiModalDataDict]]]:
-    conversation: List[ConversationMessage] = []
+) -> tuple[list[ConversationMessage], Awaitable[Optional[MultiModalDataDict]]]:
+    conversation: list[ConversationMessage] = []
     mm_tracker = AsyncMultiModalItemTracker(model_config, tokenizer)
 
     for msg in messages:
@@ -963,13 +1149,22 @@ def parse_chat_messages_futures(
 
 def apply_hf_chat_template(
     tokenizer: Union[PreTrainedTokenizer, PreTrainedTokenizerFast],
-    conversation: List[ConversationMessage],
+    conversation: list[ConversationMessage],
     chat_template: Optional[str],
+    tools: Optional[list[dict[str, Any]]],
     *,
+    trust_remote_code: bool = False,
     tokenize: bool = False,  # Different from HF's default
     **kwargs: Any,
 ) -> str:
-    if chat_template is None and tokenizer.chat_template is None:
+    hf_chat_template = resolve_hf_chat_template(
+        tokenizer,
+        chat_template=chat_template,
+        tools=tools,
+        trust_remote_code=trust_remote_code,
+    )
+
+    if hf_chat_template is None:
         raise ValueError(
             "As of transformers v4.44, default chat template is no longer "
             "allowed, so you must provide a chat template if the tokenizer "
@@ -977,7 +1172,8 @@ def apply_hf_chat_template(
 
     return tokenizer.apply_chat_template(
         conversation=conversation,  # type: ignore[arg-type]
-        chat_template=chat_template,
+        tools=tools,  # type: ignore[arg-type]
+        chat_template=hf_chat_template,
         tokenize=tokenize,
         **kwargs,
     )
@@ -985,23 +1181,20 @@ def apply_hf_chat_template(
 
 def apply_mistral_chat_template(
     tokenizer: MistralTokenizer,
-    messages: List[ChatCompletionMessageParam],
-    chat_template: Optional[str] = None,
+    messages: list[ChatCompletionMessageParam],
+    chat_template: Optional[str],
+    tools: Optional[list[dict[str, Any]]],
     **kwargs: Any,
-) -> List[int]:
-    if chat_template is not None:
-        logger.warning_once(
-            "'chat_template' cannot be overridden for mistral tokenizer.")
-    if "add_generation_prompt" in kwargs:
-        logger.warning_once(
-            "'add_generation_prompt' is not supported for mistral tokenizer, "
-            "so it will be ignored.")
-    if "continue_final_message" in kwargs:
-        logger.warning_once(
-            "'continue_final_message' is not supported for mistral tokenizer, "
-            "so it will be ignored.")
+) -> list[int]:
+    # The return value of resolve_mistral_chat_template is always None,
+    # and we won't use it.
+    resolve_mistral_chat_template(
+        chat_template=chat_template,
+        **kwargs,
+    )
 
     return tokenizer.apply_chat_template(
         messages=messages,
+        tools=tools,
         **kwargs,
     )

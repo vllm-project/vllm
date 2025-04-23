@@ -20,14 +20,14 @@
 """PyTorch Falcon model."""
 
 import math
-from typing import Iterable, List, Optional, Set, Tuple, Union
+from typing import Iterable, Optional, Set, Tuple, Union
 
 import torch
 from torch import nn
 from torch.nn import LayerNorm
 from transformers import FalconConfig as HF_FalconConfig
 
-from vllm.attention import Attention, AttentionMetadata
+from vllm.attention import Attention
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import (get_pp_group, get_tensor_model_parallel_rank,
@@ -49,7 +49,7 @@ from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs import RWConfig
 
 from .interfaces import SupportsPP
-from .utils import (is_pp_missing_parameter,
+from .utils import (AutoWeightsLoader, is_pp_missing_parameter,
                     make_empty_intermediate_tensors_factory, make_layers,
                     maybe_prefix)
 
@@ -190,8 +190,6 @@ class FalconAttention(nn.Module):
         self,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
-        kv_cache: torch.Tensor,
-        attn_metadata: AttentionMetadata,
     ) -> torch.Tensor:
         qkv, bias = self.query_key_value(hidden_states)
         if bias is not None:
@@ -199,7 +197,7 @@ class FalconAttention(nn.Module):
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
         if self.use_rotary:
             q, k = self.rotary_emb(positions, q, k)
-        attn_output = self.attn(q, k, v, kv_cache, attn_metadata)
+        attn_output = self.attn(q, k, v)
         attn_output, bias = self.dense(attn_output)
         return attn_output, bias
 
@@ -291,8 +289,6 @@ class FalconDecoderLayer(nn.Module):
         self,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
-        kv_cache: torch.Tensor,
-        attn_metadata: AttentionMetadata,
     ) -> torch.Tensor:
         residual = hidden_states
 
@@ -306,8 +302,6 @@ class FalconDecoderLayer(nn.Module):
         attention_output, attention_bias = self.self_attention(
             positions=positions,
             hidden_states=attention_layernorm_out,
-            kv_cache=kv_cache,
-            attn_metadata=attn_metadata,
         )
         if self.reduce_row_parallel_results and attention_bias is not None:
             attention_output += attention_bias
@@ -384,8 +378,6 @@ class FalconModel(nn.Module):
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        kv_caches: List[torch.Tensor],
-        attn_metadata: AttentionMetadata,
         intermediate_tensors: Optional[IntermediateTensors],
         inputs_embeds: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, IntermediateTensors]:
@@ -396,18 +388,60 @@ class FalconModel(nn.Module):
                 hidden_states = self.get_input_embeddings(input_ids)
         else:
             hidden_states = intermediate_tensors["hidden_states"]
-        for i in range(self.start_layer, self.end_layer):
-            layer = self.h[i]
-            hidden_states = layer(
-                positions,
-                hidden_states,
-                kv_caches[i - self.start_layer],
-                attn_metadata,
-            )
+        for layer in self.h[self.start_layer:self.end_layer]:
+            hidden_states = layer(positions, hidden_states)
         if not get_pp_group().is_last_rank:
             return IntermediateTensors({"hidden_states": hidden_states})
         hidden_states = self.ln_f(hidden_states)
         return hidden_states
+
+    def load_weights(self, weights: Iterable[Tuple[str,
+                                                   torch.Tensor]]) -> Set[str]:
+        total_num_heads = self.config.num_attention_heads
+        if self.config.new_decoder_architecture:
+            total_num_kv_heads = self.config.num_kv_heads
+        elif self.config.multi_query:
+            total_num_kv_heads = 1
+        else:
+            total_num_kv_heads = total_num_heads
+        num_query_heads_per_kv_head = total_num_heads // total_num_kv_heads
+        params_dict = dict(self.named_parameters(remove_duplicate=False))
+        loaded_params: Set[str] = set()
+        for name, loaded_weight in weights:
+            # Skip loading extra bias for GPTQ models.
+            if name.endswith(".bias") and name not in params_dict:
+                continue
+            if is_pp_missing_parameter(name, self):
+                continue
+            param = params_dict[name]
+            if "query_key_value" in name:
+                output_dim = getattr(param, "output_dim", None)
+                loaded_weight_shape = loaded_weight.shape
+                if output_dim is not None:
+                    loaded_weight = loaded_weight.view(
+                        loaded_weight_shape[:output_dim] +
+                        (total_num_kv_heads, num_query_heads_per_kv_head + 2,
+                         -1) + loaded_weight_shape[output_dim + 1:])
+                    wq = loaded_weight.narrow(
+                        output_dim + 1, 0,
+                        num_query_heads_per_kv_head).reshape(
+                            *loaded_weight_shape[:output_dim], -1,
+                            *loaded_weight_shape[output_dim + 1:])
+                    wk = loaded_weight.narrow(
+                        output_dim + 1, num_query_heads_per_kv_head,
+                        1).reshape(*loaded_weight_shape[:output_dim], -1,
+                                   *loaded_weight_shape[output_dim + 1:])
+                    wv = loaded_weight.narrow(
+                        output_dim + 1, num_query_heads_per_kv_head + 1,
+                        1).reshape(*loaded_weight_shape[:output_dim], -1,
+                                   *loaded_weight_shape[output_dim + 1:])
+                    loaded_weight = torch.cat([wq, wk, wv], dim=output_dim)
+
+            weight_loader = getattr(param, "weight_loader",
+                                    default_weight_loader)
+            weight_loader(param, loaded_weight)
+            loaded_params.add(name)
+        return loaded_params
 
 
 class FalconForCausalLM(nn.Module, SupportsPP):
@@ -450,14 +484,11 @@ class FalconForCausalLM(nn.Module, SupportsPP):
         self,
         input_ids: torch.LongTensor,
         positions: torch.Tensor,
-        kv_caches: List[torch.Tensor],
-        attn_metadata: AttentionMetadata,
         intermediate_tensors: Optional[IntermediateTensors] = None,
         inputs_embeds: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        hidden_states = self.transformer(input_ids, positions, kv_caches,
-                                         attn_metadata, intermediate_tensors,
-                                         inputs_embeds)
+        hidden_states = self.transformer(input_ids, positions,
+                                         intermediate_tensors, inputs_embeds)
         return hidden_states
 
     def compute_logits(
@@ -479,51 +510,9 @@ class FalconForCausalLM(nn.Module, SupportsPP):
 
     def load_weights(self, weights: Iterable[Tuple[str,
                                                    torch.Tensor]]) -> Set[str]:
-        total_num_heads = self.config.num_attention_heads
-        if self.config.new_decoder_architecture:
-            total_num_kv_heads = self.config.num_kv_heads
-        elif self.config.multi_query:
-            total_num_kv_heads = 1
-        else:
-            total_num_kv_heads = total_num_heads
-        num_query_heads_per_kv_head = total_num_heads // total_num_kv_heads
-        params_dict = dict(self.named_parameters(remove_duplicate=False))
-        loaded_params: Set[str] = set()
-        for name, loaded_weight in weights:
-            if name == "lm_head.weight" and self.tie_word_embeddings:
-                # Falcon uses tied embeddings except Falcon-11b.
-                continue
-            # Skip loading extra bias for GPTQ models.
-            if name.endswith(".bias") and name not in params_dict:
-                continue
-            if is_pp_missing_parameter(name, self):
-                continue
-            param = params_dict[name]
-            if "query_key_value" in name:
-                output_dim = getattr(param, "output_dim", None)
-                loaded_weight_shape = loaded_weight.shape
-                if output_dim is not None:
-                    loaded_weight = loaded_weight.view(
-                        loaded_weight_shape[:output_dim] +
-                        (total_num_kv_heads, num_query_heads_per_kv_head + 2,
-                         -1) + loaded_weight_shape[output_dim + 1:])
-                    wq = loaded_weight.narrow(
-                        output_dim + 1, 0,
-                        num_query_heads_per_kv_head).reshape(
-                            *loaded_weight_shape[:output_dim], -1,
-                            *loaded_weight_shape[output_dim + 1:])
-                    wk = loaded_weight.narrow(
-                        output_dim + 1, num_query_heads_per_kv_head,
-                        1).reshape(*loaded_weight_shape[:output_dim], -1,
-                                   *loaded_weight_shape[output_dim + 1:])
-                    wv = loaded_weight.narrow(
-                        output_dim + 1, num_query_heads_per_kv_head + 1,
-                        1).reshape(*loaded_weight_shape[:output_dim], -1,
-                                   *loaded_weight_shape[output_dim + 1:])
-                    loaded_weight = torch.cat([wq, wk, wv], dim=output_dim)
-
-            weight_loader = getattr(param, "weight_loader",
-                                    default_weight_loader)
-            weight_loader(param, loaded_weight)
-            loaded_params.add(name)
-        return loaded_params
+        loader = AutoWeightsLoader(
+            self,
+            skip_prefixes=(["lm_head."]
+                           if self.config.tie_word_embeddings else None),
+        )
+        return loader.load_weights(weights)
