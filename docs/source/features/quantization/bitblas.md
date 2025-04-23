@@ -1,6 +1,14 @@
+(bitblas)=
+
 # BitBLAS
 
 vLLM now supports [BitBLAS](https://github.com/microsoft/BitBLAS) for more efficient and flexible model inference. Compared to other quantization frameworks, BitBLAS provides more precision combinations.
+
+:::{note}
+Ensure your hardware supports the selected `dtype` (`torch.bfloat16` or `torch.float16`).
+Most recent NVIDIA GPUs support `float16`, while `bfloat16` is more common on newer architectures like Ampere or Hopper.
+For details see [supported hardware](https://docs.vllm.ai/en/latest/features/quantization/supported_hardware.html).
+:::
 
 Below are the steps to utilize BitBLAS with vLLM.
 
