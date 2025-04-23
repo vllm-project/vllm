@@ -8,6 +8,7 @@
 # Documentation
 # label(str): the name of the test. emoji allowed.
 # fast_check(bool): whether to run this on each commit on fastcheck pipeline.
+# torch_nightly(bool): whether to run this on vllm against torch nightly pipeline.
 # fast_check_only(bool): run this test on fastcheck pipeline only
 # optional(bool): never run this test by default (i.e. need to unblock manually) unless it's scheduled nightly run.
 # command(str): the single command to run for tests. incompatible with commands.
@@ -70,6 +71,7 @@ steps:
 - label: Basic Correctness Test # 30min
   #mirror_hardwares: [amd]
   fast_check: true
+  torch_nightly: true
   source_file_dependencies:
   - vllm/
   - tests/basic_correctness/test_basic_correctness
@@ -104,6 +106,7 @@ steps:
 - label: Entrypoints Test # 40min
   working_dir: "/vllm-workspace/tests"
   fast_check: true
+  torch_nightly: true
   #mirror_hardwares: [amd]
   source_file_dependencies:
   - vllm/
@@ -206,6 +209,7 @@ steps:
     - pytest -v -s v1/worker
     - pytest -v -s v1/structured_output
     - pytest -v -s v1/spec_decode
+    - pytest -v -s v1/test_serial_utils.py
     - pytest -v -s v1/test_stats.py
     - pytest -v -s v1/test_utils.py
     - pytest -v -s v1/test_oracle.py
@@ -313,15 +317,46 @@ steps:
   commands:
   - pytest -v -s compile/test_full_graph.py
 
-- label: Kernels Test %N # 1h each
-  # mirror_hardwares: [amd]
+- label: Kernels Core Operation Test
   source_file_dependencies:
   - csrc/
-  - vllm/attention
-  - tests/kernels
+  - tests/kernels/core
   commands:
-    - pytest -v -s kernels --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
-  parallelism: 4
+    - pytest -v -s kernels/core
+
+- label: Kernels Attention Test %N
+  source_file_dependencies:
+  - csrc/attention/
+  - vllm/attention
+  - vllm/v1/attention
+  - tests/kernels/attention
+  commands:
+    - pytest -v -s kernels/attention --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
+  parallelism: 2
+
+- label: Kernels Quantization Test %N
+  source_file_dependencies:
+  - csrc/quantization/
+  - vllm/model_executor/layers/quantization
+  - tests/kernels/quantization
+  commands:
+    - pytest -v -s kernels/quantization  --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
+  parallelism: 2
+
+- label: Kernels MoE Test
+  source_file_dependencies:
+  - csrc/moe/
+  - tests/kernels/moe
+  - vllm/model_executor/layers/fused_moe/
+  commands:
+    - pytest -v -s kernels/moe
+
+- label: Kernels Mamba Test
+  source_file_dependencies:
+  - csrc/mamba/
+  - tests/kernels/mamba
+  commands:
+    - pytest -v -s kernels/mamba
 
 - label: Tensorizer Test # 11min
   # mirror_hardwares: [amd]
