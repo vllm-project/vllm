@@ -364,7 +364,6 @@ def rocm_aiter_fused_experts(*,
                                                  fc2_smooth_scale=None,
                                                  a16=False,
                                                  activation=activation)
-    # Temp fix
     if apply_router_weight_on_input:
         assert (topk_weights.dim() == 2
                 ), "`topk_weights` should be in shape (num_tokens, topk)"
