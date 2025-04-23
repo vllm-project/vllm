@@ -32,7 +32,8 @@ from vllm.v1.engine.output_processor import (OutputProcessor,
 from vllm.v1.engine.parallel_sampling import ParentRequest
 from vllm.v1.engine.processor import Processor
 from vllm.v1.executor.abstract import Executor
-from vllm.v1.metrics.loggers import StatLoggerBase, setup_default_loggers
+from vllm.v1.metrics.loggers import (StatLoggerBase, StatLoggerFactory,
+                                     setup_default_loggers)
 from vllm.v1.metrics.stats import IterationStats, SchedulerStats
 
 logger = init_logger(__name__)
@@ -50,7 +51,7 @@ class AsyncLLM(EngineClient):
         use_cached_outputs: bool = False,
         log_requests: bool = True,
         start_engine_loop: bool = True,
-        stat_loggers: Optional[list[type[StatLoggerBase]]] = None,
+        stat_loggers: Optional[list[StatLoggerFactory]] = None,
     ) -> None:
         """
         Create an AsyncLLM.
@@ -134,7 +135,7 @@ class AsyncLLM(EngineClient):
         vllm_config: VllmConfig,
         start_engine_loop: bool = True,
         usage_context: UsageContext = UsageContext.ENGINE_CONTEXT,
-        stat_loggers: Optional[list[type[StatLoggerBase]]] = None,
+        stat_loggers: Optional[list[StatLoggerFactory]] = None,
         disable_log_requests: bool = False,
         disable_log_stats: bool = False,
     ) -> "AsyncLLM":
@@ -162,7 +163,7 @@ class AsyncLLM(EngineClient):
         engine_args: AsyncEngineArgs,
         start_engine_loop: bool = True,
         usage_context: UsageContext = UsageContext.ENGINE_CONTEXT,
-        stat_loggers: Optional[list[type[StatLoggerBase]]] = None,
+        stat_loggers: Optional[list[StatLoggerFactory]] = None,
     ) -> "AsyncLLM":
         """Create an AsyncLLM from the EngineArgs."""
 
