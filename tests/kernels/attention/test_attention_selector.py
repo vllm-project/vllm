@@ -156,6 +156,15 @@ def test_env(
                         expected = ("TRITON_MLA_VLLM_V1"
                                     if use_v1 else "TRITON_MLA")
                         assert backend.get_name() == expected
+                elif name == "FLASHINFER":
+                    backend = get_attn_backend(16,
+                                               torch.float16,
+                                               torch.float16,
+                                               block_size,
+                                               False,
+                                               use_mla=use_mla)
+                    expected = "FLASHINFER_VLLM_V1" if use_v1 else name
+                    assert backend.get_name() == expected
                 else:
                     backend = get_attn_backend(16,
                                                torch.float16,

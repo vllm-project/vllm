@@ -6,14 +6,13 @@ import itertools
 import pytest
 import torch
 
+from tests.kernels.utils_block import native_w8a8_block_matmul
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.fused_moe import fused_moe
 from vllm.model_executor.layers.quantization.utils.int8_utils import (
     w8a8_block_int8_matmul)
 from vllm.platforms import current_platform
-
-from .utils_block import native_w8a8_block_matmul
 
 if current_platform.get_device_capability() < (7, 0):
     pytest.skip("INT8 Triton requires CUDA 7.0 or higher",

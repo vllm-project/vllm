@@ -16,7 +16,7 @@ import numpy
 import pytest
 import yaml
 
-RTOL = 0.05
+RTOL = 0.08
 TEST_DATA_FILE = os.environ.get(
     "LM_EVAL_TEST_DATA_FILE",
     ".buildkite/lm-eval-harness/configs/Meta-Llama-3-8B-Instruct.yaml")

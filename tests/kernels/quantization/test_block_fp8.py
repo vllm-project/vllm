@@ -6,6 +6,7 @@ import itertools
 import pytest
 import torch
 
+from tests.kernels.utils_block import native_w8a8_block_matmul
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.fused_moe import fused_moe
@@ -17,8 +18,6 @@ from vllm.model_executor.layers.fused_moe.moe_align_block_size import (
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     per_token_group_quant_fp8, w8a8_block_fp8_matmul)
 from vllm.platforms import current_platform
-
-from .utils_block import native_w8a8_block_matmul
 
 dg_available = False
 try:

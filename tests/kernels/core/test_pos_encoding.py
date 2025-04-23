@@ -6,10 +6,9 @@ from typing import Callable, Optional
 import pytest
 import torch
 
+from tests.kernels.allclose_default import get_default_atol, get_default_rtol
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.platforms import current_platform
-
-from .allclose_default import get_default_atol, get_default_rtol
 
 IS_NEOX_STYLE = [True, False]
 DTYPES = [torch.half, torch.bfloat16, torch.float]
