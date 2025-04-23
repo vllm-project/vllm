@@ -306,6 +306,14 @@ class QuarkConfig(QuantizationConfig):
         # If no matches, return None
         return None
 
+    def has_fp8_layer_weights(self):
+        layer_quant_config = self.quant_config.get("layer_quant_config")
+        return any([
+            'fp8'
+            in layer_quant_config.get(layer_name).get("weight").get("dtype")
+            for layer_name in ["*v_proj", "*k_proj", "*q_proj"]
+        ])
+
 
 class QuarkLinearMethod(LinearMethodBase):
 
