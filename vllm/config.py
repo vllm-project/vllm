@@ -1261,11 +1261,14 @@ PrefixCachingHashAlgo = Literal["builtin", "sha256"]
 class CacheConfig:
     """Configuration for the KV cache."""
 
-    block_size: Optional[BlockSize] = None
+    block_size: BlockSize = None  # type: ignore
     """Size of a contiguous cache block in number of tokens. This is ignored on
     neuron devices and set to `--max-model-len`. On CUDA devices, only block
     sizes up to 32 are supported. On HPU devices, block size defaults to 128.
-    """
+
+    This config has no static default. If left unspecified by the user, it will
+    be set in `Platform.check_and_update_configs()` based on the current
+    platform."""
     gpu_memory_utilization: float = 0.9
     """The fraction of GPU memory to be used for the model executor, which can
     range from 0 to 1. For example, a value of 0.5 would imply 50% GPU memory
@@ -1590,8 +1593,21 @@ class ParallelConfig:
     the product of the tensor parallel size and data parallel size."""
     data_parallel_rank: int = 0
     """Rank of the data parallel group."""
-    data_parallel_rank_local: Optional[int] = None
-    """Local rank of the data parallel group, defaults to global rank."""
+    _data_parallel_rank_local: Optional[int] = field(default=None, init=False)
+    """Private field to store the local rank of the data parallel group."""
+
+    @property
+    def data_parallel_rank_local(self) -> int:
+        """Local rank of the data parallel group, defaults to global rank."""
+        if self._data_parallel_rank_local is None:
+            return self.data_parallel_rank
+        return self._data_parallel_rank_local
+
+    @data_parallel_rank_local.setter
+    def data_parallel_rank_local(self, value: int) -> None:
+        """Set the local rank of the data parallel group."""
+        self._data_parallel_rank_local = value
+
     data_parallel_master_ip: str = "127.0.0.1"
     """IP of the data parallel master."""
     data_parallel_master_port: int = 29500
@@ -3091,7 +3107,7 @@ def get_served_model_name(model: str,
 
 
 GuidedDecodingBackendV0 = Literal["auto", "outlines", "lm-format-enforcer",
-                                  "xgrammar"]
+                                  "xgrammar", "guidance"]
 GuidedDecodingBackendV1 = Literal["auto", "xgrammar", "guidance"]
 
 
