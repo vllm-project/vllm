@@ -23,7 +23,8 @@ from vllm.config import (BlockSize, CacheConfig, CacheDType, CompilationConfig,
                          ObservabilityConfig, ParallelConfig, PoolerConfig,
                          PrefixCachingHashAlgo, PromptAdapterConfig,
                          SchedulerConfig, SchedulerPolicy, SpeculativeConfig,
-                         TaskOption, VllmConfig, get_attr_docs, get_field)
+                         TaskOption, TokenizerPoolConfig, VllmConfig,
+                         get_attr_docs, get_field)
 from vllm.executor.executor_base import ExecutorBase
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS
@@ -638,6 +639,19 @@ class EngineArgs:
                             'Additionally for encoder-decoder models, if the '
                             'sequence length of the encoder input is larger '
                             'than this, we fall back to the eager mode.')
+
+        # Tokenizer arguments
+        tokenizer_kwargs = get_kwargs(TokenizerPoolConfig)
+        tokenizer_group = parser.add_argument_group(
+            title="TokenizerPoolConfig",
+            description=TokenizerPoolConfig.__doc__,
+        )
+        tokenizer_group.add_argument('--tokenizer-pool-size',
+                                     **tokenizer_kwargs["pool_size"])
+        tokenizer_group.add_argument('--tokenizer-pool-type',
+                                     **tokenizer_kwargs["pool_type"])
+        tokenizer_group.add_argument('--tokenizer-pool-extra-config',
+                                     **tokenizer_kwargs["extra_config"])
 
         # Multimodal related configs
         multimodal_kwargs = get_kwargs(MultiModalConfig)
