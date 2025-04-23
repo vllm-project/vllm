@@ -1593,8 +1593,21 @@ class ParallelConfig:
     the product of the tensor parallel size and data parallel size."""
     data_parallel_rank: int = 0
     """Rank of the data parallel group."""
-    data_parallel_rank_local: Optional[int] = None
-    """Local rank of the data parallel group, defaults to global rank."""
+    _data_parallel_rank_local: Optional[int] = field(default=None, init=False)
+    """Private field to store the local rank of the data parallel group."""
+
+    @property
+    def data_parallel_rank_local(self) -> int:
+        """Local rank of the data parallel group, defaults to global rank."""
+        if self._data_parallel_rank_local is None:
+            return self.data_parallel_rank
+        return self._data_parallel_rank_local
+
+    @data_parallel_rank_local.setter
+    def data_parallel_rank_local(self, value: int) -> None:
+        """Set the local rank of the data parallel group."""
+        self._data_parallel_rank_local = value
+
     data_parallel_master_ip: str = "127.0.0.1"
     """IP of the data parallel master."""
     data_parallel_master_port: int = 29500
