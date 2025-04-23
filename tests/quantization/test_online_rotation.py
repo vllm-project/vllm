@@ -12,7 +12,8 @@ import pytest
 import ray
 import torch
 
-from vllm.model_executor.layers.quantization.quark.schemes.hadamard_transform import hadamard_transform_registry, hadamard_sizes
+from vllm.model_executor.layers.quantization.quark.schemes import hadamard_transform 
+from hadamard_transform import hadamard_transform_registry, hadamard_sizes
 
 from vllm.distributed import (broadcast_tensor_dict, get_pp_group,
                               tensor_model_parallel_all_gather,
@@ -44,13 +45,13 @@ def test_quarot_r4(
     dummylayer = SimpleNamespace(weight=torch.Tensor([0]).to(device).bfloat16(),input_size_per_partition=input_size//tp_size,input_size=input_size)
     rotation_function=hadamard_transform(layer=dummylayer)
     
-    """ Tensor Parallel: Perform rotation function on activation shard - bfloat16"""
+    """TP: Perform rotation function on activation shard - bfloat16"""
     activation=torch.ones(2,input_size,device=device).bfloat16()
     activation_shard=activation[:,rank*(input_size//tp_size):(rank+1)*(input_size//tp_size)]
     activation_shard=activation_shard.contiguous().to(device)
     rotated_activation_shard=rotation_function(activation_shard)
 
-    """ Uniprocessor: Perfrom rotation function on entire activation - bfloat16"""
+    """Uniproc: Perfrom rotation function on entire activation - bfloat16"""
     activation=torch.ones(2,input_size,device=device).bfloat16()
     og_shape=activation.shape
     X=activation.view(-1,rotation_function.chunk_size)
