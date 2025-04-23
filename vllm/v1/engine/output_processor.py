@@ -42,12 +42,9 @@ class RequestOutputCollector:
             self.output = output
             self.ready.set()
         elif isinstance(self.output, (RequestOutput, PoolingRequestOutput)):
-            if self.aggregate:
-                # Coalesce the outputs in delta case.
-                self.output.add(output)
-            else:
-                # Just replace latest in non-delta case.
-                self.output = output
+            # This ensures that request outputs with different request indexes
+            # (if n > 1) do not override each other.
+            self.output.add(output, aggregate=self.aggregate)
 
     async def get(self) -> Union[RequestOutput, PoolingRequestOutput]:
         """Get operation blocks on put event."""
