@@ -275,12 +275,11 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
     wvSplitK_hf_sml_(const int K, const int M, const scalar_t* B,
                      const scalar_t* __restrict__ A, scalar_t* C,
                      const int _WvPrGrp, const int CuCount) {
-
-#if defined(__HIP__MI300__)
+  #if defined(__HIP__MI300__)
   constexpr bool use_mfma = (std::is_same_v<scalar_t, __hip_bfloat16>);
-#else
+  #else
   constexpr bool use_mfma = false;
-#endif
+  #endif
 
   using scalar8 =
       __attribute__((__vector_size__((A_CHUNK / 2) * sizeof(float)))) float;
@@ -389,7 +388,7 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
         if (k_ >= K) break;
 
         const scalar_t* B_ = &B[(m + 0) * K + k_];
-	for (int y=0; y<YTILE; y++)
+        for (int y = 0; y < YTILE; y++)
           bigB[y][k2].h8 = (loadnt((scalar8*)(&B_[y * K])));
       }
 
@@ -418,16 +417,17 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
   #pragma unroll
         for (uint32_t n = 0; n < N; n++) {
   #pragma unroll
-          for (int y=0; y<YTILE; y++) {
+          for (int y = 0; y < YTILE; y++) {
             if constexpr (!use_mfma)
   #pragma unroll
-              for (uint32_t b = 0; b < A_CHUNK / 2; b++) { 
+              for (uint32_t b = 0; b < A_CHUNK / 2; b++) {
                 DOT2C(sum[n][y], bigA[n][k2].f[b], bigB[y][k2].f[b])
-            }
+              }
             else
   #pragma unroll
               for (uint32_t b = 0; b < A_CHUNK / 4; b++)
-                sum4[n][y] = __builtin_amdgcn_mfma_f32_4x4x4bf16_1k(bigA[n][k2].h4[b], bigB[y][k2].h4[b], sum4[n][y], 0, 0, 0);
+                sum4[n][y] = __builtin_amdgcn_mfma_f32_4x4x4bf16_1k(
+                    bigA[n][k2].h4[b], bigB[y][k2].h4[b], sum4[n][y], 0, 0, 0);
           }
         }
       }
@@ -440,23 +440,23 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
       for (int n = 0; n < N; n++) {
         for (int y = 0; y < YTILE; y++) {
           asm("s_nop 0\n\tv_add_f32 %0, %2, %3 row_shr:8 bound_ctrl:0 "
-            : "=v"(sum[n][y])
-            : "0"(sum[n][y]), "v"(sum[n][y]), "v"(sum[n][y]));
+              : "=v"(sum[n][y])
+              : "0"(sum[n][y]), "v"(sum[n][y]), "v"(sum[n][y]));
           asm("s_nop 0\n\tv_add_f32 %0, %2, %3 row_shr:4 bound_ctrl:0 "
-            : "=v"(sum[n][y])
-            : "0"(sum[n][y]), "v"(sum[n][y]), "v"(sum[n][y]));
+              : "=v"(sum[n][y])
+              : "0"(sum[n][y]), "v"(sum[n][y]), "v"(sum[n][y]));
           asm("s_nop 0\n\tv_add_f32 %0, %2, %3 row_shr:2 bound_ctrl:0 "
-            : "=v"(sum[n][y])
-            : "0"(sum[n][y]), "v"(sum[n][y]), "v"(sum[n][y]));
+              : "=v"(sum[n][y])
+              : "0"(sum[n][y]), "v"(sum[n][y]), "v"(sum[n][y]));
           asm("s_nop 0\n\tv_add_f32 %0, %2, %3 wave_shr:1 bound_ctrl:0"
-            : "=v"(sum[n][y])
-            : "0"(sum[n][y]), "v"(sum[n][y]), "v"(sum[n][y]));
+              : "=v"(sum[n][y])
+              : "0"(sum[n][y]), "v"(sum[n][y]), "v"(sum[n][y]));
           asm("s_nop 0\n\tv_add_f32 %0, %2, %3 row_bcast:15 bound_ctrl:0"
-            : "=v"(sum[n][y])
-            : "0"(sum[n][y]), "v"(sum[n][y]), "v"(sum[n][y]));
+              : "=v"(sum[n][y])
+              : "0"(sum[n][y]), "v"(sum[n][y]), "v"(sum[n][y]));
           asm("s_nop 0\n\tv_add_f32 %0, %2, %3 row_bcast:31 bound_ctrl:0"
-            : "=v"(sum[n][y])
-            : "0"(sum[n][y]), "v"(sum[n][y]), "v"(sum[n][y]));
+              : "=v"(sum[n][y])
+              : "0"(sum[n][y]), "v"(sum[n][y]), "v"(sum[n][y]));
         }
       }
 
@@ -473,9 +473,9 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
       for (int n = 0; n < N; n++) {
   #pragma unroll
         for (int y = 0; y < YTILE; y++) {
-          //float accm1 = 0;
-          //for (int i=0; i<64; i++)
-          //   accm1 += __shfl(sum4[n][y][i%4], i);
+          // float accm1 = 0;
+          // for (int i=0; i<64; i++)
+          //    accm1 += __shfl(sum4[n][y][i%4], i);
           float accm = sum4[n][y][0];
           asm("s_nop 0\n\tv_add_f32 %0, %2, %3 row_shl:1 bound_ctrl:0 "
               : "=v"(accm)
@@ -535,11 +535,11 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
     wvSplitK_hf_(const int K, const int M, const scalar_t* B,
                  const scalar_t* __restrict__ A, scalar_t* C,
                  const int _WvPrGrp, const int CuCount) {
-#if defined(__HIP__MI300__)
+  #if defined(__HIP__MI300__)
   constexpr bool use_mfma = (std::is_same_v<scalar_t, __hip_bfloat16>);
-#else
+  #else
   constexpr bool use_mfma = false;
-#endif
+  #endif
 
   using scalar8 =
       __attribute__((__vector_size__((A_CHUNK / 2) * sizeof(float)))) float;
@@ -672,7 +672,7 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
         if (k_ >= K) break;
 
         const scalar_t* B_ = &B[(m + 0) * K + k_];
-	for (int b=0; b<YTILE; b++)
+        for (int b = 0; b < YTILE; b++)
           bigB[b][k2].h8 = (loadnt((scalar8*)(&B_[b * K])));
       }
 
@@ -704,16 +704,17 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
           // Do the matrix multiplication of activation and weight matrix
           // - Remember the accumulation is happening for K-split of 64!
   #pragma unroll
-	  for (int y=0; y<YTILE; y++) {
+          for (int y = 0; y < YTILE; y++) {
             if constexpr (!use_mfma)
   #pragma unroll
               for (uint32_t b = 0; b < A_CHUNK / 2; b++) {
                 DOT2C(sum[n][y], bigA[n][k2].f[b], bigB[y][k2].f[b])
-	      }
+              }
             else
   #pragma unroll
               for (uint32_t b = 0; b < A_CHUNK / 4; b++)
-		sum4[n][y] = __builtin_amdgcn_mfma_f32_4x4x4bf16_1k(bigA[n][k2].h4[b], bigB[y][k2].h4[b], sum4[n][y], 0, 0, 0);
+                sum4[n][y] = __builtin_amdgcn_mfma_f32_4x4x4bf16_1k(
+                    bigA[n][k2].h4[b], bigB[y][k2].h4[b], sum4[n][y], 0, 0, 0);
           }
         }
       }
@@ -726,23 +727,23 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
       for (int n = 0; n < N; n++) {
         for (int y = 0; y < YTILE; y++) {
           asm("s_nop 0\n\tv_add_f32 %0, %2, %3 row_shr:8 bound_ctrl:0 "
-            : "=v"(sum[n][y])
-            : "0"(sum[n][y]), "v"(sum[n][y]), "v"(sum[n][y]));
+              : "=v"(sum[n][y])
+              : "0"(sum[n][y]), "v"(sum[n][y]), "v"(sum[n][y]));
           asm("s_nop 0\n\tv_add_f32 %0, %2, %3 row_shr:4 bound_ctrl:0 "
-            : "=v"(sum[n][y])
-            : "0"(sum[n][y]), "v"(sum[n][y]), "v"(sum[n][y]));
+              : "=v"(sum[n][y])
+              : "0"(sum[n][y]), "v"(sum[n][y]), "v"(sum[n][y]));
           asm("s_nop 0\n\tv_add_f32 %0, %2, %3 row_shr:2 bound_ctrl:0 "
-            : "=v"(sum[n][y])
-            : "0"(sum[n][y]), "v"(sum[n][y]), "v"(sum[n][y]));
+              : "=v"(sum[n][y])
+              : "0"(sum[n][y]), "v"(sum[n][y]), "v"(sum[n][y]));
           asm("s_nop 0\n\tv_add_f32 %0, %2, %3 wave_shr:1 bound_ctrl:0"
-            : "=v"(sum[n][y])
-            : "0"(sum[n][y]), "v"(sum[n][y]), "v"(sum[n][y]));
+              : "=v"(sum[n][y])
+              : "0"(sum[n][y]), "v"(sum[n][y]), "v"(sum[n][y]));
           asm("s_nop 0\n\tv_add_f32 %0, %2, %3 row_bcast:15 bound_ctrl:0"
-            : "=v"(sum[n][y])
-            : "0"(sum[n][y]), "v"(sum[n][y]), "v"(sum[n][y]));
+              : "=v"(sum[n][y])
+              : "0"(sum[n][y]), "v"(sum[n][y]), "v"(sum[n][y]));
           asm("s_nop 0\n\tv_add_f32 %0, %2, %3 row_bcast:31 bound_ctrl:0"
-            : "=v"(sum[n][y])
-            : "0"(sum[n][y]), "v"(sum[n][y]), "v"(sum[n][y]));
+              : "=v"(sum[n][y])
+              : "0"(sum[n][y]), "v"(sum[n][y]), "v"(sum[n][y]));
         }
       }
 
@@ -759,9 +760,9 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
       for (int n = 0; n < N; n++) {
   #pragma unroll
         for (int y = 0; y < YTILE; y++) {
-          //float accm1 = 0;
-          //for (int i=0; i<64; i++)
-          //   accm1 += __shfl(sum4[n][y][i%4], i);
+          // float accm1 = 0;
+          // for (int i=0; i<64; i++)
+          //    accm1 += __shfl(sum4[n][y][i%4], i);
 
           float accm = sum4[n][y][0];
           asm("s_nop 0\n\tv_add_f32 %0, %2, %3 row_shl:1 bound_ctrl:0 "
@@ -834,11 +835,11 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
     wvSplitK_hf_big_(const int K, const int M, const scalar_t* B,
                      const scalar_t* __restrict__ A, scalar_t* C,
                      const int _WvPrGrp, const int CuCount) {
-#if defined(__HIP__MI300__)
+  #if defined(__HIP__MI300__)
   constexpr bool use_mfma = (std::is_same_v<scalar_t, __hip_bfloat16>);
-#else
+  #else
   constexpr bool use_mfma = false;
-#endif
+  #endif
 
   using scalar8 =
       __attribute__((__vector_size__((A_CHUNK / 2) * sizeof(float)))) float;
@@ -961,7 +962,7 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
         if constexpr (!use_mfma)
           sum[n][i] = 0;
         else
-          sum4[n][i] = {0,0,0,0};
+          sum4[n][i] = {0, 0, 0, 0};
 
     bigType bigA[N][UNRL];
     bigType bigB[YTILE][UNRL];
@@ -1010,7 +1011,7 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
         if (k_ >= K) break;
 
         const scalar_t* B_ = &B[(m + 0) * K + k_];
-	for (int b=0; b<YTILE; b++)
+        for (int b = 0; b < YTILE; b++)
           bigB[b][k2].h8 = (loadnt((scalar8*)(&B_[b * K])));
       }
 
@@ -1046,16 +1047,17 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
           // Do the matrix multiplication of activation and weight matrix
           // - Remember the accumulation is happening for K-split of 64!
   #pragma unroll
-	  for (int y=0; y<YTILE; y++) {
+          for (int y = 0; y < YTILE; y++) {
             if constexpr (!use_mfma)
   #pragma unroll
               for (uint32_t b = 0; b < A_CHUNK / 2; b++) {
                 DOT2C(sum[n][y], bigA[n][k2].f[b], bigB[y][k2].f[b])
-	      }
-	    else
+              }
+            else
   #pragma unroll
               for (uint32_t b = 0; b < A_CHUNK / 4; b++)
-		sum4[n][y] = __builtin_amdgcn_mfma_f32_4x4x4bf16_1k(bigA[n][k2].h4[b], bigB[y][k2].h4[b], sum4[n][y], 0, 0, 0);
+                sum4[n][y] = __builtin_amdgcn_mfma_f32_4x4x4bf16_1k(
+                    bigA[n][k2].h4[b], bigB[y][k2].h4[b], sum4[n][y], 0, 0, 0);
           }
         }
       }
@@ -1076,23 +1078,23 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
       for (int n = 0; n < N; n++) {
         for (int y = 0; y < YTILE; y++) {
           asm("s_nop 0\n\tv_add_f32 %0, %2, %3 row_shr:8 bound_ctrl:0 "
-            : "=v"(sum[n][y])
-            : "0"(sum[n][y]), "v"(sum[n][y]), "v"(sum[n][y]));
+              : "=v"(sum[n][y])
+              : "0"(sum[n][y]), "v"(sum[n][y]), "v"(sum[n][y]));
           asm("s_nop 0\n\tv_add_f32 %0, %2, %3 row_shr:4 bound_ctrl:0 "
-            : "=v"(sum[n][y])
-            : "0"(sum[n][y]), "v"(sum[n][y]), "v"(sum[n][y]));
+              : "=v"(sum[n][y])
+              : "0"(sum[n][y]), "v"(sum[n][y]), "v"(sum[n][y]));
           asm("s_nop 0\n\tv_add_f32 %0, %2, %3 row_shr:2 bound_ctrl:0 "
-            : "=v"(sum[n][y])
-            : "0"(sum[n][y]), "v"(sum[n][y]), "v"(sum[n][y]));
+              : "=v"(sum[n][y])
+              : "0"(sum[n][y]), "v"(sum[n][y]), "v"(sum[n][y]));
           asm("s_nop 0\n\tv_add_f32 %0, %2, %3 wave_shr:1 bound_ctrl:0"
-            : "=v"(sum[n][y])
-            : "0"(sum[n][y]), "v"(sum[n][y]), "v"(sum[n][y]));
+              : "=v"(sum[n][y])
+              : "0"(sum[n][y]), "v"(sum[n][y]), "v"(sum[n][y]));
           asm("s_nop 0\n\tv_add_f32 %0, %2, %3 row_bcast:15 bound_ctrl:0"
-            : "=v"(sum[n][y])
-            : "0"(sum[n][y]), "v"(sum[n][y]), "v"(sum[n][y]));
+              : "=v"(sum[n][y])
+              : "0"(sum[n][y]), "v"(sum[n][y]), "v"(sum[n][y]));
           asm("s_nop 0\n\tv_add_f32 %0, %2, %3 row_bcast:31 bound_ctrl:0"
-            : "=v"(sum[n][y])
-            : "0"(sum[n][y]), "v"(sum[n][y]), "v"(sum[n][y]));
+              : "=v"(sum[n][y])
+              : "0"(sum[n][y]), "v"(sum[n][y]), "v"(sum[n][y]));
         }
       }
 
@@ -1147,7 +1149,6 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
         }
       }
     }
-
 
     m += CuCount * _WvPrGrp * YTILE;
     kBase = 0;
