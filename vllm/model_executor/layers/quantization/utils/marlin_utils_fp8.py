@@ -109,14 +109,24 @@ def prepare_fp8_layer_for_marlin(layer: torch.nn.Module,
     else:
         group_size = layer.weight_block_size[1]
 
+    # marlin kernel only support channel-wise and group-wise quantization
+    # we need to convert the scales
     if layer.weight_block_size is None:
         if scales.nelement() == 1:
+            # tensor-wise quantization -> channel-wise quantization
+            # (1, 1) =>(repeat)=> (1, size_n)
             scales = scales.view(1, 1).repeat_interleave(part_size_n, 1)
         else:
-            scales = scales.view(part_size_n, 1)
+            # channel-wise quantization
+            # (1, size_n)
+            scales = scales.view(1, part_size_n)
     else:
+        # block-wise quantization -> group-wise quantization
+        # (size_k // block_size[1], ceil(size_n / block_size[0]))
+        #  =>(repeat)=> (size_k // block_size[1], size_n)
         block_n = layer.weight_block_size[0]
         scales = scales.T.repeat_interleave(block_n, 1)
+        # size_n may not divisable by block_size[0]
         scales = scales[:, :part_size_n]
 
     marlin_scales = marlin_permute_scales(s=scales,
@@ -198,11 +208,24 @@ def prepare_moe_fp8_layer_for_marlin(layer: torch.nn.Module,
         else:
             size_n, size_k = k, n
 
+        # marlin kernel only support channel-wise and group-wise quantization
+        # we need to convert the scales
         if layer.weight_block_size is None:
-            scales = scales.view(e, 1, 1).repeat_interleave(size_n, 2)
+            if scales.nelement() == 1:
+                # tensor-wise quantization -> channel-wise quantization
+                # (e, 1, 1) =>(repeat)=> (e, 1, size_n)
+                scales = scales.view(e, 1, 1).repeat_interleave(size_n, 2)
+            else:
+                # channel-wise quantization
+                # (e, 1, size_n)
+                scales = scales.view(e, 1, size_n)
         else:
+            # block-wise quantization -> group-wise quantization
+            # (e, size_k // block_size[1], ceil(size_n / block_size[0]))
+            #  =>(repeat)=> (e, size_k // block_size[1], size_n)
             block_n = layer.weight_block_size[0]
             scales = scales.permute(0, 2, 1).repeat_interleave(block_n, 2)
+            # size_n may not divisable by block_size[0]
             scales = scales[..., :size_n].contiguous()
 
         for i in range(e):
@@ -227,7 +250,10 @@ def pack_fp8_to_int32(fp8_tensor: torch.Tensor,
     assert fp8_tensor.ndim == 2
 
     fp8_tensor = fp8_tensor.T if size_k_first else fp8_tensor
-    int32_tensor = fp8_tensor.contiguous().view(torch.int32)
+    fp8_tensor = fp8_tensor.contiguous()
+    # fp8_tensor is contiguous and have shape (N, K) now
+    # with `.view(torch.int32)`, it become (N, K // 4)
+    int32_tensor = fp8_tensor.view(torch.int32)
     return int32_tensor.T.contiguous() if size_k_first else int32_tensor
 
 
