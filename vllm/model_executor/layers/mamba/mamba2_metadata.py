@@ -71,14 +71,14 @@ def prepare_mamba2_metadata(
 
     # Need flags to indicate if there are initial states
     # currently we really only support the FlashAttention backend
-    # initial states are only relevant for prefills
     has_initial_states = None
     prep_initial_states = False
     if (isinstance(attn_metadata, (FlashAttentionMetadata, XFormersMetadata,
                                    PlaceholderAttentionMetadata))
             and attn_metadata.context_lens_tensor is not None):
+        # keeping flags for both prefill and decode causal_conv1d varlen
         has_initial_states = attn_metadata.context_lens_tensor > 0  # [batch,]
-        # precompute flag to avoid device syncs later in mamba2 forwards
+        # precompute flag to avoid device syncs later in mamba2 layer forwards
         # prep is only needed for mamba2 ssd prefill processing
         prep_initial_states = torch.any(
             has_initial_states[:num_prefills]).item()
