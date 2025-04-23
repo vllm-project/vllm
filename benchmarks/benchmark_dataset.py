@@ -28,7 +28,7 @@ from typing import Any, Callable, Optional, Union
 
 import numpy as np
 import pandas as pd
-from datasets import Dataset, load_dataset
+from datasets import load_dataset
 from PIL import Image
 from transformers import PreTrainedTokenizerBase
 
@@ -842,8 +842,7 @@ You are a code completion assistant and your task is to analyze user edits and t
 
 
 def _format_zeta_prompt(
-        examples: dict,
-        num_requests: int,
+        sample: dict,
         original_start_marker: str = "<|editable_region_start|>") -> dict:
     """Format the zeta prompt for the Next Edit Prediction (NEP) dataset.
     
@@ -852,9 +851,8 @@ def _format_zeta_prompt(
     further extended to support more NEP datasets.
     
     Args:
-        examples: The dataset examples containing events, 
+        sample: The dataset sample containing events, 
             inputs, and outputs.
-        num_requests: The number of requests to format.
         original_start_marker: The marker indicating the 
             start of the editable region. Defaults to 
             "<|editable_region_start|>".
@@ -862,24 +860,18 @@ def _format_zeta_prompt(
     Returns:
         A dictionary with the formatted prompts and expected outputs.
     """
-    events = examples["events"]
-    inputs = examples["input"]
-    outputs = examples["output"]
-    prompts, expected_outputs = [], []
-    for i, (event, input, output) in enumerate(zip(events, inputs, outputs)):
-        # create the final prompt
-        prompts.append(zeta_prompt.format(event, input))
+    events = sample["events"]
+    input = sample["input"]
+    output = sample["output"]
+    prompt = zeta_prompt.format(events, input)
 
-        # following the original implementation, extract the focused region
-        # from the raw output
-        output_start_index = output.find(original_start_marker)
-        output_focused_region = output[output_start_index:]
-        output = output_focused_region
-        expected_outputs.append(output)
-        if i >= num_requests:
-            break
+    # following the original implementation, extract the focused region
+    # from the raw output
+    output_start_index = output.find(original_start_marker)
+    output_focused_region = output[output_start_index:]
+    expected_output = output_focused_region
 
-    return {"prompt": prompts, "expected_output": expected_outputs}
+    return {"prompt": prompt, "expected_output": expected_output}
 
 
 class NextEditPredictionDataset(HuggingFaceDataset):
@@ -894,38 +886,24 @@ class NextEditPredictionDataset(HuggingFaceDataset):
         "zed-industries/zeta": _format_zeta_prompt,
     }
 
-    def preprocess_data(self, num_requests: int) -> Dataset:
-        """Preprocess the data to format the prompts and expected outputs."""
+    def sample(self, tokenizer: PreTrainedTokenizerBase, num_requests: int,
+               **kwargs):
         formatting_prompt_func = self.MAPPING_PROMPT_FUNCS.get(
             self.dataset_path)
         if formatting_prompt_func is None:
             raise ValueError(f"Unsupported dataset path: {self.dataset_path}")
-        data = self.data.map(formatting_prompt_func,
-                             batched=True,
-                             fn_kwargs={'num_requests': num_requests})
-        return data
-
-    def sample(self, tokenizer: PreTrainedTokenizerBase, num_requests: int,
-               **kwargs):
-        # lazily preprocess only "num_requests" samples
-        data = self.preprocess_data(num_requests)
-        samples = [
-            SampleRequest(
-                prompt=item["prompt"],
-                prompt_len=len(tokenizer(item["prompt"]).input_ids),
-                expected_output_len=len(
-                    tokenizer(item["expected_output"]).input_ids),
-            ) for item in data
-        ]
-        if len(samples) < num_requests:
-            logger.info(
-                "Requested %d samples, but the dataset %s only has %d. "
-                "Will oversample to %d",
-                num_requests,
-                self.dataset_path,
-                len(samples),
-                num_requests,
-            )
+        samples = []
+        for sample in self.data:
+            sample = formatting_prompt_func(sample)
+            samples.append(
+                SampleRequest(
+                    prompt=sample["prompt"],
+                    prompt_len=len(tokenizer(sample["prompt"]).input_ids),
+                    expected_output_len=len(
+                        tokenizer(sample["expected_output"]).input_ids),
+                ))
+            if len(samples) >= num_requests:
+                break
         self.maybe_oversample_requests(samples, num_requests)
         return samples
 
