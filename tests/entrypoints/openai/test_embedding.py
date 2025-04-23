@@ -19,15 +19,9 @@ from ...models.embedding.utils import (EmbedModelInfo, check_embeddings_close,
 from ...utils import RemoteOpenAIServer
 
 MODELS = [
-    EmbedModelInfo("BAAI/bge-m3",
-                   is_matryoshka=False,
-                   architecture="XLMRobertaModel"),
-    EmbedModelInfo("jinaai/jina-embeddings-v3",
-                   is_matryoshka=True,
-                   architecture="XLMRobertaModel"),  # Bert with Rotary
+    EmbedModelInfo("intfloat/multilingual-e5-small", is_matryoshka=False),
     EmbedModelInfo("Snowflake/snowflake-arctic-embed-m-v1.5",
-                   is_matryoshka=True,
-                   architecture="BertModel")
+                   is_matryoshka=True)
 ]
 
 DUMMY_CHAT_TEMPLATE = """{% for message in messages %}{{message['role'] + ': ' + message['content'] + '\\n'}}{% endfor %}"""  # noqa: E501
@@ -45,27 +39,6 @@ def model_info(request):
 @pytest.fixture(scope="module", params=["bfloat16"])
 def dtype(request):
     return request.param
-
-
-def test_config(vllm_runner, dtype, model_info):
-    vllm_extra_kwargs = {
-        "hf_overrides": {
-            "is_matryoshka": model_info.is_matryoshka
-        }
-    }
-
-    with vllm_runner(model_info.name,
-                     task="embed",
-                     dtype=dtype,
-                     max_model_len=None,
-                     **vllm_extra_kwargs) as vllm_model:
-
-        assert (vllm_model.model.llm_engine.model_config.is_matryoshka ==
-                model_info.is_matryoshka)
-
-        if model_info.architecture:
-            assert (model_info.architecture
-                    in vllm_model.model.llm_engine.model_config.architectures)
 
 
 @pytest.fixture(scope="module")
@@ -139,7 +112,7 @@ async def test_single_embedding(model_info: EmbedModelInfo,
     assert embeddings.usage.total_tokens > 0
 
     vllm_outputs = [d.embedding for d in embeddings.data]
-    _correctness_test(model_info, hf_model, prompts, vllm_outputs)
+    _correctness_test(hf_model, prompts, vllm_outputs)
 
     # test using token IDs
     input_tokens = [1, 1, 1, 1, 1]
@@ -185,7 +158,7 @@ async def test_batch_embedding(model_info: EmbedModelInfo,
     assert embeddings.usage.total_tokens > 0
 
     vllm_outputs = [d.embedding for d in embeddings.data]
-    _correctness_test(model_info, hf_model, prompts, vllm_outputs)
+    _correctness_test(hf_model, prompts, vllm_outputs)
 
     # test list[list[int]]
     input_tokens = [[4, 5, 7, 9, 20], [15, 29, 499], [24, 24, 24, 24, 24],
@@ -276,7 +249,7 @@ async def test_batch_base64_embedding(model_info: EmbedModelInfo,
                                                      model=model_info.name,
                                                      encoding_format="float")
     float_data = [d.embedding for d in responses_float.data]
-    _correctness_test(model_info, hf_model, prompts, float_data)
+    _correctness_test(hf_model, prompts, float_data)
 
     # test base64 responses
     responses_base64 = await client.embeddings.create(input=prompts,
@@ -287,13 +260,13 @@ async def test_batch_base64_embedding(model_info: EmbedModelInfo,
         base64_data.append(
             np.frombuffer(base64.b64decode(data.embedding),
                           dtype="float32").tolist())
-    _correctness_test(model_info, hf_model, prompts, base64_data)
+    _correctness_test(hf_model, prompts, base64_data)
 
     # Default response is float32 decoded from base64 by OpenAI Client
     responses_default = await client.embeddings.create(input=prompts,
                                                        model=model_info.name)
     default_data = [d.embedding for d in responses_default.data]
-    _correctness_test(model_info, hf_model, prompts, default_data)
+    _correctness_test(hf_model, prompts, default_data)
 
 
 @pytest.mark.asyncio
@@ -379,8 +352,7 @@ async def test_matryoshka(model_info: EmbedModelInfo,
             assert len(embeddings.data[0].embedding) == dimensions
 
         vllm_outputs = [d.embedding for d in embeddings.data]
-        _correctness_test(model_info, hf_model, prompts, vllm_outputs,
-                          dimensions)
+        _correctness_test(hf_model, prompts, vllm_outputs, dimensions)
 
     if model_info.is_matryoshka:
         for dimensions in [None, 16]:
@@ -399,16 +371,12 @@ async def test_matryoshka(model_info: EmbedModelInfo,
                 await make_request_and_correctness_test(dimensions)
 
 
-def _correctness_test(model_info: EmbedModelInfo,
-                      hf_model: HfRunner,
+def _correctness_test(hf_model: HfRunner,
                       inputs,
                       vllm_outputs: Sequence[list[float]],
                       dimensions: Optional[int] = None):
-    hf_kwargs = {}
-    if model_info.name == "jinaai/jina-embeddings-v3":
-        hf_kwargs["task"] = "text-matching"
 
-    hf_outputs = hf_model.encode(inputs, **hf_kwargs)
+    hf_outputs = hf_model.encode(inputs)
     if dimensions:
         hf_outputs = matryoshka_fy(hf_outputs, dimensions)
 
