@@ -75,10 +75,12 @@ if TYPE_CHECKING:
     VLLM_DISABLED_KERNELS: list[str] = []
     VLLM_USE_V1: bool = True
     VLLM_ROCM_USE_AITER: bool = False
+    VLLM_ROCM_USE_AITER_PAGED_ATTN: bool = False
     VLLM_ROCM_USE_AITER_LINEAR: bool = True
     VLLM_ROCM_USE_AITER_MOE: bool = True
-    VLLM_ROCM_USE_AITER_FP8_BLOCK_SCALED_MOE: bool = False
     VLLM_ROCM_USE_AITER_RMSNORM: bool = True
+    VLLM_ROCM_USE_AITER_MLA: bool = True
+    VLLM_ROCM_USE_SKINNY_GEMM: bool = True
     VLLM_ROCM_FP8_PADDING: bool = True
     VLLM_ROCM_MOE_PADDING: bool = True
     VLLM_ROCM_CUSTOM_PAGED_ATTN: bool = True
@@ -96,6 +98,7 @@ if TYPE_CHECKING:
     VLLM_RAY_BUNDLE_INDICES: str = ""
     VLLM_CUDART_SO_PATH: Optional[str] = None
     VLLM_USE_HPU_CONTIGUOUS_CACHE_FETCH: bool = True
+    VLLM_HPU_USE_DELAYED_SAMPLING: bool = False
     VLLM_DP_RANK: int = 0
     VLLM_DP_RANK_LOCAL: int = -1
     VLLM_DP_SIZE: int = 1
@@ -103,7 +106,6 @@ if TYPE_CHECKING:
     VLLM_DP_MASTER_PORT: int = 0
     VLLM_MARLIN_USE_ATOMIC_ADD: bool = False
     VLLM_V0_USE_OUTLINES_CACHE: bool = False
-    VLLM_TPU_DISABLE_TOPK_TOPP_OPTIMIZATION: bool = False
     VLLM_TPU_BUCKET_PADDING_GAP: int = 0
     VLLM_USE_DEEP_GEMM: bool = False
     VLLM_XGRAMMAR_CACHE_MB: int = 0
@@ -534,6 +536,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     lambda: (os.getenv("VLLM_ROCM_USE_AITER", "False").lower() in
              ("true", "1")),
 
+    # Whether to use aiter paged attention.
+    # By default is disabled.
+    "VLLM_ROCM_USE_AITER_PAGED_ATTN":
+    lambda: (os.getenv("VLLM_ROCM_USE_AITER_PAGED_ATTN", "False").lower() in
+             ("true", "1")),
+
     # use aiter linear op if aiter ops are enabled
     # The following list of related ops
     # - scaled_mm (per-tensor / rowwise)
@@ -547,16 +555,19 @@ environment_variables: dict[str, Callable[[], Any]] = {
     lambda: (os.getenv("VLLM_ROCM_USE_AITER_MOE", "True").lower() in
              ("true", "1")),
 
-    # Whether to use aiter block scaled moe kernel.
-    # By default this is disabled.
-    "VLLM_ROCM_USE_AITER_FP8_BLOCK_SCALED_MOE":
-    lambda:
-    (os.getenv("VLLM_ROCM_USE_AITER_FP8_BLOCK_SCALED_MOE", "false").lower() in
-     ("true", "1")),
-
     # use aiter rms norm op if aiter ops are enabled.
     "VLLM_ROCM_USE_AITER_RMSNORM":
     lambda: (os.getenv("VLLM_ROCM_USE_AITER_RMSNORM", "True").lower() in
+             ("true", "1")),
+
+    # Whether to use aiter mla ops.
+    # By default is enabled.
+    "VLLM_ROCM_USE_AITER_MLA":
+    lambda: (os.getenv("VLLM_ROCM_USE_AITER_MLA", "True").lower() in
+             ("true", "1")),
+    # use rocm skinny gemms
+    "VLLM_ROCM_USE_SKINNY_GEMM":
+    lambda: (os.getenv("VLLM_ROCM_USE_SKINNY_GEMM", "True").lower() in
              ("true", "1")),
 
     # Pad the fp8 weights to 256 bytes for ROCm
@@ -640,6 +651,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     lambda: os.environ.get("VLLM_CONTIGUOUS_PA", "true").lower() in
     ("1", "true"),
 
+    # Use delayed sampling for HPU to reduce host cpu overhead
+    # between each step.
+    "VLLM_HPU_USE_DELAYED_SAMPLING":
+    lambda: os.environ.get("VLLM_DELAYED_SAMPLING", "false").lower() in
+    ("1", "true"),
+
     # Rank of the process in the data parallel setting
     "VLLM_DP_RANK":
     lambda: int(os.getenv("VLLM_DP_RANK", "0")),
@@ -684,11 +701,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # an environment with potentially malicious users.
     "VLLM_V0_USE_OUTLINES_CACHE":
     lambda: os.environ.get("VLLM_V0_USE_OUTLINES_CACHE", "0") == "1",
-
-    # If set, disables TPU-specific optimization for top-k & top-p sampling
-    "VLLM_TPU_DISABLE_TOPK_TOPP_OPTIMIZATION":
-    lambda: bool(int(os.environ["VLLM_TPU_DISABLE_TOPK_TOPP_OPTIMIZATION"]))
-    if "VLLM_TPU_DISABLE_TOPK_TOPP_OPTIMIZATION" in os.environ else None,
 
     # Gap between padding buckets for the forward pass. So we have
     # 8, we will run forward pass with [16, 24, 32, ...].
@@ -753,7 +765,7 @@ def compute_hash() -> str:
     variables, ensure that it is included in the factors list if
     it affects the computation graph. For example, different values
     of VLLM_PP_LAYER_PARTITION will generate different computation
-    graphs, so it is included in the factors list. The env vars that 
+    graphs, so it is included in the factors list. The env vars that
     affect the choice of different kernels or attention backends should
     also be included in the factors list.
     """

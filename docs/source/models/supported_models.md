@@ -133,7 +133,7 @@ class MyConfig(PretrainedConfig):
 
 ### Hugging Face Hub
 
-By default, vLLM loads models from [Hugging Face (HF) Hub](https://huggingface.co/models).
+By default, vLLM loads models from [Hugging Face (HF) Hub](https://huggingface.co/models). To change the download path for models, you can set the `HF_HOME` environment variable; for more details, refer to [their official documentation](https://huggingface.co/docs/huggingface_hub/package_reference/environment_variables#hfhome).
 
 To determine whether a given model is natively supported, you can check the `config.json` file inside the HF repository.
 If the `"architectures"` field contains a model architecture listed below, then it should be natively supported.
@@ -338,7 +338,7 @@ See [this page](#generative-models) for more information on how to use generativ
   * ✅︎
 - * `Glm4ForCausalLM`
   * GLM-4-0414
-  * `THUDM/GLM-4-32B-Chat-0414`, etc.
+  * `THUDM/GLM-4-32B-0414`, etc.
   * ✅︎
   * ✅︎
 - * `GPT2LMHeadModel`
@@ -788,7 +788,7 @@ llm = LLM(
 Online serving:
 
 ```bash
-vllm serve Qwen/Qwen2-VL-7B-Instruct --limit-mm-per-prompt image=4
+vllm serve Qwen/Qwen2-VL-7B-Instruct --limit-mm-per-prompt '{"image":4}'
 ```
 
 **This is no longer required if you are using vLLM V1.**
@@ -1004,7 +1004,7 @@ See [this page](#generative-models) for more information on how to use generativ
   * `microsoft/Phi-4-multimodal-instruct`, etc.
   * ✅︎
   *
-  *
+  * ✅︎
 - * `PixtralForConditionalGeneration`
   * Pixtral
   * T + I<sup>+</sup>
@@ -1040,6 +1040,13 @@ See [this page](#generative-models) for more information on how to use generativ
   * ✅︎
   * ✅︎
   * ✅︎
+- * `Qwen2_5OmniThinkerForConditionalGeneration`
+  * Qwen2.5-Omni
+  * T + I<sup>E+</sup> + V<sup>E+</sup> + A<sup>+</sup>
+  * `Qwen/Qwen2.5-Omni-7B`
+  *
+  * ✅︎
+  * ✅︎\*
 - * `SkyworkR1VChatModel`
   * Skywork-R1V-38B
   * T + I
@@ -1107,6 +1114,14 @@ For more details, please see: <gh-pr:4087#issuecomment-2250397630>
 
 :::{warning}
 Our PaliGemma implementations have the same problem as Gemma 3 (see above) for both V0 and V1.
+:::
+
+:::{note}
+To use Qwen2.5-Omni, you have to install Hugging Face Transformers library from source via
+`pip install git+https://github.com/huggingface/transformers.git`.
+
+Read audio from video pre-processing is currently supported on V0 (but not V1), because overlapping modalities is not yet supported in V1.
+`--mm-processor-kwargs '{"use_audio_in_video": True}'`.
 :::
 
 ### Pooling Models
