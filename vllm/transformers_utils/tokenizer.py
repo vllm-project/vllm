@@ -3,7 +3,7 @@
 import contextlib
 import os
 import warnings
-from functools import lru_cache
+from functools import cached_property, lru_cache
 from pathlib import Path
 from types import MethodType
 from typing import TYPE_CHECKING, Any, Optional, Union
@@ -69,59 +69,70 @@ def encode_tokens(
     return tokenizer.encode(text)
 
 
-def get_cached_tokenizer(tokenizer: AnyTokenizer) -> AnyTokenizer:
-    """Get tokenizer with cached properties.
-
-    This will patch the tokenizer object in place.
-
+class _CachedTokenizerProxy:
+    """
     By default, transformers will recompute multiple tokenizer properties
-    each time they are called, leading to a significant slowdown. This
-    function caches these properties for faster access."""
+    each time they are called, leading to a significant slowdown.
+    This proxy caches these properties for faster access.
+    """
 
-    tokenizer_all_special_ids = set(tokenizer.all_special_ids)
-    tokenizer_all_special_tokens_extended = (
-        tokenizer.all_special_tokens_extended)
-    tokenizer_all_special_tokens = set(tokenizer.all_special_tokens)
-    tokenizer_vocab = tokenizer.get_vocab()
-    tokenizer_len = len(tokenizer)
+    def __init__(self, tokenizer: AnyTokenizer) -> None:
+        self.__tokenizer = tokenizer
+        self.__tokenizer_vocab = tokenizer.get_vocab()
+        self.__tokenizer_len = len(tokenizer)
 
-    max_token_id = max(tokenizer_vocab.values())
-    # Some tokenizers (e.g., QwenTokenizer) have special tokens that
-    # are added and included in the implementation of the vocab_size
-    # property, but not in get_vocab(); if there is an implementation
-    # of vocab size, we should take the greater value.
-    if hasattr(tokenizer, "vocab_size"):
-        with contextlib.suppress(NotImplementedError):
-            max_token_id = max(max_token_id, tokenizer.vocab_size)
+    def __len__(self) -> int:
+        return self.__tokenizer_len
 
-    class CachedTokenizer(tokenizer.__class__):  # type: ignore
+    def __getattr__(self, name):
+        return getattr(self.__tokenizer, name)
 
-        @property
-        def all_special_ids(self):
-            return tokenizer_all_special_ids
+    @cached_property
+    def all_special_ids(self):
+        return set(self.__tokenizer.all_special_ids)
 
-        @property
-        def all_special_tokens(self):
-            return tokenizer_all_special_tokens
+    @cached_property
+    def all_special_tokens(self):
+        return set(self.__tokenizer.all_special_tokens)
 
-        @property
-        def all_special_tokens_extended(self):
-            return tokenizer_all_special_tokens_extended
+    @cached_property
+    def all_special_tokens_extended(self):
+        return set(self.__tokenizer.all_special_tokens_extended)
 
-        @property
-        def max_token_id(self):
-            return max_token_id
+    @cached_property
+    def max_token_id(self):
+        tokenizer = self.__tokenizer
 
-        def get_vocab(self):
-            return tokenizer_vocab
+        max_token_id = max(self.__tokenizer_vocab.values())
+        # Some tokenizers (e.g., QwenTokenizer) have special tokens that
+        # are added and included in the implementation of the vocab_size
+        # property, but not in get_vocab(); if there is an implementation
+        # of vocab size, we should take the greater value.
+        if hasattr(tokenizer, "vocab_size"):
+            with contextlib.suppress(NotImplementedError):
+                max_token_id = max(max_token_id, tokenizer.vocab_size)
 
-        def __len__(self):
-            return tokenizer_len
+        return max_token_id
 
-    CachedTokenizer.__name__ = f"Cached{tokenizer.__class__.__name__}"
+    def get_vocab(self):
+        return self.__tokenizer_vocab
 
-    tokenizer.__class__ = CachedTokenizer
-    return tokenizer
+    def __reduce__(self):
+        return (get_cached_tokenizer, (self.__tokenizer, ))
+
+
+def get_cached_tokenizer(tokenizer: AnyTokenizer) -> AnyTokenizer:
+    """Get tokenizer with cached properties."""
+
+    # NOTE: We need the proxy type to inherit from the original type
+    # so that `isinstance` checks work as expected
+    proxy_type = type(
+        f"Cached{type(tokenizer).__name__}",
+        (_CachedTokenizerProxy, *type(tokenizer).mro()),
+        {},
+    )
+
+    return proxy_type(tokenizer)  # type: ignore
 
 
 def patch_padding_side(tokenizer: PreTrainedTokenizer) -> None:
