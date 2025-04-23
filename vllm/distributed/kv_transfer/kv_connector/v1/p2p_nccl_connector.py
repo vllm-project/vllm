@@ -34,14 +34,13 @@ class ReqMeta:
     @staticmethod
     def make_meta(request_id: str, token_ids: list[int], block_ids: list[int],
                   block_size: int) -> "ReqMeta":
-        valid_num_tokens = align_to_block_size(len(token_ids), block_size)
-        token_ids_tensor = torch.tensor(token_ids)[:valid_num_tokens]
+        token_ids_tensor = torch.tensor(token_ids)
         block_ids_tensor = torch.tensor(block_ids)
         num_blocks = block_ids_tensor.shape[0]
         block_offsets = torch.arange(0, block_size)
         slot_mapping = block_offsets.reshape((1, block_size)) + \
                        block_ids_tensor.reshape((num_blocks, 1)) * block_size
-        slot_mapping = slot_mapping.flatten()[:valid_num_tokens]
+        slot_mapping = slot_mapping.flatten()
         return ReqMeta(
             request_id=request_id,
             token_ids=token_ids_tensor,
@@ -160,8 +159,6 @@ class P2pNcclConnector(KVConnectorBase_V1):
         for request in metadata.requests:
             if self.is_producer:
                 continue
-            logger.info("Inject KV cache of %d tokens to the paged memory",
-                        len(request.slot_mapping))
             for layer_name in forward_context.no_compile_layers:
                 attn_layer = forward_context.no_compile_layers[layer_name]
                 kv_cache_layer = attn_layer.kv_cache[ \
@@ -172,6 +169,9 @@ class P2pNcclConnector(KVConnectorBase_V1):
 
                 inject_kv_into_layer(kv_cache_layer, kv_cache,
                                      request.slot_mapping)
+
+            logger.info("Inject KV cache of %d tokens to the paged memory, %s",
+                        len(request.slot_mapping), request.request_id)
 
     def wait_for_layer_load(self, layer_name: str) -> None:
         """Blocking until the KV for a specific layer is loaded into vLLM's
@@ -339,9 +339,3 @@ class P2pNcclConnector(KVConnectorBase_V1):
             return ip, port
         raise ValueError(
             f"Request id {request_id} does not contain hostname and port")
-
-
-def align_to_block_size(num_tokens: int, block_size) -> int:
-    """Align the number of tokens to the block size.
-    """
-    return (num_tokens - 1) // block_size * block_size
