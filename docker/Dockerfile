@@ -70,7 +70,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 
 # TESTING: install xformers from source to test 2.7.0 final RC
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv pip install --system "git+https://github.com/facebookresearch/xformers@main#egg=xformers"
+    uv pip install --system --no-build-isolation "git+https://github.com/facebookresearch/xformers@main#egg=xformers"
 
 # cuda arch list used by torch
 # can be useful for both `dev` and `test`
@@ -243,8 +243,8 @@ RUN --mount=type=bind,from=build,src=/workspace/dist,target=/vllm-workspace/dist
 RUN --mount=type=cache,target=/root/.cache/uv \
 . /etc/environment && \
 if [ "$TARGETPLATFORM" != "linux/arm64" ]; then \
-    # TESTING: install xformers from source to test 2.7.0 final RC
-    uv pip install --system "git+https://github.com/flashinfer-ai/flashinfer@main" ; \
+    # TESTING: install FlashInfer from source to test 2.7.0 final RC
+    uv pip install --system --no-build-isolation "git+https://github.com/flashinfer-ai/flashinfer@main" ; \
 fi
 COPY examples examples
 COPY benchmarks benchmarks
