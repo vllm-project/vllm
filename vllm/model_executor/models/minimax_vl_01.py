@@ -277,7 +277,10 @@ class MiniMaxVL01MultiModalProcessor(
         hf_inputs: BatchFeature,
         hf_processor_mm_kwargs: Mapping[str, object],
     ) -> Mapping[str, MultiModalFieldConfig]:
-        return dict(pixel_values=MultiModalFieldConfig.batched("image"), )
+        return dict(
+            pixel_values=MultiModalFieldConfig.batched("image"),
+            image_sizes=MultiModalFieldConfig.batched("image"),
+        )
 
 
 def _get_num_hidden_layers(hf_config: MiniMaxVL01LikeConfig) -> int:
