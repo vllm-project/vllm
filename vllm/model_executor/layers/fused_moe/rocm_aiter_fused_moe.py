@@ -286,8 +286,7 @@ if current_platform.is_rocm():
                               tags=(torch.Tag.inplace_view, ))
 
 
-def rocm_aiter_fused_experts(*,
-                             hidden_states: torch.Tensor,
+def rocm_aiter_fused_experts(hidden_states: torch.Tensor,
                              w1: torch.Tensor,
                              w2: torch.Tensor,
                              topk_weights: torch.Tensor,
@@ -301,7 +300,16 @@ def rocm_aiter_fused_experts(*,
                              block_shape: Optional[List[int]] = None,
                              expert_map: Optional[torch.Tensor] = None,
                              activation: str = "silu",
-                             **kwargs) -> torch.Tensor:
+                             inplace: bool = False,
+                             use_int8_w8a8: bool = False,
+                             use_int8_w8a16: bool = False,
+                             use_int4_w4a16: bool = False,
+                             global_num_experts: int = -1,
+                             w1_zp: Optional[torch.Tensor] = None,
+                             w2_zp: Optional[torch.Tensor] = None,
+                             a2_scale: Optional[torch.Tensor] = None,
+                             allow_deep_gemm: bool = False) -> torch.Tensor:
+
     from vllm.model_executor.layers.quantization.utils.fp8_utils import (
         per_token_group_quant_fp8)
 
