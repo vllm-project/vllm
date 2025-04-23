@@ -242,10 +242,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             device=self.device)
 
         # OPTIMIZATION: Cache the tensors rather than creating them every step.
+        # Keep in int64 to avoid overflow with long context
         self.arange_np = np.arange(max(self.max_num_reqs + 1,
                                        self.max_model_len,
                                        self.max_num_tokens),
-                                   dtype=np.int32)
+                                   dtype=np.int64)
         # NOTE(woosuk): These tensors are "stateless", i.e., they are literally
         # a faster version of creating a new tensor every time. Thus, we should
         # not make any assumptions about the values in these tensors.
@@ -356,6 +357,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 image_grid_thw = []
                 video_grid_thw = []
                 second_per_grid_ts = []
+                audio_feature_lengths = []
+                use_audio_in_video = False
                 for mm_input in self.requests[req_id].mm_inputs:
                     if mm_input.get("image_grid_thw") is not None:
                         image_grid_thw.extend(
@@ -366,6 +369,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     if mm_input.get("second_per_grid_ts") is not None:
                         second_per_grid_ts.extend(
                             mm_input["second_per_grid_ts"])
+                    if mm_input.get("audio_feature_lengths") is not None:
+                        audio_feature_lengths.extend(
+                            mm_input["audio_feature_lengths"])
+                    if mm_input.get("use_audio_in_video") is True:
+                        use_audio_in_video = True
 
                 hf_config = self.model_config.hf_config
 
@@ -377,6 +385,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                         image_grid_thw=image_grid_thw,
                         video_grid_thw=video_grid_thw,
                         second_per_grid_ts=second_per_grid_ts,
+                        audio_feature_lengths=audio_feature_lengths,
+                        use_audio_in_video=use_audio_in_video,
                     )
 
             req_ids_to_add.append(req_id)
@@ -446,7 +456,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         # Add the new or resumed requests to the persistent batch.
         # The smaller empty indices are filled first.
-        removed_req_indices = sorted(removed_req_indices, reverse=True)
+        removed_req_indices.sort(reverse=True)
         for req_id in req_ids_to_add:
             req_state = self.requests[req_id]
             if removed_req_indices:
@@ -688,7 +698,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # common_prefix_len should be a multiple of the block size.
         common_prefix_len = (common_prefix_len // self.block_size *
                              self.block_size)
-        use_cascade = self.attn_backend.use_cascade_attention(
+        use_cascade = self.attn_metadata_builder.use_cascade_attention(
             common_prefix_len=common_prefix_len,
             query_lens=num_scheduled_tokens,
             num_query_heads=self.num_query_heads,
@@ -1221,7 +1231,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 target_hidden_states = hidden_states[token_indices]
                 target_slot_mapping = attn_metadata.slot_mapping[token_indices]
 
-            draft_token_ids, draft_probs = self.drafter.propose(
+            draft_token_ids = self.drafter.propose(
                 target_token_ids=target_token_ids,
                 target_positions=target_positions,
                 target_hidden_states=target_hidden_states,
@@ -1232,9 +1242,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 sampling_metadata=sampling_metadata,
             )
             spec_token_ids = draft_token_ids.tolist()
-            # TODO(woosuk): Cache draft_probs and use it for rejection sampling
-            # in the next step.
-            del draft_probs
 
         # Clear KVConnector state after all KVs are generated.
         if has_kv_transfer_group():
@@ -1263,7 +1270,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 draft_token_ids.append([])
                 continue
 
-            # Skip requests that require top-p, top-k, etc.
+            # Skip requests that require sampling parameters that are not
+            # supported with speculative decoding.
             req_id = self.input_batch.req_ids[i]
             if not is_spec_decode_supported(req_id, self.input_batch):
                 draft_token_ids.append([])
@@ -1272,6 +1280,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # Add sampled_token_ids to token_ids_cpu.
             start_idx = self.input_batch.num_tokens_no_spec[i]
             end_idx = start_idx + num_sampled_ids
+            if end_idx >= self.max_model_len:
+                # Skip requests that have already reached the max model length.
+                draft_token_ids.append([])
+                continue
+
             self.input_batch.token_ids_cpu[i, start_idx:end_idx] = sampled_ids
             drafter_output = self.drafter.propose(
                 self.input_batch.token_ids_cpu[i, :end_idx])
