@@ -98,6 +98,7 @@ if TYPE_CHECKING:
     VLLM_RAY_BUNDLE_INDICES: str = ""
     VLLM_CUDART_SO_PATH: Optional[str] = None
     VLLM_USE_HPU_CONTIGUOUS_CACHE_FETCH: bool = True
+    VLLM_HPU_USE_DELAYED_SAMPLING: bool = False
     VLLM_DP_RANK: int = 0
     VLLM_DP_RANK_LOCAL: int = -1
     VLLM_DP_SIZE: int = 1
@@ -648,6 +649,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # contiguous cache fetch will be used.
     "VLLM_USE_HPU_CONTIGUOUS_CACHE_FETCH":
     lambda: os.environ.get("VLLM_CONTIGUOUS_PA", "true").lower() in
+    ("1", "true"),
+
+    # Use delayed sampling for HPU to reduce host cpu overhead
+    # between each step.
+    "VLLM_HPU_USE_DELAYED_SAMPLING":
+    lambda: os.environ.get("VLLM_DELAYED_SAMPLING", "false").lower() in
     ("1", "true"),
 
     # Rank of the process in the data parallel setting
