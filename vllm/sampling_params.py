@@ -199,7 +199,7 @@ class SamplingParams(
             Defaults to None.
         extra_args: Arbitrary additional args, that can be used by custom
             sampling implementations. Not used by any in-tree sampling
-            implementations.
+            implementations. (Not actually a class member.)
     """
 
     n: int = 1
@@ -242,7 +242,6 @@ class SamplingParams(
     guided_decoding: Optional[GuidedDecodingParams] = None
     logit_bias: Optional[dict[int, float]] = None
     allowed_token_ids: Optional[list[int]] = None
-    extra_args: Optional[dict[str, Any]] = None
 
     # Fields used for bad words
     bad_words: Optional[list[str]] = None
@@ -288,8 +287,7 @@ class SamplingParams(
                 int(token): min(100.0, max(-100.0, bias))
                 for token, bias in logit_bias.items()
             }
-
-        return SamplingParams(
+        sampling_params = SamplingParams(
             n=1 if n is None else n,
             best_of=best_of,
             presence_penalty=0.0
@@ -321,8 +319,12 @@ class SamplingParams(
             guided_decoding=guided_decoding,
             logit_bias=logit_bias,
             allowed_token_ids=allowed_token_ids,
-            extra_args=extra_args,
         )
+        # Custom sampling params
+        if extra_args:
+            for attr_name, attr_val in extra_args.items():
+                setattr(sampling_params, attr_name, attr_val)
+        return sampling_params
 
     def __post_init__(self) -> None:
         # how we deal with `best_of``:
