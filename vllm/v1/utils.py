@@ -163,7 +163,7 @@ class CoreEngineProcManager:
 
 
 # Note(rob): shutdown function cannot be a bound method,
-# else the gc cannot collect the object.
+# else the gc cannot collect the objedecoupct.
 def shutdown(procs: list[Process], input_address: str):
     # Shutdown the process.
     for proc in procs:
@@ -180,8 +180,8 @@ def shutdown(procs: list[Process], input_address: str):
             proc.join(remaining)
 
     for proc in procs:
-        if proc.is_alive():
-            kill_process_tree(proc.pid)
+        if proc.is_alive() and (pid := proc.pid) is not None:
+            kill_process_tree(pid)
 
     # Remove zmq ipc socket files.
     if input_address.startswith("ipc://"):
