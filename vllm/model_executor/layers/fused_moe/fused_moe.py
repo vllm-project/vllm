@@ -23,9 +23,7 @@ from vllm.model_executor.layers.quantization.utils.int8_utils import (
 from vllm.platforms import current_platform
 from vllm.utils import direct_register_custom_op
 
-from .rocm_aiter_fused_moe import (is_rocm_aiter_moe_enabled,
-                                   rocm_aiter_fused_experts,
-                                   rocm_aiter_topk_softmax)
+from .rocm_aiter_fused_moe import is_rocm_aiter_moe_enabled
 
 logger = init_logger(__name__)
 
@@ -773,6 +771,18 @@ def get_default_config(
             config = {"BLOCK_SIZE_M": 32, "GROUP_SIZE_M": 1}
         else:
             config = {"BLOCK_SIZE_M": 64, "GROUP_SIZE_M": 1}
+    elif is_marlin:
+        for block_size_m in [8, 16, 32, 48, 64]:
+            if M * topk / E / block_size_m < 0.9:
+                break
+        return {"BLOCK_SIZE_M": block_size_m}
+    elif M <= E:
+        config = {
+            "BLOCK_SIZE_M": 16,
+            "BLOCK_SIZE_N": 32,
+            "BLOCK_SIZE_K": 64,
+            "GROUP_SIZE_M": 1,
+        }
     else:
         config = {
             "BLOCK_SIZE_M": 64,
@@ -780,14 +790,6 @@ def get_default_config(
             "BLOCK_SIZE_K": 32,
             "GROUP_SIZE_M": 8,
         }
-        # A heuristic: fused marlin works faster with this config for small M
-        if M <= E or (is_marlin and M <= 32):
-            config = {
-                "BLOCK_SIZE_M": 16,
-                "BLOCK_SIZE_N": 32,
-                "BLOCK_SIZE_K": 64,
-                "GROUP_SIZE_M": 1,
-            }
     return config
 
 
@@ -842,6 +844,7 @@ def vllm_topk_softmax(topk_weights: torch.Tensor, topk_indices: torch.Tensor,
 
 def dispatch_topk_func() -> Callable[..., tuple[torch.Tensor, ...]]:
     if is_rocm_aiter_moe_enabled():
+        from .rocm_aiter_fused_moe import rocm_aiter_topk_softmax
         return rocm_aiter_topk_softmax
     return vllm_topk_softmax
 
@@ -1098,6 +1101,7 @@ def torch_vllm_outplace_fused_experts(**kwargs) -> torch.Tensor:
 
 def dispatch_fused_experts_func(inplace: bool) -> Callable[..., torch.Tensor]:
     if is_rocm_aiter_moe_enabled():
+        from .rocm_aiter_fused_moe import rocm_aiter_fused_experts
         return rocm_aiter_fused_experts
     if inplace:
         return torch_vllm_inplace_fused_experts
