@@ -100,10 +100,10 @@ def get_model_architecture(
         architectures = ["QuantMixtralForCausalLM"]
 
     vllm_supported_archs = ModelRegistry.get_supported_archs()
-    is_vllm_supported = any(arch in vllm_supported_archs
-                            for arch in architectures)
-    if (not is_vllm_supported
-            or model_config.model_impl == ModelImpl.TRANSFORMERS):
+    vllm_not_supported = not any(arch in vllm_supported_archs
+                                 for arch in architectures)
+    if (model_config.model_impl == ModelImpl.TRANSFORMERS or
+            model_config.model_impl != ModelImpl.VLLM and vllm_not_supported):
         architectures = resolve_transformers_arch(model_config, architectures)
 
     model_cls, arch = ModelRegistry.resolve_model_cls(architectures)
