@@ -441,6 +441,7 @@ def test_guided_number_range_json_completion(llm,
         assert (re.fullmatch(r"^\d{5}(-\d{4})?$", output_json["zipcode"])
                 is not None)
 
+
 @pytest.mark.skip_global_cleanup
 def test_guidance_no_additional_properties(llm):
     schema = {
