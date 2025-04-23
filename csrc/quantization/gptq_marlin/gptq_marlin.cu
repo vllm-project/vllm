@@ -166,7 +166,7 @@ int get_scales_cache_size(thread_config_t const& th_config, int prob_m,
   if (cache_scales_chunk) {
     int load_groups =
         tb_groups * pipe_stages * 2;  // Chunk size is 2x pipeline over dim K
-    load_groups = max(load_groups, 32 + 1);  // We load at least 32 scale groups
+    load_groups = max(load_groups, 32);  // We load at least 32 scale groups
     return load_groups * tb_n * 2;
   } else {
     int tb_scales = tb_groups * tb_n * 2;
