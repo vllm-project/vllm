@@ -312,6 +312,7 @@ class BackgroundResources:
     def __call__(self):
         """Clean up background resources."""
 
+        self.engine_dead = True
         for core_engine in self.core_engines:
             core_engine.close()
 
@@ -564,7 +565,7 @@ class SyncMPClient(MPClient):
         self._send_input(EngineCoreRequestType.ADD, request)
 
     def abort_requests(self, request_ids: list[str]) -> None:
-        if len(request_ids) > 0:
+        if request_ids and not self.resources.engine_dead:
             self._send_input(EngineCoreRequestType.ABORT, request_ids)
 
     def profile(self, is_start: bool = True) -> None:
@@ -735,7 +736,7 @@ class AsyncMPClient(MPClient):
         self._ensure_output_queue_task()
 
     async def abort_requests_async(self, request_ids: list[str]) -> None:
-        if len(request_ids) > 0:
+        if request_ids and not self.resources.engine_dead:
             await self._send_input(EngineCoreRequestType.ABORT, request_ids)
 
     async def profile_async(self, is_start: bool = True) -> None:
@@ -902,5 +903,6 @@ class DPAsyncMPClient(AsyncMPClient):
 
     async def _abort_requests(self, request_ids: list[str],
                               engine: CoreEngine) -> None:
-        await self._send_input(EngineCoreRequestType.ABORT, request_ids,
-                               engine)
+        if not self.resources.engine_dead:
+            await self._send_input(EngineCoreRequestType.ABORT, request_ids,
+                                   engine)
