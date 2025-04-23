@@ -25,17 +25,17 @@ def test_cached_tokenizer(model_id: str):
     _check_consistency(unpickled_tokenizer, reference_tokenizer)
 
 
-def _check_consistency(actual: AnyTokenizer, expected: AnyTokenizer):
-    assert isinstance(actual, type(expected))
+def _check_consistency(target: AnyTokenizer, expected: AnyTokenizer):
+    assert isinstance(target, type(expected))
 
     # Cached attributes
-    assert actual.all_special_ids == expected.all_special_ids
-    assert actual.all_special_tokens == expected.all_special_tokens
-    assert (actual.all_special_tokens_extended ==
+    assert target.all_special_ids == expected.all_special_ids
+    assert target.all_special_tokens == expected.all_special_tokens
+    assert (target.all_special_tokens_extended ==
             expected.all_special_tokens_extended)
 
     # Other attributes
-    assert getattr(actual, "padding_side",
+    assert getattr(target, "padding_side",
                    None) == getattr(expected, "padding_side", None)
 
-    assert actual.encode("prompt") == expected.encode("prompt")
+    assert target.encode("prompt") == expected.encode("prompt")
