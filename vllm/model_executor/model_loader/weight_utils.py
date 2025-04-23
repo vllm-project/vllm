@@ -502,7 +502,7 @@ def fastsafetensors_weights_iterator(
 def pt_weights_iterator(
     hf_weights_files: List[str],
     use_tqdm_on_load: bool,
-    pt_load_map_location: Union[str, Dict[str, str]] = "cpu",
+    pt_load_map_location: Union[str, dict[str, str]] = "cpu",
 ) -> Generator[Tuple[str, torch.Tensor], None, None]:
     """Iterate over the weights in the model bin/pt files."""
     for bin_file in tqdm(
