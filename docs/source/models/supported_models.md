@@ -776,7 +776,6 @@ See [this page](#multimodal-inputs) on how to pass multi-modal inputs to the mod
 **To enable multiple multi-modal items per text prompt in vLLM V0**, you have to set `limit_mm_per_prompt` (offline inference)
 or `--limit-mm-per-prompt` (online serving). For example, to enable passing up to 4 images per text prompt:
 
-
 Offline inference:
 
 ```python
