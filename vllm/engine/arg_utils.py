@@ -19,7 +19,7 @@ from vllm import version
 from vllm.config import (BlockSize, CacheConfig, CacheDType, CompilationConfig,
                          ConfigFormat, ConfigType, DecodingConfig, Device,
                          DeviceConfig, DistributedExecutorBackend,
-                         GuidedDecodingBackendV1, HfOverrides,
+                         EventPublisherConfig, GuidedDecodingBackendV1, HfOverrides,
                          KVTransferConfig, LoadConfig, LoadFormat, LoRAConfig,
                          ModelConfig, ModelImpl, MultiModalConfig,
                          ObservabilityConfig, ParallelConfig, PoolerConfig,
@@ -248,6 +248,7 @@ class EngineArgs:
     worker_extension_cls: str = ParallelConfig.worker_extension_cls
 
     kv_transfer_config: Optional[KVTransferConfig] = None
+    event_publisher_config: Optional[EventPublisherConfig] = None
 
     generation_config: Optional[str] = "auto"
     override_generation_config: Optional[Dict[str, Any]] = None
@@ -932,6 +933,10 @@ class EngineArgs:
                             default=None,
                             help='The configurations for distributed KV cache '
                             'transfer. Should be a JSON string.')
+        parser.add_argument('--event-publisher-config',
+                            type=EventPublisherConfig.from_cli,
+                            default=None,
+                            help='The configurations for event publishing.')
 
         parser.add_argument(
             '--worker-cls',
@@ -1329,6 +1334,7 @@ class EngineArgs:
             prompt_adapter_config=prompt_adapter_config,
             compilation_config=self.compilation_config,
             kv_transfer_config=self.kv_transfer_config,
+            event_publisher_config=self.event_publisher_config,
             additional_config=self.additional_config,
         )
 

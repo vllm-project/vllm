@@ -737,7 +737,6 @@ def test_kv_cache_events(blocks_to_cache: int):
         make_kv_cache_config(block_size, num_blocks),
         max_model_len=8192,
         enable_caching=True,
-        num_preallocate_tokens=0,
         enable_kv_cache_events=True,
     )
 

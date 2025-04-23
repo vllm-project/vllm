@@ -63,6 +63,7 @@ class LoggingStatLogger(StatLoggerBase):
     def record(self, scheduler_stats: SchedulerStats,
                iteration_stats: Optional[IterationStats]):
         """Log Stats to standard output."""
+
         if iteration_stats:
             self._track_iteration_stats(iteration_stats)
 

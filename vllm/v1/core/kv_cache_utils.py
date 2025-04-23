@@ -4,7 +4,7 @@ import os
 from collections import deque
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Any, Callable, NamedTuple, Optional
+from typing import Any, Callable, NamedTuple, Optional, Union
 
 import msgspec
 
@@ -14,6 +14,7 @@ from vllm.utils import GiB_bytes, sha256
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
                                         KVCacheGroupSpec, KVCacheSpec,
                                         KVCacheTensor, SlidingWindowSpec)
+from vllm.v1.metrics.events import EventBatch
 from vllm.v1.metrics.stats import PrefixCacheStats
 from vllm.v1.request import Request
 
@@ -288,6 +289,10 @@ class BlockRemoved(KVCacheEvent):
 
 class AllBlocksCleared(KVCacheEvent):
     pass
+
+
+class KVEventBatch(EventBatch):
+    events: list[Union[BlockStored, BlockRemoved, AllBlocksCleared]]
 
 
 def need_extra_keys(request: Request) -> bool:

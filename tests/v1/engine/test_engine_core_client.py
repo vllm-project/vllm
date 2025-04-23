@@ -14,6 +14,7 @@ from vllm import SamplingParams
 from vllm.engine.arg_utils import EngineArgs
 from vllm.platforms import current_platform
 from vllm.usage.usage_lib import UsageContext
+from vllm.v1.core.kv_cache_utils import BlockStored, KVEventBatch
 from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.engine.core import EngineCore
 from vllm.v1.engine.core_client import (AsyncMPClient, EngineCoreClient,
@@ -21,6 +22,7 @@ from vllm.v1.engine.core_client import (AsyncMPClient, EngineCoreClient,
 from vllm.v1.executor.abstract import Executor
 
 from ...utils import create_new_process_for_each_test
+from ..conftest import MockSubscriber
 
 if not current_platform.is_cuda():
     pytest.skip(reason="V1 currently only supported on CUDA.",
@@ -247,6 +249,82 @@ async def test_engine_core_client_asyncio(monkeypatch: pytest.MonkeyPatch):
             await core_client.call_utility_async("echo", None, "help!")
 
         assert str(e_info.value) == "Call to echo method failed: help!"
+
+
+@create_new_process_for_each_test()
+@pytest.mark.parametrize(
+    "multiprocessing_mode,publisher_config",
+    [(False, "inproc"), (True, "tcp")],
+    indirect=["publisher_config"],
+)
+def test_kv_cache_events(
+    monkeypatch: pytest.MonkeyPatch,
+    multiprocessing_mode: bool,
+    publisher_config,
+):
+
+    with monkeypatch.context() as m:
+        m.setenv("VLLM_USE_V1", "1")
+        block_size = 16
+        num_blocks = 2
+
+        engine_args = EngineArgs(
+            model=MODEL_NAME,
+            enforce_eager=True,
+            enable_prefix_caching=True,
+            enable_kv_cache_events=True,  # Enable KV cache events
+            block_size=block_size)
+        print(f"publisher_config: {publisher_config}")
+        engine_args.event_publisher_config = publisher_config
+
+        vllm_config = engine_args.create_engine_config(
+            UsageContext.UNKNOWN_CONTEXT)
+
+        executor_class = Executor.get_class(vllm_config)
+        client = EngineCoreClient.make_client(
+            multiprocess_mode=multiprocessing_mode,
+            asyncio_mode=False,
+            vllm_config=vllm_config,
+            executor_class=executor_class,
+            log_stats=False,
+        )
+        endpoint = publisher_config.endpoint.replace("*", "127.0.0.1")
+        subscriber = MockSubscriber(endpoint,
+                                    topic=publisher_config.topic,
+                                    decode_type=KVEventBatch)
+
+        custom_tokens = list(range(num_blocks * block_size))
+        request = EngineCoreRequest(
+            request_id=str(uuid.uuid4()),
+            prompt=None,
+            prompt_token_ids=custom_tokens,
+            mm_inputs=None,
+            mm_hashes=None,
+            mm_placeholders=None,
+            sampling_params=SamplingParams(
+                max_tokens=1),  # Short completion for speed
+            eos_token_id=None,
+            arrival_time=time.time(),
+            lora_request=None,
+        )
+        client.add_request(request)
+
+        outputs: dict[str, list] = {request.request_id: []}
+        loop_until_done(client, outputs)
+
+        result = subscriber.receive_one(timeout=1000)
+        assert result is not None, "No message received"
+
+        seq, received = result
+
+        assert seq == 0, "Sequence number mismatch"
+        assert len(received.events) == 1, (
+            "We should have exactly one BlockStored event")
+        assert isinstance(received.events[0],
+                          BlockStored), ("We should have a BlockStored event")
+        assert len(received.events[0].block_hashes) == num_blocks, (
+            "We should have a BlockStored event with 2 block_hashes")
+        return
 
 
 @pytest.mark.timeout(10)

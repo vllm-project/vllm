@@ -1942,8 +1942,8 @@ class SchedulerConfig:
 
     enable_kv_cache_events: bool = False
     """If True, enable KV cache events for tracking block storage and removal.
-    Events are stored in `EngineCoreOutputs.kv_cache_events` and can
-    be published using a stats logger."""
+    Events can be published externally by zmq using the event publisher config.
+    """
 
     # scheduler class or path. "vllm.core.scheduler.Scheduler" (default)
     # or "mod.custom_class".
@@ -3303,6 +3303,21 @@ class KVTransferConfig(BaseModel):
         return self.kv_connector_extra_config.get(key, default)
 
 
+class EventPublisherConfig(BaseModel):
+    """Configuration for event publisher."""
+    publisher: str = "null"
+    endpoint: str = "tcp://*:5557"
+    replay_endpoint: Optional[str] = None
+    buffer_steps: int = 10_000
+    hwm: int = 100_000
+    topic: str = ""
+
+    @classmethod
+    def from_cli(cls, cli_value: str) -> "EventPublisherConfig":
+        """Parse the CLI value for the event publisher config."""
+        return EventPublisherConfig.model_validate_json(cli_value)
+
+
 class CompilationLevel:
     # constants for the levels of the compilation process
     NO_COMPILATION = 0
@@ -3661,6 +3676,7 @@ class VllmConfig:
                                                   init=True)  # type: ignore
     kv_transfer_config: KVTransferConfig = field(default=None,
                                                  init=True)  # type: ignore
+    event_publisher_config: Optional[EventPublisherConfig] = None
     # some opaque config, only used to provide additional information
     # for the hash computation, mainly used for testing, debugging or out of
     # tree config registration.
@@ -3894,6 +3910,17 @@ class VllmConfig:
             if self.cache_config is not None:
                 self.cache_config.enable_prefix_caching = False
 
+        if (self.scheduler_config.enable_kv_cache_events
+                and not self.cache_config.enable_prefix_caching):
+            logger.warning(
+                "KV cache events are on, but prefix caching is not enabled."
+                "Use --enable-prefix-caching to enable.")
+        if (self.event_publisher_config
+                and self.event_publisher_config.publisher != "null"
+                and not self.scheduler_config.enable_kv_cache_events):
+            logger.warning("KV cache events are disabled,"
+                           "but the scheduler is configured to publish them."
+                           "Use --enable-kv-cache-events to enable.")
         current_platform.check_and_update_config(self)
 
         if not self.instance_id:
