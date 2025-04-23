@@ -99,7 +99,7 @@ class LLMEngine:
         if not multiprocess_mode:
             # for v0 compatibility
             self.model_executor = self.engine_core.engine_core.model_executor  # type: ignore
-        
+
         # If usage stat is enabled, collect relevant info.
         if is_usage_stats_enabled():
             from vllm.model_executor.model_loader import (
@@ -136,7 +136,6 @@ class LLMEngine:
                     "disable_custom_all_reduce":
                     parallel_config.disable_custom_all_reduce,
                 })
-
 
     @classmethod
     def from_vllm_config(

@@ -114,8 +114,8 @@ class AsyncLLM(EngineClient):
             self._run_output_handler()
         except RuntimeError:
             pass
-        
-         # If usage stat is enabled, collect relevant info.
+
+        # If usage stat is enabled, collect relevant info.
         if is_usage_stats_enabled():
             from vllm.model_executor.model_loader import (
                 get_architecture_class_name)

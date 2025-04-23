@@ -175,15 +175,14 @@ class UsageMessage:
         if current_platform.is_cuda():
             self.cuda_runtime = torch.version.cuda
         if current_platform.is_tpu():
-            try:
-                import torch_xla.runtime as xr
-                from torch_xla.core import xla_model as xm
-                from torch_xla.tpu import tpu_type
-                self.gpu_count = xr.world_size()
-                self.gpu_type = tpu_type()
-                self.gpu_memory_per_device = xm.get_memory_info().bytes_limit
-            except ImportError:
-                pass
+            # try:
+            import torch_xla.runtime as xr
+            from torch_xla.core import xla_model as xm
+            self.gpu_count = xr.world_size()
+            self.gpu_type = torch_xla.tpu.tpu_type()
+            self.gpu_memory_per_device = xm.get_memory_info().bytes_limit
+            # except ImportError:
+                # pass
         self.provider = _detect_cloud_provider()
         self.architecture = platform.machine()
         self.platform = platform.platform()
