@@ -23,19 +23,20 @@ from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import SamplingParams
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.transformers_utils.tokenizer_group import init_tokenizer_from_configs
-from vllm.usage.usage_lib import (UsageContext, is_usage_stats_enabled,
-                                  usage_message)
+from vllm.usage.usage_lib import UsageContext, is_usage_stats_enabled, usage_message
 from vllm.utils import Device, cdiv
 from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.engine.core_client import AsyncMPClient, DPAsyncMPClient
 from vllm.v1.engine.exceptions import EngineDeadError, EngineGenerateError
-from vllm.v1.engine.output_processor import (OutputProcessor,
-                                             RequestOutputCollector)
+from vllm.v1.engine.output_processor import OutputProcessor, RequestOutputCollector
 from vllm.v1.engine.parallel_sampling import ParentRequest
 from vllm.v1.engine.processor import Processor
 from vllm.v1.executor.abstract import Executor
-from vllm.v1.metrics.loggers import (LoggingStatLogger, PrometheusStatLogger,
-                                     StatLoggerBase)
+from vllm.v1.metrics.loggers import (
+    LoggingStatLogger,
+    PrometheusStatLogger,
+    StatLoggerBase,
+)
 from vllm.v1.metrics.stats import IterationStats, SchedulerStats
 
 logger = init_logger(__name__)
@@ -59,7 +60,8 @@ class AsyncLLM(EngineClient):
                 "Using V1 AsyncLLMEngine, but envs.VLLM_USE_V1=False. "
                 "This should not happen. As a workaround, try using "
                 "AsyncLLMEngine.from_vllm_config(...) or explicitly set "
-                "VLLM_USE_V1=0 or 1 and report this issue on Github.")
+                "VLLM_USE_V1=0 or 1 and report this issue on Github."
+            )
 
         self.model_config = vllm_config.model_config
         self.vllm_config = vllm_config
@@ -73,8 +75,7 @@ class AsyncLLM(EngineClient):
                 loggers: list[StatLoggerBase] = []
                 if logger.isEnabledFor(logging.INFO):
                     loggers.append(LoggingStatLogger(engine_index=i))
-                loggers.append(
-                    PrometheusStatLogger(vllm_config, engine_index=i))
+                loggers.append(PrometheusStatLogger(vllm_config, engine_index=i))
                 self.stat_loggers.append(loggers)
 
         # Tokenizer (+ ensure liveness if running in another process).
@@ -82,7 +83,8 @@ class AsyncLLM(EngineClient):
             model_config=vllm_config.model_config,
             scheduler_config=vllm_config.scheduler_config,
             parallel_config=vllm_config.parallel_config,
-            lora_config=vllm_config.lora_config)
+            lora_config=vllm_config.lora_config,
+        )
         self.tokenizer.ping()
 
         # Processor (converts Inputs --> EngineCoreRequests).
@@ -93,13 +95,16 @@ class AsyncLLM(EngineClient):
         )
 
         # OutputProcessor (converts EngineCoreOutputs --> RequestOutput).
-        self.output_processor = OutputProcessor(self.tokenizer,
-                                                log_stats=self.log_stats)
+        self.output_processor = OutputProcessor(
+            self.tokenizer, log_stats=self.log_stats
+        )
 
         # EngineCore (starts the engine in background process).
-        core_client_class = AsyncMPClient if (
-            vllm_config.parallel_config.data_parallel_size
-            == 1) else DPAsyncMPClient
+        core_client_class = (
+            AsyncMPClient
+            if (vllm_config.parallel_config.data_parallel_size == 1)
+            else DPAsyncMPClient
+        )
 
         self.engine_core = core_client_class(
             vllm_config=vllm_config,
@@ -114,43 +119,31 @@ class AsyncLLM(EngineClient):
             self._run_output_handler()
         except RuntimeError:
             pass
-        
-         # If usage stat is enabled, collect relevant info.
+
+        # If usage stat is enabled, collect relevant info.
         if is_usage_stats_enabled():
-            from vllm.model_executor.model_loader import (
-                get_architecture_class_name)
+            from vllm.model_executor.model_loader import get_architecture_class_name
+
             usage_message.report_usage(
                 get_architecture_class_name(self.model_config),
                 usage_context,
                 extra_kvs={
                     # Common configuration
-                    "dtype":
-                    str(self.model_config.dtype),
-                    "tensor_parallel_size":
-                    vllm_config.parallel_config.tensor_parallel_size,
-                    "block_size":
-                    vllm_config.cache_config.block_size,
-                    "gpu_memory_utilization":
-                    vllm_config.cache_config.gpu_memory_utilization,
-
+                    "dtype": str(self.model_config.dtype),
+                    "tensor_parallel_size": vllm_config.parallel_config.tensor_parallel_size,
+                    "block_size": vllm_config.cache_config.block_size,
+                    "gpu_memory_utilization": vllm_config.cache_config.gpu_memory_utilization,
                     # Quantization
-                    "quantization":
-                    self.model_config.quantization,
-                    "kv_cache_dtype":
-                    str(vllm_config.cache_config.cache_dtype),
-
+                    "quantization": self.model_config.quantization,
+                    "kv_cache_dtype": str(vllm_config.cache_config.cache_dtype),
                     # Feature flags
-                    "enable_lora":
-                    bool(vllm_config.lora_config),
-                    "enable_prompt_adapter":
-                    bool(vllm_config.prompt_adapter_config),
-                    "enable_prefix_caching":
-                    vllm_config.cache_config.enable_prefix_caching,
-                    "enforce_eager":
-                    vllm_config.model_config.enforce_eager,
-                    "disable_custom_all_reduce":
-                    vllm_config.parallel_config.disable_custom_all_reduce,
-                })
+                    "enable_lora": bool(vllm_config.lora_config),
+                    "enable_prompt_adapter": bool(vllm_config.prompt_adapter_config),
+                    "enable_prefix_caching": vllm_config.cache_config.enable_prefix_caching,
+                    "enforce_eager": vllm_config.model_config.enforce_eager,
+                    "disable_custom_all_reduce": vllm_config.parallel_config.disable_custom_all_reduce,
+                },
+            )
 
     @classmethod
     def from_vllm_config(
@@ -167,13 +160,16 @@ class AsyncLLM(EngineClient):
                 "Using V1 AsyncLLMEngine, but envs.VLLM_USE_V1=False. "
                 "This should not happen. As a workaround, try using "
                 "AsyncLLMEngine.from_vllm_config(...) or explicitly set "
-                "VLLM_USE_V1=0 or 1 and report this issue on Github.")
+                "VLLM_USE_V1=0 or 1 and report this issue on Github."
+            )
 
         # FIXME(rob): refactor VllmConfig to include the StatLoggers
         # include StatLogger in the Oracle decision.
         if stat_loggers is not None:
-            raise ValueError("Custom StatLoggers are not yet supported on V1. "
-                             "Explicitly set VLLM_USE_V1=0 to disable V1.")
+            raise ValueError(
+                "Custom StatLoggers are not yet supported on V1. "
+                "Explicitly set VLLM_USE_V1=0 to disable V1."
+            )
 
         # Create the LLMEngine.
         return cls(
@@ -236,18 +232,22 @@ class AsyncLLM(EngineClient):
         if self.errored:
             raise EngineDeadError()
 
-        assert isinstance(params, SamplingParams), \
-            "Pooling is not supported in V1"
+        assert isinstance(params, SamplingParams), "Pooling is not supported in V1"
 
         # Create a new output collector for the request.
         queue = RequestOutputCollector(output_kind=params.output_kind)
 
         # Convert Input --> Request.
-        request = self.processor.process_inputs(request_id, prompt, params,
-                                                arrival_time, lora_request,
-                                                trace_headers,
-                                                prompt_adapter_request,
-                                                priority)
+        request = self.processor.process_inputs(
+            request_id,
+            prompt,
+            params,
+            arrival_time,
+            lora_request,
+            trace_headers,
+            prompt_adapter_request,
+            priority,
+        )
 
         if params.n == 1:
             await self._add_request(request, None, 0, queue)
@@ -263,9 +263,13 @@ class AsyncLLM(EngineClient):
             await self._add_request(child_request, parent_request, idx, queue)
         return queue
 
-    async def _add_request(self, request: EngineCoreRequest,
-                           parent_req: Optional[ParentRequest], index: int,
-                           queue: RequestOutputCollector):
+    async def _add_request(
+        self,
+        request: EngineCoreRequest,
+        parent_req: Optional[ParentRequest],
+        index: int,
+        queue: RequestOutputCollector,
+    ):
 
         # Add the request to OutputProcessor (this process).
         self.output_processor.add_request(request, parent_req, index, queue)
@@ -382,23 +386,26 @@ class AsyncLLM(EngineClient):
                     outputs = await engine_core.get_output_async()
                     num_outputs = len(outputs.outputs)
 
-                    iteration_stats = IterationStats() if (
-                        log_stats and num_outputs) else None
+                    iteration_stats = (
+                        IterationStats() if (log_stats and num_outputs) else None
+                    )
 
                     # Split outputs into chunks of at most
                     # VLLM_V1_OUTPUT_PROC_CHUNK_SIZE, so that we don't block the
                     # event loop for too long.
                     if num_outputs <= VLLM_V1_OUTPUT_PROC_CHUNK_SIZE:
-                        slices = (outputs.outputs, )
+                        slices = (outputs.outputs,)
                     else:
                         slices = np.array_split(
                             outputs.outputs,
-                            cdiv(num_outputs, VLLM_V1_OUTPUT_PROC_CHUNK_SIZE))
+                            cdiv(num_outputs, VLLM_V1_OUTPUT_PROC_CHUNK_SIZE),
+                        )
 
                     for i, outputs_slice in enumerate(slices):
                         # 2) Process EngineCoreOutputs.
                         processed_outputs = output_processor.process_outputs(
-                            outputs_slice, outputs.timestamp, iteration_stats)
+                            outputs_slice, outputs.timestamp, iteration_stats
+                        )
                         # NOTE: RequestOutputs are pushed to their queues.
                         assert not processed_outputs.request_outputs
 
@@ -408,7 +415,8 @@ class AsyncLLM(EngineClient):
 
                         # 3) Abort any reqs that finished due to stop strings.
                         await engine_core.abort_requests_async(
-                            processed_outputs.reqs_to_abort)
+                            processed_outputs.reqs_to_abort
+                        )
 
                     # 4) Logging.
                     # TODO(rob): make into a coroutine and launch it in
@@ -429,7 +437,7 @@ class AsyncLLM(EngineClient):
     async def abort(self, request_id: str) -> None:
         """Abort RequestId in OutputProcessor and EngineCore."""
 
-        request_ids = self.output_processor.abort_requests((request_id, ))
+        request_ids = self.output_processor.abort_requests((request_id,))
         await self.engine_core.abort_requests_async(request_ids)
 
         if self.log_requests:
@@ -444,8 +452,9 @@ class AsyncLLM(EngineClient):
         """static so that it can be used from the output_handler task
         without a circular ref to AsyncLLM."""
         for stat_logger in stat_loggers:
-            stat_logger.record(scheduler_stats=scheduler_stats,
-                               iteration_stats=iteration_stats)
+            stat_logger.record(
+                scheduler_stats=scheduler_stats, iteration_stats=iteration_stats
+            )
 
     def encode(
         self,
@@ -497,8 +506,7 @@ class AsyncLLM(EngineClient):
     async def stop_profile(self) -> None:
         await self.engine_core.profile_async(False)
 
-    async def reset_prefix_cache(self,
-                                 device: Optional[Device] = None) -> None:
+    async def reset_prefix_cache(self, device: Optional[Device] = None) -> None:
         if device == Device.CPU:
             raise ValueError("Not supported on CPU.")
         await self.engine_core.reset_prefix_cache_async()
