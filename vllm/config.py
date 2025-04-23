@@ -6,6 +6,7 @@ import enum
 import hashlib
 import inspect
 import json
+import re
 import sys
 import textwrap
 import warnings
@@ -328,6 +329,8 @@ class ModelConfig:
         factors.append(self.rope_theta)
         # hf_config can control how the model looks!
         factors.append(self.hf_config.to_json_string())
+        str_factors = str(factors)
+        assert_hashable(str_factors)
         return hashlib.sha256(str(factors).encode()).hexdigest()
 
     def __init__(
@@ -1248,7 +1251,7 @@ class ModelConfig:
                 or getattr(self.hf_config, "is_matryoshka", False))
 
 
-BlockSize = Literal[8, 16, 32, 64, 128]
+BlockSize = Literal[1, 8, 16, 32, 64, 128]
 CacheDType = Literal["auto", "fp8", "fp8_e4m3", "fp8_e5m2"]
 PrefixCachingHashAlgo = Literal["builtin", "sha256"]
 
@@ -1258,11 +1261,14 @@ PrefixCachingHashAlgo = Literal["builtin", "sha256"]
 class CacheConfig:
     """Configuration for the KV cache."""
 
-    block_size: Optional[BlockSize] = None
+    block_size: BlockSize = None  # type: ignore
     """Size of a contiguous cache block in number of tokens. This is ignored on
     neuron devices and set to `--max-model-len`. On CUDA devices, only block
     sizes up to 32 are supported. On HPU devices, block size defaults to 128.
-    """
+
+    This config has no static default. If left unspecified by the user, it will
+    be set in `Platform.check_and_update_configs()` based on the current
+    platform."""
     gpu_memory_utilization: float = 0.9
     """The fraction of GPU memory to be used for the model executor, which can
     range from 0 to 1. For example, a value of 0.5 would imply 50% GPU memory
@@ -1587,8 +1593,21 @@ class ParallelConfig:
     the product of the tensor parallel size and data parallel size."""
     data_parallel_rank: int = 0
     """Rank of the data parallel group."""
-    data_parallel_rank_local: Optional[int] = None
-    """Local rank of the data parallel group, defaults to global rank."""
+    _data_parallel_rank_local: Optional[int] = field(default=None, init=False)
+    """Private field to store the local rank of the data parallel group."""
+
+    @property
+    def data_parallel_rank_local(self) -> int:
+        """Local rank of the data parallel group, defaults to global rank."""
+        if self._data_parallel_rank_local is None:
+            return self.data_parallel_rank
+        return self._data_parallel_rank_local
+
+    @data_parallel_rank_local.setter
+    def data_parallel_rank_local(self, value: int) -> None:
+        """Set the local rank of the data parallel group."""
+        self._data_parallel_rank_local = value
+
     data_parallel_master_ip: str = "127.0.0.1"
     """IP of the data parallel master."""
     data_parallel_master_port: int = 29500
@@ -4061,3 +4080,30 @@ def get_current_vllm_config() -> VllmConfig:
         from vllm.config import VllmConfig
         return VllmConfig()
     return _current_vllm_config
+
+
+def contains_object_print(text):
+    """
+    Check if the text looks like a printed Python object, e.g.
+    contains any substring matching the pattern: "at 0xFFFFFFF>"
+    We match against 0x followed by 2-16 hex chars (there's
+    a max of 16 on a 64 bit system).
+
+    Args:
+        text (str): The text to check
+
+    Returns:
+        bool: True if a match is found, False otherwise
+    """
+    pattern = r'at 0x[a-fA-F0-9]{2,16}>'
+    match = re.search(pattern, text)
+    return match is not None
+
+
+def assert_hashable(text):
+    if not contains_object_print(text):
+        return True
+    raise AssertionError(
+        f"vLLM tried to hash some configs that may have Python objects ids "
+        f"in them. This is a bug, please file an issue. "
+        f"Text being hashed: {text}")
