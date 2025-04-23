@@ -397,7 +397,6 @@ class MambaMixer2(CustomOp):
         has_prefill = num_prefills > 0
         has_decode = num_decodes > 0
 
-        seq_len, _ = hidden_states.shape
         groups_time_state_size = self.n_groups * self.ssm_state_size
 
         # 1. Gated MLP's linear projection
