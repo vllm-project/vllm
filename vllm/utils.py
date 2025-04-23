@@ -628,12 +628,12 @@ def get_open_port() -> int:
     process. Currently it uses 2 ports.
     """
     if "VLLM_DP_MASTER_PORT" in os.environ:
-        dp_port = envs.VLLM_DP_MASTER_PORT
+        dp_master_port = envs.VLLM_DP_MASTER_PORT
+        reserved_port_range = range(dp_master_port, dp_master_port + 10)
         while True:
-            port = _get_open_port()
-            if dp_port <= port < dp_port + 10:
-                continue
-            return port
+            candidate_port = _get_open_port()
+            if candidate_port not in reserved_port_range:
+                return candidate_port
     return _get_open_port()
 
 
