@@ -202,11 +202,8 @@ class TTWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
         self.mesh_device = self._open_mesh_device()
         self.device_config.device = self.mesh_device
         
-        # TODO: Add flag for enabling program cache
+        # Enable program cache
         self._enable_program_cache()
-        
-        # TODO: Add flag for enabling async mode
-        self._enable_async_mode()
 
     def load_model(self):
         self.model_runner.load_model()
@@ -379,14 +376,6 @@ class TTWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
     
     # TT-NN utilities
     
-    def _get_devices(self):
-        if self.mesh_device:
-            devices = self.mesh_device.get_devices()
-        else:
-            devices = []
-            logger.warning("No devices exist")
-        return devices
-    
     def _get_dispatch_core_type(self):
         dispatch_core_type = ttnn.device.DispatchCoreType.WORKER
         if ("WH_ARCH_YAML" in os.environ) and os.environ["WH_ARCH_YAML"] == "wormhole_b0_80_arch_eth_dispatch.yaml":
@@ -435,37 +424,20 @@ class TTWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
         return mesh_device
     
     def _enable_program_cache(self):
-        devices = self._get_devices()
-        if not devices or len(devices) == 0:
-            logger.warning("No devices found to apply program cache to: PROGRAM CACHE DISABLED")
-        for dev in devices:
-            dev.enable_program_cache()
-            
-    def _enable_async_mode(self):
-        devices = self._get_devices()
-        if not devices or len(devices) == 0:
-            logger.warning("No devices found to apply async mode to: ASYNC MODE DISABLED")
-        for dev in devices:
-            dev.enable_async(True)
-        
+        assert self.mesh_device is not None, "Mesh device is not initialized"
+        self.mesh_device.enable_program_cache()
+    
     ## Destructor (used to close devices)
     
     def __del__(self):
         del self.model_runner  # Delete model runner first in case there are model arifacts
         
         if self.mesh_device:
-            devices = self.mesh_device.get_devices()
-            
             # Disable program cache
-            for dev in devices:
-                dev.disable_and_clear_program_cache()
-            
-            # Disable async mode
-            for dev in devices:
-                dev.enable_async(False)
+            self.mesh_device.disable_and_clear_program_cache()
             
             # Dump device profiler
-            for device in devices:
+            for device in self.mesh_device.get_devices():
                 ttnn.DumpDeviceProfiler(device)
 
             # Close devices
