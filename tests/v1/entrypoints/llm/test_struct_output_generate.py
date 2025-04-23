@@ -64,7 +64,8 @@ def test_structured_output(
 ):
     monkeypatch.setenv("VLLM_USE_V1", "1")
 
-    # Don't use eager execution on TPUs because of recompilation
+    # Don't use eager execution on TPUs because we want to test for no
+    # recompilation at runtime
     enforce_eager = bool(not current_platform.is_tpu())
     # Use a single LLM instance for several scenarios to
     # speed up the test suite.
