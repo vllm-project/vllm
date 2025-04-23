@@ -545,8 +545,8 @@ class MambaMixer2(CustomOp):
             dt_d = dt_d[:, :, None].expand(-1, -1, self.head_dim)
             dt_bias = self.dt_bias[:, None, ...].expand(-1, self.head_dim)
             D_d = self.D[:, None, ...].expand(-1, self.head_dim)
-            B_d = B_d.view(-1, n_groups, B.shape[1] // n_groups)
-            C_d = C_d.view(-1, n_groups, C.shape[1] // n_groups)
+            B_d = B_d.view(-1, n_groups, B_d.shape[1] // n_groups)
+            C_d = C_d.view(-1, n_groups, C_d.shape[1] // n_groups)
             hidden_states_d = hidden_states_d.view(
                 -1, self.num_heads // self.tp_size, self.head_dim)
 
