@@ -3,8 +3,15 @@ from typing import List, Optional, Tuple
 
 import torch
 
+from vllm import envs
 from vllm.platforms import current_platform
 from vllm.utils import direct_register_custom_op
+
+
+def is_rocm_aiter_moe_enabled() -> bool:
+    return current_platform.is_rocm() \
+        and envs.VLLM_ROCM_USE_AITER_MOE \
+        and envs.VLLM_ROCM_USE_AITER \
 
 
 def rocm_aiter_asm_moe_tkw1(hidden_states,
