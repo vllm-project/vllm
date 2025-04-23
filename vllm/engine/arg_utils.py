@@ -17,8 +17,9 @@ from typing_extensions import TypeIs
 import vllm.envs as envs
 from vllm import version
 from vllm.config import (BlockSize, CacheConfig, CacheDType, CompilationConfig,
-                         Config, ConfigFormat, DecodingConfig, Device,
-                         DeviceConfig, DistributedExecutorBackend, HfOverrides,
+                         ConfigFormat, ConfigType, DecodingConfig, Device,
+                         DeviceConfig, DistributedExecutorBackend,
+                         GuidedDecodingBackendV1, HfOverrides,
                          KVTransferConfig, LoadConfig, LoadFormat, LoRAConfig,
                          ModelConfig, ModelImpl, MultiModalConfig,
                          ObservabilityConfig, ParallelConfig, PoolerConfig,
@@ -304,7 +305,7 @@ class EngineArgs:
             """Check if the class is a custom type."""
             return cls.__module__ != "builtins"
 
-        def get_kwargs(cls: type[Config]) -> dict[str, Any]:
+        def get_kwargs(cls: ConfigType) -> dict[str, Any]:
             cls_docs = get_attr_docs(cls)
             kwargs = {}
             for field in fields(cls):
@@ -678,13 +679,15 @@ class EngineArgs:
             '--mm-processor-kwargs',
             default=None,
             type=json.loads,
-            help=('Overrides for the multimodal input mapping/processing, '
-                  'e.g., image processor. For example: ``{"num_crops": 4}``.'))
+            help=('Overrides for the multi-modal processor obtained from '
+                  '``AutoProcessor.from_pretrained``. The available overrides '
+                  'depend on the model that is being run.'
+                  'For example, for Phi-3-Vision: ``{"num_crops": 4}``.'))
         parser.add_argument(
             '--disable-mm-preprocessor-cache',
             action='store_true',
-            help='If true, then disables caching of the multi-modal '
-            'preprocessor/mapper. (not recommended)')
+            help='If True, disable caching of the processed multi-modal '
+            'inputs.')
 
         # LoRA related configs
         parser.add_argument('--enable-lora',
@@ -766,11 +769,18 @@ class EngineArgs:
                             help=('Maximum number of forward steps per '
                                   'scheduler call.'))
 
-        parser.add_argument('--speculative-config',
-                            type=json.loads,
-                            default=None,
-                            help='The configurations for speculative decoding.'
-                            ' Should be a JSON string.')
+        # Speculative arguments
+        speculative_group = parser.add_argument_group(
+            title="SpeculativeConfig",
+            description=SpeculativeConfig.__doc__,
+        )
+        speculative_group.add_argument(
+            '--speculative-config',
+            type=json.loads,
+            default=None,
+            help='The configurations for speculative decoding.'
+            ' Should be a JSON string.')
+
         parser.add_argument(
             '--ignore-patterns',
             action="append",
@@ -1361,14 +1371,13 @@ class EngineArgs:
                                recommend_to_remove=True)
             return False
 
-        # Xgrammar and Guidance are supported.
-        SUPPORTED_GUIDED_DECODING = [
-            "xgrammar", "xgrammar:disable-any-whitespace", "guidance",
-            "guidance:disable-any-whitespace", "auto"
-        ]
-        if self.guided_decoding_backend not in SUPPORTED_GUIDED_DECODING:
-            _raise_or_fallback(feature_name="--guided-decoding-backend",
-                               recommend_to_remove=False)
+        # remove backend options when doing this check
+        if self.guided_decoding_backend.split(':')[0] \
+            not in get_args(GuidedDecodingBackendV1):
+            _raise_or_fallback(
+                feature_name=
+                f"--guided-decoding-backend={self.guided_decoding_backend}",
+                recommend_to_remove=False)
             return False
 
         # Need at least Ampere for now (FA support required).
