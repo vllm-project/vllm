@@ -167,7 +167,6 @@ class ModelOptFp8LinearMethod(LinearMethodBase):
                                      input_scale=layer.input_scale,
                                      bias=bias)
 
-
 class ModelOptNvFp4Config(QuantizationConfig):
     """Config class for ModelOpt FP4."""
 
@@ -625,9 +624,10 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
                         topk_weights=topk_weights,
                         topk_ids=topk_ids,
                         m=x.shape[0],
-                        n=layer.w2_weight.shape[1],
+                        n=layer.w2_weight.shape[2] * 2,
                         k=x.shape[1],
                         e=layer.w13_weight.shape[0],
-                        a1_gscale=layer.w13_input_scale,
-                        a2_gscale=layer.w2_input_scale,
+                        a1_gscale=layer.g1_alphas,
+                        a2_gscale=layer.g2_alphas,
+                        device=x.device
         ).to(x.dtype)
