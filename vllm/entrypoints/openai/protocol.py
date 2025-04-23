@@ -1289,7 +1289,12 @@ class ClassificationRequest(OpenAIBaseModel):
     input: Union[list[str], str]
     truncate_prompt_tokens: Optional[int] = None
     user: Optional[str] = None
+
+    # doc: begin-classification-pooling-params
     additional_data: Optional[Any] = None
+    # doc: end-classification-pooling-params
+
+    # doc: begin-classification-extra-params
     priority: int = Field(
         default=0,
         description=(
@@ -1297,6 +1302,8 @@ class ClassificationRequest(OpenAIBaseModel):
             "default: 0). Any priority other than 0 will raise an error "
             "if the served model does not use priority scheduling."),
     )
+
+    # doc: end-classification-extra-params
 
     def to_pooling_params(self):
         return PoolingParams(additional_data=self.additional_data)

@@ -26,16 +26,21 @@ def server():
 
 
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
-def test_single_input_classification(server: RemoteOpenAIServer, model_name: str):
+def test_single_input_classification(server: RemoteOpenAIServer,
+                                     model_name: str):
     input_text = "This product was excellent and exceeded my expectations"
 
     classification_response = requests.post(
         server.url_for("classify"),
-        json={"model": model_name, "input": input_text},
+        json={
+            "model": model_name,
+            "input": input_text
+        },
     )
 
     classification_response.raise_for_status()
-    output = ClassificationResponse.model_validate(classification_response.json())
+    output = ClassificationResponse.model_validate(
+        classification_response.json())
 
     assert output.object == "list"
     assert output.model == MODEL_NAME
@@ -45,7 +50,8 @@ def test_single_input_classification(server: RemoteOpenAIServer, model_name: str
 
 
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
-def test_multiple_inputs_classification(server: RemoteOpenAIServer, model_name: str):
+def test_multiple_inputs_classification(server: RemoteOpenAIServer,
+                                        model_name: str):
     input_texts = [
         "The product arrived on time and works perfectly",
         "I'm very satisfied with my purchase, would buy again",
@@ -57,9 +63,13 @@ def test_multiple_inputs_classification(server: RemoteOpenAIServer, model_name: 
 
     classification_response = requests.post(
         server.url_for("classify"),
-        json={"model": model_name, "input": input_texts},
+        json={
+            "model": model_name,
+            "input": input_texts
+        },
     )
-    output = ClassificationResponse.model_validate(classification_response.json())
+    output = ClassificationResponse.model_validate(
+        classification_response.json())
 
     assert len(output.data) == len(input_texts)
     for i, item in enumerate(output.data):
@@ -76,11 +86,16 @@ def test_truncate_prompt_tokens(server: RemoteOpenAIServer, model_name: str):
 
     classification_response = requests.post(
         server.url_for("classify"),
-        json={"model": model_name, "input": long_text, "truncate_prompt_tokens": 5},
+        json={
+            "model": model_name,
+            "input": long_text,
+            "truncate_prompt_tokens": 5
+        },
     )
 
     classification_response.raise_for_status()
-    output = ClassificationResponse.model_validate(classification_response.json())
+    output = ClassificationResponse.model_validate(
+        classification_response.json())
 
     assert len(output.data) == 1
     assert output.data[0].index == 0
@@ -90,12 +105,15 @@ def test_truncate_prompt_tokens(server: RemoteOpenAIServer, model_name: str):
 
 
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
-def test_invalid_truncate_prompt_tokens_error(
-    server: RemoteOpenAIServer, model_name: str
-):
+def test_invalid_truncate_prompt_tokens_error(server: RemoteOpenAIServer,
+                                              model_name: str):
     classification_response = requests.post(
         server.url_for("classify"),
-        json={"model": model_name, "input": "test", "truncate_prompt_tokens": 513},
+        json={
+            "model": model_name,
+            "input": "test",
+            "truncate_prompt_tokens": 513
+        },
     )
 
     error = classification_response.json()
@@ -108,7 +126,10 @@ def test_invalid_truncate_prompt_tokens_error(
 def test_empty_input_error(server: RemoteOpenAIServer, model_name: str):
     classification_response = requests.post(
         server.url_for("classify"),
-        json={"model": model_name, "input": ""},
+        json={
+            "model": model_name,
+            "input": ""
+        },
     )
 
     error = classification_response.json()
@@ -117,13 +138,18 @@ def test_empty_input_error(server: RemoteOpenAIServer, model_name: str):
 
 
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
-def test_batch_classification_empty_list(server: RemoteOpenAIServer, model_name: str):
+def test_batch_classification_empty_list(server: RemoteOpenAIServer,
+                                         model_name: str):
     classification_response = requests.post(
         server.url_for("classify"),
-        json={"model": model_name, "input": []},
+        json={
+            "model": model_name,
+            "input": []
+        },
     )
     classification_response.raise_for_status()
-    output = ClassificationResponse.model_validate(classification_response.json())
+    output = ClassificationResponse.model_validate(
+        classification_response.json())
 
     assert output.object == "list"
     assert isinstance(output.data, list)

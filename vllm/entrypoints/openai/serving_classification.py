@@ -2,7 +2,8 @@
 
 import asyncio
 import time
-from typing import AsyncGenerator, Optional, Union, cast
+from collections.abc import AsyncGenerator
+from typing import Optional, Union, cast
 
 import numpy as np
 from fastapi import Request
@@ -10,16 +11,13 @@ from fastapi import Request
 from vllm.config import ModelConfig
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.logger import RequestLogger
-from vllm.entrypoints.openai.protocol import (
-    ClassificationData,
-    ClassificationRequest,
-    ClassificationResponse,
-    ErrorResponse,
-    UsageInfo,
-)
-
+from vllm.entrypoints.openai.protocol import (ClassificationData,
+                                              ClassificationRequest,
+                                              ClassificationResponse,
+                                              ErrorResponse, UsageInfo)
 # yapf: enable
-from vllm.entrypoints.openai.serving_engine import OpenAIServing, TextTokensPrompt
+from vllm.entrypoints.openai.serving_engine import (OpenAIServing,
+                                                    TextTokensPrompt)
 from vllm.entrypoints.openai.serving_models import OpenAIServingModels
 from vllm.inputs.data import TokensPrompt
 from vllm.logger import init_logger
@@ -73,9 +71,9 @@ class OpenAIServingClassification(OpenAIServing):
                 model_name,
             )
 
-        (request_prompts, engine_prompts, lora_request, prompt_adapter_request) = (
-            await self._prepare_classification_inputs(request)
-        )
+        (request_prompts, engine_prompts, lora_request,
+         prompt_adapter_request) = (
+             await self._prepare_classification_inputs(request))
 
         generators = await self._get_classification_generators(
             request_id,
@@ -98,7 +96,8 @@ class OpenAIServingClassification(OpenAIServing):
 
             assert all(final_res is not None for final_res in final_res_batch)
 
-            final_res_batch_checked = cast(list[PoolingRequestOutput], final_res_batch)
+            final_res_batch_checked = cast(list[PoolingRequestOutput],
+                                           final_res_batch)
 
             return self.request_output_to_classify_response(
                 final_res_batch_checked,
@@ -115,23 +114,21 @@ class OpenAIServingClassification(OpenAIServing):
             return self.create_error_response(str(e))
 
     def _validate_request(
-        self, request: ClassificationRequest
-    ) -> Optional[ErrorResponse]:
-        if (
-            request.truncate_prompt_tokens is not None
-            and request.truncate_prompt_tokens > self.max_model_len
-        ):
+            self, request: ClassificationRequest) -> Optional[ErrorResponse]:
+        if (request.truncate_prompt_tokens is not None
+                and request.truncate_prompt_tokens > self.max_model_len):
             return self.create_error_response(
                 "truncate_prompt_tokens value is "
                 "greater than max_model_len."
-                " Please, select a smaller truncation size."
-            )
+                " Please, select a smaller truncation size.")
 
         return None
 
-    async def _prepare_classification_inputs(self, request: ClassificationRequest):
+    async def _prepare_classification_inputs(self,
+                                             request: ClassificationRequest):
         """
-        Prepare inputs for classification by tokenizing, preprocessing, and handling adapters.
+        Process classification inputs: tokenize text, resolve adapters, 
+        and prepare model-specific inputs.
         """
         try:
             (
@@ -153,7 +150,8 @@ class OpenAIServingClassification(OpenAIServing):
                 truncate_prompt_tokens=request.truncate_prompt_tokens,
             )
 
-            return request_prompts, engine_prompts, lora_request, prompt_adapter_request
+            return request_prompts, engine_prompts, \
+                    lora_request, prompt_adapter_request
 
         except (ValueError, TypeError) as e:
             logger.exception("Error in preprocessing prompt inputs")
@@ -170,16 +168,13 @@ class OpenAIServingClassification(OpenAIServing):
         prompt_adapter_request: Optional[PromptAdapterRequest],
     ):
         """
-        Create async generators for classification by encoding inputs through the model.
+        Create generators for classification by encoding inputs via the model.
         """
         generators: list[AsyncGenerator[PoolingRequestOutput, None]] = []
 
         try:
-            trace_headers = (
-                None
-                if raw_request is None
-                else await self._get_trace_headers(raw_request.headers)
-            )
+            trace_headers = (None if raw_request is None else await
+                             self._get_trace_headers(raw_request.headers))
 
             pooling_params = request.to_pooling_params()
 
@@ -219,7 +214,8 @@ class OpenAIServingClassification(OpenAIServing):
         model_name: str,
     ) -> ClassificationResponse:
         """
-        Convert model outputs to a formatted classification response with probabilities and labels.
+        Convert model outputs to a formatted classification response 
+        with probabilities and labels.
         """
         items: list[ClassificationData] = []
         num_prompt_tokens = 0
