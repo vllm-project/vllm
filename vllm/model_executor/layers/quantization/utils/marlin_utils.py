@@ -328,16 +328,28 @@ def maybe_warn_marlin_atomic_add(device, dtype):
             "if possible.")
 
 
+def maybe_warn_marlin_atomic_add_env():
+    if envs.VLLM_MARLIN_USE_ATOMIC_ADD:
+        return
+    logger.info_once(
+        "Marlin kernel can achieve better performance for small size_n "
+        "with experimental use_atomic_add feature. "
+        "You can consider set environment variable "
+        "VLLM_MARLIN_USE_ATOMIC_ADD to 1 if possible.")
+
+
 def should_use_atomic_add_reduce(m: int, n: int, k: int, device: torch.device,
                                  dtype: torch.dtype) -> bool:
-    # disable atomicAdd reduce by default,
-    # one can enable it with VLLM_MARLIN_USE_ATOMIC_ADD=1
-    if not envs.VLLM_MARLIN_USE_ATOMIC_ADD or device.type != "cuda":
-        return False
 
     # the performance of atomicAdd is better than global reduce
     # only when m*n is small and k is large
-    if n >= 2048 or k < 2048:
+    if n >= 2048 or k < 2048 or device.type != "cuda":
+        return False
+
+    # disable atomicAdd reduce by default,
+    # one can enable it with VLLM_MARLIN_USE_ATOMIC_ADD=1
+    if not envs.VLLM_MARLIN_USE_ATOMIC_ADD:
+        maybe_warn_marlin_atomic_add_env()
         return False
 
     # sm8x doesn't support atomicAdd + bfloat16 natively

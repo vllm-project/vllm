@@ -124,8 +124,7 @@ def fused_marlin_moe(hidden_states: torch.Tensor,
     intermediate_cache3 = intermediate_cache13[:M * topk_ids.shape[1] * K]
     intermediate_cache3 = intermediate_cache3.view(-1, K)
 
-    maybe_warn_marlin_atomic_add(hidden_states.device,
-                                 hidden_states.dtype == torch.half)
+    maybe_warn_marlin_atomic_add(hidden_states.device, hidden_states.dtype)
     use_atomic_add = hidden_states.dtype == torch.half or \
         torch.cuda.get_device_capability(hidden_states.device)[0] >= 9
 
