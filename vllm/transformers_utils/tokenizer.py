@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import contextlib
+import copy
 import os
 import warnings
 from functools import cached_property, lru_cache
@@ -69,6 +70,16 @@ def encode_tokens(
     return tokenizer.encode(text)
 
 
+@lru_cache
+def _cached_tokenizer_len(tokenizer: AnyTokenizer) -> int:
+    return len(tokenizer)
+
+
+@lru_cache
+def _cached_tokenizer_vocab(tokenizer: AnyTokenizer) -> dict[str, int]:
+    return tokenizer.get_vocab()
+
+
 class _CachedTokenizerProxy:
     """
     By default, transformers will recompute multiple tokenizer properties
@@ -76,16 +87,14 @@ class _CachedTokenizerProxy:
     This proxy caches these properties for faster access.
     """
 
-    def __init__(self, tokenizer: AnyTokenizer) -> None:
-        self.__tokenizer = tokenizer
-        self.__tokenizer_vocab = tokenizer.get_vocab()
-        self.__tokenizer_len = len(tokenizer)
-
-    def __len__(self) -> int:
-        return self.__tokenizer_len
+    # NOTE: This is set by `get_cached_tokenizer`
+    __tokenizer: AnyTokenizer
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self.__tokenizer, name)
+
+    def __reduce__(self):
+        return (get_cached_tokenizer, (self.__tokenizer, ))
 
     @cached_property
     def all_special_ids(self) -> list[int]:
@@ -103,7 +112,7 @@ class _CachedTokenizerProxy:
     def max_token_id(self) -> int:
         tokenizer = self.__tokenizer
 
-        max_token_id = max(self.__tokenizer_vocab.values())
+        max_token_id = max(self.get_vocab().values())
         # Some tokenizers (e.g., QwenTokenizer) have special tokens that
         # are added and included in the implementation of the vocab_size
         # property, but not in get_vocab(); if there is an implementation
@@ -115,24 +124,27 @@ class _CachedTokenizerProxy:
         return max_token_id
 
     def get_vocab(self) -> dict[str, int]:
-        return self.__tokenizer_vocab
+        return _cached_tokenizer_vocab(self.__tokenizer)
 
-    def __reduce__(self):
-        return (get_cached_tokenizer, (self.__tokenizer, ))
+    def __len__(self) -> int:
+        return _cached_tokenizer_len(self.__tokenizer)
 
 
 def get_cached_tokenizer(tokenizer: AnyTokenizer) -> AnyTokenizer:
-    """Get tokenizer with cached properties."""
+    """Get a wrapped tokenizer with cached properties."""
+    cached_tokenizer = copy.deepcopy(tokenizer)
 
-    # NOTE: We need the proxy type to inherit from the original type
-    # so that `isinstance` checks work as expected
-    proxy_type = type(
+    # Patch the type so that attribute lookup prioritizes _CachedTokenizerProxy
+    cached_tokenizer.__class__ = type(
         f"Cached{type(tokenizer).__name__}",
         (_CachedTokenizerProxy, *type(tokenizer).mro()),
         {},
     )
 
-    return proxy_type(tokenizer)  # type: ignore
+    tokenizer_attr = f"{_CachedTokenizerProxy.__name__}__tokenizer"
+    setattr(cached_tokenizer, tokenizer_attr, tokenizer)
+
+    return cached_tokenizer
 
 
 def patch_padding_side(tokenizer: PreTrainedTokenizer) -> None:
