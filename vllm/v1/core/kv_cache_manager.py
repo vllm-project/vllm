@@ -7,7 +7,6 @@ from typing import Optional
 from vllm.logger import init_logger
 from vllm.utils import cdiv, sha256
 from vllm.v1.core.block_pool import BlockPool
-from vllm.v1.core.kv_cache_manager import KVCacheBlocksInterface
 from vllm.v1.core.kv_cache_utils import (BlockHashType, KVCacheBlock,
                                          hash_request_tokens)
 from vllm.v1.core.specialized_manager import get_specialized_manager
@@ -19,25 +18,23 @@ logger = init_logger(__name__)
 
 
 @dataclass
-class HybridKVCacheBlocks(KVCacheBlocksInterface):
+class KVCacheBlocks:
     blocks: list[list[KVCacheBlock]]
 
     def to_block_ids(self) -> list[list[int]]:
         return [[blk.block_id for blk in blk_one_layer]
                 for blk_one_layer in self.blocks]
 
-    def __add__(self,
-                other: "KVCacheBlocksInterface") -> "KVCacheBlocksInterface":
-        assert isinstance(other, HybridKVCacheBlocks)
-        return HybridKVCacheBlocks([
+    def __add__(self, other: "KVCacheBlocks") -> "KVCacheBlocks":
+        return KVCacheBlocks([
             self_blocks_i + other_blocks_i
             for self_blocks_i, other_blocks_i in zip(self.blocks, other.blocks)
         ])
 
 
-class HybridKVCacheManager:
+class KVCacheManager:
     """
-    The HybridKVCacheManager for models with multiple KV cache types
+    The KVCacheManager for models with multiple KV cache types
      (e.g., Gemma-2) and thus multiple kv cache groups (Refer to class 
      `KVCacheConfig` for the meaning of kv cache groups).
     """
@@ -93,7 +90,7 @@ class HybridKVCacheManager:
         # This is used to track the number of cached blocks for each request.
         # This is only used to track the RUNNING requests, we do not track the
         # data for reempted ones.
-        self.num_cached_block: dict[str, int] = {}
+        self.num_cached_block: dict[str, list[int]] = {}
 
     @property
     def usage(self) -> float:
@@ -116,8 +113,8 @@ class HybridKVCacheManager:
         self.prefix_cache_stats = PrefixCacheStats()
         return stats
 
-    def get_computed_blocks(
-            self, request: Request) -> tuple[HybridKVCacheBlocks, int]:
+    def get_computed_blocks(self,
+                            request: Request) -> tuple[KVCacheBlocks, int]:
         """Get the computed (cached) blocks for the request.
         Note that the computed blocks must be full.
 
@@ -134,7 +131,7 @@ class HybridKVCacheManager:
             computed_blocks: list[list[KVCacheBlock]] = [
                 [] for _ in range(self.num_kv_cache_groups)
             ]
-            return HybridKVCacheBlocks(computed_blocks), 0
+            return KVCacheBlocks(computed_blocks), 0
 
         # The block hashes for the request may already be computed
         # if the scheduler has tried to schedule the request before.
@@ -152,10 +149,11 @@ class HybridKVCacheManager:
             self.prefix_cache_stats.requests += 1
         # When the request requires prompt logprobs, we skip prefix caching.
         if request.sampling_params.prompt_logprobs is not None:
-            return [], 0
+            return KVCacheBlocks([[]
+                                  for _ in range(self.num_kv_cache_groups)]), 0
 
         # TODO: Fix last block problem
-            # if len(block_hashes) * self.block_size == request.num_tokens:
+        # if len(block_hashes) * self.block_size == request.num_tokens:
         #     # When prompt length is divisible by the block size and all
         #     # blocks are cached, we need to recompute the last token. This
         #     # have to be achieved by re-computing an entire block because
@@ -179,16 +177,16 @@ class HybridKVCacheManager:
 
             self.prefix_cache_stats.queries += len(block_hashes)
             self.prefix_cache_stats.hits += len(computed_blocks)
-        return HybridKVCacheBlocks(computed_blocks), num_computed_tokens
+        return KVCacheBlocks(computed_blocks), num_computed_tokens
 
     def allocate_slots(
         self,
         request: Request,
         num_tokens: int,
-        new_computed_blocks: Optional[KVCacheBlocksInterface] = None,
-        num_lookahead_tokens: int = 0,,
+        new_computed_blocks: Optional[KVCacheBlocks] = None,
         num_new_computed_tokens: int = 0,
-    ) -> Optional[HybridKVCacheBlocks]:
+        num_lookahead_tokens: int = 0,
+    ) -> Optional[KVCacheBlocks]:
         """Add slots for a request with new tokens to append.
 
         Args:
@@ -223,7 +221,6 @@ class HybridKVCacheManager:
             raise ValueError("num_tokens must be greater than 0")
 
         if new_computed_blocks is not None:
-            assert isinstance(new_computed_blocks, HybridKVCacheBlocks)
             new_computed_block_list = new_computed_blocks.blocks
         else:
             new_computed_block_list = ([
@@ -285,32 +282,32 @@ class HybridKVCacheManager:
         for i in range(self.num_kv_cache_groups):
             req_blocks[i].extend(new_computed_block_list[i])
 
+        new_blocks: list[list[KVCacheBlock]] = []
         # Start to handle new blocks
-
-        if num_new_blocks <= 0:
-            # No new block is needed.
-            new_blocks = []
-        else:
-            # Get new blocks from the free block pool.
-            # TODO: to group
-            num_new_blocks = min(
-                num_new_blocks,
-                self.block_pool.get_num_free_blocks(),
-                # Should not exceed the maximum number of blocks per request.
-                # This is especially because the block table has the shape
-                # [..., max_num_blocks_per_req].
-                self.max_num_blocks_per_req - len(req_blocks),
-            )
-            assert num_new_blocks > 0
+        for i in range(self.num_kv_cache_groups):
+            if num_new_blocks[i] <= 0:
+                # No new block is needed.
+                new_blocks.append([])
+            else:
+                # Get new blocks from the free block pool.
+                num_new_blocks_i = min(
+                    num_new_blocks[i],
+                    # Should not exceed the maximum number of blocks per
+                    # request.
+                    # This is especially because the block table has the shape
+                    # [..., max_num_blocks_per_req].
+                    self.max_num_blocks_per_req[i] - len(req_blocks[i]),
+                )
+                assert num_new_blocks_i > 0
 
                 # Concatenate the computed block IDs and the new block IDs.
                 new_blocks_this_layer = self.block_pool.get_new_blocks(
-                    num_block_to_allocate)
+                    num_new_blocks_i)
                 new_blocks.append(new_blocks_this_layer)
                 req_blocks[i].extend(new_blocks_this_layer)
 
         if not self.enable_caching:
-            return HybridKVCacheBlocks(new_blocks)
+            return KVCacheBlocks(new_blocks)
 
         # Use `new_computed_block_list` for a new request, and
         # `num_cached_block` for a running request.
@@ -338,7 +335,7 @@ class HybridKVCacheManager:
             num_cached_blocks[i] = num_full_blocks_after_append
 
         self.num_cached_block[request.request_id] = num_cached_blocks
-        return HybridKVCacheBlocks(new_blocks)
+        return KVCacheBlocks(new_blocks)
 
     def free(self, request: Request) -> None:
         """Free the blocks allocated for the request.
@@ -474,36 +471,8 @@ class HybridKVCacheManager:
 
         return computed_blocks, min_computed_tokens
 
-    def _merge_blocks_by_eviction_order(
-            self, blocks: list[list[KVCacheBlock]]) -> list[KVCacheBlock]:
-        """
-        Merge the blocks of different layers to one list. The returned blocks 
-        are sorted by eviction order, with the first block having the highest 
-        eviction priority.
-        Args:
-            blocks: the blocks of each virtual layer, ordered by eviction 
-            priority.
-        Returns:
-            A list of KVCacheBlocks sorted by eviction order.
-        """
-
-        if self.enable_caching:
-            # NOTE (Chen): A simple strategy that interleaves the blocks of
-            # each layer. We can investigate more advanced strategies
-            # in the future.
-            ordered_blocks = []
-            max_len = max(len(blocks_one_layer) for blocks_one_layer in blocks)
-            for i in range(max_len):
-                for blocks_one_layer in blocks:
-                    if i < len(blocks_one_layer):
-                        ordered_blocks.append(blocks_one_layer[i])
-        else:
-            ordered_blocks = []
-            for blocks_one_layer in blocks:
-                ordered_blocks.extend(blocks_one_layer)
-
-        return ordered_blocks
-
     def _free_blocks(self, blocks: list[list[KVCacheBlock]]) -> None:
-        ordered_blocks = self._merge_blocks_by_eviction_order(blocks)
+        ordered_blocks = []
+        for blocks_one_layer in blocks:
+            ordered_blocks.extend(blocks_one_layer)
         self.block_pool.free_blocks(ordered_blocks)

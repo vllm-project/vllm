@@ -15,10 +15,9 @@ from vllm.logger import init_logger
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.v1.core.encoder_cache_manager import (EncoderCacheManager,
                                                 compute_encoder_budget)
-from vllm.v1.core.kv_cache_manager import init_kv_cache_manager
+from vllm.v1.core.kv_cache_manager import KVCacheManager
 from vllm.v1.core.sched.interface import SchedulerInterface
-from vllm.v1.core.sched.output import (CachedRequestData,
-                                       MayMultiGroupBlockIDs, NewRequestData,
+from vllm.v1.core.sched.output import (CachedRequestData, NewRequestData,
                                        SchedulerOutput)
 from vllm.v1.core.sched.utils import check_stop
 from vllm.v1.engine import (EngineCoreEventType, EngineCoreOutput,
@@ -76,7 +75,7 @@ class Scheduler(SchedulerInterface):
         assert num_gpu_blocks is not None and num_gpu_blocks > 0
 
         # Create the KV cache manager.
-        self.kv_cache_manager = init_kv_cache_manager(
+        self.kv_cache_manager = KVCacheManager(
             kv_cache_config=kv_cache_config,
             max_model_len=self.max_model_len,
             enable_caching=self.cache_config.enable_prefix_caching,
@@ -156,7 +155,7 @@ class Scheduler(SchedulerInterface):
         # uses structured decoding.
         structured_output_request_ids: dict[str, int] = {}
 
-        req_to_new_block_ids: dict[str, MayMultiGroupBlockIDs] = {}
+        req_to_new_block_ids: dict[str, list[list[int]]] = {}
         num_scheduled_tokens: dict[str, int] = {}
         token_budget = self.max_num_scheduled_tokens
         # Encoder-related.
@@ -430,11 +429,9 @@ class Scheduler(SchedulerInterface):
 
         # Get the longest common prefix among all requests in the running queue.
         # This can be potentially used for cascade attention.
-        if len(self.kv_cache_config.kv_cache_groups) > 1:
-            num_common_prefix_blocks: Union[int, list[int]] = [0] * len(
-                self.kv_cache_config.kv_cache_groups)
-        else:
-            num_common_prefix_blocks = 0
+        num_common_prefix_blocks: list[int] = [0] * len(
+            self.kv_cache_config.kv_cache_groups)
+
         if self.running:
             any_request = self.running[0]
             num_common_prefix_blocks = (
@@ -516,7 +513,7 @@ class Scheduler(SchedulerInterface):
         request: Request,
         num_scheduled_tokens: int,
         num_scheduled_spec_tokens: int,
-        new_block_ids: MayMultiGroupBlockIDs,
+        new_block_ids: list[list[int]],
         resumed_from_preemption: bool,
     ) -> CachedRequestData:
         # OPTIMIZATION: Cache the CachedRequestData objects to avoid creating

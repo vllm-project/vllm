@@ -11,7 +11,6 @@ from vllm.lora.request import LoRARequest
 from vllm.multimodal.inputs import MultiModalKwargs, PlaceholderRange
 from vllm.sampling_params import SamplingParams, SamplingType
 from vllm.utils import swap_dict_values
-from vllm.v1.core.sched.output import MayMultiGroupBlockIDs
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.outputs import LogprobsTensors
 from vllm.v1.sample.metadata import SamplingMetadata
@@ -32,7 +31,7 @@ class CachedRequestState:
     sampling_params: SamplingParams
     generator: Optional[torch.Generator]
 
-    block_ids: MayMultiGroupBlockIDs
+    block_ids: list[list[int]]
     num_computed_tokens: int
     output_token_ids: list[int]
 

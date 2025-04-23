@@ -372,17 +372,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # Update the block IDs.
             if not req_data.resumed_from_preemption:
                 # Append the new blocks to the existing block IDs.
-                if len(self.kv_cache_config.kv_cache_groups) == 1:
-                    block_ids = cast(list[int], req_state.block_ids)
-                    new_block_ids = cast(list[int], req_data.new_block_ids)
-                    block_ids.extend(new_block_ids)
-                else:
-                    hybrid_block_ids = cast(list[list[int]],
-                                            req_state.block_ids)
-                    new_hybrid_block_ids = cast(list[list[int]],
-                                                req_data.new_block_ids)
-                    for i in range(len(self.kv_cache_config.kv_cache_groups)):
-                        hybrid_block_ids[i].extend(new_hybrid_block_ids[i])
+                for i in range(len(self.kv_cache_config.kv_cache_groups)):
+                    req_state.block_ids[i].extend(req_data.new_block_ids[i])
             else:
                 # The request is resumed from preemption.
                 # Replace the existing block IDs with the new ones.
@@ -444,8 +435,14 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # Some attention backends (namely MLA) may want to separate requests
         # based on if the attention computation will be compute-bound or
         # memory-bound. This gives them a hook to do that.
-        batch_reordered = self.attn_metadata_builder.reorder_batch(
+        batch_reordered = self.attn_metadata_builders[0].reorder_batch(
             self.input_batch, scheduler_output)
+
+        for kv_cache_group_id in range(
+                1, len(self.kv_cache_config.kv_cache_groups)):
+            assert not self.attn_metadata_builders[
+                kv_cache_group_id].reorder_batch(self.input_batch,
+                                                 scheduler_output)
 
         if batch_changed or batch_reordered:
             self.input_batch.refresh_sampling_metadata()
@@ -459,14 +456,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         assert total_num_scheduled_tokens > 0
         num_reqs = self.input_batch.num_reqs
         assert num_reqs > 0
-
-        # Some attention backends (namely MLA) may want to separate requests
-        # based on if the attention computation will be compute-bound or
-        # memory-bound. This gives them a hook to do that.
-        modified_batch = self.attn_metadata_builder.reorder_batch(
-            self.input_batch, scheduler_output)
-        if modified_batch:
-            self.input_batch.refresh_sampling_metadata()
 
         # OPTIMIZATION: Start copying the block table first.
         # This way, we can overlap the copy with the following CPU operations.
@@ -521,16 +510,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                            torch.from_numpy(token_indices),
                            out=self.input_ids_cpu[:total_num_scheduled_tokens])
 
-        if len(self.kv_cache_config.kv_cache_groups) == 1:
-            may_multi_layer_unwrapper = lambda x, _group_id: x
-        else:
-            may_multi_layer_unwrapper = lambda x, group_id: x[group_id]
-
         for kv_cache_group_id, kv_cache_group_spec in enumerate(
                 self.kv_cache_config.kv_cache_groups):
             block_size = kv_cache_group_spec.kv_cache_spec.block_size
-            block_table: BlockTable = may_multi_layer_unwrapper(
-                self.input_batch.block_table, kv_cache_group_id)
+            block_table: BlockTable = self.input_batch.block_table[
+                kv_cache_group_id]
             # Calculate the slot mapping.
             # E.g., [0, 1, 0, 1, 2, 3, 4, 0, 1, 2]
             # -> [0, 0, K, K, K + 1, K + 1, K + 2, 2 * K, 2 * K, 2 * K + 1]
@@ -584,23 +568,19 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             if self.cascade_attn_enabled:
                 common_prefix_len = self._compute_cascade_attn_prefix_len(
                     num_scheduled_tokens,
-                    may_multi_layer_unwrapper(
-                        scheduler_output.num_common_prefix_blocks,
-                        kv_cache_group_id),
+                    scheduler_output.
+                    num_common_prefix_blocks[kv_cache_group_id],
                     kv_cache_group_spec.kv_cache_spec,
-                    self.attn_backends[kv_cache_group_id],
+                    self.attn_metadata_builders[kv_cache_group_id],
                 )
 
-            block_table = may_multi_layer_unwrapper(
-                self.input_batch.block_table, kv_cache_group_id)
+            block_table = self.input_batch.block_table[kv_cache_group_id]
             attn_metadata_i = (
                 self.attn_metadata_builders[kv_cache_group_id].build(
                     num_reqs=num_reqs,
                     num_actual_tokens=total_num_scheduled_tokens,
                     max_query_len=max_num_scheduled_tokens,
-                    common_prefix_len=common_prefix_len,
-                    block_table=block_table,
-                ))
+                    common_prefix_len=common_prefix_len))
             for layer_name in kv_cache_group_spec.layer_names:
                 attn_metadata[layer_name] = attn_metadata_i
 
@@ -640,7 +620,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         num_scheduled_tokens: np.ndarray,
         num_common_prefix_blocks: int,
         kv_cache_spec: KVCacheSpec,
-        attn_backend: AttentionBackend,
+        attn_metadata_builder: AttentionMetadataBuilder,
     ) -> int:
         """Compute the length of the common prefix for cascade attention.
 
@@ -1786,12 +1766,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 raise NotImplementedError(
                     "Non-Attention backend is not supported by V1 "
                     "GPUModelRunner.")
-            if isinstance(self.input_batch.block_table, BlockTable):
-                block_table = self.input_batch.block_table
-            else:
-                block_table = self.input_batch.block_table[i]
+            block_table_i = self.input_batch.block_table[i]
             attn_metadata_builder_i = attn_backend_i.get_builder_cls()(
-                weakref.proxy(self), kv_cache_spec, block_table)
+                weakref.proxy(self), kv_cache_spec, block_table_i)
             self.attn_backends.append(attn_backend_i)
             self.attn_metadata_builders.append(attn_metadata_builder_i)
 

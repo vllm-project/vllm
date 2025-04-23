@@ -291,20 +291,23 @@ class FlashAttentionMetadataBuilder:
         self.num_heads_kv = model_config.get_num_kv_heads(
             runner.parallel_config)
         self.headdim = model_config.get_head_size()
-        self.page_size = self.runner.block_size
+        self.page_size = kv_cache_spec.block_size
+        self.kv_cache_spec = kv_cache_spec
+        self.persistent_block_table = persistent_block_table
 
     def reorder_batch(self, input_batch: "InputBatch",
                       scheduler_output: "SchedulerOutput") -> bool:
         return False
 
     def build(self, num_reqs: int, num_actual_tokens: int, max_query_len: int,
-              common_prefix_len: int, block_table: BlockTable):
+              common_prefix_len: int):
         max_seq_len = self.runner.seq_lens_np[:num_reqs].max()
         query_start_loc_cpu = self.runner.query_start_loc_cpu[:num_reqs + 1]
         query_start_loc = query_start_loc_cpu.to(self.runner.device,
                                                  non_blocking=True)
         seq_lens_cpu = self.runner.seq_lens_cpu[:num_reqs]
         seq_lens = seq_lens_cpu.to(self.runner.device, non_blocking=True)
+        block_table = self.persistent_block_table
         block_table_tensor = block_table.get_device_tensor()[:num_reqs]
         slot_mapping = block_table.slot_mapping_cpu[:num_actual_tokens].to(
             self.runner.device, non_blocking=True).long()
@@ -335,7 +338,7 @@ class FlashAttentionMetadataBuilder:
                     self.runner.query_start_loc_np[:num_reqs + 1],
                     self.runner.seq_lens_np[:num_reqs],
                     block_table,
-                    self.runner.block_size,
+                    self.kv_cache_spec.block_size,
                 )
             local_query_start_loc = torch.from_numpy(virt_q_cu_seqlens_np).to(
                 self.runner.device, non_blocking=True)

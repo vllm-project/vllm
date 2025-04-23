@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# type: ignore
 """Attention layer with FlashInfer."""
 from __future__ import annotations
 

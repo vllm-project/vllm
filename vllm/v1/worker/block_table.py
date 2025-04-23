@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
-from typing import Callable, Concatenate, ParamSpec, Union
+from typing import Callable, Concatenate, ParamSpec
 
 import numpy as np
 import torch
@@ -156,15 +156,11 @@ def initialize_block_table(
     pin_memory: bool,
     device: torch.device,
     kv_cache_config: KVCacheConfig,
-) -> Union[BlockTable, MultiLayerBlockTable]:
+) -> MultiLayerBlockTable:
     max_num_blocks_per_req = [
         cdiv(max_model_len, g.kv_cache_spec.block_size)
         for g in kv_cache_config.kv_cache_groups
     ]
-    if len(kv_cache_config.kv_cache_groups) == 1:
-        return BlockTable(max_num_reqs, max_num_blocks_per_req[0],
-                          max_num_tokens, pin_memory, device)
-    else:
-        return MultiLayerBlockTable(max_num_reqs, max_num_blocks_per_req,
-                                    max_num_tokens, pin_memory, device,
-                                    kv_cache_config)
+    return MultiLayerBlockTable(max_num_reqs, max_num_blocks_per_req,
+                                max_num_tokens, pin_memory, device,
+                                kv_cache_config)

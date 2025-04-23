@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-
+# type: ignore
 from dataclasses import dataclass
 from typing import Any, Optional
 
