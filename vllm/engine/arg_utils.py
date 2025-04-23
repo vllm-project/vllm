@@ -1395,7 +1395,7 @@ class EngineArgs:
         if current_platform.is_rocm():
             from vllm.model_executor.layers.quantization.fp8 import Fp8Config
             load_config = self.create_load_config()
-            quantization_config = VllmConfig._get_quantization_config(
+            quantization_config = VllmConfig.get_quantization_config(
                 model_config, load_config)
             if isinstance(quantization_config, Fp8Config):
                 _raise_or_fallback(feature_name="fp8 for ROCm",

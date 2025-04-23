@@ -308,7 +308,7 @@ class QuarkConfig(QuantizationConfig):
 
     def has_fp8_layer_weights(self):
         layer_quant_config = self.quant_config.get("layer_quant_config")
-        to_dict = lambda obj: cast(Dict[str, Any], obj)
+        to_dict = lambda obj: cast(Dict[str, Any], obj) or {}
         return any([
             'fp8' in to_dict(
                 to_dict(layer_quant_config.get(layer_name)).get("weight")).get(
