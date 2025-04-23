@@ -28,6 +28,11 @@ class TextPrompt(TypedDict):
     to pass the mm_processor_kwargs to each of them.
     """
 
+    cache_salt: NotRequired[str]
+    """
+    Optional cache salt to be used for prefix caching.
+    """
+
 
 class TokensPrompt(TypedDict):
     """Schema for a tokenized prompt."""
@@ -50,6 +55,11 @@ class TokensPrompt(TypedDict):
     multimodal input mapper & processor. Note that if multiple modalities
     have registered mappers etc for the model being considered, we attempt
     to pass the mm_processor_kwargs to each of them.
+    """
+
+    cache_salt: NotRequired[str]
+    """
+    Optional cache salt to be used for prefix caching.
     """
 
 

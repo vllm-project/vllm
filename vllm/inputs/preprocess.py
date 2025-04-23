@@ -17,7 +17,7 @@ from vllm.transformers_utils.tokenizer_group import TokenizerGroup
 
 from .data import (DecoderOnlyInputs, EncoderDecoderInputs, ProcessorInputs,
                    PromptType, SingletonInputs, SingletonPrompt, token_inputs)
-from .parse import (ParsedStrPrompt, ParsedTextPrompt, ParsedTokensPrompt,
+from .parse import (ParsedTextPrompt, ParsedTokensPrompt,
                     is_explicit_encoder_decoder_prompt, parse_singleton_prompt)
 
 logger = init_logger(__name__)
@@ -292,19 +292,18 @@ class InputPreprocessor:
                                   return_mm_hashes,
                                   cache_salt=cache_salt)
 
-    def _get_prompt_data(parsed_prompt: Union[ParsedStrPrompt,
-                                              ParsedTextPrompt,
-                                              ParsedTokensPrompt]):
+    def _get_prompt_data(self, parsed_prompt: Union[ParsedTextPrompt,
+                                                    ParsedTokensPrompt]):
         prompt_text = None
         prompt_token_ids = None
         token_type_ids = None
 
-        content = parsed_prompt["content"]
         if parsed_prompt["type"] == "tokens":
+            content = parsed_prompt["content"]
             prompt_token_ids = content.get("prompt_token_ids")
             token_type_ids = content.get("token_type_ids")
         elif parsed_prompt["type"] == "text":
-            prompt_text = content["prompt"]
+            prompt_text = parsed_prompt["content"]["prompt"]
         else:
             assert_never(parsed_prompt)
 
@@ -331,23 +330,24 @@ class InputPreprocessor:
         * :class:`SingletonInputs` instance
         """
         parsed = parse_singleton_prompt(prompt)
-        content = parsed["content"]
 
         if parsed["type"] == "str":
+            prompt_text = parsed["content"]
             prompt_token_ids = self._tokenize_prompt(
-                content,
+                prompt_text,
                 lora_request=lora_request,
                 tokenization_kwargs=tokenization_kwargs,
             )
 
             return token_inputs(
-                prompt=content,
+                prompt=prompt_text,
                 prompt_token_ids=prompt_token_ids,
             )
 
         prompt_text, prompt_token_ids, token_type_ids = self._get_prompt_data(
             parsed)
 
+        content = parsed["content"]
         multi_modal_data = content.get("multi_modal_data")
         mm_processor_kwargs = content.get("mm_processor_kwargs")
         cache_salt = content.get("cache_salt")
@@ -400,23 +400,24 @@ class InputPreprocessor:
     ) -> SingletonInputs:
         """Async version of :meth:`_extract_prompt_components`."""
         parsed = parse_singleton_prompt(prompt)
-        content = parsed["content"]
 
         if parsed["type"] == "str":
+            prompt_text = parsed["content"]
             prompt_token_ids = await self._tokenize_prompt_async(
-                prompt=content,
+                prompt=prompt_text,
                 lora_request=lora_request,
                 tokenization_kwargs=tokenization_kwargs,
             )
 
             return token_inputs(
-                prompt=content,
+                prompt=prompt_text,
                 prompt_token_ids=prompt_token_ids,
             )
 
         prompt_text, prompt_token_ids, token_type_ids = self._get_prompt_data(
             parsed)
 
+        content = parsed["content"]
         multi_modal_data = content.get("multi_modal_data")
         mm_processor_kwargs = content.get("mm_processor_kwargs")
         cache_salt = content.get("cache_salt")
@@ -512,6 +513,7 @@ class InputPreprocessor:
                     mm_kwargs=inputs["mm_kwargs"],
                     mm_hashes=inputs["mm_hashes"],
                     mm_placeholders=inputs["mm_placeholders"],
+                    cache_salt=inputs["cache_salt"],
                 )
             else:
                 decoder_inputs = MultiModalInputs(
@@ -521,6 +523,7 @@ class InputPreprocessor:
                     mm_kwargs=inputs["mm_kwargs"],
                     mm_hashes=inputs["mm_hashes"],
                     mm_placeholders=inputs["mm_placeholders"],
+                    cache_salt=inputs["cache_salt"],
                 )
         elif inputs["type"] == "token":
             # Text-only inputs
