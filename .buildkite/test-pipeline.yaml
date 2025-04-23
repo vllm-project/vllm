@@ -403,10 +403,7 @@ steps:
   commands:
     - pytest -v -s models/test_transformers.py
     - pytest -v -s models/test_registry.py
-    - pytest -v -s models/test_initialization.py -k 'not llama4 and not plamo2'
-    # There are memory leak issues with these models
-    - pytest -v -s models/test_initialization.py -k 'llama4'
-    - pytest -v -s models/test_initialization.py -k 'plamo2'
+    - pytest -v -s models/test_initialization.py
 
 - label: Language Models Test (Standard) # 32min
   #mirror_hardwares: [amd]
