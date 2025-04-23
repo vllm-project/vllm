@@ -335,12 +335,12 @@ class MistralTokenizer(TokenizerBase):
             input_ids = self.encode_one(text, truncation, max_length)
         return Encoding(input_ids=input_ids)
 
-    def get_vocab(self) -> Dict[str, int]:
+    def get_vocab(self) -> dict[str, int]:
         # NB: the dictionary form of the vocabulary collapses token ids that map
         # to the same string but have different bytes
         return self._vocab_dict
 
-    def get_added_vocab(self) -> Dict[str, int]:
+    def get_added_vocab(self) -> dict[str, int]:
         # Mistral tokenizers have no added vocabulary
         return {}
 

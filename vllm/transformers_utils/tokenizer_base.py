@@ -2,7 +2,7 @@
 
 import importlib
 from abc import ABC, abstractmethod
-from typing import TYPE_CHECKING, Any, Dict, Optional, Tuple, Union
+from typing import TYPE_CHECKING, Any, Optional, Union
 
 if TYPE_CHECKING:
     from vllm.entrypoints.chat_utils import ChatCompletionMessageParam
@@ -75,11 +75,11 @@ class TokenizerBase(ABC):
         raise NotImplementedError()
 
     @abstractmethod
-    def get_vocab(self) -> Dict[str, int]:
+    def get_vocab(self) -> dict[str, int]:
         raise NotImplementedError()
 
     @abstractmethod
-    def get_added_vocab(self) -> Dict[str, int]:
+    def get_added_vocab(self) -> dict[str, int]:
         raise NotImplementedError()
 
     @abstractmethod
@@ -100,7 +100,7 @@ class TokenizerBase(ABC):
     @abstractmethod
     def apply_chat_template(self,
                             messages: list["ChatCompletionMessageParam"],
-                            tools: Optional[list[Dict[str, Any]]] = None,
+                            tools: Optional[list[dict[str, Any]]] = None,
                             **kwargs) -> list[int]:
         raise NotImplementedError()
 
@@ -125,7 +125,7 @@ class TokenizerBase(ABC):
 
 class TokenizerRegistry:
     # Tokenizer name -> (tokenizer module, tokenizer class)
-    REGISTRY: Dict[str, Tuple[str, str]] = {}
+    REGISTRY: dict[str, tuple[str, str]] = {}
 
     @staticmethod
     def register(name: str, module: str, class_name: str) -> None:

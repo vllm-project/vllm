@@ -84,23 +84,23 @@ class _CachedTokenizerProxy:
     def __len__(self) -> int:
         return self.__tokenizer_len
 
-    def __getattr__(self, name):
+    def __getattr__(self, name: str) -> Any:
         return getattr(self.__tokenizer, name)
 
     @cached_property
-    def all_special_ids(self):
+    def all_special_ids(self) -> list[int]:
         return self.__tokenizer.all_special_ids
 
     @cached_property
-    def all_special_tokens(self):
+    def all_special_tokens(self) -> list[str]:
         return self.__tokenizer.all_special_tokens
 
     @cached_property
-    def all_special_tokens_extended(self):
+    def all_special_tokens_extended(self) -> list[str]:
         return self.__tokenizer.all_special_tokens_extended
 
     @cached_property
-    def max_token_id(self):
+    def max_token_id(self) -> int:
         tokenizer = self.__tokenizer
 
         max_token_id = max(self.__tokenizer_vocab.values())
@@ -114,7 +114,7 @@ class _CachedTokenizerProxy:
 
         return max_token_id
 
-    def get_vocab(self):
+    def get_vocab(self) -> dict[str, int]:
         return self.__tokenizer_vocab
 
     def __reduce__(self):
