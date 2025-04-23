@@ -1,5 +1,4 @@
 # SPDX-License-Identifier: Apache-2.0
-import bisect
 import time
 from typing import TYPE_CHECKING, Optional, cast
 from unittest.mock import patch
@@ -106,6 +105,7 @@ class TPUModelRunner:
         self.prompt_adapter_config = vllm_config.prompt_adapter_config
         self.observability_config = vllm_config.observability_config
         self.device_config = vllm_config.device_config
+        self.padding_config = vllm_config.padding_config
 
         model_config = self.model_config
         cache_config = self.cache_config
@@ -131,11 +131,7 @@ class TPUModelRunner:
         # InputBatch needs to work with sampling tensors greater than padding
         # to avoid dynamic shapes. Also, avoid suboptimal alignment.
         self.max_num_reqs = max(scheduler_config.max_num_seqs, MIN_NUM_SEQS)
-        # self.num_tokens_paddings = _get_token_paddings(
-        #     min_token_size=16,
-        #     max_token_size=scheduler_config.max_num_batched_tokens,
-        #     padding_gap=envs.VLLM_TPU_BUCKET_PADDING_GAP)
-        self.num_tokens_paddings = self.vllm_config.padding_config.num_token_paddings
+        self.num_tokens_paddings = self.padding_config.num_token_paddings
         # In case `max_num_tokens < max(num_tokens_paddings)` use the actual
         # padded max value to pre-allocate data structures and pre-compile.
         self.max_num_tokens = self.num_tokens_paddings[-1]
@@ -324,7 +320,8 @@ class TPUModelRunner:
         # Update the states of the running/resumed requests.
         for req_data in scheduler_output.scheduled_cached_reqs:
             req_id = req_data.req_id
-            req_state = self.requests[req_id]   # increase prompt_size in prefill and 1 in decode.
+            req_state = self.requests[
+                req_id]  # increase prompt_size in prefill and 1 in decode.
             # Update the cached states.
             req_state.num_computed_tokens = req_data.num_computed_tokens
             if not req_data.resumed_from_preemption:
@@ -498,8 +495,8 @@ class TPUModelRunner:
             num_scheduled_tokens_per_req)
 
         # Do the padding and copy the tensors to the TPU.
-        padded_total_num_scheduled_tokens = _get_padded_token_len(
-            self.num_tokens_paddings, total_num_scheduled_tokens)
+        padded_total_num_scheduled_tokens = self.padding_config.get_padded_token_len(
+            total_num_scheduled_tokens)
         # Zero out to avoid spurious values from prev iteration (last cp chunk)
         self.input_ids_cpu[
             total_num_scheduled_tokens:padded_total_num_scheduled_tokens] = 0
@@ -1062,51 +1059,3 @@ def _get_req_paddings(min_req_size: int, max_req_size: int) -> list[int]:
 def _get_padded_num_reqs_with_upper_limit(x: int, upper_limit: int) -> int:
     res = MIN_NUM_SEQS if x <= MIN_NUM_SEQS else 1 << (x - 1).bit_length()
     return min(res, upper_limit)
-
-
-def _get_token_paddings(min_token_size: int, max_token_size: int,
-                        padding_gap: int) -> list[int]:
-    """Generate a list of padding size, starting from min_token_size, 
-    ending with a number that can cover max_token_size
-    
-    If padding_gap == 0 then:
-        increase 2X each time (exponential)
-    else:
-        first increase the size to twice, 
-        then increase the padding size by padding_gap.
-    """
-    # assert min_token_size is power of 2
-    assert (min_token_size & (min_token_size - 1) == 0) and min_token_size > 0
-    paddings = []
-    num = min_token_size
-
-    if padding_gap == 0:
-        logger.info("Using exponential token paddings:")
-        while True:
-            logger.info("    %d", num)
-            paddings.append(num)
-            if num >= max_token_size:
-                break
-            num *= 2
-
-    else:
-        logger.info("Using incremental token paddings:")
-        while num <= padding_gap:
-            logger.info("    %d", num)
-            paddings.append(num)
-            num *= 2
-        num //= 2
-        while num < max_token_size:
-            num += padding_gap
-            logger.info("    %d", num)
-            paddings.append(num)
-
-    return paddings
-
-
-def _get_padded_token_len(paddings: list[int], x: int) -> int:
-    """Return the first element in paddings list greater or equal to x.
-    """
-    index = bisect.bisect_left(paddings, x)
-    assert index < len(paddings)
-    return paddings[index]

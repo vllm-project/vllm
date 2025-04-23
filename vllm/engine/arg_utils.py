@@ -21,11 +21,11 @@ from vllm.config import (CacheConfig, CompilationConfig, Config, ConfigFormat,
                          DistributedExecutorBackend, HfOverrides,
                          KVTransferConfig, LoadConfig, LoadFormat, LoRAConfig,
                          ModelConfig, ModelImpl, MultiModalConfig,
-                         ObservabilityConfig, PaddingConfig, ParallelConfig, PoolerConfig,
-                         PoolType, PromptAdapterConfig, SchedulerConfig,
-                         SchedulerPolicy, SpeculativeConfig, TaskOption,
-                         TokenizerPoolConfig, VllmConfig, get_attr_docs,
-                         get_field)
+                         ObservabilityConfig, PaddingConfig, ParallelConfig,
+                         PoolerConfig, PoolType, PromptAdapterConfig,
+                         SchedulerConfig, SchedulerPolicy, SpeculativeConfig,
+                         TaskOption, TokenizerPoolConfig, VllmConfig,
+                         get_attr_docs, get_field)
 from vllm.executor.executor_base import ExecutorBase
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS
@@ -1023,9 +1023,10 @@ class EngineArgs:
             '--padding-gap',
             type=int,
             default=EngineArgs.padding_gap,
-            help='the padding gap between fixed token lengths, we pad the request into a list of fixed length to save compilation time'
-            'if set to 0, we do exponential padding (always pad to the power of 2), if set to other numbers, we do incremental padding with padding_gap')
-
+            help=
+            'the padding gap between fixed token lengths, we pad the request into a list of fixed length to save compilation time'
+            'if set to 0, we do exponential padding (always pad to the power of 2), if set to other numbers, we do incremental padding with padding_gap'
+        )
 
         parser.add_argument(
             "--additional-config",

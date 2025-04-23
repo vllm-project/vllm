@@ -76,6 +76,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.speculative_config = vllm_config.speculative_config
         self.prompt_adapter_config = vllm_config.prompt_adapter_config
         self.observability_config = vllm_config.observability_config
+        self.padding_config = vllm_config.padding_config
 
         from vllm.model_executor.models.utils import set_cpu_offload_max_bytes
         set_cpu_offload_max_bytes(
@@ -1007,8 +1008,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 and num_scheduled_tokens <= self.cudagraph_batch_sizes[-1]):
             # Use piecewise CUDA graphs.
             # Add padding to the batch size.
-            # todo: need update
-            num_input_tokens = self.vllm_config.pad_for_cudagraph(
+            num_input_tokens = self.padding_config.get_padded_token_len(
                 num_scheduled_tokens)
         else:
             # Eager mode.
@@ -1623,6 +1623,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # todo: need to update here.
         with graph_capture(device=self.device):
             for num_tokens in reversed(self.cudagraph_batch_sizes):
+                print(f"capture model, {num_tokens=}")
                 for _ in range(self.vllm_config.compilation_config.
                                cudagraph_num_of_warmups):
                     self._dummy_run(num_tokens)
