@@ -776,11 +776,6 @@ See [this page](#multimodal-inputs) on how to pass multi-modal inputs to the mod
 **To enable multiple multi-modal items per text prompt in vLLM V0**, you have to set `limit_mm_per_prompt` (offline inference)
 or `--limit-mm-per-prompt` (online serving). For example, to enable passing up to 4 images per text prompt:
 
-### AllenAI Molmo-7B-D-0924 (multi-modal)
-
-⚠️ Accuracy Note: For improved output quality (especially in object localization tasks), we recommend using the pinned dependency versions listed in [`requirements/molmo.txt`](https://github.com/vllm-project/vllm/blob/main/requirements/molmo.txt).  
-These versions match the environment that achieved consistent results on both A10 and L40 GPUs.  
-_Note: This setup currently works with `vllm==0.7.0`._
 
 Offline inference:
 
@@ -1229,3 +1224,9 @@ We have the following levels of testing for models:
 2. **Output Sensibility**: We check if the output of the model is sensible and coherent, by measuring the perplexity of the output and checking for any obvious errors. This is a less stringent test.
 3. **Runtime Functionality**: We check if the model can be loaded and run without errors. This is the least stringent test. Please refer to [functionality tests](gh-dir:tests) and [examples](gh-dir:examples) for the models that have passed this test.
 4. **Community Feedback**: We rely on the community to provide feedback on the models. If a model is broken or not working as expected, we encourage users to raise issues to report it or open pull requests to fix it. The rest of the models fall under this category.
+
+### AllenAI Molmo-7B-D-0924 (multi-modal)
+
+⚠️ Accuracy Note: For improved output quality (especially in object localization tasks), we recommend using the pinned dependency versions listed in [`requirements/molmo.txt`](https://github.com/vllm-project/vllm/blob/main/requirements/molmo.txt).  
+These versions match the environment that achieved consistent results on both A10 and L40 GPUs.  
+_Note: This setup currently works with `vllm==0.7.0`._
