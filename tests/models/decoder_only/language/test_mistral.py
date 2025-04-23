@@ -174,15 +174,8 @@ SAMPLE_JSON_SCHEMA = {
 @pytest.mark.parametrize("dtype", ["bfloat16"])
 @pytest.mark.parametrize("max_tokens", [64])
 @pytest.mark.parametrize("num_logprobs", [5])
-def test_models(
-    hf_runner,
-    vllm_runner,
-    example_prompts,
-    model: str,
-    dtype: str,
-    max_tokens: int,
-    num_logprobs: int,
-) -> None:
+def test_models(hf_runner, vllm_runner, example_prompts, model: str,
+                dtype: str, max_tokens: int, num_logprobs: int) -> None:
     # TODO(sang): Sliding window should be tested separately.
     with hf_runner(model, dtype=dtype) as hf_model:
         hf_outputs = hf_model.generate_greedy_logprobs_limit(
@@ -206,14 +199,8 @@ def test_models(
 @pytest.mark.parametrize("dtype", ["bfloat16"])
 @pytest.mark.parametrize("max_tokens", [64])
 @pytest.mark.parametrize("num_logprobs", [5])
-def test_mistral_format(
-    vllm_runner,
-    example_prompts,
-    model: str,
-    dtype: str,
-    max_tokens: int,
-    num_logprobs: int,
-) -> None:
+def test_mistral_format(vllm_runner, example_prompts, model: str, dtype: str,
+                        max_tokens: int, num_logprobs: int) -> None:
     with vllm_runner(
             model,
             dtype=dtype,
@@ -244,11 +231,8 @@ def test_mistral_format(
 
 @pytest.mark.parametrize("model", MISTRAL_FORMAT_MODELS)
 @pytest.mark.parametrize("dtype", ["bfloat16"])
-def test_mistral_symbolic_languages(
-    vllm_runner,
-    model: str,
-    dtype: str,
-) -> None:
+def test_mistral_symbolic_languages(vllm_runner, model: str,
+                                    dtype: str) -> None:
     with vllm_runner(model,
                      dtype=dtype,
                      max_model_len=8192,
@@ -266,11 +250,7 @@ def test_mistral_symbolic_languages(
 @pytest.mark.parametrize("dtype", ["bfloat16"])
 @pytest.mark.parametrize("model",
                          MISTRAL_FORMAT_MODELS)  # v1 can't do func calling
-def test_mistral_function_calling(
-    vllm_runner,
-    model: str,
-    dtype: str,
-) -> None:
+def test_mistral_function_calling(vllm_runner, model: str, dtype: str) -> None:
     with vllm_runner(model,
                      dtype=dtype,
                      tokenizer_mode="mistral",
@@ -301,11 +281,8 @@ def test_mistral_function_calling(
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("guided_backend",
                          ["outlines", "lm-format-enforcer", "xgrammar"])
-def test_mistral_guided_decoding(
-    vllm_runner,
-    model: str,
-    guided_backend: str,
-) -> None:
+def test_mistral_guided_decoding(vllm_runner, model: str,
+                                 guided_backend: str) -> None:
     with vllm_runner(model, dtype='bfloat16',
                      tokenizer_mode="mistral") as vllm_model:
 

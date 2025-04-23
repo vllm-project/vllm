@@ -23,6 +23,8 @@ Currently, there are no pre-built XPU wheels.
 - Second, install Python packages for vLLM XPU backend building:
 
 ```console
+git clone https://github.com/vllm-project/vllm.git
+cd vllm
 pip install --upgrade pip
 pip install -v -r requirements/xpu.txt
 ```
@@ -54,7 +56,7 @@ Currently, there are no pre-built XPU images.
 ### Build image from source
 
 ```console
-$ docker build -f Dockerfile.xpu -t vllm-xpu-env --shm-size=4g .
+$ docker build -f docker/Dockerfile.xpu -t vllm-xpu-env --shm-size=4g .
 $ docker run -it \
              --rm \
              --network=host \

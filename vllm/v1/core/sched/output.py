@@ -9,9 +9,10 @@ if TYPE_CHECKING:
     import numpy as np
     import numpy.typing as npt
 
+    from vllm.distributed.kv_transfer.kv_connector.v1.base import (
+        KVConnectorMetadata)
     from vllm.lora.request import LoRARequest
-    from vllm.multimodal import MultiModalKwargs
-    from vllm.multimodal.base import PlaceholderRange
+    from vllm.multimodal.inputs import MultiModalKwargs, PlaceholderRange
     from vllm.sampling_params import SamplingParams
     from vllm.v1.request import Request
 
@@ -122,3 +123,6 @@ class SchedulerOutput:
     structured_output_request_ids: dict[str, int]
     # the bitmask for the whole batch
     grammar_bitmask: Optional[npt.NDArray[np.int32]]
+
+    # KV Cache Connector metadata.
+    kv_connector_metadata: Optional[KVConnectorMetadata] = None
