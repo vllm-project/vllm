@@ -98,11 +98,6 @@ def device_id_to_physical_device_id(device_id: int) -> int:
         return device_id
 
 
-def on_navi() -> bool:
-    GPU_ARCH = torch.cuda.get_device_properties("cuda").gcnArchName
-    return "gfx1" in GPU_ARCH
-
-
 def on_mi250_mi300() -> bool:
     GPU_ARCH = torch.cuda.get_device_properties("cuda").gcnArchName
     return any(arch in GPU_ARCH for arch in ["gfx90a", "gfx942"])
@@ -114,15 +109,11 @@ def use_rocm_custom_paged_attention(qtype: torch.dtype, head_size: int,
                                     max_seq_len: int,
                                     sliding_window: int) -> bool:
 
-    ON_NAVI = on_navi()
-    ON_MI250_MI300 = on_mi250_mi300()
-
-    # rocm custom page attention not support on navi (gfx1*)
+    # rocm custom page attention not support on gfx1*
     # custom paged attn always supported on V0. On V1, requires sliding window
     # disabled due to observed numerical discrepancy.
-    return (ON_MI250_MI300 and not ON_NAVI
-            and (not envs.VLLM_USE_V1 or sliding_window == 0
-                 or sliding_window == (-1, -1))
+    return (on_mi250_mi300() and (not envs.VLLM_USE_V1 or sliding_window == 0
+                                  or sliding_window == (-1, -1))
             and (qtype == torch.half or qtype == torch.bfloat16)
             and (head_size == 64 or head_size == 128)
             and (block_size == 16 or block_size == 32)
