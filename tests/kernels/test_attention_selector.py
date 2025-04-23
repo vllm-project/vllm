@@ -26,7 +26,7 @@ DEVICE_MLA_BACKENDS = {
     "cpu": [],
 }
 
-DEVICE_NON_MLA_BACKENDS = {
+DEVICE_REGULAR_ATTN_BACKENDS = {
     "cuda": ["XFORMERS", "FLASHINFER"],
     "hip": ["ROCM_FLASH"],
     "cpu": ["TORCH_SDPA"],
@@ -44,7 +44,7 @@ def generate_params():
     for use_mla in [True, False]:
         for device in ["cuda", "hip", "cpu"]:
             backends = DEVICE_MLA_BACKENDS[
-                device] if use_mla else DEVICE_NON_MLA_BACKENDS[device]
+                device] if use_mla else DEVICE_REGULAR_ATTN_BACKENDS[device]
             for name in backends:
                 block_sizes = DEVICE_MLA_BLOCK_SIZES[device] if use_mla else [
                     16

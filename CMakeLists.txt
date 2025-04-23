@@ -679,8 +679,8 @@ if(VLLM_GPU_LANG STREQUAL "HIP")
   #
   set(VLLM_ROCM_EXT_SRC
     "csrc/rocm/torch_bindings.cpp"
+    "csrc/rocm/skinny_gemms.cu"
     "csrc/rocm/attention.cu"
-    "csrc/rocm/custom_kernels.cu"
     "csrc/rocm/fused_kernels.cu"
     "csrc/rocm/custom.cu")
 

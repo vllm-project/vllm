@@ -73,23 +73,6 @@ typedef struct _B8x16 {
   _B8x8 xy[2];
 } _B8x16;
 
-////// Non temporal loads ///////
-template <typename T>
-__device__ __forceinline__ T loadnt(T* addr) {
-  return __builtin_nontemporal_load(addr);
-}
-
-__device__ __forceinline__ _B16x8 load_ntmprl_16Byte(const _B16x8* addr) {
-  auto addr_alias = reinterpret_cast<const float*>(addr);
-  auto dat0 = loadnt(addr_alias);
-  auto dat1 = loadnt(addr_alias + 1);
-  auto dat2 = loadnt(addr_alias + 2);
-  auto dat3 = loadnt(addr_alias + 3);
-  auto res = make_float4(dat0, dat1, dat2, dat3);
-  return *reinterpret_cast<_B16x8*>(&res);
-}
-///////////////////////////////////
-
 template <typename T, int absz, int cbid, int blgp>
 __device__ __forceinline__ floatx4 gcn_mfma4x4x4_instr(const _B16x4& inpA,
                                                        const _B16x4& inpB,
@@ -126,23 +109,6 @@ __device__ __forceinline__ float to_float(const T& inp) {
     return (float)inp;
   } else if constexpr (std::is_same<T, __hip_bfloat16>::value) {
     return __bfloat162float(inp);
-  } else {
-    static_assert(false, "unsupported 16b dtype");
-  }
-}
-
-template <typename T>
-__device__ __forceinline__ float to_float_b16(const bit16_t& inp) {
-  union tmpcvt {
-    bit16_t u;
-    _Float16 f;
-    __hip_bfloat16 b;
-  } t16;
-  t16.u = inp;
-  if constexpr (std::is_same<T, _Float16>::value) {
-    return (float)t16.f;
-  } else if constexpr (std::is_same<T, __hip_bfloat16>::value) {
-    return __bfloat162float(t16.b);
   } else {
     static_assert(false, "unsupported 16b dtype");
   }
@@ -225,45 +191,6 @@ __device__ __forceinline__ _B16x4 addx4(const _B16x4& inp1,
   } else {
     static_assert(false, "unsupported 16b dtype");
   }
-}
-
-template <typename T, vllm::Fp8KVCacheDataType KV_DTYPE>
-__device__ __forceinline__ _B16x8 scaled_convert_b8x8(const _B8x8 input,
-                                                      const float scale) {
-  union alignas(16) {
-    uint4 u4;
-    _B16x8 u16x8;
-    vllm::bf16_8_t b16x8;
-  } tmp;
-  if constexpr (std::is_same<T, _Float16>::value) {
-    tmp.u4 = vllm::fp8::scaled_convert<uint4, _B8x8, KV_DTYPE>(input, scale);
-    return tmp.u16x8;
-  } else if constexpr (std::is_same<T, __hip_bfloat16>::value) {
-    tmp.b16x8 = vllm::fp8::scaled_convert<vllm::bf16_8_t, _B8x8, KV_DTYPE>(
-        input, scale);
-    return tmp.u16x8;
-  } else {
-    static_assert(false, "unsupported 16b dtype");
-  }
-}
-
-template <typename T>
-__device__ __forceinline__ _B16x8
-scaled_convert_b8x8_custom(const _B8x8 input, const float scale) {
-  union {
-    floatx4 f32x4[2];
-    vllm::Float8_ f32x8;
-  } tmpf8;
-  tmpf8.f32x8 = vllm::fp8::vec_conversion<vllm::Float8_, uint2>(
-      *reinterpret_cast<const uint2*>(&input));
-
-  tmpf8.f32x4[0] *= scale;
-  tmpf8.f32x4[1] *= scale;
-
-  _B16x8 ret;
-  ret.xy[0] = from_floatx4<T>(tmpf8.f32x4[0]);
-  ret.xy[1] = from_floatx4<T>(tmpf8.f32x4[1]);
-  return ret;
 }
 
 __device__ __forceinline__ floatx4 to_float_fp8x4(const _B8x4& inp) {

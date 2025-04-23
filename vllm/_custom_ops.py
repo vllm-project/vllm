@@ -1215,6 +1215,26 @@ def selective_scan_fwd(u: torch.Tensor, delta: torch.Tensor, A: torch.Tensor,
                                     ssm_states, pad_slot_id)
 
 
+# ROCm skinny gemms
+def LLMM1(a: torch.Tensor, b: torch.Tensor,
+          rows_per_block: int) -> torch.Tensor:
+    return torch.ops._rocm_C.LLMM1(a, b, rows_per_block)
+
+
+def wvSplitK(a: torch.Tensor, b: torch.Tensor, cu_count: int) -> torch.Tensor:
+    return torch.ops._rocm_C.wvSplitK(a, b, cu_count)
+
+
+def wvSplitKQ(a: torch.Tensor, b: torch.Tensor, out_dtype: torch.dtype,
+              scale_a: torch.Tensor, scale_b: torch.Tensor,
+              cu_count: int) -> torch.Tensor:
+    out = torch.empty((b.shape[0], a.shape[0]),
+                      dtype=out_dtype,
+                      device=b.device)
+    torch.ops._rocm_C.wvSplitKQ(a, b, out, scale_a, scale_b, cu_count)
+    return out
+
+
 # moe
 def moe_sum(input: torch.Tensor, output: torch.Tensor):
     torch.ops._moe_C.moe_sum(input, output)
@@ -1462,26 +1482,9 @@ def free_shared_buffer(ptr: int) -> None:
     torch.ops._C_custom_ar.free_shared_buffer(ptr)
 
 
-# ROCm custom
-def LLMM1(a: torch.Tensor, b: torch.Tensor, out: torch.Tensor,
-          rows_per_block: int) -> None:
-    torch.ops._rocm_C.LLMM1(a, b, out, rows_per_block)
-
-
 def LLMM_Silu(a: torch.Tensor, b: torch.Tensor, out: torch.Tensor,
               rows_per_block: int) -> None:
     torch.ops._rocm_C.LLMM_Silu(a, b, out, rows_per_block)
-
-
-def wvSpltK(a: torch.Tensor, b: torch.Tensor, out: torch.Tensor, N: int,
-            cu_count: int) -> None:
-    torch.ops._rocm_C.wvSpltK(a, b, out, N, cu_count)
-
-
-def wvSpltKQ(a: torch.Tensor, b: torch.Tensor, out: torch.Tensor,
-             scale_a: torch.Tensor, scale_b: torch.Tensor, N: int, Otp: int,
-             cu_count: int) -> None:
-    torch.ops._rocm_C.wvSpltKQ(a, b, out, scale_a, scale_b, N, Otp, cu_count)
 
 
 def get_flash_mla_metadata(
