@@ -1590,12 +1590,6 @@ class TranscriptionRequest(OpenAIBaseModel):
     `verbose_json`, or `vtt`.
     """
 
-    # Custom args param
-    extra_sampling_params: Optional[dict[str, Any]] = Field(
-        default=None,
-        description=("Additional kwargs to pass to sampling."),
-    )
-
     ## TODO (varun) : Support if set to 0, certain thresholds are met !!
 
     timestamp_granularities: list[Literal["word", "segment"]] = Field(
@@ -1704,8 +1698,7 @@ class TranscriptionRequest(OpenAIBaseModel):
                                             presence_penalty=self.presence_penalty,
                                             output_kind=RequestOutputKind.DELTA
                                             if self.stream \
-                                            else RequestOutputKind.FINAL_ONLY,
-                                            extra_args=self.extra_sampling_params)
+                                            else RequestOutputKind.FINAL_ONLY)
 
     @model_validator(mode="before")
     @classmethod
