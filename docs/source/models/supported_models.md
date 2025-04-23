@@ -133,7 +133,7 @@ class MyConfig(PretrainedConfig):
 
 ### Hugging Face Hub
 
-By default, vLLM loads models from [Hugging Face (HF) Hub](https://huggingface.co/models).
+By default, vLLM loads models from [Hugging Face (HF) Hub](https://huggingface.co/models). To change the download path for models, you can set the `HF_HOME` environment variable; for more details, refer to [their official documentation](https://huggingface.co/docs/huggingface_hub/package_reference/environment_variables#hfhome).
 
 To determine whether a given model is natively supported, you can check the `config.json` file inside the HF repository.
 If the `"architectures"` field contains a model architecture listed below, then it should be natively supported.
