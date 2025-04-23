@@ -1256,6 +1256,10 @@ class TPUModelRunner:
     def sample_from_logits(
             self, logits: torch.Tensor,
             sampling_metadata: TPUSupportedSamplingMetadata) -> torch.Tensor:
+        """
+        Sample with xla-friendly function. This function is to be traced 
+        separately from `forward` for lighter compilation overhead.
+        """
         if sampling_metadata.all_greedy:
             out_tokens = torch.argmax(logits, dim=-1, keepdim=True)
             # TODO skip if not needed and compile for it
