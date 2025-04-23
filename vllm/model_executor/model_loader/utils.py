@@ -55,7 +55,10 @@ def resolve_transformers_arch(model_config: ModelConfig,
         #     "AutoModelFor<Task>": "<your-repo-name>--<config-name>",
         # },
         auto_modules = {
-            name: get_class_from_dynamic_module(module, model_config.model)
+            name:
+            get_class_from_dynamic_module(module,
+                                          model_config.model,
+                                          revision=model_config.revision)
             for name, module in sorted(auto_map.items(), key=lambda x: x[0])
         }
         custom_model_module = auto_modules.get("AutoModel")
