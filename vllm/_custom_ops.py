@@ -776,7 +776,7 @@ def cutlass_fp4_moe_mm(a_tensors: torch.Tensor,
                 b_tensors: torch.Tensor, a_scales: torch.Tensor,
                 b_scales: torch.Tensor, alphas: torch.Tensor,
                 problem_sizes: torch.Tensor, expert_offsets: torch.Tensor,
-                sf_offsets: torch.Tensor, out_dtype: torch.dtype):
+                sf_offsets: torch.Tensor, out_dtype: torch.dtype, device: torch.device):
     """
     An FP4 Blockscaled Group Gemm that takes in  a_tensors, b_tensors and runs 
     the gemms for each combination based on the specified problem sizes.
@@ -797,13 +797,30 @@ def cutlass_fp4_moe_mm(a_tensors: torch.Tensor,
     """
     m_topk = a_tensors.shape[0]
     n = b_tensors.shape[1]
-    c2_shape = (m_topk, n) 
-    c2 = torch.empty(c2_shape, device=a_tensors.device, dtype=out_dtype)
+    e = b_tensors.shape[0]
+    c_shape = (m_topk, n) 
+    c = torch.empty(c_shape, device=device, dtype=out_dtype)
+    a_strides = torch.full((e, ),
+                            a_tensors.stride(0) * 2,
+                            device=device,
+                            dtype=torch.int64)
+    b_strides = torch.full((e, ),
+                            b_tensors.stride(1) * 2,
+                            device=device,
+                            dtype=torch.int64)
+    c_strides = torch.full((e, ),
+                            c.stride(0),
+                            device=device,
+                            dtype=torch.int64)
+    layout_sfa = torch.empty((e, 5), device=device, dtype=torch.int)
+    layout_sfb = torch.empty((e, 5), device=device, dtype=torch.int)
+
     assert(n == problem_sizes[0,1])
-    torch.ops._C.cutlass_blockscaled_fp4_group_mm(c2, a_tensors, 
-                                b_tensors, a_scales, b_scales, alphas,
-                                problem_sizes, expert_offsets, sf_offsets) 
-    return c2.to(out_dtype)
+    torch.ops._C.cutlass_blockscaled_fp4_group_mm(c, a_tensors, b_tensors, a_scales,
+                        b_scales, alphas, a_strides, b_strides,
+                        c_strides, layout_sfa, layout_sfb, problem_sizes,
+                        expert_offsets, sf_offsets)
+    return c.to(out_dtype)
 
 # aqlm
 def aqlm_gemm(input: torch.Tensor, codes: torch.Tensor,
