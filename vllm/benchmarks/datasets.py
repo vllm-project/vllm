@@ -931,9 +931,12 @@ class NextEditPredictionDataset(HuggingFaceDataset):
         ]
         if len(samples) < num_requests:
             logger.info(
-                "Requested %d samples, but the dataset %s only has %d",
+                "Requested %d samples, but the dataset %s only has %d. "
+                "Will oversample to %d",
                 num_requests,
                 self.dataset_path,
                 len(samples),
+                num_requests,
             )
+        self.maybe_oversample_requests(samples, num_requests)
         return samples
