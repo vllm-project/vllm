@@ -16,12 +16,6 @@ If vLLM natively supports a model, its implementation can be found in <gh-file:v
 
 These models are what we list in <project:#supported-text-models> and <project:#supported-mm-models>.
 
-### AllenAI Molmo-7B-D-0924 (multi-modal)
-
-⚠️ Accuracy Note: For improved output quality (especially in object localization tasks), we recommend using the pinned dependency versions listed in [`requirements/molmo.txt`](https://github.com/vllm-project/vllm/blob/main/requirements/molmo.txt).\
-These versions match the environment that achieved consistent results on different GPUs.\
-_Note: This setup currently works with `vllm==0.7.0`._
-
 (transformers-backend)=
 
 ### Transformers
@@ -577,7 +571,6 @@ See [this page](#generative-models) for more information on how to use generativ
   - `Zyphra/Zamba2-7B-instruct`, `Zyphra/Zamba2-2.7B-instruct`, `Zyphra/Zamba2-1.2B-instruct`, etc.
   -
   -
-
 :::
 
 :::{note}
@@ -639,7 +632,6 @@ you should explicitly specify the task type to ensure that the model is used in 
   - `intfloat/multilingual-e5-large`, `jinaai/jina-reranker-v2-base-multilingual`, etc.
   -
   -
-
 :::
 
 :::{note}
@@ -757,7 +749,6 @@ If your model is not in the above list, we will try to automatically convert the
   - `Alibaba-NLP/gte-reranker-modernbert-base`, etc.
   -
   -
-
 :::
 
 (supported-mm-models)=
@@ -1096,16 +1087,16 @@ However, there are differences in how they handle text + image inputs:
 
 V0 correctly implements the model's attention pattern:
 
-- Uses bidirectional attention between the image tokens corresponding to the same image
-- Uses causal attention for other tokens
-- Implemented via (naive) PyTorch SDPA with masking tensors
-- Note: May use significant memory for long prompts with image
+* Uses bidirectional attention between the image tokens corresponding to the same image
+* Uses causal attention for other tokens
+* Implemented via (naive) PyTorch SDPA with masking tensors
+* Note: May use significant memory for long prompts with image
 
 V1 currently uses a simplified attention pattern:
 
-- Uses causal attention for all tokens, including image tokens
-- Generates reasonable outputs but does not match the original model's attention for text + image inputs, especially when `{"do_pan_and_scan": True}`
-- Will be updated in the future to support the correct behavior
+* Uses causal attention for all tokens, including image tokens
+* Generates reasonable outputs but does not match the original model's attention for text + image inputs, especially when `{"do_pan_and_scan": True}`
+* Will be updated in the future to support the correct behavior
 
 This limitation exists because the model's mixed attention pattern (bidirectional for images, causal otherwise) is not yet supported by vLLM's attention backends.
 :::
@@ -1144,6 +1135,13 @@ Since some model architectures support both generative and pooling tasks,
 you should explicitly specify the task type to ensure that the model is used in pooling mode instead of generative mode.
 :::
 
+:::{important}
+### AllenAI Molmo-7B-D-0924 (multi-modal)
+
+⚠️ Accuracy Note: For improved output quality (especially in object localization tasks), we recommend using the pinned dependency versions listed in [`requirements/molmo.txt`](https://github.com/vllm-project/vllm/blob/main/requirements/molmo.txt).\
+These versions match the environment that achieved consistent results on different GPUs.\
+_Note: This setup currently works with `vllm==0.7.0`._
+
 #### Text Embedding (`--task embed`)
 
 Any text generation model can be converted into an embedding model by passing `--task embed`.
@@ -1158,30 +1156,30 @@ The following table lists those that are tested in vLLM.
 :widths: 25 25 15 25 5 5
 :header-rows: 1
 
-- - Architecture
-  - Models
-  - Inputs
-  - Example HF Models
-  - [LoRA](#lora-adapter)
-  - [PP](#distributed-serving)
-- - `LlavaNextForConditionalGeneration`
-  - LLaVA-NeXT-based
-  - T / I
-  - `royokong/e5-v`
+- * Architecture
+  * Models
+  * Inputs
+  * Example HF Models
+  * [LoRA](#lora-adapter)
+  * [PP](#distributed-serving)
+- * `LlavaNextForConditionalGeneration`
+  * LLaVA-NeXT-based
+  * T / I
+  * `royokong/e5-v`
   -
-  - ✅︎
-- - `Phi3VForCausalLM`
-  - Phi-3-Vision-based
-  - T + I
-  - `TIGER-Lab/VLM2Vec-Full`
-  - 🚧
-  - ✅︎
-- - `Qwen2VLForConditionalGeneration`
-  - Qwen2-VL-based
-  - T + I
-  - `MrLight/dse-qwen2-2b-mrl-v1`
-  -
-  - ✅︎
+  * ✅︎
+- * `Phi3VForCausalLM`
+  * Phi-3-Vision-based
+  * T + I
+  * `TIGER-Lab/VLM2Vec-Full`
+  * 🚧
+  * ✅︎
+- * `Qwen2VLForConditionalGeneration`
+  * Qwen2-VL-based
+  * T + I
+  * `MrLight/dse-qwen2-2b-mrl-v1`
+  *
+  * ✅︎
     :::
 
 #### Transcription (`--task transcription`)
@@ -1192,16 +1190,16 @@ Speech2Text models trained specifically for Automatic Speech Recognition.
 :widths: 25 25 25 5 5
 :header-rows: 1
 
-- - Architecture
-  - Models
-  - Example HF Models
-  - [LoRA](#lora-adapter)
-  - [PP](#distributed-serving)
-- - `Whisper`
-  - Whisper-based
-  - `openai/whisper-large-v3-turbo`
-  - 🚧
-  - 🚧
+- * Architecture
+  * Models
+  * Example HF Models
+  * [LoRA](#lora-adapter)
+  * [PP](#distributed-serving)
+- * `Whisper`
+  * Whisper-based
+  * `openai/whisper-large-v3-turbo`
+  * 🚧
+  * 🚧
     :::
 
 ______________________________________________________________________
