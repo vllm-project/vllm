@@ -50,7 +50,9 @@ class HPUTP1DraftModelRunner(ModelRunnerWrapperBase):
         intermediate_tensors: Optional[IntermediateTensors] = None,
         num_steps: int = 1,
     ) -> Optional[List[SamplerOutput]]:
-        if previous_hidden_states is not None:
+        # MTP previous_hidden_states will be handled in self.model_runner.execute_model
+        if previous_hidden_states is not None \
+        and self.vllm_config.model_config.hf_config.model_type != 'deepseek_mtp':
             batch_size, block_size = model_input.input_tokens.shape
             previous_hidden_states = previous_hidden_states.unsqueeze(
                 dim=1).expand(-1, block_size, -1)

@@ -293,6 +293,9 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
                                    speculative_model="abhigoyal/vllm-medusa-llama-68m-random"),  # noqa: E501
     "MLPSpeculatorPreTrainedModel": _HfExamplesInfo("JackFram/llama-160m",
                                                     speculative_model="ibm-ai-platform/llama-160m-accelerator"),  # noqa: E501
+    "DeepSeekMTPModel": _HfExamplesInfo("luccafong/deepseek_mtp_main_random",
+                                        speculative_model="luccafong/deepseek_mtp_draft_random",  # noqa: E501
+                                        trust_remote_code=True),
 }
 
 _FALLBACK_MODEL = {

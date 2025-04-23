@@ -109,6 +109,7 @@ def create_spec_worker(*args, **kwargs) -> "SpecDecodeWorker":
         typical_acceptance_sampler_posterior_alpha,
         disable_logprobs=speculative_config.disable_logprobs,
         disable_log_stats=speculative_config.disable_log_stats,
+        num_speculative_tokens=speculative_config.num_speculative_tokens,
     )
 
     return spec_decode_worker
@@ -154,9 +155,12 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         typical_acceptance_sampler_posterior_alpha: float,
         disable_logprobs: bool,
         disable_log_stats: bool,
+        num_speculative_tokens: int,
     ) -> "SpecDecodeWorker":
 
         allow_zero_draft_token_step = True
+        enable_lm_head_weight_load = False
+        num_spec_prefill_steps = 1
         ngram_prompt_lookup_max = (
             draft_worker_kwargs.pop("ngram_prompt_lookup_max"))
         ngram_prompt_lookup_min = (
@@ -179,7 +183,8 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
             elif draft_model_config.hf_config.model_type == "medusa":
                 proposer_worker = MedusaWorker(**draft_worker_kwargs)
             else:
-                if draft_tp == 1:
+                if draft_tp == 1 or draft_model_config.hf_config.model_type ==\
+                        "deepseek_mtp":
                     if current_platform.is_cuda_alike():
                         draft_worker_kwargs[
                             "model_runner_cls"] = TP1DraftModelRunner
@@ -189,10 +194,13 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
                 else:
                     if draft_model_config.hf_config.model_type == "eagle":
                         raise NotImplementedError(
-                            "EAGLE does not support TP > 1 yet")
+                            f"{draft_model_config.hf_config.model_type} "
+                            "does not support TP > 1 yet")
 
                     allow_zero_draft_token_step = False
                 proposer_worker = MultiStepWorker(**draft_worker_kwargs)
+                if draft_model_config.hf_config.model_type == "deepseek_mtp":
+                    num_spec_prefill_steps = num_speculative_tokens
 
             proposer_worker = SmallerTpProposerWorker.maybe_wrap_worker(
                 proposer_worker, draft_tp, target_tp)
@@ -244,7 +252,9 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
             disable_log_stats=disable_log_stats,
             disable_by_batch_size=disable_by_batch_size,
             spec_decode_sampler=spec_decode_sampler,
-            allow_zero_draft_token_step=allow_zero_draft_token_step)
+            allow_zero_draft_token_step=allow_zero_draft_token_step,
+            enable_lm_head_weight_load=enable_lm_head_weight_load,
+            num_spec_prefill_steps=num_spec_prefill_steps)
 
     def __init__(
         self,
@@ -257,6 +267,8 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         metrics_collector: Optional[AsyncMetricsCollector] = None,
         disable_by_batch_size: Optional[int] = None,
         allow_zero_draft_token_step: Optional[bool] = True,
+        enable_lm_head_weight_load: Optional[bool] = False,
+        num_spec_prefill_steps: int = 1,
     ):
         """
         Create a SpecDecodeWorker.
@@ -287,6 +299,12 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
             allow_zero_draft_token_step: whether to allow a step where the draft
                 model generates no draft token; should disallow when the tp of
                 draft model is larger than 1 (TODO: #5814)
+            enable_lm_head_weight_load: whether to load lm_head weight for
+                draft models like eagle.
+            num_spec_prefill_steps: number of speculative prefill steps to run
+                before the speculative decoding starts. This is only used when
+                the draft model is a deepseek_mtp model that requires prefill
+                kv cache separately for each MTP layer.
         """
         self.proposer_worker = proposer_worker
         self.scorer_worker = scorer_worker
@@ -319,6 +337,7 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         self.previous_hidden_states: Optional[HiddenStates] = None
         self._disable_logprobs = disable_logprobs
         self._disable_log_stats = disable_log_stats
+        self._num_spec_prefill_steps = num_spec_prefill_steps
 
     def init_device(self) -> None:
         """Initialize both scorer and proposer models.
@@ -667,8 +686,9 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
             execute_model_req.previous_hidden_states = \
                 prepare_prefill_hidden_states(
                     sampler_output.prefill_hidden_states)
-
-            self.proposer_worker.execute_model(execute_model_req)
+            for i in range(self._num_spec_prefill_steps):
+                execute_model_req.spec_step_idx = i
+                self.proposer_worker.execute_model(execute_model_req)
 
         sampler_output_to_return = (self._serialize_sampler_output_no_logprobs(
             execute_model_req=execute_model_req, sampler_output=sampler_output)

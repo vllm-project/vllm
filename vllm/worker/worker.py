@@ -68,10 +68,10 @@ class Worker(LocalOrDistributedWorkerBase):
         speculative_config = self.speculative_config
         model_config = self.model_config
         speculative_args = {} if speculative_config is None \
-            or (speculative_config.draft_model_config.model ==
-                model_config.model) \
+            or (speculative_config.draft_model_config.hf_config.model_type ==
+                model_config.hf_config.model_type) \
             or (speculative_config.draft_model_config.hf_config.model_type
-                not in ["medusa", "mlp_speculator", "eagle"]) \
+                not in ("medusa", "mlp_speculator", "eagle", "deepseek_mtp")) \
                     else {"return_hidden_states": True}
 
         ModelRunnerClass: Type[GPUModelRunnerBase] = ModelRunner
