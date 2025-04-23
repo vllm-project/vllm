@@ -155,8 +155,9 @@ def rocm_per_tensor_w8a8_scaled_mm(*, qinput: torch.Tensor,
                                    scale_b: torch.Tensor, bias: torch.Tensor,
                                    input_2d: torch.Tensor,
                                    output_shape: List) -> torch.Tensor:
-    if envs.VLLM_ROCM_USE_SKINNY_GEMM and qinput.shape[
-            0] == 1 and qinput.shape[1] % 16 == 0:
+    from vllm.platforms.rocm import on_navi
+    if envs.VLLM_ROCM_USE_SKINNY_GEMM and not on_navi(
+    ) and qinput.shape[0] == 1 and qinput.shape[1] % 16 == 0:
         output = ops.wvSplitKQ(weight.t(), qinput, out_dtype, scale_a, scale_b,
                                current_platform.get_cu_count())
     else:
