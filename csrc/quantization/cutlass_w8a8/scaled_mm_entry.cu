@@ -30,7 +30,7 @@ void get_cutlass_moe_mm_data_caller(
     torch::Tensor& input_permutation, torch::Tensor& output_permutation,
     const int64_t num_experts, const int64_t n, const int64_t k);
 
-#if ENABLE_SCALED_MM_SM90 
+  #if ENABLE_SCALED_MM_SM90
 void cutlass_scaled_mm_sm90(torch::Tensor& c, torch::Tensor const& a,
                             torch::Tensor const& b,
                             torch::Tensor const& a_scales,
@@ -43,17 +43,17 @@ void cutlass_moe_mm_sm90(
     torch::Tensor const& problem_sizes, torch::Tensor const& a_strides,
     torch::Tensor const& b_strides, torch::Tensor const& c_strides);
 
-#endif // defined(ENABLE_SCALED_MM_SM90)
+  #endif  // defined(ENABLE_SCALED_MM_SM90)
 
-#if ENABLE_SCALED_MM_SM100 
+  #if ENABLE_SCALED_MM_SM100
 void cutlass_scaled_mm_sm100(torch::Tensor& c, torch::Tensor const& a,
                              torch::Tensor const& b,
                              torch::Tensor const& a_scales,
                              torch::Tensor const& b_scales,
                              std::optional<torch::Tensor> const& bias);
 
-#endif // defined(ENABLE_SCALED_MM_SM100)
-#endif // defined(ENABLE_SCALED_MM_SM90) || defined(ENABLE_SCALED_MM_SM100)
+  #endif  // defined(ENABLE_SCALED_MM_SM100)
+#endif    // defined(ENABLE_SCALED_MM_SM90) || defined(ENABLE_SCALED_MM_SM100)
 
 void cutlass_scaled_mm_azp_sm75(torch::Tensor& c, torch::Tensor const& a,
                                 torch::Tensor const& b,

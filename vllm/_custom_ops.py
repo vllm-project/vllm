@@ -1024,11 +1024,10 @@ def scaled_expert_fp4_quant(
     FLOAT8_E4M3_MAX = torch.finfo(torch.float8_e4m3fn).max   
     e = expert_offsets.shape[0]- 1
     device = input_tensor.device
-    if use_expert_map:
-        rep_a =  input_tensor[expert_map] #replicated input using expert map
-    else:
-        rep_a =  input_tensor
+    
+    rep_a = input_tensor[expert_map] if use_expert_map else input_tensor
     m_numtopk, k = rep_a.shape
+    
     tokens_per_expert = expert_offsets[1:] - expert_offsets[:-1]
     round_up = lambda x, y: (x + y - 1) // y * y
     sf_sizes = round_up(tokens_per_expert, 128)

@@ -10,9 +10,8 @@ from vllm._custom_ops import (cutlass_scaled_fp4_mm,
                               cutlass_scaled_mm_supports_fp4, scaled_fp4_quant)
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.cutlass_moe import cutlass_moe_fp4
-from vllm.model_executor.layers.fused_moe.layer import (FusedMoE,
-                                                        FusedMoEMethodBase,
-                                                        FusedMoeWeightScaleSupported)
+from vllm.model_executor.layers.fused_moe.layer import (
+    FusedMoE, FusedMoEMethodBase, FusedMoeWeightScaleSupported)
 from vllm.model_executor.layers.linear import (LinearBase, LinearMethodBase,
                                                UnquantizedLinearMethod)
 from vllm.model_executor.layers.quantization import QuantizationMethods
@@ -27,6 +26,7 @@ from vllm.model_executor.parameter import (ModelWeightParameter,
                                            PerTensorScaleParameter)
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
+
 logger = init_logger(__name__)
 
 QUANT_ALGOS = ["FP8", "NVFP4"]
@@ -444,7 +444,6 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
                              " dynamic quantization is not supported.")
             
         layer.quant_config = self.quant_config
-        group_size = self.quant_config.group_size
         weight_dtype = torch.uint8
         weight_scale_dtype = torch.float8_e4m3fn
         weight_loader = extra_weight_attrs.get("weight_loader")

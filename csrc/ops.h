@@ -209,12 +209,10 @@ void cutlass_moe_mm(
     torch::Tensor const& b_strides, torch::Tensor const& c_strides);
 
 void cutlass_fp4_group_mm(
-    torch::Tensor &output, const torch::Tensor &a,
-    const torch::Tensor &b, const torch::Tensor &a_blockscale,
-    const torch::Tensor &b_blockscales, const torch::Tensor &alphas,
-    const torch::Tensor &problem_sizes, const torch::Tensor &expert_offsets,
-    const torch::Tensor &sf_offsets);
-
+    torch::Tensor& output, const torch::Tensor& a, const torch::Tensor& b,
+    const torch::Tensor& a_blockscale, const torch::Tensor& b_blockscales,
+    const torch::Tensor& alphas, const torch::Tensor& problem_sizes,
+    const torch::Tensor& expert_offsets, const torch::Tensor& sf_offsets);
 
 void get_cutlass_moe_mm_data(
     const torch::Tensor& topk_ids, torch::Tensor& expert_offsets,

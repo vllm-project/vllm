@@ -1,8 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 """ CUTLASS based Fused MoE kernels."""
 from typing import Optional
+
 import torch
+
 from vllm import _custom_ops as ops
+from vllm.scalar_type import scalar_types
 
 
 #TODO make the grouped gemm kernel consistent with scaled gemm kernel
@@ -177,7 +180,6 @@ def cutlass_moe_fp8(
         c2 = c2 * topk_weights.view(m, topk, 1).to(out_dtype)
     return c2.sum(dim=1)
 
-from vllm.scalar_type import scalar_types
 
 FLOAT4_E2M1_MAX = scalar_types.float4_e2m1fn.max()
 FLOAT8_E4M3_MAX = torch.finfo(torch.float8_e4m3fn).max  
@@ -259,7 +261,7 @@ def cutlass_moe_fp4(
     problem_sizes1 = torch.empty((e, 3),
                                  dtype=torch.int32,
                                  device=device)
-    # Problem size:  (num_experts, (m,n,k)) 
+    # Problem size:  (num_experts, (m,n,k))
     problem_sizes2 = torch.empty((e, 3),
                                  dtype=torch.int32,
                                  device=device)
