@@ -35,7 +35,9 @@ opencv-python-headless >= 4.11.0 # required for video test
 datamodel_code_generator # required for minicpm3 test
 lm-eval[api]==0.4.8 # required for model evaluation test
 transformers==4.51.1
+tokenizers==0.21.1
 huggingface-hub[hf_xet]>=0.30.0  # Required for Xet downloads.
+schemathesis>=3.39.15 # Required for openai schema test.
 # quantization
 bitsandbytes>=0.45.3
 buildkite-test-collector==0.1.9
