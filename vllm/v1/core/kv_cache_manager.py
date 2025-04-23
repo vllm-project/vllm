@@ -4,11 +4,12 @@ from collections import defaultdict
 from collections.abc import Iterable
 from typing import Optional
 
+from vllm.distributed.kv_events import KVCacheEvent
 from vllm.logger import init_logger
 from vllm.utils import cdiv, sha256
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_utils import (BlockHashType, KVCacheBlock,
-                                         KVCacheEvent, hash_request_tokens)
+                                         hash_request_tokens)
 from vllm.v1.core.specialized_manager import get_specialized_manager
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.metrics.stats import PrefixCacheStats

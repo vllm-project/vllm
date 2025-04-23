@@ -11,18 +11,18 @@ import pytest
 from transformers import AutoTokenizer
 
 from vllm import SamplingParams
+from vllm.distributed.kv_events import BlockStored, KVEventBatch
 from vllm.engine.arg_utils import EngineArgs
 from vllm.platforms import current_platform
 from vllm.usage.usage_lib import UsageContext
-from vllm.v1.core.kv_cache_utils import BlockStored, KVEventBatch
 from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.engine.core import EngineCore
 from vllm.v1.engine.core_client import (AsyncMPClient, EngineCoreClient,
                                         SyncMPClient)
 from vllm.v1.executor.abstract import Executor
 
+from ...distributed.conftest import MockSubscriber
 from ...utils import create_new_process_for_each_test
-from ..conftest import MockSubscriber
 
 if not current_platform.is_cuda():
     pytest.skip(reason="V1 currently only supported on CUDA.",
@@ -254,7 +254,7 @@ async def test_engine_core_client_asyncio(monkeypatch: pytest.MonkeyPatch):
 @create_new_process_for_each_test()
 @pytest.mark.parametrize(
     "multiprocessing_mode,publisher_config",
-    [(False, "inproc"), (True, "tcp")],
+    [(True, "tcp"), (False, "inproc")],
     indirect=["publisher_config"],
 )
 def test_kv_cache_events(
@@ -268,14 +268,11 @@ def test_kv_cache_events(
         block_size = 16
         num_blocks = 2
 
-        engine_args = EngineArgs(
-            model=MODEL_NAME,
-            enforce_eager=True,
-            enable_prefix_caching=True,
-            enable_kv_cache_events=True,  # Enable KV cache events
-            block_size=block_size)
-        print(f"publisher_config: {publisher_config}")
-        engine_args.event_publisher_config = publisher_config
+        engine_args = EngineArgs(model=MODEL_NAME,
+                                 enforce_eager=True,
+                                 enable_prefix_caching=True,
+                                 block_size=block_size)
+        engine_args.kv_events_config = publisher_config
 
         vllm_config = engine_args.create_engine_config(
             UsageContext.UNKNOWN_CONTEXT)
@@ -289,6 +286,7 @@ def test_kv_cache_events(
             log_stats=False,
         )
         endpoint = publisher_config.endpoint.replace("*", "127.0.0.1")
+        time.sleep(0.1)
         subscriber = MockSubscriber(endpoint,
                                     topic=publisher_config.topic,
                                     decode_type=KVEventBatch)

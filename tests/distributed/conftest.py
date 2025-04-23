@@ -7,8 +7,8 @@ import msgspec.msgpack
 import pytest
 import zmq
 
-from vllm.config import EventPublisherConfig
-from vllm.v1.metrics.events import EventPublisherFactory
+from vllm.config import KVEventsConfig
+from vllm.distributed.kv_events import EventPublisherFactory
 
 from .test_events import SampleBatch
 
@@ -31,12 +31,13 @@ def publisher_config(random_port, request):
         endpoint = f"tcp://*:{random_port}"
         replay_endpoint = f"tcp://*:{random_port + 1}"
 
-    return EventPublisherConfig(publisher="zmq",
-                                endpoint=endpoint,
-                                replay_endpoint=replay_endpoint,
-                                buffer_steps=100,
-                                hwm=1000,
-                                topic="test")
+    return KVEventsConfig(enable_kv_cache_events=True,
+                          publisher="zmq",
+                          endpoint=endpoint,
+                          replay_endpoint=replay_endpoint,
+                          buffer_steps=100,
+                          hwm=1000,
+                          topic="test")
 
 
 @pytest.fixture
@@ -93,6 +94,7 @@ class MockSubscriber:
     def receive_one(self,
                     timeout=1000) -> Union[tuple[int, SampleBatch], None]:
         """Receive a single message with timeout"""
+        print(f"self.sub: {self.sub}")
         if not self.sub.poll(timeout):
             return None
 

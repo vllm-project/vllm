@@ -19,7 +19,7 @@ from vllm import version
 from vllm.config import (BlockSize, CacheConfig, CacheDType, CompilationConfig,
                          ConfigFormat, ConfigType, DecodingConfig, Device,
                          DeviceConfig, DistributedExecutorBackend,
-                         EventPublisherConfig, GuidedDecodingBackendV1, HfOverrides,
+                         GuidedDecodingBackendV1, HfOverrides, KVEventsConfig,
                          KVTransferConfig, LoadConfig, LoadFormat, LoRAConfig,
                          ModelConfig, ModelImpl, MultiModalConfig,
                          ObservabilityConfig, ParallelConfig, PoolerConfig,
@@ -159,7 +159,6 @@ class EngineArgs:
     enable_prefix_caching: Optional[bool] = CacheConfig.enable_prefix_caching
     prefix_caching_hash_algo: PrefixCachingHashAlgo = \
         CacheConfig.prefix_caching_hash_algo
-    enable_kv_cache_events: bool = False
     disable_sliding_window: bool = False
     disable_cascade_attn: bool = False
     use_v2_block_manager: bool = True
@@ -248,7 +247,7 @@ class EngineArgs:
     worker_extension_cls: str = ParallelConfig.worker_extension_cls
 
     kv_transfer_config: Optional[KVTransferConfig] = None
-    event_publisher_config: Optional[EventPublisherConfig] = None
+    kv_events_config: Optional[KVEventsConfig] = None
 
     generation_config: Optional[str] = "auto"
     override_generation_config: Optional[Dict[str, Any]] = None
@@ -574,12 +573,6 @@ class EngineArgs:
         cache_group.add_argument('--calculate-kv-scales',
                                  **cache_kwargs["calculate_kv_scales"])
 
-        parser.add_argument(
-            "--enable-kv-cache-events",
-            action='store_true',
-            default=EngineArgs.enable_kv_cache_events,
-            help=
-            "Enable KV cache events for tracking block storage and removal.")
         parser.add_argument('--disable-sliding-window',
                             action='store_true',
                             help='Disables sliding window, '
@@ -933,8 +926,8 @@ class EngineArgs:
                             default=None,
                             help='The configurations for distributed KV cache '
                             'transfer. Should be a JSON string.')
-        parser.add_argument('--event-publisher-config',
-                            type=EventPublisherConfig.from_cli,
+        parser.add_argument('--kv-events-config',
+                            type=KVEventsConfig.from_cli,
                             default=None,
                             help='The configurations for event publishing.')
 
@@ -1262,7 +1255,6 @@ class EngineArgs:
             max_num_partial_prefills=self.max_num_partial_prefills,
             max_long_partial_prefills=self.max_long_partial_prefills,
             long_prefill_token_threshold=self.long_prefill_token_threshold,
-            enable_kv_cache_events=self.enable_kv_cache_events,
         )
 
         lora_config = LoRAConfig(
@@ -1334,7 +1326,7 @@ class EngineArgs:
             prompt_adapter_config=prompt_adapter_config,
             compilation_config=self.compilation_config,
             kv_transfer_config=self.kv_transfer_config,
-            event_publisher_config=self.event_publisher_config,
+            kv_events_config=self.kv_events_config,
             additional_config=self.additional_config,
         )
 

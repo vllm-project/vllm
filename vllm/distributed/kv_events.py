@@ -2,12 +2,12 @@
 
 import collections
 from abc import ABC, abstractmethod
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Optional, Union
 
 import msgspec
 import zmq
 
-from vllm.config import EventPublisherConfig
+from vllm.config import KVEventsConfig
 
 
 class EventBatch(
@@ -18,6 +18,35 @@ class EventBatch(
 ):
     ts: float
     events: list[Any]
+
+
+class KVCacheEvent(
+        msgspec.Struct,
+        array_like=True,  # type: ignore[call-arg]
+        omit_defaults=True,  # type: ignore[call-arg]
+        gc=False,  # type: ignore[call-arg]
+        tag=True):
+    """Base class for all KV cache-related events"""
+
+
+class BlockStored(KVCacheEvent):
+    block_hashes: list[int]
+    parent_block_hash: Optional[int]
+    token_ids: list[int]
+    num_toks_per_block: list[int]
+    lora_id: Optional[int]
+
+
+class BlockRemoved(KVCacheEvent):
+    block_hashes: list[int]
+
+
+class AllBlocksCleared(KVCacheEvent):
+    pass
+
+
+class KVEventBatch(EventBatch):
+    events: list[Union[BlockStored, BlockRemoved, AllBlocksCleared]]
 
 
 class EventPublisher(ABC):
@@ -151,7 +180,7 @@ class EventPublisherFactory:
         cls._registry[name] = ctor
 
     @classmethod
-    def create(cls, config: Optional[EventPublisherConfig]) -> EventPublisher:
+    def create(cls, config: Optional[KVEventsConfig]) -> EventPublisher:
         """Create publisher from a config mapping."""
         if not config:
             return NullEventPublisher()
@@ -159,6 +188,7 @@ class EventPublisherFactory:
         config_dict = config.model_dump()
 
         kind = config_dict.pop("publisher", "null")
+        config_dict.pop("enable_kv_cache_events", False)
         try:
             constructor = cls._registry[kind]
         except KeyError as exc:

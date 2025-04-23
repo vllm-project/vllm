@@ -4,9 +4,7 @@ import os
 from collections import deque
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Any, Callable, NamedTuple, Optional, Union
-
-import msgspec
+from typing import Any, Callable, NamedTuple, Optional
 
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
@@ -14,7 +12,6 @@ from vllm.utils import GiB_bytes, sha256
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
                                         KVCacheGroupSpec, KVCacheSpec,
                                         KVCacheTensor, SlidingWindowSpec)
-from vllm.v1.metrics.events import EventBatch
 from vllm.v1.metrics.stats import PrefixCacheStats
 from vllm.v1.request import Request
 
@@ -264,35 +261,6 @@ class FreeKVCacheBlockQueue:
             ret.append(curr_block)
             curr_block = curr_block.next_free_block
         return ret
-
-
-class KVCacheEvent(
-        msgspec.Struct,
-        array_like=True,  # type: ignore[call-arg]
-        omit_defaults=True,  # type: ignore[call-arg]
-        gc=False,  # type: ignore[call-arg]
-        tag=True):
-    """Base class for all KV cache-related events"""
-
-
-class BlockStored(KVCacheEvent):
-    block_hashes: list[int]
-    parent_block_hash: Optional[int]
-    token_ids: list[int]
-    num_toks_per_block: list[int]
-    lora_id: Optional[int]
-
-
-class BlockRemoved(KVCacheEvent):
-    block_hashes: list[int]
-
-
-class AllBlocksCleared(KVCacheEvent):
-    pass
-
-
-class KVEventBatch(EventBatch):
-    events: list[Union[BlockStored, BlockRemoved, AllBlocksCleared]]
 
 
 def need_extra_keys(request: Request) -> bool:
