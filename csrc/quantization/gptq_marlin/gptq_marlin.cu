@@ -364,7 +364,6 @@ MarlinFuncPtr get_marlin_kernel(const vllm::ScalarType q_type,
 
   COMMON_GET_IF(vllm::kU4)
   COMMON_GET_IF(vllm::kU4B8)
-  COMMON_GET_IF(vllm::kU8)
   COMMON_GET_IF(vllm::kU8B128)
 
   BIGGROUP_GET_IF(vllm::kFE4M3fn)
