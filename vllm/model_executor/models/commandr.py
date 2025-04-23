@@ -249,7 +249,9 @@ class CohereDecoderLayer(nn.Module):
                                          quant_config=quant_config,
                                          prefix=f"{prefix}.self_attn")
 
-        self.mlp = CohereMLP(config, quant_config=quant_config, prefix=f"{prefix}.mlp"))
+        self.mlp = CohereMLP(config,
+                             quant_config=quant_config,
+                             prefix=f"{prefix}.mlp")
         self.input_layernorm = LayerNorm(param_shape=(config.hidden_size),
                                          eps=config.layer_norm_eps)
 
