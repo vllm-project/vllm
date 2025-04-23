@@ -463,17 +463,6 @@ async def show_version():
     return JSONResponse(content=ver)
 
 
-RequestWithExtraBody = Union[CompletionRequest, ChatCompletionRequest,
-                             TranscriptionRequest]
-
-
-def _merge_extra_body(request: RequestWithExtraBody) -> None:
-    """Integrate extra body arguments"""
-    for key, value in request.extra_body.items():
-        setattr(request, key, value)
-    request.extra_body = None
-
-
 @router.post("/v1/chat/completions",
              dependencies=[Depends(validate_json_request)])
 @with_cancellation
@@ -505,9 +494,6 @@ async def create_completion(request: CompletionRequest, raw_request: Request):
     if handler is None:
         return base(raw_request).create_error_response(
             message="The model does not support Completions API")
-    if request.extra_body:
-        # Integrate extra body arguments
-        _merge_extra_body(request)
 
     generator = await handler.create_completion(request, raw_request)
     if isinstance(generator, ErrorResponse):

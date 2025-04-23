@@ -248,12 +248,6 @@ class ChatCompletionRequest(OpenAIBaseModel):
         description=("Additional kwargs to pass to sampling."),
     )
 
-    # Catch-all for request attributes beyond the OpenAI API spec
-    extra_body: Optional[dict[str, Any]] = Field(
-        default=None,
-        description=("Specify arguments beyond the OpenAI API spec."),
-    )
-
     # NOTE this will be ignored by vLLM -- the model determines the behavior
     parallel_tool_calls: Optional[bool] = False
     user: Optional[str] = None
@@ -735,12 +729,6 @@ class CompletionRequest(OpenAIBaseModel):
     extra_sampling_params: Optional[dict[str, Any]] = Field(
         default=None,
         description=("Additional kwargs to pass to sampling."),
-    )
-
-    # Catch-all for request attributes beyond the OpenAI API spec
-    extra_body: Optional[dict[str, Any]] = Field(
-        default=None,
-        description=("Specify arguments beyond the OpenAI API spec."),
     )
 
     # doc: begin-completion-sampling-params
@@ -1606,12 +1594,6 @@ class TranscriptionRequest(OpenAIBaseModel):
     extra_sampling_params: Optional[dict[str, Any]] = Field(
         default=None,
         description=("Additional kwargs to pass to sampling."),
-    )
-
-    # Catch-all for request attributes beyond the OpenAI API spec
-    extra_body: Optional[dict[str, Any]] = Field(
-        default=None,
-        description=("Specify arguments beyond the OpenAI API spec."),
     )
 
     ## TODO (varun) : Support if set to 0, certain thresholds are met !!
