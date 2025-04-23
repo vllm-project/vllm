@@ -225,7 +225,8 @@ class OpenAIServingClassification(OpenAIServing):
 
             probs = classify_res.probs
             predicted_index = int(np.argmax(probs))
-            label = self.model_config.hf_config.id2label.get(predicted_index)
+            label = getattr(self.model_config.hf_config, "id2label",
+                            {}).get(predicted_index)
 
             item = ClassificationData(
                 index=idx,
