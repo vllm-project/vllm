@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+from functools import cache
 from typing import List, Optional, Tuple
 
 import torch
@@ -8,25 +9,27 @@ from vllm.platforms import current_platform
 from vllm.utils import direct_register_custom_op
 
 
+@cache
 def is_rocm_aiter_moe_enabled() -> bool:
     return current_platform.is_rocm() \
         and envs.VLLM_ROCM_USE_AITER_MOE \
-        and envs.VLLM_ROCM_USE_AITER \
+        and envs.VLLM_ROCM_USE_AITER
 
 
-def rocm_aiter_asm_moe_tkw1(hidden_states,
-                            w1,
-                            w2,
-                            topk_weight,
-                            topk_ids,
-                            fc1_scale=None,
-                            fc2_scale=None,
-                            fc1_smooth_scale=None,
-                            fc2_smooth_scale=None,
-                            a16=False,
-                            per_tensor_quant_scale=None,
-                            expert_mask=None,
-                            activation_str: str = "silu") -> None:
+def rocm_aiter_asm_moe_tkw1_impl(
+        hidden_states: torch.Tensor,
+        w1: torch.Tensor,
+        w2: torch.Tensor,
+        topk_weight: torch.Tensor,
+        topk_ids: torch.Tensor,
+        fc1_scale: Optional[torch.Tensor] = None,
+        fc2_scale: Optional[torch.Tensor] = None,
+        fc1_smooth_scale: Optional[torch.Tensor] = None,
+        fc2_smooth_scale: Optional[torch.Tensor] = None,
+        a16: bool = False,
+        per_tensor_quant_scale: Optional[torch.Tensor] = None,
+        expert_mask: Optional[torch.Tensor] = None,
+        activation_str: str = "silu") -> torch.Tensor:
 
     from aiter import ActivationType
     from aiter.fused_moe_bf16_asm import asm_moe_tkw1
@@ -47,6 +50,23 @@ def rocm_aiter_asm_moe_tkw1(hidden_states,
                         per_tensor_quant_scale=per_tensor_quant_scale,
                         expert_mask=expert_mask,
                         activation=activation)
+
+
+def rocm_aiter_asm_moe_tkw1_fake(
+        hidden_states: torch.Tensor,
+        w1: torch.Tensor,
+        w2: torch.Tensor,
+        topk_weight: torch.Tensor,
+        topk_ids: torch.Tensor,
+        fc1_scale: Optional[torch.Tensor] = None,
+        fc2_scale: Optional[torch.Tensor] = None,
+        fc1_smooth_scale: Optional[torch.Tensor] = None,
+        fc2_smooth_scale: Optional[torch.Tensor] = None,
+        a16: bool = False,
+        per_tensor_quant_scale: Optional[torch.Tensor] = None,
+        expert_mask: Optional[torch.Tensor] = None,
+        activation_str: str = "silu") -> torch.Tensor:
+    return torch.empty_like(hidden_states)
 
 
 def rocm_aiter_ck_moe_impl(hidden_states: torch.Tensor, w1: torch.Tensor,
@@ -219,6 +239,14 @@ def rocm_aiter_shuffle_weight_fake(tensor: torch.Tensor) -> torch.Tensor:
 if current_platform.is_rocm():
 
     direct_register_custom_op(
+        op_name="rocm_aiter_asm_moe_tkw1",
+        op_func=rocm_aiter_asm_moe_tkw1_impl,
+        mutates_args=[],
+        fake_impl=rocm_aiter_asm_moe_tkw1_fake,
+        dispatch_key=current_platform.dispatch_key,
+    )
+
+    direct_register_custom_op(
         op_name="rocm_aiter_ck_moe",
         op_func=rocm_aiter_ck_moe_impl,
         mutates_args=[],
@@ -306,19 +334,20 @@ def rocm_aiter_fused_experts(hidden_states: torch.Tensor,
             "Only support topk=1 when"
             " `apply_router_weight_on_input` is True")
 
-        return rocm_aiter_asm_moe_tkw1(hidden_states,
-                                       w1,
-                                       w2,
-                                       topk_weights,
-                                       topk_ids,
-                                       fc1_scale=w1_scale,
-                                       fc2_scale=w2_scale,
-                                       fc1_smooth_scale=None,
-                                       fc2_smooth_scale=None,
-                                       a16=False,
-                                       per_tensor_quant_scale=None,
-                                       expert_mask=expert_map,
-                                       activation_str=activation)
+        return torch.ops.vllm.rocm_aiter_asm_moe_tkw1(
+            hidden_states,
+            w1,
+            w2,
+            topk_weights,
+            topk_ids,
+            fc1_scale=w1_scale,
+            fc2_scale=w2_scale,
+            fc1_smooth_scale=None,
+            fc2_smooth_scale=None,
+            a16=False,
+            per_tensor_quant_scale=None,
+            expert_mask=expert_map,
+            activation_str=activation)
 
     elif use_fp8_w8a8:
         assert not apply_router_weight_on_input, (
