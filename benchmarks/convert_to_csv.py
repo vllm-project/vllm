@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 from argparse import ArgumentParser
+
 import pandas as pd
 
 parser = ArgumentParser()
