@@ -18,7 +18,6 @@ import requests
 import torch
 
 import vllm.envs as envs
-from vllm.config import VllmConfig
 from vllm.connections import global_http_connection
 from vllm.utils import cuda_device_count_stateless, cuda_get_device_properties
 from vllm.version import __version__ as VLLM_VERSION
@@ -152,25 +151,20 @@ class UsageMessage:
     def report_usage(self,
                      model_architecture: str,
                      usage_context: UsageContext,
-                     vllm_config: VllmConfig,
                      extra_kvs: Optional[dict[str, Any]] = None) -> None:
         t = Thread(target=self._report_usage_worker,
-                   args=(model_architecture, usage_context, vllm_config,
-                         extra_kvs or {}),
+                   args=(model_architecture, usage_context, extra_kvs or {}),
                    daemon=True)
         t.start()
 
     def _report_usage_worker(self, model_architecture: str,
                              usage_context: UsageContext,
-                             vllm_config: VllmConfig,
                              extra_kvs: dict[str, Any]) -> None:
-        self._report_usage_once(model_architecture, usage_context, vllm_config,
-                                extra_kvs)
+        self._report_usage_once(model_architecture, usage_context, extra_kvs)
         self._report_continous_usage()
 
     def _report_usage_once(self, model_architecture: str,
                            usage_context: UsageContext,
-                           vllm_config: VllmConfig,
                            extra_kvs: dict[str, Any]) -> None:
         # Platform information
         from vllm.platforms import current_platform
@@ -183,7 +177,7 @@ class UsageMessage:
         if current_platform.is_tpu():
             # try:
             import torch_xla
-            self.gpu_count = vllm_config.parallel_config.world_size
+            self.gpu_count = torch_xla.runtime.world_size
             self.gpu_type = torch_xla.tpu.get_tpu_type()
             self.gpu_memory_per_device = (
                 torch_xla.core.xla_model.get_memory_info()["bytes_limit"])
