@@ -108,6 +108,9 @@ class GuidanceBackend(StructuredOutputBackend):
         return llguidance_torch.allocate_token_bitmask(
             max_num_seqs, self.ll_tokenizer.vocab_size)
 
+    def destroy(self):
+        pass
+
 
 @dataclass
 class GuidanceGrammar(StructuredOutputGrammar):

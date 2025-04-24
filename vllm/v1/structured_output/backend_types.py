@@ -87,3 +87,9 @@ class StructuredOutputBackend(ABC):
             max_num_seqs (int): The maximum number of sequences for which
               to allocate the bitmask.
         """
+
+    @abstractmethod
+    def destroy(self):
+        """
+        Backend-specific cleanup.
+        """
