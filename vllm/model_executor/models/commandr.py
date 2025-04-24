@@ -88,6 +88,7 @@ class CohereMLP(nn.Module):
         self,
         config: CohereConfig,
         quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = "",
     ):
         super().__init__()
         self.config = config
@@ -98,12 +99,14 @@ class CohereMLP(nn.Module):
             [self.intermediate_size] * 2,
             bias=False,
             quant_config=quant_config,
+            prefix=f"{prefix}.gate_up_proj",
         )
         self.down_proj = RowParallelLinear(
             self.intermediate_size,
             self.hidden_size,
             bias=False,
             quant_config=quant_config,
+            prefix=f"{prefix}.down_proj",
         )
         self.act_fn = SiluAndMul()
 
@@ -157,12 +160,14 @@ class CohereAttention(nn.Module):
             self.total_num_kv_heads,
             bias=False,
             quant_config=quant_config,
+            prefix=f"{prefix}.qkv_proj",
         )
         self.o_proj = RowParallelLinear(
             self.total_num_heads * self.head_dim,
             self.hidden_size,
             bias=False,
             quant_config=quant_config,
+            prefix=f"{prefix}.o_proj",
         )
         self.rotary_emb = get_rope(
             self.head_dim,
@@ -243,7 +248,9 @@ class CohereDecoderLayer(nn.Module):
                                          quant_config=quant_config,
                                          prefix=f"{prefix}.self_attn")
 
-        self.mlp = CohereMLP(config, quant_config=quant_config)
+        self.mlp = CohereMLP(config,
+                             quant_config=quant_config,
+                             prefix=f"{prefix}.mlp")
         self.input_layernorm = LayerNorm(param_shape=(config.hidden_size),
                                          eps=config.layer_norm_eps)
 
