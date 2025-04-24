@@ -1,4 +1,4 @@
-# Deprecation Policy for vLLM
+# Deprecation Policy
 
 This document outlines the official policy and process for deprecating features in the vLLM project.
 
