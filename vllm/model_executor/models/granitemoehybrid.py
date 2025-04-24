@@ -13,7 +13,7 @@ from vllm.distributed import divide, get_tensor_model_parallel_world_size
 from vllm.distributed.parallel_state import get_pp_group
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.layernorm import RMSNorm
-from vllm.model_executor.layers.linear import ColumnParallelLinear, RowParallelLinear
+from vllm.model_executor.layers.linear import ReplicatedLinear, RowParallelLinear
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.mamba.mamba_mixer2 import (
     MambaMixer2, extra_groups_for_head_shards)
@@ -209,25 +209,25 @@ class GraniteMoeHybridAttention(nn.Module):
         self.head_dim = self.hidden_size // self.num_heads
         self.num_key_value_heads = config.num_key_value_heads    
         
-        self.q_proj = ColumnParallelLinear(self.hidden_size,
+        self.q_proj = ReplicatedLinear(   self.hidden_size,
                                           self.num_heads * self.head_dim,
                                           bias=self.attention_bias,
                                           quant_config=quant_config,
                                           prefix=f"{prefix}.q_proj")
         
-        self.k_proj = ColumnParallelLinear(self.hidden_size,
+        self.k_proj = ReplicatedLinear(   self.hidden_size,
                                           self.num_key_value_heads * self.head_dim,
                                           bias=self.attention_bias,
                                           quant_config=quant_config,
                                           prefix=f"{prefix}.k_proj")
         
-        self.v_proj = ColumnParallelLinear(self.hidden_size,
+        self.v_proj = ReplicatedLinear(   self.hidden_size,
                                           self.num_key_value_heads * self.head_dim,
                                           bias=self.attention_bias,
                                           quant_config=quant_config,
                                           prefix=f"{prefix}.v_proj")
         
-        self.o_proj = RowParallelLinear(  self.hidden_size,
+        self.o_proj = ReplicatedLinear(   self.hidden_size,
                                           self.hidden_size,
                                           bias=self.attention_bias,
                                           quant_config=quant_config,
