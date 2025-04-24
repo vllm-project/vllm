@@ -7,7 +7,6 @@ Note that lmcache needs to be installed to run this example.
 Learn more about LMCache in https://github.com/LMCache/LMCache.
 """
 import os
-import time
 
 from lmcache.experimental.cache_engine import LMCacheEngineBuilder
 from lmcache.integration.vllm.utils import ENGINE_NAME

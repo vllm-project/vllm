@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
+import json
+
 import openai
 import pytest
 import pytest_asyncio
@@ -31,7 +33,7 @@ def server():
         "--enforce-eager",
         "--trust-remote-code",
         "--limit-mm-per-prompt",
-        f"video={MAXIMUM_VIDEOS}",
+        json.dumps({"video": MAXIMUM_VIDEOS}),
     ]
 
     with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
@@ -104,6 +106,35 @@ async def test_single_chat_session_video(client: openai.AsyncOpenAI,
     )
     message = chat_completion.choices[0].message
     assert message.content is not None and len(message.content) >= 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model_name", [MODEL_NAME])
+@pytest.mark.parametrize("video_url", TEST_VIDEO_URLS)
+async def test_error_on_invalid_video_url_type(client: openai.AsyncOpenAI,
+                                               model_name: str,
+                                               video_url: str):
+    messages = [{
+        "role":
+        "user",
+        "content": [
+            {
+                "type": "video_url",
+                "video_url": video_url
+            },
+            {
+                "type": "text",
+                "text": "What's in this video?"
+            },
+        ],
+    }]
+
+    # video_url should be a dict {"url": "some url"}, not directly a string
+    with pytest.raises(openai.BadRequestError):
+        _ = await client.chat.completions.create(model=model_name,
+                                                 messages=messages,
+                                                 max_completion_tokens=10,
+                                                 temperature=0.0)
 
 
 @pytest.mark.asyncio
