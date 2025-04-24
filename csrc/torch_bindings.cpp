@@ -10,6 +10,11 @@
 // The X_meta signatures are for the meta functions corresponding to op X.
 // They must be kept in sync with the signature for X. Generally, only
 // functions that return Tensors require a meta function.
+//
+// See the following links for detailed docs on op registration and function
+// schemas.
+// https://docs.google.com/document/d/1_W62p8WJOQQUzPsJYa7s701JXt0qf2OfLub2sbkHOaU/edit#heading=h.ptttacy8y1u9
+// https://github.com/pytorch/pytorch/blob/main/aten/src/ATen/native/README.md#annotations
 
 TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   // vLLM custom ops
@@ -226,6 +231,9 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   // pytorch throws an assert in
   // 'torch._higher_order_ops._register_effectful_op' that prevents these
   // kernels from being torch.compile'd.
+  // See the following document for more info on custom types and ops that use
+  // custom types:
+  // https://docs.google.com/document/d/18fBMPuOJ0fY5ZQ6YyrHUppw9FA332CpNtgB6SOIgyuA 
 
   // Marlin (Dense) Optimized Quantized GEMM for GPTQ.
   ops.def(

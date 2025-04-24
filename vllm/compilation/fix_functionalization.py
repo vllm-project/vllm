@@ -167,6 +167,7 @@ class FixFunctionalizationPass(VllmInductorPass):
         Insert a new defunctionalized node into the graph before node.
         If one of the kwargs is 'out', provide args directly,
         as node.kwargs cannot be used.
+        See https://github.com/pytorch/pytorch/blob/a00faf440888ffb724bad413f329a49e2b6388e7/torch/_inductor/lowering.py#L351
 
         :param graph: Graph to insert the defunctionalized node into
         :param node: The auto-functionalized node to defunctionalize
