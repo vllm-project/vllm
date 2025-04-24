@@ -108,9 +108,11 @@ def subtuple(obj: object,
     else:
         values = {f: to_override.get(f, getattr(obj, f)) for f in fields}
     if typename not in _TYPE_CACHE:
-        _TYPE_CACHE[typename] = collections.namedtuple(typename,
-                                                       ' '.join(fields))
-    return _TYPE_CACHE[typename](**values)
+        _TYPE_CACHE[typename] = {
+            'object': collections.namedtuple(typename, ' '.join(fields)),
+            'fields': fields
+        }
+    return _TYPE_CACHE[typename]['object'](**values)  # type: ignore
 
 
 def align_workers(value, op):
@@ -340,8 +342,20 @@ class HpuModelAdapter(torch.nn.Module):
             block_groups.masked_fill_(oob_values, batch_size)
             metadata = metadata._replace(block_groups=block_groups)
         block_mapping = block_mapping.to(dtype)
-        metadata = metadata._replace(block_mapping=block_mapping,
-                                     attn_bias=attn_bias)
+
+        # Torch compile dynamo doesn't support calling any named tuple
+        # dynamic methods other than len and get_attr so we need to
+        # mimic behaviour of tuple._replace manually
+        TrimmedAttentionMetadata = _TYPE_CACHE['TrimmedAttentionMetadata'][
+            'object']
+        fields = _TYPE_CACHE['TrimmedAttentionMetadata']['fields']
+        metadata_dict = {
+            field: getattr(metadata, field)
+            for field in fields  # type: ignore
+        }  # type: ignore
+        metadata_dict['attn_bias'] = attn_bias
+        metadata_dict['block_mapping'] = block_mapping
+        metadata = TrimmedAttentionMetadata(**metadata_dict)  # type: ignore
         return metadata
 
     def _set_indices_and_offsets(self, metadata, block_size, is_prompt):
