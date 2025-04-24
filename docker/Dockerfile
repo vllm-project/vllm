@@ -66,7 +66,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 COPY requirements/common.txt requirements/common.txt
 COPY requirements/cuda.txt requirements/cuda.txt
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv pip install --system -r requirements/cuda.txt
+    uv pip install --system -r requirements/cuda.txt --index-strategy unsafe-best-match
 
 # cuda arch list used by torch
 # can be useful for both `dev` and `test`
@@ -96,7 +96,7 @@ COPY requirements/build.txt requirements/build.txt
 ENV UV_HTTP_TIMEOUT=500
 
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv pip install --system -r requirements/build.txt
+    uv pip install --system -r requirements/build.txt --index-strategy unsafe-best-match
 
 COPY . .
 ARG GIT_REPO_CHECK=0
@@ -171,7 +171,7 @@ COPY requirements/dev.txt requirements/dev.txt
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip install --system mamba-ssm==2.2.4 --no-build-isolation
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv pip install --system -r requirements/dev.txt
+    uv pip install --system -r requirements/dev.txt --index-strategy unsafe-best-match
 #################### DEV IMAGE ####################
 
 #################### vLLM installation IMAGE ####################
@@ -228,7 +228,9 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 # Install vllm wheel first, so that torch etc will be installed.
 RUN --mount=type=bind,from=build,src=/workspace/dist,target=/vllm-workspace/dist \
     --mount=type=cache,target=/root/.cache/uv \
-    uv pip install --system dist/*.whl --verbose
+    uv pip install --system dist/*.whl --verbose \
+    --extra-index-url https://download.pytorch.org/whl/cu128 \
+    --index-strategy unsafe-best-match
 
 # TESTING: install xformers from source to test 2.7.0 final RC
 RUN --mount=type=cache,target=/root/.cache/uv \
@@ -268,7 +270,7 @@ uv pip list
 # TODO: Remove this once FlashInfer AOT wheel is fixed
 COPY requirements/build.txt requirements/build.txt
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv pip install --system -r requirements/build.txt
+    uv pip install --system -r requirements/build.txt --index-strategy unsafe-best-match
 
 #################### vLLM installation IMAGE ####################
 
@@ -288,7 +290,7 @@ ENV UV_HTTP_TIMEOUT=500
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip install --system mamba-ssm==2.2.4 --no-build-isolation
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv pip install --system -r requirements/dev.txt
+    uv pip install --system -r requirements/dev.txt --index-strategy unsafe-best-match
 
 # install development dependencies (for testing)
 RUN --mount=type=cache,target=/root/.cache/uv \
