@@ -290,17 +290,11 @@ class MiniMaxVL01MultiModalProcessor(
             if image_sizes is not None and len(
                     pixel_values) != len(image_sizes) and isinstance(
                         pixel_values, list) and isinstance(image_sizes, list):
-                if isinstance(pixel_values[0], list):
-                    pixel_values = [
-                        item for sublist in pixel_values for item in sublist
-                    ]
-                    processed_outputs["pixel_values"] = pixel_values
-
-                if len(pixel_values) != len(image_sizes) and len(
-                        image_sizes) == 1 and len(pixel_values) > 1:
-                    image_sizes = [image_sizes[0]] * len(pixel_values)
-                    processed_outputs["image_sizes"] = image_sizes
-
+                min_len = min(len(pixel_values), len(image_sizes))
+                pixel_values = pixel_values[:min_len]
+                image_sizes = image_sizes[:min_len]
+                processed_outputs["pixel_values"] = pixel_values
+                processed_outputs["image_sizes"] = image_sizes
         return processed_outputs
 
     def _get_mm_fields_config(
