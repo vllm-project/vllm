@@ -193,7 +193,6 @@ import torch
 
 from vllm import _custom_ops as ops
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionLayer,
-                                              AttentionMetadata,
                                               MLAAttentionImpl)
 from vllm.attention.backends.utils import get_mla_dims
 from vllm.attention.ops.merge_attn_states import merge_attn_states
@@ -207,11 +206,13 @@ from vllm.utils import cdiv, round_down
 from vllm.vllm_flash_attn.fa_utils import get_flash_attn_version
 
 try:
-    from vllm.vllm_flash_attn import flash_attn_varlen_func
+    import vllm.vllm_flash_attn as vfa
+    flash_attn_varlen_func = vfa.flash_attn_varlen_func
     is_vllm_fa = True
 except ImportError:
     # For rocm use upstream flash attention
-    from flash_attn import flash_attn_varlen_func
+    import flash_attn as fa
+    flash_attn_varlen_func = fa.flash_attn_varlen_func
     is_vllm_fa = False
 
 if TYPE_CHECKING:
@@ -222,7 +223,8 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
-class MLACommonBackend(AttentionBackend):
+class MLACommonBackend(AttentionBackend["MLACommonMetadata",
+                                        "MLACommonMetadataBuilder"]):
 
     accept_output_buffer: bool = True
 
@@ -231,7 +233,7 @@ class MLACommonBackend(AttentionBackend):
         return "TRITON_MLA_VLLM_V1"
 
     @staticmethod
-    def get_metadata_cls() -> type["AttentionMetadata"]:
+    def get_metadata_cls() -> type["MLACommonMetadata"]:
         return MLACommonMetadata
 
     @staticmethod
@@ -647,9 +649,10 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
         # v with 0s to match the qk head dim for attention backends that do
         # not support different headdims
         # We don't need to pad V if we are on a hopper system with FA3
+        device_capability = current_platform.get_device_capability()
         self._pad_v = self.vllm_flash_attn_version is None or not (
-            self.vllm_flash_attn_version == 3
-            and current_platform.get_device_capability()[0] == 9)
+            self.vllm_flash_attn_version == 3 and device_capability is not None
+            and device_capability[0] == 9)
 
     def _flash_attn_varlen_diff_headdims(self,
                                          q,
@@ -721,7 +724,8 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
                 f" {WEIGHT_NAMES}.")
 
         def get_and_maybe_dequant_weights(layer: LinearBase):
-            if not isinstance(layer.quant_method, UnquantizedLinearMethod):
+            if not (layer.quant_method is None or isinstance(
+                    layer.quant_method, UnquantizedLinearMethod)):
                 # NOTE: This should only be used offline, since it's O(N^3)
                 eye = torch.eye(layer.input_size_per_partition,
                                 dtype=act_dtype,

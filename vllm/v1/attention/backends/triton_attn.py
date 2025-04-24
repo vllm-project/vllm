@@ -5,7 +5,7 @@ from typing import Any, Optional
 import torch
 
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
-                                              AttentionMetadata, AttentionType)
+                                              AttentionType)
 from vllm.attention.ops.chunked_prefill_paged_decode import (
     chunked_prefill_paged_decode)
 from vllm.attention.ops.paged_attn import PagedAttention
@@ -16,7 +16,8 @@ from vllm.v1.attention.backends.flash_attn import (
 logger = init_logger(__name__)
 
 
-class TritonAttentionBackend(AttentionBackend):
+class TritonAttentionBackend(AttentionBackend[FlashAttentionMetadata,
+                                              FlashAttentionMetadataBuilder]):
 
     accept_output_buffer: bool = True
 
@@ -33,7 +34,7 @@ class TritonAttentionBackend(AttentionBackend):
         return TritonAttentionImpl
 
     @staticmethod
-    def get_metadata_cls() -> type["AttentionMetadata"]:
+    def get_metadata_cls() -> type[FlashAttentionMetadata]:
         return FlashAttentionMetadata
 
     @staticmethod
@@ -52,7 +53,7 @@ class TritonAttentionBackend(AttentionBackend):
         return False
 
     @staticmethod
-    def get_builder_cls() -> type["FlashAttentionMetadataBuilder"]:
+    def get_builder_cls() -> type[FlashAttentionMetadataBuilder]:
         return FlashAttentionMetadataBuilder
 
 

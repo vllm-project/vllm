@@ -28,7 +28,8 @@ FLASHINFER_WORKSPACE_BUFFER_SIZE = 256 * 1024 * 1024
 logger = init_logger(__name__)
 
 
-class FlashInferBackend(AttentionBackend):
+class FlashInferBackend(AttentionBackend["FlashInferMetadata",
+                                         "FlashInferMetadataBuilder"]):
 
     accept_output_buffer: bool = True
 
