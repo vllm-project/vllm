@@ -289,6 +289,19 @@ def validate_parsed_serve_args(args: argparse.Namespace):
         raise TypeError("Error: --enable-reasoning requires "
                         "--reasoning-parser")
 
+    # Ensure that --max-num-batched-tokens, --max-num-seqs, --max-model-len
+    # are passed within command on TPU.
+    from vllm.platforms import current_platform
+    if current_platform.is_tpu():
+        if args.max_num_batched_tokens is None:
+            raise ValueError("Requires --max-num-batched-tokens")
+
+        if args.max_num_seqs is None:
+            raise ValueError("Requires --max-num-seqs")
+
+        if args.max_model_len is None:
+            raise ValueError("Requires --max-model-len")
+
 
 def create_parser_for_docs() -> FlexibleArgumentParser:
     parser_for_docs = FlexibleArgumentParser(
