@@ -34,8 +34,7 @@ from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import SamplingParams
 from vllm.sequence import ExecuteModelRequest
 from vllm.transformers_utils.tokenizer import AnyTokenizer
-from vllm.usage.usage_lib import (UsageContext, is_usage_stats_enabled,
-                                  usage_message)
+from vllm.usage.usage_lib import UsageContext
 from vllm.utils import Device, deprecate_kwargs, weak_bind
 
 logger = init_logger(__name__)
@@ -597,7 +596,6 @@ class AsyncLLMEngine(EngineClient):
                  *args,
                  log_requests: bool = True,
                  start_engine_loop: bool = True,
-                 usage_context: UsageContext = UsageContext.ENGINE_CONTEXT,
                  **kwargs) -> None:
         if envs.VLLM_USE_V1:
             raise ValueError(
@@ -628,46 +626,7 @@ class AsyncLLMEngine(EngineClient):
         self._errored_with: Optional[BaseException] = None
 
         # Lazy initialized fields
-        self.usage_context = usage_context
         self._request_tracker: RequestTracker
-
-        # If usage stat is enabled, collect relevant info.
-        if is_usage_stats_enabled():
-            from vllm.model_executor.model_loader import (
-                get_architecture_class_name)
-            usage_message.report_usage(
-                get_architecture_class_name(self.engine.model_config),
-                self.usage_context,
-                self.engine.vllm_config,
-                extra_kvs={
-                    # Common configuration
-                    "dtype":
-                    str(self.engine.model_config.dtype),
-                    "tensor_parallel_size":
-                    self.engine.parallel_config.tensor_parallel_size,
-                    "block_size":
-                    self.engine.cache_config.block_size,
-                    "gpu_memory_utilization":
-                    self.engine.cache_config.gpu_memory_utilization,
-
-                    # Quantization
-                    "quantization":
-                    self.engine.model_config.quantization,
-                    "kv_cache_dtype":
-                    str(self.engine.cache_config.cache_dtype),
-
-                    # Feature flags
-                    "enable_lora":
-                    bool(self.engine.lora_config),
-                    "enable_prompt_adapter":
-                    bool(self.engine.prompt_adapter_config),
-                    "enable_prefix_caching":
-                    self.engine.cache_config.enable_prefix_caching,
-                    "enforce_eager":
-                    self.engine.model_config.enforce_eager,
-                    "disable_custom_all_reduce":
-                    self.engine.parallel_config.disable_custom_all_reduce,
-                })
 
     def __del__(self):
         if rt := getattr(self, "request_tracker", None):
