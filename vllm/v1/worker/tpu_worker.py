@@ -83,7 +83,8 @@ class TPUWorker:
         if self.model_config.seed is None:
             self.model_config.seed = 0
 
-    def init_device(self, usage_context: UsageContext = UsageContext.ENGINE_CONTEXT):
+    def init_device(self,
+                    usage_context: UsageContext = UsageContext.ENGINE_CONTEXT):
         os.environ["PJRT_DEVICE"] = "TPU"
         # Note: Currently the XLA compiler wrongly uses 2D ring strategy on 1D
         # ring, the xla tpu compiler flag
