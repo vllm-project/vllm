@@ -17,8 +17,8 @@ import psutil
 import requests
 import torch
 
-from vllm.config import VllmConfig
 import vllm.envs as envs
+from vllm.config import VllmConfig
 from vllm.connections import global_http_connection
 from vllm.version import __version__ as VLLM_VERSION
 
@@ -154,7 +154,8 @@ class UsageMessage:
                      vllm_config: VllmConfig,
                      extra_kvs: Optional[dict[str, Any]] = None) -> None:
         t = Thread(target=self._report_usage_worker,
-                   args=(model_architecture, usage_context, vllm_config, extra_kvs or {}),
+                   args=(model_architecture, usage_context, vllm_config,
+                         extra_kvs or {}),
                    daemon=True)
         t.start()
 
@@ -162,7 +163,8 @@ class UsageMessage:
                              usage_context: UsageContext,
                              vllm_config: VllmConfig,
                              extra_kvs: dict[str, Any]) -> None:
-        self._report_usage_once(model_architecture, usage_context, vllm_config, extra_kvs)
+        self._report_usage_once(model_architecture, usage_context, vllm_config,
+                                extra_kvs)
         self._report_continous_usage()
 
     def _report_usage_once(self, model_architecture: str,
@@ -184,7 +186,7 @@ class UsageMessage:
             self.gpu_count = vllm_config.parallel_config.world_size
             self.gpu_type = torch_xla.tpu.get_tpu_type()
             self.gpu_memory_per_device = (
-                torch_xla.core.xla_model.get_memory_info().bytes_limit)
+                torch_xla.core.xla_model.get_memory_info()["bytes_limit"])
             # except ImportError:
             # pass
         self.provider = _detect_cloud_provider()

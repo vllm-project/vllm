@@ -16,6 +16,8 @@ from vllm.distributed import (ensure_model_parallel_initialized,
                               init_distributed_environment)
 from vllm.logger import init_logger
 from vllm.model_executor import set_random_seed
+from vllm.usage.usage_lib import (UsageContext, is_usage_stats_enabled,
+                                  usage_message)
 from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import (AttentionSpec, KVCacheConfig,
@@ -82,7 +84,7 @@ class TPUWorker:
         if self.model_config.seed is None:
             self.model_config.seed = 0
 
-    def init_device(self):
+    def init_device(self, usage_context: UsageContext = UsageContext.ENGINE_CONTEXT):
         os.environ["PJRT_DEVICE"] = "TPU"
         # Note: Currently the XLA compiler wrongly uses 2D ring strategy on 1D
         # ring, the xla tpu compiler flag
@@ -132,6 +134,44 @@ class TPUWorker:
 
         # Init ModelRunner here, so that we have access to self.device.
         self.model_runner = TPUModelRunner(self.vllm_config, self.device)
+
+        # If usage stat is enabled, collect relevant info.
+        if is_usage_stats_enabled():
+            from vllm.model_executor.model_loader import (
+                get_architecture_class_name)
+            usage_message.report_usage(
+                get_architecture_class_name(self.model_config),
+                usage_context,
+                self.vllm_config,
+                extra_kvs={
+                    # Common configuration
+                    "dtype":
+                    str(self.model_config.dtype),
+                    "tensor_parallel_size":
+                    self.parallel_config.tensor_parallel_size,
+                    "block_size":
+                    self.cache_config.block_size,
+                    "gpu_memory_utilization":
+                    self.cache_config.gpu_memory_utilization,
+
+                    # Quantization
+                    "quantization":
+                    self.model_config.quantization,
+                    "kv_cache_dtype":
+                    str(self.cache_config.cache_dtype),
+
+                    # Feature flags
+                    "enable_lora":
+                    bool(self.lora_config),
+                    "enable_prompt_adapter":
+                    bool(self.prompt_adapter_config),
+                    "enable_prefix_caching":
+                    self.cache_config.enable_prefix_caching,
+                    "enforce_eager":
+                    self.model_config.enforce_eager,
+                    "disable_custom_all_reduce":
+                    self.parallel_config.disable_custom_all_reduce,
+                })
 
     def determine_available_memory(self) -> int:
         kv_caches: dict[str, torch.Tensor] = {}
