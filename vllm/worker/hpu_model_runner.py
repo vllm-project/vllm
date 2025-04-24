@@ -316,6 +316,7 @@ class HpuModelAdapter:
 
     def __init__(self, model, vllm_config):
         self.model = model
+        self.sampler = get_sampler()
         self.prefill_use_fusedsdpa = os.getenv('VLLM_PROMPT_USE_FUSEDSDPA',
                                                '0').lower() in ['1', 'true']
         self.vllm_config = vllm_config
@@ -657,9 +658,8 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
         self.lora_manager: LRUCacheWorkerLoRAManager = None
         self.model: torch.nn.Module = None
         self.inc_initialized_successfully = False
-        self.sampler = None
 
-        # Profiler stats
+        # Profiler tats
         self.profiler = HabanaHighLevelProfiler()
         self.profiler_counter_helper = HabanaProfilerCounterHelper()
         self.seen_configs: set = set()
@@ -772,7 +772,6 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
                     self.model, vllm_config=self.vllm_config)
             msg = f"Wrapping in HPU Graph took {m_wrap.get_summary_string()}"
             logger.info(msg)
-        self.sampler = get_sampler()
 
         self.model_memory_usage = m.consumed_device_memory
         msg = f"Loading model weights took in total {m.get_summary_string()}"
@@ -2169,7 +2168,7 @@ class HPUModelRunner(HPUModelRunnerBase[ModelInputForHPUWithSamplingMetadata]):
                 # in case of multi-step scheduling
                 # we only want to pythonize in the last step
                 sampling_metadata.skip_sampler_cpu_output = True
-                self.sampler.include_gpu_probs_tensor = True
+                self.model.sampler.include_gpu_probs_tensor = True
             cache_orig_output_tokens_len: List[Dict] = []
 
             def try_revert_dummy_output_tokens():
@@ -2233,7 +2232,7 @@ class HPUModelRunner(HPUModelRunnerBase[ModelInputForHPUWithSamplingMetadata]):
                                      f'{"prompt" if is_prompt else "decode"}_'
                                      f'bs{batch_size}_'
                                      f'seq{seq_len}')):
-                    output = self.sampler(
+                    output = self.sample(
                         logits=logits,
                         sampling_metadata=sampling_metadata,
                     )
