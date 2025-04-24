@@ -46,7 +46,8 @@ class GuidanceBackend(StructuredOutputBackend):
             in vllm_config.decoding_config.guided_decoding_backend)
 
         tokenizer = tokenizer_group.get_lora_tokenizer(None)
-        self.ll_tokenizer = llguidance_hf.from_tokenizer(tokenizer, None)
+        self.ll_tokenizer = llguidance_hf.from_tokenizer(
+            tokenizer, self.vocab_size)
 
     def compile_grammar(self, request_type: StructuredOutputOptions,
                         grammar_spec: str) -> StructuredOutputGrammar:

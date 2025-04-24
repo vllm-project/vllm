@@ -21,10 +21,10 @@ def get_aiter_mla_metadata(max_batch_size: int, block_size: int,
 
 
 def aiter_mla_decode_fwd(
-    q,
-    kv_buffer,
-    o,
-    sm_scale,
+    q: torch.Tensor,
+    kv_buffer: torch.Tensor,
+    o: torch.Tensor,
+    sm_scale: float,
     kv_indptr: Optional[torch.Tensor] = None,
     kv_indices: Optional[torch.Tensor] = None,
     kv_last_page_lens: Optional[torch.Tensor] = None,

@@ -124,9 +124,9 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             is_rocm_aiter_2stage_moe_enabled, is_rocm_aiter_moe_enabled,
             shuffle_weights)
         if is_rocm_aiter_moe_enabled():
+            # reshaping weights is required for aiter moe kernel.
             layout = (32, 32) if is_rocm_aiter_2stage_moe_enabled() else (16,
                                                                           16)
-            # reshaping weights is required for aiter moe kernel.
             shuffled_w13, shuffled_w2 = shuffle_weights(layer.w13_weight.data,
                                                         layer.w2_weight.data,
                                                         layout=layout)
@@ -426,6 +426,7 @@ class FusedMoE(torch.nn.Module):
 
         if params_dtype is None:
             params_dtype = torch.get_default_dtype()
+        self.params_dtype = params_dtype
 
         # Note: here we guard against accessing the TP and DP groups when
         # uninitialized (this happens when testing)
@@ -441,7 +442,7 @@ class FusedMoE(torch.nn.Module):
         # Use expert parallelism instead of tensor parallelism?
         vllm_config = get_current_vllm_config()
         use_ep = (vllm_config.parallel_config.enable_expert_parallel
-                  and self.tp_size > 1)
+                  and self.tp_size * self.dp_size > 1)
 
         # For smuggling this layer into the fused moe custom op
         self.use_direct_call = self.dp_size == 1
@@ -476,6 +477,7 @@ class FusedMoE(torch.nn.Module):
         self.global_num_experts = num_experts
 
         assert intermediate_size % self.tp_size == 0
+        self.hidden_size = hidden_size
         self.intermediate_size_per_partition = intermediate_size // self.tp_size
         self.reduce_results = reduce_results
         self.renormalize = renormalize
@@ -516,7 +518,9 @@ class FusedMoE(torch.nn.Module):
         }
         # need full intermediate size pre-sharding for WNA16 act order
         if (self.quant_method.__class__.__name__
-                in ("GPTQMarlinMoEMethod", "CompressedTensorsWNA16MoEMethod")):
+                in ("GPTQMarlinMoEMethod",
+                    "CompressedTensorsWNA16MarlinMoEMethod",
+                    "CompressedTensorsWNA16MoEMethod")):
             moe_quant_params["intermediate_size_full"] = intermediate_size
 
         self.quant_method.create_weights(layer=self, **moe_quant_params)
@@ -652,9 +656,10 @@ class FusedMoE(torch.nn.Module):
         # compressed-tensors checkpoints with packed weights are stored flipped
         # TODO (mgoin): check self.quant_method.quant_config.quant_format
         # against known CompressionFormat enum values that have this quality
-        loaded_weight = loaded_weight.t().contiguous() if (
-            self.quant_method.__class__.__name__
-            == "CompressedTensorsWNA16MoEMethod") else loaded_weight
+        if self.quant_method.__class__.__name__ in (
+                "CompressedTensorsWNA16MarlinMoEMethod",
+                "CompressedTensorsWNA16MoEMethod"):
+            loaded_weight = loaded_weight.t().contiguous()
 
         if shard_id not in ("w1", "w2", "w3"):
             raise ValueError(f"shard_id must be ['w1','w2','w3'] but "

@@ -5,9 +5,6 @@ from functools import cache, lru_cache, wraps
 from typing import TYPE_CHECKING, Dict, List, Optional
 
 import torch
-from amdsmi import (AmdSmiException, amdsmi_get_gpu_asic_info,
-                    amdsmi_get_processor_handles, amdsmi_init,
-                    amdsmi_shut_down, amdsmi_topo_get_link_type)
 
 import vllm.envs as envs
 from vllm.logger import init_logger
@@ -112,6 +109,8 @@ def use_rocm_custom_paged_attention(qtype: torch.dtype, head_size: int,
     ON_MI250_MI300 = any(arch in GPU_ARCH for arch in ["gfx90a", "gfx942"])
 
     # rocm custom page attention not support on navi (gfx1*)
+    # custom paged attn always supported on V0. On V1, requires sliding window
+    # disabled due to observed numerical discrepancy.
     return (ON_MI250_MI300 and not ON_NAVI
             and (not envs.VLLM_USE_V1 or sliding_window == 0
                  or sliding_window == (-1, -1))
@@ -119,7 +118,9 @@ def use_rocm_custom_paged_attention(qtype: torch.dtype, head_size: int,
             and (head_size == 64 or head_size == 128)
             and (block_size == 16 or block_size == 32)
             and (gqa_ratio >= 1 and gqa_ratio <= 16)
-            and max_seq_len <= 128 * 1024 and envs.VLLM_ROCM_CUSTOM_PAGED_ATTN)
+            and max_seq_len <= 128 * 1024 and envs.VLLM_ROCM_CUSTOM_PAGED_ATTN
+            and not (envs.VLLM_ROCM_USE_AITER_PAGED_ATTN
+                     and envs.VLLM_ROCM_USE_AITER))
 
 
 class RocmPlatform(Platform):
@@ -156,16 +157,20 @@ class RocmPlatform(Platform):
                 else:
                     raise ValueError(
                         f" The selected backend, {selected_backend.name},"
-                        "does not support block size {block_size}.")
-            else:
+                        f"does not support block size {block_size}.")
+            elif selected_backend == _Backend.ROCM_AITER_MLA:
                 if block_size == 1:
                     logger.info("Using AITER MLA backend.")
                     return "vllm.attention.backends.rocm_aiter_mla.AiterMLABackend"  # noqa: E501
                 else:
                     raise ValueError(
                         f" The selected backend, {selected_backend.name},"
-                        "does not support block size {block_size}."
+                        f"does not support block size {block_size}."
                         "(currently only supports block size 1)")
+            else:
+                raise ValueError(
+                    f" The selected backend, {selected_backend.name},"
+                    f"is not MLA type while requested for MLA backend.")
 
         selected_backend = (_Backend.ROCM_FLASH if selected_backend
                             == _Backend.FLASH_ATTN else selected_backend)
@@ -332,12 +337,13 @@ class RocmPlatform(Platform):
         return True
 
     @classmethod
-    def supports_structured_output(cls) -> bool:
-        return True
-
-    @classmethod
     def use_custom_allreduce(cls) -> bool:
         # We only enable custom allreduce for MI300 series
         gcn_arch = torch.cuda.get_device_properties(0).gcnArchName
         supported_archs = ['gfx94']
         return any(gfx in gcn_arch for gfx in supported_archs)
+
+    @classmethod
+    def get_cu_count(cls, device_id: int = 0) -> int:
+        return torch.cuda.get_device_properties(
+            device_id).multi_processor_count

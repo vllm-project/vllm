@@ -450,6 +450,7 @@ def attn_fwd(
     BLOCK_M: tl.constexpr,
     BLOCK_DMODEL: tl.constexpr,
     USE_FP8: tl.constexpr,
+    USE_FP8_OUT: tl.constexpr,
     BLOCK_N: tl.constexpr,
     PRE_LOAD_V: tl.constexpr,
     BIAS_TYPE: tl.constexpr,
@@ -737,7 +738,7 @@ def attn_fwd(
     end_m_idx = (start_m + 1) * BLOCK_M
     start_m_idx = start_m * BLOCK_M
     causal_start_idx = seqlen_q - seqlen_k
-    if USE_FP8:
+    if USE_FP8_OUT:
         acc *= o_descale
         acc = tl.clamp(acc, FP8_MIN, FP8_MAX)
     acc = acc.to(Out.type.element_ty)
@@ -831,10 +832,11 @@ class _attention(torch.autograd.Function):
         sm_scale=1.0,
         bias=None,
         fp8_scales=None,
+        fp8_out_scale=None,
     ):
         if fp8_scales is not None:
             use_fp8 = True
-            (q_scale, k_scale, v_scale, p_scale, o_scale) = fp8_scales
+            (q_scale, k_scale, v_scale, p_scale) = fp8_scales
             float8 = current_platform.fp8_dtype()
 
             def check_and_convert(t, scale):
@@ -851,7 +853,7 @@ class _attention(torch.autograd.Function):
             v = check_and_convert(v, v_scale)
         else:
             use_fp8 = False
-            q_scale = k_scale = v_scale = p_scale = o_scale = 1.0
+            q_scale = k_scale = v_scale = p_scale = 1.0
 
         if o is None:
             o = torch.empty_like(q, dtype=v.dtype)
@@ -916,7 +918,8 @@ class _attention(torch.autograd.Function):
             bias_strides = (0, 0, 0, 0)
 
         p_descale = 1.0 / p_scale
-        o_descale = 1.0 / o_scale
+        o_descale = 1.0 / fp8_out_scale.item(
+        ) if fp8_out_scale is not None else 1.0
 
         arg_max_seqlens_q = 0 if is_navi() else max_seqlens_q
         arg_max_seqlens_k = 0 if is_navi() else max_seqlens_k
@@ -958,6 +961,7 @@ class _attention(torch.autograd.Function):
             ENABLE_DROPOUT=False,
             RETURN_ENCODED_SOFTMAX=False,
             USE_FP8=use_fp8,
+            USE_FP8_OUT=fp8_out_scale is not None,
         )
 
         ctx.grid = grid
