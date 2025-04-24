@@ -283,18 +283,22 @@ class MiniMaxVL01MultiModalProcessor(
             mm_data=mm_data,
             mm_kwargs=mm_kwargs,
         )
-
         pixel_values = processed_outputs.get("pixel_values")
-        if pixel_values is not None:
-            image_sizes = processed_outputs.get("image_sizes")
-            if image_sizes is not None and len(
-                    pixel_values) != len(image_sizes) and isinstance(
-                        pixel_values, list) and isinstance(image_sizes, list):
-                min_len = min(len(pixel_values), len(image_sizes))
-                pixel_values = pixel_values[:min_len]
-                image_sizes = image_sizes[:min_len]
-                processed_outputs["pixel_values"] = pixel_values
+        image_sizes = processed_outputs.get("image_sizes")
+
+        if pixel_values is not None and image_sizes is not None:
+            pixel_values_len = len(pixel_values) if isinstance(
+                pixel_values, list) else pixel_values.shape[0]
+            image_sizes_len = len(image_sizes) if isinstance(
+                image_sizes, list) else image_sizes.shape[0]
+
+            if image_sizes_len == 1 and pixel_values_len > 1:
+                if isinstance(image_sizes, torch.Tensor):
+                    image_sizes = image_sizes.repeat(pixel_values_len, 1)
+                else:
+                    image_sizes = [image_sizes[0]] * pixel_values_len
                 processed_outputs["image_sizes"] = image_sizes
+
         return processed_outputs
 
     def _get_mm_fields_config(
