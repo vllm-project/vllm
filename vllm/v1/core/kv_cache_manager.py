@@ -88,12 +88,17 @@ class KVCacheManager:
         return stats
 
     def get_computed_blocks(
-            self, request: Request) -> tuple[list[KVCacheBlock], int]:
+            self, request: Request,
+            enable_eagle: bool) -> tuple[list[KVCacheBlock], int]:
         """Get the computed (cached) blocks for the request.
         Note that the computed blocks must be full.
 
         Args:
             request: The request to get the computed blocks.
+            enable_eagle: Whether to enable eagle spec decode. If True,
+                we will drop the last matched block so that we can recompute
+                the last block to get the required hidden states for eagle 
+                drafting head.
 
         Returns:
             A tuple containing:
@@ -134,6 +139,16 @@ class KVCacheManager:
 
         computed_blocks = (
             self.specialized_manager.find_longest_cache_hit(block_hashes))
+
+        if enable_eagle and len(
+                computed_blocks) > 0 and last_block_hash is None:
+            # Drop the last matched block if (1) eagle is enabled and
+            # (2) there is a cache hit and (3) the last block hash is
+            # not removed.
+            # This is to recompute the last block to get the required
+            # hidden states for eagle drafting head.
+            computed_blocks.pop()
+
         if self.log_stats:
             assert self.prefix_cache_stats is not None
             self.prefix_cache_stats.queries += len(block_hashes)
