@@ -234,8 +234,9 @@ def rocm_aiter_topk_softmax(topk_weights: torch.Tensor,
     return topk_weights, topk_indices
 
 
-def shuffle_weights(*tensors: torch.Tensor,
-                    layout: tuple[int, int]) -> tuple[torch.Tensor, ...]:
+def shuffle_weights(
+    *tensors: torch.Tensor, layout: tuple[int, int] = (16, 16)
+) -> tuple[torch.Tensor, ...]:
     """
     Applies shuffle_weight function from AITER to each 
     input tensor and returns them.

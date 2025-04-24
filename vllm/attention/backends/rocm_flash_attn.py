@@ -814,6 +814,7 @@ class ROCmFlashAttentionImpl(AttentionImpl):
                         self.num_heads,
                         self.head_size,
                         self.scale,
+                        causal_mask,
                         attn_masks,
                     )
                 else:
