@@ -13,6 +13,7 @@ from pydantic import BaseModel
 
 from vllm.entrypoints.llm import LLM
 from vllm.outputs import RequestOutput
+from vllm.platforms import current_platform
 from vllm.sampling_params import GuidedDecodingParams, SamplingParams
 
 PARAMS_MODELS_BACKENDS_TOKENIZER_MODE = [
@@ -63,10 +64,13 @@ def test_structured_output(
 ):
     monkeypatch.setenv("VLLM_USE_V1", "1")
 
+    # Don't use eager execution on TPUs because we want to test for no
+    # recompilation at runtime
+    enforce_eager = bool(not current_platform.is_tpu())
     # Use a single LLM instance for several scenarios to
     # speed up the test suite.
     llm = LLM(model=model_name,
-              enforce_eager=True,
+              enforce_eager=enforce_eager,
               max_model_len=1024,
               guided_decoding_backend=guided_decoding_backend,
               tokenizer_mode=tokenizer_mode)
