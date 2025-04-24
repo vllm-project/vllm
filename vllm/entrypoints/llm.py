@@ -40,7 +40,6 @@ from vllm.sampling_params import (BeamSearchParams, GuidedDecodingParams,
                                   RequestOutputKind, SamplingParams)
 from vllm.transformers_utils.tokenizer import (AnyTokenizer, MistralTokenizer,
                                                get_cached_tokenizer)
-from vllm.transformers_utils.tokenizer_group import TokenizerGroup
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils import (Counter, Device, deprecate_args, deprecate_kwargs,
                         is_list_of)
@@ -253,10 +252,10 @@ class LLM:
         self.default_sampling_params: Union[dict[str, Any], None] = None
 
     def get_tokenizer(self) -> AnyTokenizer:
-        return self.llm_engine.get_tokenizer_group(TokenizerGroup).tokenizer
+        return self.llm_engine.get_tokenizer_group().tokenizer
 
     def set_tokenizer(self, tokenizer: AnyTokenizer) -> None:
-        tokenizer_group = self.llm_engine.get_tokenizer_group(TokenizerGroup)
+        tokenizer_group = self.llm_engine.get_tokenizer_group()
 
         # While CachedTokenizer is dynamic, have no choice but
         # compare class name. Misjudgment will arise from

@@ -8,13 +8,13 @@ from vllm.sequence import (VLLM_INVALID_TOKEN_ID, Logprob, SamplingParams,
 from .detokenizer_utils import (convert_prompt_ids_to_tokens,
                                 detokenize_incrementally)
 from .tokenizer import AnyTokenizer
-from .tokenizer_group import BaseTokenizerGroup
+from .tokenizer_group import TokenizerGroup
 
 
 class Detokenizer:
     """Provides methods to decode the output of a model into text."""
 
-    def __init__(self, tokenizer_group: BaseTokenizerGroup):
+    def __init__(self, tokenizer_group: TokenizerGroup):
         self.tokenizer_group = tokenizer_group
 
     def get_tokenizer_for_seq(self, sequence: Sequence) -> AnyTokenizer:

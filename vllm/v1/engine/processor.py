@@ -17,7 +17,7 @@ from vllm.multimodal.utils import merge_and_sort_multimodal_metadata
 from vllm.pooling_params import PoolingParams
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import SamplingParams
-from vllm.transformers_utils.tokenizer_group import BaseTokenizerGroup
+from vllm.transformers_utils.tokenizer_group import TokenizerGroup
 from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.engine.mm_input_cache import MirroredProcessingCache
 from vllm.v1.structured_output.backend_guidance import (
@@ -31,7 +31,7 @@ class Processor:
     def __init__(
         self,
         vllm_config: VllmConfig,
-        tokenizer: BaseTokenizerGroup,
+        tokenizer: TokenizerGroup,
         mm_registry: MultiModalRegistry = MULTIMODAL_REGISTRY,
     ):
 

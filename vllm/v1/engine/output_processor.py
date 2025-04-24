@@ -8,7 +8,7 @@ from typing import Optional, Union
 from vllm.outputs import CompletionOutput, RequestOutput
 from vllm.sampling_params import RequestOutputKind
 from vllm.transformers_utils.tokenizer import AnyTokenizer
-from vllm.transformers_utils.tokenizer_group import BaseTokenizerGroup
+from vllm.transformers_utils.tokenizer_group import TokenizerGroup
 from vllm.v1.engine import EngineCoreOutput, EngineCoreRequest, FinishReason
 from vllm.v1.engine.detokenizer import IncrementalDetokenizer
 from vllm.v1.engine.logprobs import LogprobsProcessor
@@ -225,7 +225,7 @@ class OutputProcessor:
 
     def __init__(
         self,
-        tokenizer: BaseTokenizerGroup,
+        tokenizer: TokenizerGroup,
         log_stats: bool,
     ):
         self.log_stats = log_stats

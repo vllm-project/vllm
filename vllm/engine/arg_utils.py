@@ -7,9 +7,8 @@ import json
 import re
 import threading
 from dataclasses import MISSING, dataclass, fields
-from typing import (TYPE_CHECKING, Any, Callable, Dict, List, Literal,
-                    Optional, Tuple, Type, TypeVar, Union, cast, get_args,
-                    get_origin)
+from typing import (Any, Callable, Dict, List, Literal, Optional, Tuple, Type,
+                    TypeVar, Union, cast, get_args, get_origin)
 
 import torch
 from typing_extensions import TypeIs
@@ -23,7 +22,7 @@ from vllm.config import (BlockSize, CacheConfig, CacheDType, CompilationConfig,
                          KVTransferConfig, LoadConfig, LoadFormat, LoRAConfig,
                          ModelConfig, ModelImpl, MultiModalConfig,
                          ObservabilityConfig, ParallelConfig, PoolerConfig,
-                         PoolType, PrefixCachingHashAlgo, PromptAdapterConfig,
+                         PrefixCachingHashAlgo, PromptAdapterConfig,
                          SchedulerConfig, SchedulerPolicy, SpeculativeConfig,
                          TaskOption, TokenizerPoolConfig, VllmConfig,
                          get_attr_docs, get_field)
@@ -38,9 +37,6 @@ from vllm.usage.usage_lib import UsageContext
 from vllm.utils import FlexibleArgumentParser, GiB_bytes, is_in_ray_actor
 
 # yapf: enable
-
-if TYPE_CHECKING:
-    from vllm.transformers_utils.tokenizer_group import BaseTokenizerGroup
 
 logger = init_logger(__name__)
 
@@ -185,13 +181,12 @@ class EngineArgs:
     enforce_eager: Optional[bool] = None
     max_seq_len_to_capture: int = 8192
     disable_custom_all_reduce: bool = ParallelConfig.disable_custom_all_reduce
+    # The following three fields are deprecated and will be removed in a future
+    # release. Setting them will have no effect. Please remove them from your
+    # configurations.
     tokenizer_pool_size: int = TokenizerPoolConfig.pool_size
-    # Note: Specifying a tokenizer pool by passing a class
-    # is intended for expert use only. The API may change without
-    # notice.
-    tokenizer_pool_type: Union[PoolType, Type["BaseTokenizerGroup"]] = \
-        TokenizerPoolConfig.pool_type
-    tokenizer_pool_extra_config: dict[str, Any] = \
+    tokenizer_pool_type: str = TokenizerPoolConfig.pool_type
+    tokenizer_pool_extra_config: dict = \
         get_field(TokenizerPoolConfig, "extra_config")
     limit_mm_per_prompt: dict[str, int] = \
         get_field(MultiModalConfig, "limit_per_prompt")
@@ -1187,11 +1182,6 @@ class EngineArgs:
             enable_expert_parallel=self.enable_expert_parallel,
             max_parallel_loading_workers=self.max_parallel_loading_workers,
             disable_custom_all_reduce=self.disable_custom_all_reduce,
-            tokenizer_pool_config=TokenizerPoolConfig.create_config(
-                self.tokenizer_pool_size,
-                self.tokenizer_pool_type,
-                self.tokenizer_pool_extra_config,
-            ),
             ray_workers_use_nsight=self.ray_workers_use_nsight,
             placement_group=placement_group,
             distributed_executor_backend=self.distributed_executor_backend,
