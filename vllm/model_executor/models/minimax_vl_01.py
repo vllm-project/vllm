@@ -13,6 +13,7 @@ from transformers import (BatchFeature, CLIPVisionConfig, PixtralVisionConfig,
 from transformers.image_processing_utils import select_best_resolution
 
 from vllm.config import VllmConfig
+from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                RowParallelLinear)
@@ -37,7 +38,6 @@ from .siglip import SiglipVisionModel
 from .utils import (AutoWeightsLoader, init_vllm_registered_model,
                     maybe_prefix, merge_multimodal_embeddings)
 from .vision import get_vision_encoder_info
-from vllm.logger import init_logger
 
 logger = init_logger(__name__)
 
@@ -286,24 +286,17 @@ class MiniMaxVL01MultiModalProcessor(
             mm_data=mm_data,
             mm_kwargs=mm_kwargs,
         )
-        logger.info(f"processed_outputs: {processed_outputs}")
-        
         pixel_values = processed_outputs.get("pixel_values")
         image_sizes = processed_outputs.get("image_sizes")
-        
-        if pixel_values is not None:
-            if isinstance(pixel_values, list):
-                if len(pixel_values) > 0:
-                    first_item = pixel_values[0]
-                    processed_outputs["pixel_values"] = [first_item]
-            
-            if image_sizes is not None:
-                if isinstance(image_sizes, torch.Tensor) and image_sizes.dim() > 0:
-                    processed_outputs["image_sizes"] = image_sizes[:1]
-        
-        logger.info(f"After adjustment - pixel_values: {type(processed_outputs.get('pixel_values'))} shape/len: {len(processed_outputs.get('pixel_values') or [])}")
-        logger.info(f"After adjustment - image_sizes: {type(processed_outputs.get('image_sizes'))} shape: {processed_outputs.get('image_sizes').shape if processed_outputs.get('image_sizes') is not None else None}")
-        
+
+        if pixel_values is not None and isinstance(
+                pixel_values, list) and len(pixel_values) > 0:
+            first_item = pixel_values[0]
+            processed_outputs["pixel_values"] = [first_item]
+
+        if pixel_values is not None and image_sizes is not None and isinstance(
+                image_sizes, torch.Tensor) and image_sizes.dim() > 0:
+            processed_outputs["image_sizes"] = image_sizes[:1]
         return processed_outputs
 
     def _get_mm_fields_config(
@@ -598,18 +591,26 @@ class MiniMaxVL01ForConditionalGeneration(nn.Module, SupportsMultiModal,
             inputs_embeds = self.get_input_embeddings(for_inputs_embeds_ids)
 
             # 2. Merge text and images
-            if pixel_values is not None and input_ids.shape[
-                    1] != 1 and pixel_values.size(0) > 0:
+            # 添加安全检查确保input_ids有正确的维度并且pixel_values不为空
+            has_valid_shape = isinstance(input_ids, torch.Tensor) and len(
+                input_ids.shape) > 1
+            has_images = pixel_values is not None and (
+                isinstance(pixel_values, torch.Tensor)
+                and pixel_values.size(0) > 0
+                or isinstance(pixel_values, list) and len(pixel_values) > 0)
+
+            if has_images and has_valid_shape and input_ids.shape[1] != 1:
                 inputs_embeds = self._process_vision_features(
                     pixel_values=pixel_values,
                     image_sizes=image_sizes,
                     inputs_embeds=inputs_embeds,
                     input_ids=input_ids,
                 )
-            # pixel_values is not None but is empty ---> text only cases
-            elif pixel_values is not None and input_ids.shape[
-                    1] != 1 and pixel_values.size(0) == 0:
-                # there are no images
+            # pixel_values exists but is empty or
+            # input_ids is a single token -> text only cases
+            elif pixel_values is not None and (has_valid_shape
+                                               and input_ids.shape[1]
+                                               == 1) or not has_valid_shape:
                 pass
 
         hidden_states = self.language_model.model(
