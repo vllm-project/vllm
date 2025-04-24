@@ -97,9 +97,6 @@ class LLMEngine:
             # for v0 compatibility
             self.model_executor = self.engine_core.engine_core.model_executor  # type: ignore
 
-        # If usage stat is enabled, collect relevant info.
-        report_usage_stats(vllm_config, usage_context)
-
     @classmethod
     def from_vllm_config(
         cls,

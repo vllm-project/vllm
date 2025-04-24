@@ -133,8 +133,9 @@ class TPUWorker:
         # Init ModelRunner here, so that we have access to self.device.
         self.model_runner = TPUModelRunner(self.vllm_config, self.device)
 
-        # If usage stat is enabled, collect relevant info.
-        report_usage_stats(self.vllm_config)
+        if rank == 0:
+            # If usage stat is enabled, collect relevant info.
+            report_usage_stats(self.vllm_config)
 
     def determine_available_memory(self) -> int:
         kv_caches: dict[str, torch.Tensor] = {}

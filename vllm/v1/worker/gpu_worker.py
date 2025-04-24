@@ -25,6 +25,7 @@ from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 from vllm.v1.worker.worker_base import WorkerBase
+from vllm.v1.utils import report_usage_stats
 
 logger = init_logger(__name__)
 
@@ -140,6 +141,10 @@ class Worker(WorkerBase):
         # Construct the model runner
         self.model_runner: GPUModelRunner = GPUModelRunner(
             self.vllm_config, self.device)
+        
+        if self.rank == 0:
+            # If usage stat is enabled, collect relevant info.
+            report_usage_stats(self.vllm_config)
 
     # FIXME(youkaichao & ywang96): Use TorchDispatchMode instead of memory pool
     # to hijack tensor allocation.
