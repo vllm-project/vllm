@@ -121,10 +121,6 @@ class MiniMaxText01RMSNormTP(CustomOp):
             else:
                 weight = self.weight[:x.size(-1)]
 
-        if x.dim() > 1:
-            weight = weight.view(1, -1)
-            for _ in range(x.dim() - 2):
-                weight = weight.unsqueeze(0)
         x = x.to(orig_dtype) * weight
         return x
 
