@@ -789,7 +789,8 @@ class TPUModelRunner:
             logits = self.structured_decode(require_struct_decoding,
                                             grammar_bitmask_padded, logits,
                                             arange)
-        selected_token_ids, logprobs = self.sample_from_logits(logits, tpu_sampling_metadata)
+        selected_token_ids, logprobs = self.sample_from_logits(
+            logits, tpu_sampling_metadata)
         # Remove padding on cpu and keep dynamic op outside of xla graph.
         selected_token_ids = selected_token_ids.cpu()[:num_reqs]
         logprobs_lists = logprobs.tolists() \
@@ -1256,7 +1257,8 @@ class TPUModelRunner:
     @torch.compile(backend="openxla", fullgraph=True, dynamic=False)
     def sample_from_logits(
             self, logits: torch.Tensor,
-            sampling_metadata: TPUSupportedSamplingMetadata) -> torch.Tensor:
+            sampling_metadata: TPUSupportedSamplingMetadata) -> \
+                tuple[torch.Tensor, Optional[LogprobsTensors]]:
         """
         Sample with xla-friendly function. This function is to be traced 
         separately from `forward` for lighter compilation overhead.
