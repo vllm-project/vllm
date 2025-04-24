@@ -177,6 +177,11 @@ def linkcode_resolve(domain, info):
         for part in info['fullname'].split('.'):
             obj = getattr(obj, part)
 
+            # Skip decorator wrappers by checking if the object is a function
+            # and has a __wrapped__ attribute (which decorators typically set)
+            while hasattr(obj, '__wrapped__'):
+                obj = obj.__wrapped__
+
             if not (inspect.isclass(obj) or inspect.isfunction(obj)
                     or inspect.ismethod(obj)):
                 obj = obj.__class__  # Get the class of the instance
