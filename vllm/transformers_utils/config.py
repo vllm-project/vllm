@@ -650,6 +650,11 @@ def load_params_config(model: Union[str, Path], revision: Optional[str],
     config_file_name = "params.json"
 
     config_dict = get_hf_file_to_dict(config_file_name, model, revision)
+    if config_dict is None:
+        raise ValueError(
+            f"Failed to load mistral '{config_file_name}' config for model "
+            f"{model}. Please check if the model is a mistral-format model "
+            f"and if the config file exists.")
     assert isinstance(config_dict, dict)
 
     config_mapping = {
