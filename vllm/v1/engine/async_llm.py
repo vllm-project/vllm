@@ -36,6 +36,7 @@ from vllm.v1.executor.abstract import Executor
 from vllm.v1.metrics.loggers import (LoggingStatLogger, PrometheusStatLogger,
                                      StatLoggerBase)
 from vllm.v1.metrics.stats import IterationStats, SchedulerStats
+from vllm.v1.utils import report_usage_stats
 
 logger = init_logger(__name__)
 
@@ -80,9 +81,7 @@ class AsyncLLM(EngineClient):
         self.tokenizer = init_tokenizer_from_configs(
             model_config=vllm_config.model_config,
             scheduler_config=vllm_config.scheduler_config,
-            parallel_config=vllm_config.parallel_config,
             lora_config=vllm_config.lora_config)
-        self.tokenizer.ping()
 
         # Processor (converts Inputs --> EngineCoreRequests).
         self.processor = Processor(
@@ -113,6 +112,9 @@ class AsyncLLM(EngineClient):
             self._run_output_handler()
         except RuntimeError:
             pass
+
+        # If usage stat is enabled, collect relevant info.
+        report_usage_stats(vllm_config, usage_context)
 
     @classmethod
     def from_vllm_config(

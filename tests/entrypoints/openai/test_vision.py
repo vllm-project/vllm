@@ -140,6 +140,36 @@ async def test_single_chat_session_image(client: openai.AsyncOpenAI,
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
 @pytest.mark.parametrize("image_url", TEST_IMAGE_URLS)
+async def test_error_on_invalid_image_url_type(client: openai.AsyncOpenAI,
+                                               model_name: str,
+                                               image_url: str):
+    content_text = "What's in this image?"
+    messages = [{
+        "role":
+        "user",
+        "content": [
+            {
+                "type": "image_url",
+                "image_url": image_url
+            },
+            {
+                "type": "text",
+                "text": content_text
+            },
+        ],
+    }]
+
+    # image_url should be a dict {"url": "some url"}, not directly a string
+    with pytest.raises(openai.BadRequestError):
+        _ = await client.chat.completions.create(model=model_name,
+                                                 messages=messages,
+                                                 max_completion_tokens=10,
+                                                 temperature=0.0)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model_name", [MODEL_NAME])
+@pytest.mark.parametrize("image_url", TEST_IMAGE_URLS)
 async def test_single_chat_session_image_beamsearch(client: openai.AsyncOpenAI,
                                                     model_name: str,
                                                     image_url: str):

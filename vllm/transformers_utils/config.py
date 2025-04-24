@@ -36,10 +36,9 @@ from vllm.transformers_utils.configs import (ChatGLMConfig, Cohere2Config,
                                              KimiVLConfig, MedusaConfig,
                                              MllamaConfig, MLPSpeculatorConfig,
                                              MPTConfig, NemotronConfig,
-                                             NVLM_D_Config, Olmo2Config,
-                                             RWConfig, SkyworkR1VChatConfig,
-                                             SolarConfig, Telechat2Config,
-                                             UltravoxConfig)
+                                             NVLM_D_Config, RWConfig,
+                                             SkyworkR1VChatConfig, SolarConfig,
+                                             Telechat2Config, UltravoxConfig)
 # yapf: enable
 from vllm.transformers_utils.utils import check_gguf_file
 from vllm.utils import resolve_obj_by_qualname
@@ -76,7 +75,6 @@ _CONFIG_REGISTRY: Dict[str, Type[PretrainedConfig]] = {
     "internvl_chat": InternVLChatConfig,
     "nemotron": NemotronConfig,
     "NVLM_D": NVLM_D_Config,
-    "olmo2": Olmo2Config,
     "solar": SolarConfig,
     "skywork_chat": SkyworkR1VChatConfig,
     "telechat": Telechat2Config,
@@ -690,6 +688,9 @@ def load_params_config(model: Union[str, Path], revision: Optional[str],
                 "quant_method": "fp8",
                 "activation_scheme": "static"
             }
+        elif quantization.get("quant_method") == "compressed-tensors":
+            # Pass through the quantization config to compressed-tensors
+            quantization_config = quantization
         else:
             raise ValueError(
                 f"Found unknown quantization='{quantization}' in config")
@@ -707,6 +708,7 @@ def load_params_config(model: Union[str, Path], revision: Optional[str],
 
     if config_type == "multimodal":
         multimodal_config = config_dict.pop("vision_encoder")
+        quantization_config = config_dict.get("quantization_config", {})
 
         config_dict = {
             "text_config": config_dict,
@@ -714,6 +716,8 @@ def load_params_config(model: Union[str, Path], revision: Optional[str],
         }
         config_dict["architectures"] = ["PixtralForConditionalGeneration"]
         config_dict["model_type"] = "pixtral"
+        if quantization_config:
+            config_dict["quantization_config"] = quantization_config
 
     config_dict.update(kwargs)
 
