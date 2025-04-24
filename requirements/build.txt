@@ -4,8 +4,6 @@ ninja
 packaging
 setuptools>=61
 setuptools-scm>=8
-# 2.7.0 final RC
---extra-index-url https://download.pytorch.org/whl/test/cu128
 torch==2.7.0
 wheel
 jinja2>=3.1.6
