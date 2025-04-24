@@ -122,11 +122,12 @@ class Scheduler(SchedulerInterface):
         self.encoder_cache_manager = EncoderCacheManager(
             cache_size=encoder_cache_size)
 
-        self.num_lookahead_tokens = 0
         speculative_config = vllm_config.speculative_config
-        if speculative_config and speculative_config.method == "eagle":
-            self.num_lookahead_tokens = \
-                speculative_config.num_speculative_tokens
+        self.num_spec_tokens = self.num_lookahead_tokens = 0
+        if speculative_config:
+            self.num_spec_tokens = speculative_config.num_speculative_tokens
+            if speculative_config.method == "eagle":
+                self.num_lookahead_tokens = self.num_spec_tokens
 
     def schedule(self) -> SchedulerOutput:
         # NOTE(woosuk) on the scheduling algorithm:
@@ -824,7 +825,8 @@ class Scheduler(SchedulerInterface):
         if not self.log_stats:
             return None
         if spec_decoding_stats is None:
-            spec_decoding_stats = SpecDecodingStats()
-        spec_decoding_stats.observe(num_draft_tokens=num_draft_tokens,
-                                    num_accepted_tokens=num_accepted_tokens)
+            spec_decoding_stats = SpecDecodingStats.new(self.num_spec_tokens)
+        spec_decoding_stats.observe_draft(
+            num_draft_tokens=num_draft_tokens,
+            num_accepted_tokens=num_accepted_tokens)
         return spec_decoding_stats
