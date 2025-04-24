@@ -82,7 +82,7 @@ ENV VLLM_FA_CMAKE_GPU_ARCHES=${vllm_fa_cmake_gpu_arches}
 # TESTING: install xformers from source to test 2.7.0 final RC
 RUN --mount=type=cache,target=/root/.cache/uv \
     TORCH_CUDA_ARCH_LIST='7.5 8.0 8.6 8.9 9.0+PTX' \
-    uv pip install --system --no-build-isolation "git+https://github.com/facebookresearch/xformers@main#egg=xformers"
+    uv pip install --system --no-build-isolation "git+https://github.com/facebookresearch/xformers@v0.0.29.post3#egg=xformers"
 #################### BASE BUILD IMAGE ####################
 
 #################### WHEEL BUILD IMAGE ####################
@@ -169,7 +169,7 @@ ENV UV_INDEX_STRATEGY="unsafe-best-match"
 
 # Workaround for #17068
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv pip install --system --no-build-isolation "git+https://github.com/state-spaces/mamba@main"
+    uv pip install --system --no-build-isolation "git+https://github.com/state-spaces/mamba@v2.2.4"
 
 COPY requirements/lint.txt requirements/lint.txt
 COPY requirements/test.txt requirements/test.txt
@@ -239,7 +239,7 @@ RUN --mount=type=bind,from=build,src=/workspace/dist,target=/vllm-workspace/dist
 # TESTING: install xformers from source to test 2.7.0 final RC
 RUN --mount=type=cache,target=/root/.cache/uv \
     TORCH_CUDA_ARCH_LIST='7.5 8.0 8.6 8.9 9.0+PTX' \
-    uv pip install --system --no-build-isolation "git+https://github.com/facebookresearch/xformers@main#egg=xformers"
+    uv pip install --system --no-build-isolation "git+https://github.com/facebookresearch/xformers@v0.0.29.post3#egg=xformers"
 
 # If we need to build FlashInfer wheel before its release:
 # $ export FLASHINFER_ENABLE_AOT=1
@@ -292,7 +292,7 @@ ENV UV_INDEX_STRATEGY="unsafe-best-match"
 
 # Workaround for #17068
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv pip install --system --no-build-isolation "git+https://github.com/state-spaces/mamba@main"
+    uv pip install --system --no-build-isolation "git+https://github.com/state-spaces/mamba@v2.2.4"
 
 # install development dependencies (for testing)
 RUN --mount=type=cache,target=/root/.cache/uv \
