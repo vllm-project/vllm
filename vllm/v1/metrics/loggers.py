@@ -487,10 +487,11 @@ def setup_default_loggers(
     if not log_stats:
         return []
 
+    factories: list[StatLoggerFactory]
     if custom_stat_loggers is not None:
         factories = custom_stat_loggers
     else:
-        factories: list[StatLoggerFactory] = [PrometheusStatLogger]
+        factories = [PrometheusStatLogger]
         if logger.isEnabledFor(logging.INFO):
             factories.append(LoggingStatLogger)
 
