@@ -12,7 +12,7 @@ The pre-built image includes:
 
 - ROCm™ 6.3.1
 - HipblasLT 0.13
-- vLLM 0.7.3
+- vLLM 0.8.3
 - PyTorch 2.7dev (nightly)
 
 ## Pull latest Docker Image
