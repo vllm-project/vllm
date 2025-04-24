@@ -11,7 +11,7 @@ from transformers import (BatchFeature, Phi4MultimodalVisionConfig, Phi4Multimod
                           SequenceFeatureExtractor, SiglipVisionConfig)
 from transformers import Phi4MultimodalProcessor as Phi4MMProcessor
 from transformers.models.phi4_multimodal.modeling_phi4_multimodal import (
-    Phi4MultimodalAudioConvModule, Phi4MultimodalAudioMeanVarianceNormLayer, 
+    Phi4MultimodalAudioConvModule, 
     Phi4MultimodalAudioRelativeAttentionBias,
     Phi4MultimodalAudioNemoConvSubsampling, adaptive_enc_mask, unfold_tensor)
 
@@ -20,10 +20,12 @@ from vllm.config import VllmConfig
 from vllm.distributed import get_pp_group, divide, get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
+                                               MergedColumnParallelLinear,
                                                QKVParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.models.module_mapping import MultiModelKeys
+from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig,
@@ -104,14 +106,14 @@ def get_navit_vision_model(layer_idx: int = -1, **kwargs):
 class Phi4MMProjector(nn.Module):
     def __init__(self, input_size: int, hidden_size: int):
         super().__init__()
-        self.projection_up = ColumnParallelLinear(input_size, hidden_size)
-        self.projection_down = RowParallelLinear(hidden_size, hidden_size)
+        self.up = ColumnParallelLinear(input_size, hidden_size)
+        self.down = RowParallelLinear(hidden_size, hidden_size)
         self.act = get_act_fn("gelu")
     
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x, _ = self.projection_up(x)
+        x, _ = self.up(x)
         x = self.act(x)
-        x, _ = self.projection_down(x)
+        x, _ = self.down(x)
         return x
 
 
@@ -239,7 +241,7 @@ class Phi4MultimodalAudioMLP(nn.Module):
         super().__init__()
         self.layer_norm = nn.LayerNorm(config.hidden_size)
         self.act_fn = get_act_fn("silu")
-        self.gate_up_proj = ColumnParallelLinear(config.hidden_size,
+        self.gate_up_proj = MergedColumnParallelLinear(config.hidden_size,
                                         [config.intermediate_size] * 2,
                                         bias=True,
                                         quant_config=quant_config,
@@ -285,7 +287,7 @@ class Phi4MultimodalAudioAttention(nn.Module):
             prefix=f"{prefix}.qkv_proj",
         )
 
-        self.out_proj = RowParallelLinear(
+        self.o_proj = RowParallelLinear(
             input_size=self.embed_dim,
             output_size=self.embed_dim,
             quant_config=quant_config,
@@ -320,7 +322,7 @@ class Phi4MultimodalAudioAttention(nn.Module):
                                              attn_mask=attention_mask,)
         out = out.transpose(1, 2)
 
-        attn_output, _ = self.out_proj(out)
+        attn_output, _ = self.o_proj(out)
 
         return attn_output
 
@@ -353,12 +355,38 @@ class Phi4MultimodalAudioConformerEncoderLayer(nn.Module):
         return out
 
 
+class Phi4MMAudioMeanVarianceNormLayer(nn.Module):
+    """Mean/variance normalization layer.
+
+    Will subtract mean and multiply input by inverted standard deviation.
+    Typically used as a very first layer in a model.
+
+    Args:
+        input_size: int
+            layer input size.
+    """
+
+    def __init__(self, config: Phi4MultimodalAudioConfig):
+        super().__init__()
+        self.global_mean = nn.Parameter(torch.zeros(config.input_size))
+        self.global_invstd = nn.Parameter(torch.ones(config.input_size))
+
+    def forward(self, input_: torch.Tensor) -> torch.Tensor:
+        """MeanVarianceNormLayer Forward
+
+        Args:
+            input_: torch.Tensor
+                input tensor.
+        """
+        return (input_ - self.global_mean) * self.global_invstd
+
+
 class Phi4MultimodalAudioModel(nn.Module):
     def __init__(self, config: Phi4MultimodalAudioConfig):
         super().__init__()
         self.config = config
 
-        self.encoder_embedding = Phi4MultimodalAudioMeanVarianceNormLayer(config)
+        self.encoder_embedding = Phi4MMAudioMeanVarianceNormLayer(config)
         self.embed = Phi4MultimodalAudioNemoConvSubsampling(config)
         self.relative_attention_bias_layer = Phi4MultimodalAudioRelativeAttentionBias(config)
         self.encoders = nn.ModuleList(
@@ -479,7 +507,6 @@ class Phi4MMAudioEmbedding(nn.Module):
         self.config = config
         self.layer_idx = config.audio_config.feature_layer
 
-        self.drop = nn.Dropout(config.embd_pdrop)
         self.encoder = Phi4MultimodalAudioModel(config.audio_config)
 
         proj_input_size = config.audio_config.hidden_size * config.audio_config.downsample_rate
@@ -505,8 +532,8 @@ class Phi4MMAudioEmbedding(nn.Module):
 
         audio_projection = self.get_projection(audio_projection_mode)
 
-        target_device = audio_projection.projection_up.bias.device
-        target_dtype = audio_projection.projection_up.bias.dtype
+        target_device = audio_projection.up.bias.device
+        target_dtype = audio_projection.up.bias.dtype
 
         audio_input_features = audio_input_features.to(device=target_device, dtype=target_dtype)
 
@@ -516,6 +543,34 @@ class Phi4MMAudioEmbedding(nn.Module):
         audio_embeds = [audio_embeds[i, : audio_embed_sizes[i], :] for i in range(len(audio_embed_sizes))]
 
         return audio_embeds
+    
+    def load_weights(self, weights: Iterable[Tuple[str,
+                                                   torch.Tensor]]) -> set[str]:
+        stacked_params_mapping = [
+            # (param_name, shard_name, shard_id)
+            ("qkv_proj", "q_proj", "q"),
+            ("qkv_proj", "k_proj", "k"),
+            ("qkv_proj", "v_proj", "v"),
+        ]
+        params_dict = dict(self.named_parameters())
+        loaded_params: set[str] = set()
+
+        for name, loaded_weight in weights:
+            for param_name, weight_name, shard_id in stacked_params_mapping:
+                if weight_name not in name:
+                    continue
+                name = name.replace(weight_name, param_name)
+                param = params_dict[name]
+                weight_loader = param.weight_loader
+                weight_loader(param, loaded_weight, shard_id)
+                break
+            else:
+                param = params_dict[name]
+                weight_loader = getattr(param, "weight_loader",
+                                        default_weight_loader)
+                weight_loader(param, loaded_weight)
+            loaded_params.add(name)
+        return loaded_params
 
 
 class Phi4MMImagePixelInputs(TypedDict):
@@ -1034,10 +1089,10 @@ class Phi4MultimodalForCausalLM(nn.Module, SupportsLoRA, SupportsMultiModal):
         orig_to_new_substr={
             # projection
             ".img_projection_": ".img_projection.",
-            ".up_proj_for_speech.": ".speech_projection.up",
-            ".up_proj_for_vision_speech.": ".vision_speech_projection.up",
-            ".down_proj_for_speech.": ".speech_projection.down",
-            ".down_proj_for_vision_speech.": ".vision_speech_projection.down",
+            ".up_proj_for_speech.": ".speech_projection.up.",
+            ".up_proj_for_vision_speech.": ".vision_speech_projection.up.",
+            ".down_proj_for_speech.": ".speech_projection.down.",
+            ".down_proj_for_vision_speech.": ".vision_speech_projection.down.",
         },
     )
 
@@ -1051,11 +1106,11 @@ class Phi4MultimodalForCausalLM(nn.Module, SupportsLoRA, SupportsMultiModal):
         # TODO: Optionally initializes these for supporting input embeddings.
         self.image_embed = Phi4MMImageEmbedding(
             config,
-            prefix=maybe_prefix(prefix, "image_embed"),
+            # prefix=maybe_prefix(prefix, "image_embed"),
         )
         self.audio_embed = Phi4MMAudioEmbedding(
             config,
-            prefix=maybe_prefix(prefix, "audio_embed"),
+            # prefix=maybe_prefix(prefix, "audio_embed"),
         )
 
         self.language_model = init_vllm_registered_model(
