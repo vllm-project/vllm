@@ -19,6 +19,7 @@ docker run --privileged --net host --shm-size=16G -it \
     vllm-tpu /bin/bash -c "python3 -m pip install git+https://github.com/thuml/depyf.git \
     && python3 -m pip install pytest pytest-asyncio tpu-info \
     && python3 -m pip install lm_eval[api]==0.4.4 \
+    && export VLLM_XLA_CACHE_PATH= \
     && export VLLM_USE_V1=1 \
     && export VLLM_XLA_CHECK_RECOMPILATION=1 \
     && echo HARDWARE \
