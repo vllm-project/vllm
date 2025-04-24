@@ -490,32 +490,82 @@ __global__ void __launch_bounds__(64)
       uint32_t B_loaded = *(uint32_t*)(B_ptr_local + ax0_ax1_fused_0 * row_stride * (OC / 8));
       uint4 B_loaded_bf16 = dequantize_s4_to_bf16x2(B_loaded);  // Changed to BF16
 
-      // Apply zero and scaling in BF16
-      // Apply zero and scaling in BF16
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 900
+      // SM90+ implementation using assembly instructions
+      // Apply zero point and scaling factor to each BF16 pair
       asm volatile("sub.bf16x2 %0, %1, %2;\n"
                   : "=r"(B_loaded_bf16.x)
                   : "r"(B_loaded_bf16.x), "r"(B_loaded_zero.x));
       asm volatile("fma.rn.bf16x2 %0, %1, %2, %3;\n"
                   : "=r"(B_loaded_bf16.x)
                   : "r"(B_loaded_bf16.x), "r"(B_loaded_scale.x), "r"(ZERO));
+
       asm volatile("sub.bf16x2 %0, %1, %2;\n"
                   : "=r"(B_loaded_bf16.y)
                   : "r"(B_loaded_bf16.y), "r"(B_loaded_zero.y));
       asm volatile("fma.rn.bf16x2 %0, %1, %2, %3;\n"
                   : "=r"(B_loaded_bf16.y)
                   : "r"(B_loaded_bf16.y), "r"(B_loaded_scale.y), "r"(ZERO));
+
       asm volatile("sub.bf16x2 %0, %1, %2;\n"
                   : "=r"(B_loaded_bf16.z)
                   : "r"(B_loaded_bf16.z), "r"(B_loaded_zero.z));
       asm volatile("fma.rn.bf16x2 %0, %1, %2, %3;\n"
                   : "=r"(B_loaded_bf16.z)
                   : "r"(B_loaded_bf16.z), "r"(B_loaded_scale.z), "r"(ZERO));
+
       asm volatile("sub.bf16x2 %0, %1, %2;\n"
                   : "=r"(B_loaded_bf16.w)
                   : "r"(B_loaded_bf16.w), "r"(B_loaded_zero.w));
       asm volatile("fma.rn.bf16x2 %0, %1, %2, %3;\n"
                   : "=r"(B_loaded_bf16.w)
                   : "r"(B_loaded_bf16.w), "r"(B_loaded_scale.w), "r"(ZERO));
+#else
+      // SM80-SM90 implementation using CUDA BF16 API
+      // Process each pair of BF16 values
+      
+      // Process .x component (first pair)
+      __nv_bfloat162 bf16_pair_x = *reinterpret_cast<__nv_bfloat162*>(&B_loaded_bf16.x);
+      __nv_bfloat162 zero_pair_x = *reinterpret_cast<__nv_bfloat162*>(&B_loaded_zero.x);
+      __nv_bfloat162 scale_pair_x = *reinterpret_cast<__nv_bfloat162*>(&B_loaded_scale.x);
+      
+      // Subtract zero and multiply by scale
+      bf16_pair_x = __hsub2(bf16_pair_x, zero_pair_x);
+      bf16_pair_x = __hmul2(bf16_pair_x, scale_pair_x);
+      
+      // Store result back
+      B_loaded_bf16.x = *reinterpret_cast<uint32_t*>(&bf16_pair_x);
+      
+      // Process .y component (second pair)
+      __nv_bfloat162 bf16_pair_y = *reinterpret_cast<__nv_bfloat162*>(&B_loaded_bf16.y);
+      __nv_bfloat162 zero_pair_y = *reinterpret_cast<__nv_bfloat162*>(&B_loaded_zero.y);
+      __nv_bfloat162 scale_pair_y = *reinterpret_cast<__nv_bfloat162*>(&B_loaded_scale.y);
+      
+      bf16_pair_y = __hsub2(bf16_pair_y, zero_pair_y);
+      bf16_pair_y = __hmul2(bf16_pair_y, scale_pair_y);
+      
+      B_loaded_bf16.y = *reinterpret_cast<uint32_t*>(&bf16_pair_y);
+      
+      // Process .z component (third pair)
+      __nv_bfloat162 bf16_pair_z = *reinterpret_cast<__nv_bfloat162*>(&B_loaded_bf16.z);
+      __nv_bfloat162 zero_pair_z = *reinterpret_cast<__nv_bfloat162*>(&B_loaded_zero.z);
+      __nv_bfloat162 scale_pair_z = *reinterpret_cast<__nv_bfloat162*>(&B_loaded_scale.z);
+      
+      bf16_pair_z = __hsub2(bf16_pair_z, zero_pair_z);
+      bf16_pair_z = __hmul2(bf16_pair_z, scale_pair_z);
+      
+      B_loaded_bf16.z = *reinterpret_cast<uint32_t*>(&bf16_pair_z);
+      
+      // Process .w component (fourth pair)
+      __nv_bfloat162 bf16_pair_w = *reinterpret_cast<__nv_bfloat162*>(&B_loaded_bf16.w);
+      __nv_bfloat162 zero_pair_w = *reinterpret_cast<__nv_bfloat162*>(&B_loaded_zero.w);
+      __nv_bfloat162 scale_pair_w = *reinterpret_cast<__nv_bfloat162*>(&B_loaded_scale.w);
+      
+      bf16_pair_w = __hsub2(bf16_pair_w, zero_pair_w);
+      bf16_pair_w = __hmul2(bf16_pair_w, scale_pair_w);
+      
+      B_loaded_bf16.w = *reinterpret_cast<uint32_t*>(&bf16_pair_w);
+#endif
       
 
       *(uint4*)(B_shared_ptr + ax0_ax1_fused_0 * row_stride * (N + 8)) = B_loaded_bf16;
@@ -593,7 +643,7 @@ __global__ void __launch_bounds__(64)
   for (int ax1_0_1 = 0; ax1_0_1 < (N / 32); ++ax1_0_1) {
     for (int local_id = 0; local_id < 8; ++local_id) {
       int row_offset = (((int)blockIdx_y) / j_factors1) * 16 +
-                       ((int)threadIdx.x) / 4 + (local_id % 4) / 2 * 8;  // Same as before
+                       ((int)threadIdx.x) / 4 + (local_id % 4) / 2 * 8;;  // Same as before
       if (row_offset < M) {
         *(C_ptr + ax1_0_1 * 16 + row_offset * OC + (local_id / 4) * 8 +
           local_id % 2) = __float2bfloat16(C_warp[(ax1_0_1 * 8) + local_id]);
@@ -642,6 +692,8 @@ __global__ void __launch_bounds__(64)
   uint32_t B_loaded = *(uint32_t*)B_ptr2;
   uint4 B_loaded_bf16 = dequantize_s4_to_bf16x2(B_loaded);
 
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 900
+  // SM90+ implementation using assembly instructions
   // Apply zero point and scaling factor to each BF16 pair
   asm volatile("sub.bf16x2 %0, %1, %2;\n"
               : "=r"(B_loaded_bf16.x)
@@ -670,6 +722,52 @@ __global__ void __launch_bounds__(64)
   asm volatile("fma.rn.bf16x2 %0, %1, %2, %3;\n"
               : "=r"(B_loaded_bf16.w)
               : "r"(B_loaded_bf16.w), "r"(B_loaded_scale.w), "r"(ZERO));
+#else
+  // SM80-SM90 implementation using CUDA BF16 API
+  // Process each pair of BF16 values
+  
+  // Process .x component (first pair)
+  __nv_bfloat162 bf16_pair_x = *reinterpret_cast<__nv_bfloat162*>(&B_loaded_bf16.x);
+  __nv_bfloat162 zero_pair_x = *reinterpret_cast<__nv_bfloat162*>(&B_loaded_zero.x);
+  __nv_bfloat162 scale_pair_x = *reinterpret_cast<__nv_bfloat162*>(&B_loaded_scale.x);
+  
+  // Subtract zero and multiply by scale
+  bf16_pair_x = __hsub2(bf16_pair_x, zero_pair_x);
+  bf16_pair_x = __hmul2(bf16_pair_x, scale_pair_x);
+  
+  // Store result back
+  B_loaded_bf16.x = *reinterpret_cast<uint32_t*>(&bf16_pair_x);
+  
+  // Process .y component (second pair)
+  __nv_bfloat162 bf16_pair_y = *reinterpret_cast<__nv_bfloat162*>(&B_loaded_bf16.y);
+  __nv_bfloat162 zero_pair_y = *reinterpret_cast<__nv_bfloat162*>(&B_loaded_zero.y);
+  __nv_bfloat162 scale_pair_y = *reinterpret_cast<__nv_bfloat162*>(&B_loaded_scale.y);
+  
+  bf16_pair_y = __hsub2(bf16_pair_y, zero_pair_y);
+  bf16_pair_y = __hmul2(bf16_pair_y, scale_pair_y);
+  
+  B_loaded_bf16.y = *reinterpret_cast<uint32_t*>(&bf16_pair_y);
+  
+  // Process .z component (third pair)
+  __nv_bfloat162 bf16_pair_z = *reinterpret_cast<__nv_bfloat162*>(&B_loaded_bf16.z);
+  __nv_bfloat162 zero_pair_z = *reinterpret_cast<__nv_bfloat162*>(&B_loaded_zero.z);
+  __nv_bfloat162 scale_pair_z = *reinterpret_cast<__nv_bfloat162*>(&B_loaded_scale.z);
+  
+  bf16_pair_z = __hsub2(bf16_pair_z, zero_pair_z);
+  bf16_pair_z = __hmul2(bf16_pair_z, scale_pair_z);
+  
+  B_loaded_bf16.z = *reinterpret_cast<uint32_t*>(&bf16_pair_z);
+  
+  // Process .w component (fourth pair)
+  __nv_bfloat162 bf16_pair_w = *reinterpret_cast<__nv_bfloat162*>(&B_loaded_bf16.w);
+  __nv_bfloat162 zero_pair_w = *reinterpret_cast<__nv_bfloat162*>(&B_loaded_zero.w);
+  __nv_bfloat162 scale_pair_w = *reinterpret_cast<__nv_bfloat162*>(&B_loaded_scale.w);
+  
+  bf16_pair_w = __hsub2(bf16_pair_w, zero_pair_w);
+  bf16_pair_w = __hmul2(bf16_pair_w, scale_pair_w);
+  
+  B_loaded_bf16.w = *reinterpret_cast<uint32_t*>(&bf16_pair_w);
+#endif
 
   // Store dequantized weights in shared memory
   *(uint4*)B_shared_ptr2 = B_loaded_bf16;

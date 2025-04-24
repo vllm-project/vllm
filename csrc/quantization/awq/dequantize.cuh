@@ -11,6 +11,8 @@ Shang and Dang, Xingyu and Han, Song}, journal={arXiv}, year={2023}
 
 #pragma once
 
+#include <cuda_bf16.h>
+
 namespace vllm {
 namespace awq {
 
@@ -98,7 +100,7 @@ __device__ uint4 dequantize_s4_to_fp16x2(uint32_t const& source) {
   __builtin_unreachable();  // Suppress missing return statement warning
 }
 
-__device__ uint4 dequantize_int4_to_bf16x2(uint32_t const& source) {
+__device__ uint4 dequantize_s4_to_bf16x2(uint32_t const& source) {
 #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ < 800
   assert(false);
 #else
@@ -146,40 +148,66 @@ __device__ uint4 dequantize_int4_to_bf16x2(uint32_t const& source) {
   
   // This is the bfloat16 {0x5F00, 0x5F00} which represents {1.0, 1.0} * 2^0
   static constexpr uint32_t BF16_BIAS = 0x5F005F00;
-  // This is the bfloat16 {0x2000, 0x2000} which represents {1.0, 1.0} * 2^-15
-  static constexpr uint32_t BF16_SCALE = 0x20002000;
-  // This is the bfloat16 {0x8000, 0x8000} which represents {-0.0, -0.0}
-  static constexpr uint32_t BF16_SIGN = 0x80008000;
+  // This is the bfloat16 {0x3C00, 0x3C00} which represents {1/16, 1/16}
+  static constexpr uint32_t ONE_SIXTEENTH_BF16 = 0x3C003C00;
+  // This is the bfloat16 {-64, -64} in bfloat16 format
+  static constexpr uint32_t NEG_64_BF16 = 0xC200C200;
 
-  // Convert the packed INT4 values to BF16
-  // For signed INT4, we need to handle the sign bit (bit 3) properly
-  // We'll subtract 8 from values with the sign bit set
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 900
+  // SM90+ implementation using assembly instructions
+  // Similar to FP16 implementation, we use different operations for even/odd indices
+  // For h[0] and h[2], we use subtraction
   asm volatile("sub.bf16x2 %0, %1, %2;\n"
                : "=r"(h[0])
                : "r"(h[0]), "r"(BF16_BIAS));
   asm volatile("sub.bf16x2 %0, %1, %2;\n"
-               : "=r"(h[1])
-               : "r"(h[1]), "r"(BF16_BIAS));
-  asm volatile("sub.bf16x2 %0, %1, %2;\n"
                : "=r"(h[2])
                : "r"(h[2]), "r"(BF16_BIAS));
-  asm volatile("sub.bf16x2 %0, %1, %2;\n"
-               : "=r"(h[3])
-               : "r"(h[3]), "r"(BF16_BIAS));
-
-  // Apply scaling to get the final values in the correct range
-  asm volatile("mul.bf16x2 %0, %1, %2;\n"
-               : "=r"(h[0])
-               : "r"(h[0]), "r"(BF16_SCALE));
-  asm volatile("mul.bf16x2 %0, %1, %2;\n"
+               
+  // For h[1] and h[3], we use fused multiply-add like in the FP16 version
+  asm volatile("fma.rn.bf16x2 %0, %1, %2, %3;\n"
                : "=r"(h[1])
-               : "r"(h[1]), "r"(BF16_SCALE));
-  asm volatile("mul.bf16x2 %0, %1, %2;\n"
-               : "=r"(h[2])
-               : "r"(h[2]), "r"(BF16_SCALE));
-  asm volatile("mul.bf16x2 %0, %1, %2;\n"
+               : "r"(h[1]), "r"(ONE_SIXTEENTH_BF16), "r"(NEG_64_BF16));
+  asm volatile("fma.rn.bf16x2 %0, %1, %2, %3;\n"
                : "=r"(h[3])
-               : "r"(h[3]), "r"(BF16_SCALE));
+               : "r"(h[3]), "r"(ONE_SIXTEENTH_BF16), "r"(NEG_64_BF16));
+#else
+  // SM80-SM90 implementation using __nv_bfloat162 operations
+  // Convert from BF16_BIAS representation to actual values with scaling
+  
+  // Process each pair (two bfloat16 values packed in a uint32_t)
+  // Following the same pattern as in the FP16 version
+  
+  // For h[0] and h[2], we use subtraction (like sub.bf16x2)
+  // This processes elements 0,1,4,5 (direct conversion by subtracting bias)
+  __nv_bfloat162 bf16_pair_0 = *reinterpret_cast<__nv_bfloat162*>(&h[0]);
+  __nv_bfloat162 bf16_pair_2 = *reinterpret_cast<__nv_bfloat162*>(&h[2]);
+  __nv_bfloat162 bias_pair = *reinterpret_cast<const __nv_bfloat162*>(&BF16_BIAS);
+  
+  // Subtract the bias to get the actual INT4 values in bf16 format
+  bf16_pair_0 = __hsub2(bf16_pair_0, bias_pair);
+  bf16_pair_2 = __hsub2(bf16_pair_2, bias_pair);
+  
+  // Store results back
+  h[0] = *reinterpret_cast<uint32_t*>(&bf16_pair_0);
+  h[2] = *reinterpret_cast<uint32_t*>(&bf16_pair_2);
+  
+  // For h[1] and h[3], we use fused multiply-add (like fma.rn.bf16x2)
+  // This processes elements 2,3,6,7 (conversion via multiply-add operation)
+  __nv_bfloat162 bf16_pair_1 = *reinterpret_cast<__nv_bfloat162*>(&h[1]);
+  __nv_bfloat162 bf16_pair_3 = *reinterpret_cast<__nv_bfloat162*>(&h[3]);
+  __nv_bfloat162 scale_pair = *reinterpret_cast<const __nv_bfloat162*>(&ONE_SIXTEENTH_BF16);
+  __nv_bfloat162 offset_pair = *reinterpret_cast<const __nv_bfloat162*>(&NEG_64_BF16);
+  
+  // Apply scale and offset: (x + bias) * (1/16) + (-64)
+  // This effectively converts and scales the INT4 values appropriately
+  bf16_pair_1 = __hfma2(bf16_pair_1, scale_pair, offset_pair);
+  bf16_pair_3 = __hfma2(bf16_pair_3, scale_pair, offset_pair);
+  
+  // Store results back
+  h[1] = *reinterpret_cast<uint32_t*>(&bf16_pair_1);
+  h[3] = *reinterpret_cast<uint32_t*>(&bf16_pair_3);
+#endif
 
   return result;
 #endif
