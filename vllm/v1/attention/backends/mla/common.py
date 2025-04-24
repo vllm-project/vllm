@@ -207,7 +207,7 @@ from vllm.vllm_flash_attn.fa_utils import get_flash_attn_version
 
 try:
     import vllm.vllm_flash_attn as vfa
-    flash_attn_varlen_func = vfa.flash_attn_varlen_func
+    flash_attn_varlen_func = vfa.flash_attn_varlen_func  # type: ignore[attr-defined]
     is_vllm_fa = True
 except ImportError:
     # For rocm use upstream flash attention
