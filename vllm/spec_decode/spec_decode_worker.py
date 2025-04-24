@@ -183,8 +183,7 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
             elif draft_model_config.hf_config.model_type == "medusa":
                 proposer_worker = MedusaWorker(**draft_worker_kwargs)
             else:
-                if draft_tp == 1 or draft_model_config.hf_config.model_type ==\
-                        "deepseek_mtp":
+                if draft_tp == 1:
                     if current_platform.is_cuda_alike():
                         draft_worker_kwargs[
                             "model_runner_cls"] = TP1DraftModelRunner
@@ -200,7 +199,8 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
                     allow_zero_draft_token_step = False
                 proposer_worker = MultiStepWorker(**draft_worker_kwargs)
                 if draft_model_config.hf_config.model_type == "deepseek_mtp":
-                    num_spec_prefill_steps = num_speculative_tokens
+                    num_spec_prefill_steps = \
+                        draft_model_config.hf_config.n_predict
 
             proposer_worker = SmallerTpProposerWorker.maybe_wrap_worker(
                 proposer_worker, draft_tp, target_tp)

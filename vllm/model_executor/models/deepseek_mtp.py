@@ -92,7 +92,7 @@ class DeepSeekMultiTokenPredictorLayer(nn.Module):
                                                  attn_metadata=attn_metadata,
                                                  residual=None)
         hidden_states = residual + hidden_states
-        return self.shared_head(hidden_states)
+        return hidden_states
 
 
 class DeepSeekMultiTokenPredictor(nn.Module):
@@ -128,14 +128,15 @@ class DeepSeekMultiTokenPredictor(nn.Module):
         inputs_embeds: Optional[torch.Tensor] = None,
         spec_step_idx: int = 0,
     ) -> torch.Tensor:
-        return self.layers[str(self.mtp_start_layer_idx + spec_step_idx)](
+        current_step_idx = (spec_step_idx % self.num_mtp_layers)
+        return self.layers[str(self.mtp_start_layer_idx + current_step_idx)](
             input_ids,
             positions,
             kv_caches[spec_step_idx],
             attn_metadata,
             previous_hidden_states,
             inputs_embeds,
-            spec_step_idx,
+            current_step_idx,
         )
 
     def compute_logits(
@@ -144,9 +145,12 @@ class DeepSeekMultiTokenPredictor(nn.Module):
         sampling_metadata: SamplingMetadata,
         spec_step_idx: int = 0,
     ) -> torch.Tensor:
-        mtp_layer = self.layers[str(self.mtp_start_layer_idx + spec_step_idx)]
+        current_step_idx = (spec_step_idx % self.num_mtp_layers)
+        mtp_layer = self.layers[str(self.mtp_start_layer_idx +
+                                    current_step_idx)]
         logits = self.logits_processor(mtp_layer.shared_head.head,
-                                       hidden_states, sampling_metadata)
+                                       mtp_layer.shared_head(hidden_states),
+                                       sampling_metadata)
         return logits
 
 
