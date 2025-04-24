@@ -14,6 +14,7 @@ from transformers.configuration_utils import PretrainedConfig
 
 from vllm.attention import Attention, AttentionMetadata
 from vllm.config import CacheConfig, VllmConfig
+from vllm.distributed.communication_op import tensor_model_parallel_all_reduce
 from vllm.distributed.parallel_state import (
     get_pp_group, get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size)
@@ -79,8 +80,8 @@ class MiniMaxText01RMSNormTP(CustomOp):
         super().__init__()
         self.tp_world = get_tensor_model_parallel_world_size()
         self.tp_rank = get_tensor_model_parallel_rank()
-        self.hidden_size = hidden_size
-        self.weight = nn.Parameter(torch.ones(hidden_size // self.tp_world))
+        self.weight = nn.Parameter(torch.ones(int(hidden_size /
+                                                  self.tp_world)))
 
         self.weight.weight_loader = self.weight_loader
         self.variance_epsilon = eps
@@ -99,40 +100,27 @@ class MiniMaxText01RMSNormTP(CustomOp):
         param.data.copy_(loaded_weight[shard])
         return
 
+    def _forward(
+        self,
+        x: torch.Tensor,
+    ) -> torch.Tensor:
+        orig_dtype = x.dtype
+        x = x.to(torch.float32)
+        variance = x.pow(2).mean(dim=-1, keepdim=True, dtype=torch.float32)
+        if self.tp_world > 1:
+            variance = tensor_model_parallel_all_reduce(
+                variance) / self.tp_world
+        x = x * torch.rsqrt(variance + self.variance_epsilon)
+        x = x.to(orig_dtype) * self.weight
+        return x
+
     def forward(
         self,
         x: torch.Tensor,
         residual: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
         assert residual is None, "RMSNorm does not support residual connection."
-        orig_dtype = x.dtype
-        x = x.to(torch.float32)
-        if x.dim() == 0:
-            return x.to(orig_dtype)
-
-        last_dim = x.size(-1)
-        weight_dim = self.weight.size(0)
-
-        if last_dim != weight_dim:
-            if last_dim < weight_dim:
-                weight = self.weight[:last_dim]
-            else:
-                weight = torch.ones(last_dim,
-                                    dtype=self.weight.dtype,
-                                    device=self.weight.device)
-                weight[:weight_dim] = self.weight
-        else:
-            weight = self.weight
-
-        if x.dim() > 1:
-            weight_shape = [1] * (x.dim() - 1) + [weight.size(0)]
-            weight = weight.view(weight_shape)
-
-        var = torch.mean(x * x, dim=-1, keepdim=True)
-        x_norm = x * torch.rsqrt(var + self.variance_epsilon)
-        result = weight * x_norm
-
-        return result.to(orig_dtype)
+        return self._forward(x)
 
 
 class MiniMaxText01RotaryEmbedding(CustomOp):
