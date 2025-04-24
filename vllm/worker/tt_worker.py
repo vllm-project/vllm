@@ -398,6 +398,38 @@ class TTWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
 
         dispatch_core_config = ttnn.DispatchCoreConfig(dispatch_core_type, dispatch_core_axis)
         return dispatch_core_config
+    
+    # Set fabric config to passed in value
+    # Do nothing if not set
+    # Must be called before creating the mesh device
+    def _set_fabric(self):
+        override_tt_config = self.model_config.override_tt_config
+        if override_tt_config is not None and "fabric_config" in override_tt_config:
+            fabric_config_str = override_tt_config["fabric_config"]
+            fabric_config_map = {
+                "DISABLED": ttnn.FabricConfig.DISABLED,
+                "FABRIC_1D": ttnn.FabricConfig.FABRIC_1D,
+                "FABRIC_2D": ttnn.FabricConfig.FABRIC_2D,
+                "CUSTOM": ttnn.FabricConfig.CUSTOM,
+            }
+            fabric_config = fabric_config_map.get(fabric_config_str)
+            assert fabric_config is not None, f"Invalid fabric_config: {fabric_config_str}. Expected one of {list(fabric_config_map.keys())}."
+            ttnn.initialize_fabric_config(fabric_config)
+
+    def _device_params_from_override_tt_config(self):
+        override_tt_config = self.model_config.override_tt_config
+        device_params = {}
+
+        if self.trace_mode:
+            # Set the most common value as default, override later
+            device_params["trace_region_size"] = 23887872
+            if override_tt_config and "trace_region_size" in override_tt_config:
+                device_params["trace_region_size"] = override_tt_config["trace_region_size"]
+
+        if override_tt_config and "worker_l1_size" in override_tt_config:
+            device_params["worker_l1_size"] = override_tt_config["worker_l1_size"]
+
+        return device_params
 
     def _open_mesh_device(self):
         num_devices_available = len(ttnn.get_device_ids())
@@ -411,9 +443,9 @@ class TTWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
         if mesh_grid[0] * mesh_grid[1] > num_devices_available:
             assert f"Requested mesh grid shape {mesh_grid} is larger than number of available devices {num_devices_available}"
 
-        device_params = {}
-        if self.trace_mode:
-            device_params["trace_region_size"] = 23887872  # TODO: make this configurable
+        device_params = self._device_params_from_override_tt_config()
+
+        self._set_fabric()
 
         mesh_device = ttnn.open_mesh_device(
             ttnn.MeshShape(*mesh_grid),
