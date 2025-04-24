@@ -166,8 +166,11 @@ class CudaPlatformBase(Platform):
                     envs.VLLM_ATTENTION_BACKEND == "CUTLASS_MLA")
 
             from vllm.attention.ops.flashmla import is_flashmla_supported
-            if use_flashmla and is_flashmla_supported()[0] \
-                and cache_config.block_size != 64:
+            use_flashmla = is_flashmla_supported()[0] and \
+                (envs.VLLM_ATTENTION_BACKEND == "FLASHMLA" or
+                    envs.VLLM_ATTENTION_BACKEND is None)
+
+            if use_flashmla and cache_config.block_size != 64:
                 cache_config.block_size = 64
                 logger.info(
                     "Forcing kv cache block size to 64 for FlashMLA backend.")
@@ -253,9 +256,6 @@ class CudaPlatformBase(Platform):
                 else:
                     logger.warning(
                         "Cutlass MLA backend is only supported on V1 engine")
-            if use_flashattn:
-                return _get_version("FlashAttention MLA",
-                                    "flashattn_mla.FlashAttnMLABackend")
             if use_flashmla:
                 if block_size != 64:
                     logger.warning(
@@ -264,6 +264,9 @@ class CudaPlatformBase(Platform):
                         block_size)
                 else:
                     return _get_version("FlashMLA", "flashmla.FlashMLABackend")
+            if use_flashattn:
+                return _get_version("FlashAttention MLA",
+                                    "flashattn_mla.FlashAttnMLABackend")
             if use_triton:
                 return _get_version("Triton MLA",
                                     "triton_mla.TritonMLABackend")
