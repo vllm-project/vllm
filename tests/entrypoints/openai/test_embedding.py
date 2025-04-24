@@ -21,7 +21,8 @@ from ...utils import RemoteOpenAIServer
 MODELS = [
     EmbedModelInfo("intfloat/multilingual-e5-small", is_matryoshka=False),
     EmbedModelInfo("Snowflake/snowflake-arctic-embed-m-v1.5",
-                   is_matryoshka=True)
+                   is_matryoshka=True,
+                   matryoshka_dimensions=[256]),
 ]
 
 DUMMY_CHAT_TEMPLATE = """{% for message in messages %}{{message['role'] + ': ' + message['content'] + '\\n'}}{% endfor %}"""  # noqa: E501
@@ -53,13 +54,15 @@ def server(model_info, dtype: str):
         "--max-model-len",
         "512",
         "--chat-template",
-        DUMMY_CHAT_TEMPLATE,
-        "--trust_remote_code"
+        DUMMY_CHAT_TEMPLATE
     ]
 
     if model_info.name == "Snowflake/snowflake-arctic-embed-m-v1.5":
         # Manually enable Matryoshka Embeddings
-        args.extend(["--hf_overrides", '{"is_matryoshka":true}'])
+        args.extend([
+            "--trust_remote_code", "--hf_overrides",
+            '{"matryoshka_dimensions":[256]}'
+        ])
 
     with RemoteOpenAIServer(model_info.name, args) as remote_server:
         yield remote_server
@@ -355,19 +358,28 @@ async def test_matryoshka(model_info: EmbedModelInfo,
         _correctness_test(hf_model, prompts, vllm_outputs, dimensions)
 
     if model_info.is_matryoshka:
-        for dimensions in [None, 16]:
+        valid_dimensions = [None]
+        if model_info.matryoshka_dimensions:
+            valid_dimensions += model_info.matryoshka_dimensions[:2]
+
+        for dimensions in valid_dimensions:
             await make_request_and_correctness_test(dimensions)
 
-        with pytest.raises(openai.BadRequestError):
-            for dimensions in [-1]:
+        invalid_dimensions = [-1]
+        if model_info.matryoshka_dimensions:
+            assert 5 not in model_info.matryoshka_dimensions
+            invalid_dimensions.append(5)
+
+        for dimensions in invalid_dimensions:
+            with pytest.raises(openai.BadRequestError):
                 await make_request_and_correctness_test(dimensions)
 
     else:
         for dimensions in [None]:
             await make_request_and_correctness_test(dimensions)
 
-        with pytest.raises(openai.BadRequestError):
-            for dimensions in [-1, 16]:
+        for dimensions in [-1, 16]:
+            with pytest.raises(openai.BadRequestError):
                 await make_request_and_correctness_test(dimensions)
 
 
