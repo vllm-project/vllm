@@ -241,10 +241,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             device=self.device)
 
         # OPTIMIZATION: Cache the tensors rather than creating them every step.
+        # Keep in int64 to avoid overflow with long context
         self.arange_np = np.arange(max(self.max_num_reqs + 1,
                                        self.max_model_len,
                                        self.max_num_tokens),
-                                   dtype=np.int32)
+                                   dtype=np.int64)
         # NOTE(woosuk): These tensors are "stateless", i.e., they are literally
         # a faster version of creating a new tensor every time. Thus, we should
         # not make any assumptions about the values in these tensors.
@@ -1229,7 +1230,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 target_hidden_states = hidden_states[token_indices]
                 target_slot_mapping = attn_metadata.slot_mapping[token_indices]
 
-            draft_token_ids, draft_probs = self.drafter.propose(
+            draft_token_ids = self.drafter.propose(
                 target_token_ids=target_token_ids,
                 target_positions=target_positions,
                 target_hidden_states=target_hidden_states,
@@ -1240,9 +1241,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 sampling_metadata=sampling_metadata,
             )
             spec_token_ids = draft_token_ids.tolist()
-            # TODO(woosuk): Cache draft_probs and use it for rejection sampling
-            # in the next step.
-            del draft_probs
 
         # Clear KVConnector state after all KVs are generated.
         if has_kv_transfer_group():
