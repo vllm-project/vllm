@@ -50,7 +50,7 @@ completion = client.chat.completions.create(
             "content": "Generate an example email address for Alan Turing, who works in Enigma. End in .com and new line. Example result: alan.turing@enigma.com\n",
         }
     ],
-    extra_body={"guided_regex": "\w+@\w+\.com\n", "stop": ["\n"]},
+    extra_body={"guided_regex": r"\w+@\w+\.com\n", "stop": ["\n"]},
 )
 print(completion.choices[0].message.content)
 ```
@@ -105,17 +105,17 @@ It works by using a context free EBNF grammar, which for example we can use to d
 
 ```python
 simplified_sql_grammar = """
-    ?start: select_statement
+    root ::= select_statement
 
-    ?select_statement: "SELECT " column_list " FROM " table_name
+    select_statement ::= "SELECT " column " from " table " where " condition
 
-    ?column_list: column_name ("," column_name)*
+    column ::= "col_1 " | "col_2 "
 
-    ?table_name: identifier
+    table ::= "table_1 " | "table_2 "
 
-    ?column_name: identifier
+    condition ::= column "= " number
 
-    ?identifier: /[a-zA-Z_][a-zA-Z0-9_]*/
+    number ::= "1 " | "2 "
 """
 
 completion = client.chat.completions.create(

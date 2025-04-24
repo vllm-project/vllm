@@ -101,17 +101,17 @@ print("content: ", completion.choices[0].message.content)
 
 # Guided decoding by Grammar
 simplified_sql_grammar = """
-    ?start: select_statement
+    root ::= select_statement
 
-    ?select_statement: "SELECT " column_list " FROM " table_name
+    select_statement ::= "SELECT " column " from " table " where " condition
 
-    ?column_list: column_name ("," column_name)*
+    column ::= "col_1 " | "col_2 "
 
-    ?table_name: identifier
+    table ::= "table_1 " | "table_2 "
 
-    ?column_name: identifier
+    condition ::= column "= " number
 
-    ?identifier: /[a-zA-Z_][a-zA-Z0-9_]*/
+    number ::= "1 " | "2 "
 """
 
 # This may be very slow https://github.com/vllm-project/vllm/issues/12122
