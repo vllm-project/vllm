@@ -16,6 +16,7 @@ Authors:
 import inspect
 import time
 from typing import List
+from __future__ import annotations
 
 from triton import KernelInterface
 from triton import __version__ as triton_version
