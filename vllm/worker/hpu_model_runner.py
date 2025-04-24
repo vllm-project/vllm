@@ -659,7 +659,7 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
         self.model: torch.nn.Module = None
         self.inc_initialized_successfully = False
 
-        # Profiler tats
+        # Profiler stat
         self.profiler = HabanaHighLevelProfiler()
         self.profiler_counter_helper = HabanaProfilerCounterHelper()
         self.seen_configs: set = set()
