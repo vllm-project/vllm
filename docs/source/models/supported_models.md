@@ -1111,6 +1111,10 @@ This limitation exists because the model's mixed attention pattern (bidirectiona
 To use `TIGER-Lab/Mantis-8B-siglip-llama3`, you have to pass `--hf_overrides '{"architectures": ["MantisForConditionalGeneration"]}'` when running vLLM.
 :::
 
+:::{warning}
+For improved output quality of `AllenAI/Molmo-7B-D-0924` (especially in object localization tasks), we recommend using the pinned dependency versions listed in <gh-file:requirements/molmo.txt> (including `vllm==0.7.0`). These versions match the environment that achieved consistent results on both A10 and L40 GPUs.
+:::
+
 :::{note}
 The official `openbmb/MiniCPM-V-2` doesn't work yet, so we need to use a fork (`HwwwH/MiniCPM-V-2`) for now.
 For more details, please see: <gh-pr:4087#issuecomment-2250397630>
