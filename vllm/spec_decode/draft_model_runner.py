@@ -295,7 +295,7 @@ class TP1DraftModelRunner(ModelRunnerWrapperBase):
             if not self.is_driver_worker:
                 return []
             # Sample the next token.
-            output = self.model.sample(
+            output = self.model_runner.sampler(
                 logits=logits,
                 sampling_metadata=model_input.sampling_metadata,
             )
