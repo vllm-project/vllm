@@ -19,7 +19,7 @@ from vllm.lora.request import LoRARequest
 from vllm.lora.worker_manager import LRUCacheWorkerLoRAManager
 from vllm.model_executor import SamplingMetadata
 from vllm.model_executor.layers.rotary_embedding import MRotaryEmbedding
-from vllm.model_executor.layers.sampler import SamplerOutput
+from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.model_loader import get_model
 from vllm.model_executor.models import supports_lora, supports_multimodal
 from vllm.multimodal import (MULTIMODAL_REGISTRY, BatchedTensorInputs,
@@ -490,6 +490,7 @@ class CPUModelRunnerBase(ModelRunnerBase[TModelInputForCPU]):
         self.model: nn.Module  # Set after init_Model
         # Set after load_model.
         self.lora_manager: Optional[LRUCacheWorkerLoRAManager] = None
+        self.sampler = get_sampler()
 
         if hasattr(self, "_builder_cls"):
             # multi-step model runner does not have `_builder_cls`
@@ -544,11 +545,6 @@ class CPUModelRunnerBase(ModelRunnerBase[TModelInputForCPU]):
         self.builder.set_seq_group_list(seq_group_metadata_list)
 
         return self.builder.build()  # type: ignore
-
-    # sampler property will be used by spec_decode_worker
-    @property
-    def sampler(self):
-        return self.model.sampler
 
     @property
     def vocab_size(self) -> int:
@@ -677,7 +673,7 @@ class CPUModelRunner(CPUModelRunnerBase[ModelInputForCPUWithSamplingMetadata]):
             return []
 
         # Sample the next token.
-        output = self.model.sample(
+        output = self.sampler(
             logits=logits,
             sampling_metadata=model_input.sampling_metadata,
         )

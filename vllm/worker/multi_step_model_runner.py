@@ -488,8 +488,7 @@ class MultiStepModelRunner(GPUModelRunnerBase[StatefulModelInput]):
                     device="cpu",
                     pin_memory=True)
 
-            self._base_model_runner.model.sampler.include_gpu_probs_tensor = (
-                True)
+            self._base_model_runner.sampler.include_gpu_probs_tensor = True
             if frozen_model_input.sampling_metadata:
                 frozen_model_input.sampling_metadata.skip_sampler_cpu_output = (
                     True)
