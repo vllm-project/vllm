@@ -30,15 +30,6 @@ def set_default_torch_dtype(dtype: torch.dtype):
     torch.set_default_dtype(old_dtype)
 
 
-def is_transformers_impl_compatible(
-        arch: str,
-        module: Optional["transformers.PreTrainedModel"] = None) -> bool:
-    mod = module or getattr(transformers, arch, None)
-    if mod is None:
-        return False
-    return mod.is_backend_compatible()
-
-
 def resolve_transformers_arch(model_config: ModelConfig,
                               architectures: list[str]):
     for i, arch in enumerate(architectures):
@@ -61,17 +52,26 @@ def resolve_transformers_arch(model_config: ModelConfig,
                                           revision=model_config.revision)
             for name, module in sorted(auto_map.items(), key=lambda x: x[0])
         }
-        custom_model_module = auto_modules.get("AutoModel")
+        model_module = getattr(transformers, arch, None)
+        if model_module is None:
+            if "AutoModel" not in auto_map:
+                raise ValueError(
+                    f"Cannot find model module. '{arch}' is not a registered "
+                    "model in the Transformers library (only relevant if the "
+                    "model is meant to be in Transformers) and 'AutoModel' is "
+                    "not present in the model config's 'auto_map' (relevant "
+                    "if the model is custom).")
+            model_module = auto_modules["AutoModel"]
         # TODO(Isotr0py): Further clean up these raises.
         # perhaps handled them in _ModelRegistry._raise_for_unsupported?
         if model_config.model_impl == ModelImpl.TRANSFORMERS:
-            if not is_transformers_impl_compatible(arch, custom_model_module):
+            if not model_module.is_backend_compatible():
                 raise ValueError(
                     f"The Transformers implementation of {arch} is not "
                     "compatible with vLLM.")
             architectures[i] = "TransformersForCausalLM"
         if model_config.model_impl == ModelImpl.AUTO:
-            if not is_transformers_impl_compatible(arch, custom_model_module):
+            if not model_module.is_backend_compatible():
                 raise ValueError(
                     f"{arch} has no vLLM implementation and the Transformers "
                     "implementation is not compatible with vLLM. Try setting "
