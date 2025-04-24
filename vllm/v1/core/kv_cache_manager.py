@@ -44,8 +44,6 @@ class KVCacheManager:
         caching_hash_algo: str = "builtin",
         log_stats: bool = False,
     ) -> None:
-        # TODO: adjust the name for item in one group, list of items in all
-        # groups, and reduced item for all groups.
         self.kv_cache_config = kv_cache_config
         self.num_gpu_blocks = kv_cache_config.num_blocks
         self.max_model_len = max_model_len
@@ -61,6 +59,8 @@ class KVCacheManager:
 
         self.num_kv_cache_groups = len(kv_cache_config.kv_cache_groups)
 
+        # the kv cache groups managed by the each manager
+        # manager_id -> list[kv_cache_group_id]
         self.manager_to_group = self.generate_group_manager_map()
         self.num_specialized_managers = len(self.manager_to_group)
 

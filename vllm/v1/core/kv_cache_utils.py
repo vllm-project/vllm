@@ -848,7 +848,8 @@ def remove_last_block_hash_for_divisible_prompt_length(
         block_hashes[block_size].append(block_hash)
 
 
-# KVCacheBlocks for the same set of token of groups managed by the same manager
+# KVCacheBlocks for the same block of all kv cache groups with the same kv cache
+# spec (and belongs to the same manager)
 @dataclass
 class GroupedKVCacheBlock:
     blocks: tuple[KVCacheBlock, ...]
@@ -860,3 +861,8 @@ class GroupedKVCacheBlock:
         return GroupedKVCacheBlock(blocks=blocks,
                                    block_hash=blocks[0].block_hash,
                                    block_id=blocks[0].block_id)
+
+    def reset_hash(self):
+        for block in self.blocks:
+            block.reset_hash()
+        self.block_hash = None

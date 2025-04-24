@@ -67,10 +67,6 @@ class SpecializedManager(ABC):
 
     def allocate_new_blocks(self, request_id: str,
                             num_tokens: int) -> list[GroupedKVCacheBlock]:
-        """
-        return [group_id][block_of_that_group]
-        """
-        # TODO: group?
         num_required_blocks = cdiv(num_tokens, self.block_size)
         num_new_blocks = max(
             num_required_blocks - len(self.req_to_blocks[request_id]), 0)
@@ -131,7 +127,6 @@ class SpecializedManager(ABC):
         computed_blocks: Optional[list[GroupedKVCacheBlock]] = None,
     ) -> list[GroupedKVCacheBlock]:
         """
-        # TODO: update comment for multiple calls
         Get the longest cache hit prefix of the blocks. If no cache hit is 
         found, return an empty list. # TODO: add notes for computed_blocks
         will not be longer than block_hashes.
