@@ -74,7 +74,7 @@ def rand_data(shape, dtype=torch.float16):
 @pytest.mark.parametrize("k_chunk", MARLIN_K_CHUNKS)
 @pytest.mark.parametrize("n_chunk", MARLIN_N_CHUNKS)
 @pytest.mark.parametrize("quant_type",
-                         query_marlin_supported_quant_types(False))
+                         query_marlin_supported_quant_types(False, False))
 @pytest.mark.parametrize("group_size", MARLIN_SUPPORTED_GROUP_SIZES)
 @pytest.mark.parametrize("act_order", ACT_ORDER_OPTS)
 @pytest.mark.parametrize("mnk_factors", MNK_FACTORS)
@@ -139,7 +139,7 @@ def test_gptq_marlin_repack(k_chunk, n_chunk, quant_type, group_size,
 @pytest.mark.parametrize("k_chunk", MARLIN_K_CHUNKS)
 @pytest.mark.parametrize("n_chunk", MARLIN_N_CHUNKS)
 @pytest.mark.parametrize("quant_type",
-                         query_marlin_supported_quant_types(False))
+                         query_marlin_supported_quant_types(True))
 @pytest.mark.parametrize("group_size", MARLIN_SUPPORTED_GROUP_SIZES)
 @pytest.mark.parametrize("mnk_factors", MNK_FACTORS)
 def test_awq_marlin_repack(k_chunk, n_chunk, quant_type, group_size,
@@ -371,7 +371,6 @@ def test_awq_marlin_gemm(
     g_idx = torch.empty(0, dtype=torch.int, device=marlin_q_w.device)
     sort_indices = torch.empty(0, dtype=torch.int, device=marlin_q_w.device)
     is_k_full = True
-    has_zp = True
 
     workspace = MarlinWorkspace(size_n, GPTQ_MARLIN_MIN_THREAD_N,
                                 GPTQ_MARLIN_MAX_PARALLEL)
@@ -389,7 +388,6 @@ def test_awq_marlin_gemm(
         b_weight.shape[1],
         a_input.shape[1],
         is_k_full=is_k_full,
-        has_zp=has_zp,
         use_fp32_reduce=use_fp32_reduce,
         is_zp_float=False,
     )
@@ -575,7 +573,6 @@ def test_marlin_gemm_subset_input():
         b_weight.shape[1],
         a_input.shape[1],
         is_k_full=True,
-        has_zp=False,
         use_atomic_add=False,
         use_fp32_reduce=True,
         is_zp_float=False,

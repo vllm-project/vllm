@@ -32,9 +32,11 @@ USE_FP32_REDUCE_DEFAULT = True
 # For binary size and compile time, we don't support the same types for with and
 #  without runtime zero-point. We support common cases, i.e. AWQ and GPTQ.
 #  TODO: we may want to move this into the C++ so its closer to the actual impl
-def query_marlin_supported_quant_types(has_zp: bool,
-                                       device_capability: Optional[int] = None
-                                       ):
+def query_marlin_supported_quant_types(
+    has_zp: bool,
+    include_fp_type: bool = True,
+    device_capability: Optional[int] = None,
+):
     if device_capability is None:
         capability_tuple = current_platform.get_device_capability()
         device_capability = (-1 if capability_tuple is None else
@@ -48,10 +50,10 @@ def query_marlin_supported_quant_types(has_zp: bool,
         return [scalar_types.uint4, scalar_types.uint8]
     else:
         # GPTQ style, unsigned + symmetric bias
-        return [
-            scalar_types.uint4b8, scalar_types.uint8b128,
-            scalar_types.float8_e4m3fn
-        ]
+        res = [scalar_types.uint4b8, scalar_types.uint8b128]
+        if include_fp_type:
+            res += [scalar_types.float8_e4m3fn]
+        return res
 
 
 def _check_marlin_supported(
