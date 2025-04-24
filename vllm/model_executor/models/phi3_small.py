@@ -1,11 +1,13 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import math
-from typing import Iterable, List, Optional, Set, Tuple, Union
+from typing import Iterable, Optional, Set, Tuple, Union
 
 import torch
 from torch import nn
 from transformers.configuration_utils import PretrainedConfig
 
-from vllm.attention import Attention, AttentionMetadata
+from vllm.attention import Attention
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import (get_pp_group, get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size)
@@ -24,7 +26,7 @@ from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 
 from .interfaces import SupportsPP
-from .utils import (is_pp_missing_parameter,
+from .utils import (AutoWeightsLoader, WeightsMapper, is_pp_missing_parameter,
                     make_empty_intermediate_tensors_factory, make_layers,
                     maybe_prefix)
 
@@ -229,8 +231,6 @@ class Phi3SmallSelfAttention(nn.Module):
         self,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
-        kv_cache: torch.Tensor,
-        attn_metadata: AttentionMetadata,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor],
                Optional[Tuple[torch.Tensor]]]:
         qkv, _ = self.query_key_value(hidden_states)
@@ -246,7 +246,7 @@ class Phi3SmallSelfAttention(nn.Module):
         v = v.reshape(-1, self.head_dim * self.num_kv_heads_per_partion)
 
         q, k = self.rotary_emb(positions, q, k)
-        attn_output = self.attn(q, k, v, kv_cache, attn_metadata=attn_metadata)
+        attn_output = self.attn(q, k, v)
         output, _ = self.dense(attn_output)
 
         return output
@@ -280,8 +280,6 @@ class Phi3SmallDecoderLayer(nn.Module):
         self,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
-        kv_cache: torch.Tensor,
-        attn_metadata: AttentionMetadata,
     ) -> torch.Tensor:
         residual = hidden_states
         hidden_states = self.input_layernorm(hidden_states)
@@ -289,8 +287,6 @@ class Phi3SmallDecoderLayer(nn.Module):
         hidden_states = self.self_attn(
             positions=positions,
             hidden_states=hidden_states,
-            kv_cache=kv_cache,
-            attn_metadata=attn_metadata,
         )
         hidden_states = residual + hidden_states
 
@@ -336,8 +332,6 @@ class Phi3SmallModel(nn.Module):
         self,
         input_ids: torch.LongTensor,
         positions: Optional[torch.LongTensor],
-        kv_caches: List[torch.Tensor],
-        attn_metadata: AttentionMetadata,
         intermediate_tensors: Optional[IntermediateTensors],
         inputs_embeds: Optional[torch.Tensor],
     ) -> Union[torch.Tensor, IntermediateTensors]:
@@ -352,22 +346,35 @@ class Phi3SmallModel(nn.Module):
         else:
             assert intermediate_tensors
             hidden_states = intermediate_tensors["hidden_states"]
-        for i in range(self.start_layer, self.end_layer):
-            layer = self.layers[i]
-            hidden_states = layer(
-                positions,
-                hidden_states,
-                kv_caches[i - self.start_layer],
-                attn_metadata,
-            )
+        for layer in self.layers[self.start_layer:self.end_layer]:
+            hidden_states = layer(positions, hidden_states)
         if not get_pp_group().is_last_rank:
             return IntermediateTensors({"hidden_states": hidden_states})
         hidden_states = self.final_layernorm(hidden_states)
         return hidden_states
 
+    def load_weights(self, weights: Iterable[Tuple[str,
+                                                   torch.Tensor]]) -> Set[str]:
+        params_dict = dict(self.named_parameters())
+        loaded_params: Set[str] = set()
+        for name, loaded_weight in weights:
+            if name.endswith(".bias") and name not in params_dict:
+                continue
+            if is_pp_missing_parameter(name, self):
+                continue
+            param = params_dict[name]
+            weight_loader = getattr(param, "weight_loader",
+                                    default_weight_loader)
+            weight_loader(param, loaded_weight)
+            loaded_params.add(name)
+        return loaded_params
+
 
 class Phi3SmallForCausalLM(nn.Module, SupportsPP):
     _tied_weights_keys = ["lm_head.weight"]
+
+    hf_to_vllm_mapper = WeightsMapper(
+        orig_to_new_suffix={"rotary_emb.inv_freq": None})
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
@@ -436,16 +443,12 @@ class Phi3SmallForCausalLM(nn.Module, SupportsPP):
         self,
         input_ids: torch.LongTensor,
         positions: Optional[torch.LongTensor],
-        kv_caches: List[torch.Tensor],
-        attn_metadata: AttentionMetadata,
         intermediate_tensors: Optional[IntermediateTensors] = None,
         inputs_embeds: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, IntermediateTensors]:
         output_hidden_states = self.model(
             input_ids=input_ids,
             positions=positions,
-            kv_caches=kv_caches,
-            attn_metadata=attn_metadata,
             intermediate_tensors=intermediate_tensors,
             inputs_embeds=inputs_embeds,
         )
@@ -464,19 +467,8 @@ class Phi3SmallForCausalLM(nn.Module, SupportsPP):
 
     def load_weights(self, weights: Iterable[Tuple[str,
                                                    torch.Tensor]]) -> Set[str]:
-
-        params_dict = dict(self.named_parameters())
-        loaded_params: Set[str] = set()
-        for name, loaded_weight in weights:
-            if "rotary_emb.inv_freq" in name:
-                continue
-            if name.endswith(".bias") and name not in params_dict:
-                continue
-            if is_pp_missing_parameter(name, self):
-                continue
-            param = params_dict[name]
-            weight_loader = getattr(param, "weight_loader",
-                                    default_weight_loader)
-            weight_loader(param, loaded_weight)
-            loaded_params.add(name)
-        return loaded_params
+        loader = AutoWeightsLoader(
+            self,
+            skip_prefixes=(["lm_head.weight"]
+                           if self.config.tie_word_embeddings else None))
+        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)

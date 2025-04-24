@@ -1,6 +1,6 @@
 # Using other frameworks
 
-```{toctree}
+:::{toctree}
 :maxdepth: 1
 
 bentoml
@@ -9,6 +9,7 @@ dstack
 helm
 lws
 modal
+open-webui
 skypilot
 triton
-```
+:::

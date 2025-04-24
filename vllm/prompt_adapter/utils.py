@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 # code borrowed from: https://github.com/huggingface/peft/blob/v0.12.0/src/peft/utils/save_and_load.py#L420
 
 import os
@@ -89,6 +91,7 @@ def load_peft_weights(model_id: str,
         adapters_weights = safe_load_file(filename, device=device)
     else:
         adapters_weights = torch.load(filename,
-                                      map_location=torch.device(device))
+                                      map_location=torch.device(device),
+                                      weights_only=True)
 
     return adapters_weights

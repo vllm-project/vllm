@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 # Adapted from
 # https://github.com/huggingface/transformers/blob/v4.28.0/src/transformers/models/gpt2/modeling_gpt2.py
 # Copyright 2023 The vLLM team.
@@ -17,13 +19,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Inference-only GPTBigCode model compatible with HuggingFace weights."""
-from typing import Iterable, List, Optional, Set, Tuple, Union
+from typing import Iterable, Optional, Set, Tuple, Union
 
 import torch
 from torch import nn
 from transformers import GPTBigCodeConfig
 
-from vllm.attention import Attention, AttentionMetadata
+from vllm.attention import Attention
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
@@ -41,7 +43,7 @@ from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
 
 from .interfaces import SupportsLoRA, SupportsPP
-from .utils import (is_pp_missing_parameter,
+from .utils import (AutoWeightsLoader, is_pp_missing_parameter,
                     make_empty_intermediate_tensors_factory, make_layers)
 
 
@@ -99,8 +101,6 @@ class GPTBigCodeAttention(nn.Module):
     def forward(
         self,
         hidden_states: torch.Tensor,
-        kv_cache: torch.Tensor,
-        attn_metadata: AttentionMetadata,
     ) -> torch.Tensor:
         qkv, _ = self.c_attn(hidden_states)
         q, k, v = qkv.split(
@@ -110,7 +110,7 @@ class GPTBigCodeAttention(nn.Module):
             ],
             dim=-1,
         )
-        attn_output = self.attn(q, k, v, kv_cache, attn_metadata)
+        attn_output = self.attn(q, k, v)
         attn_output, _ = self.c_proj(attn_output)
         return attn_output
 
@@ -171,16 +171,10 @@ class GPTBigCodeBlock(nn.Module):
     def forward(
         self,
         hidden_states: torch.Tensor,
-        kv_cache: torch.Tensor,
-        attn_metadata: AttentionMetadata,
     ) -> torch.Tensor:
         residual = hidden_states
         hidden_states = self.ln_1(hidden_states)
-        attn_output = self.attn(
-            hidden_states=hidden_states,
-            kv_cache=kv_cache,
-            attn_metadata=attn_metadata,
-        )
+        attn_output = self.attn(hidden_states=hidden_states, )
         # residual connection
         hidden_states = attn_output + residual
 
@@ -232,8 +226,6 @@ class GPTBigCodeModel(nn.Module):
         self,
         input_ids: torch.Tensor,
         position_ids: torch.Tensor,
-        kv_caches: List[torch.Tensor],
-        attn_metadata: AttentionMetadata,
         intermediate_tensors: Optional[IntermediateTensors],
         inputs_embeds: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, IntermediateTensors]:
@@ -244,29 +236,47 @@ class GPTBigCodeModel(nn.Module):
         else:
             hidden_states = intermediate_tensors["hidden_states"]
 
-        for i in range(self.start_layer, self.end_layer):
-            layer = self.h[i]
-            hidden_states = layer(hidden_states,
-                                  kv_caches[i - self.start_layer],
-                                  attn_metadata)
+        for layer in self.h[self.start_layer:self.end_layer]:
+            hidden_states = layer(hidden_states)
 
         if not get_pp_group().is_last_rank:
             return IntermediateTensors({"hidden_states": hidden_states})
         hidden_states = self.ln_f(hidden_states)
         return hidden_states
 
+    def load_weights(self, weights: Iterable[Tuple[str,
+                                                   torch.Tensor]]) -> Set[str]:
+        params_dict = dict(self.named_parameters(remove_duplicate=False))
+        loaded_params: Set[str] = set()
+        for name, loaded_weight in weights:
+            if ".attn.bias" in name:
+                # Skip attention mask.
+                # NOTE: "c_attn.bias" should not be skipped.
+                continue
+            if is_pp_missing_parameter(name, self):
+                continue
+            param = params_dict[name]
+            weight_loader = getattr(param, "weight_loader",
+                                    default_weight_loader)
+            # TODO (@robertgshaw2-neuralmagic): move to fp8 linear method
+            if "c_attn.input_scale" in name or "c_attn.weight_scale" in name:
+                weight_loader(param, loaded_weight, 'q')
+                weight_loader(param, loaded_weight, 'k')
+                weight_loader(param, loaded_weight, 'v')
+            else:
+                weight_loader(param, loaded_weight)
+            loaded_params.add(name)
+        return loaded_params
+
 
 class GPTBigCodeForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
     packed_modules_mapping = {"c_attn": ["c_attn"]}
 
-    supported_lora_modules = ["c_fc", "c_proj", "wte", "c_attn"]
-
+    # LoRA specific attributes
     embedding_modules = {
         "wte": "input_embeddings",
         "lm_head": "output_embeddings",
     }
-
-    embedding_padding_modules = []
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
@@ -303,14 +313,11 @@ class GPTBigCodeForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        kv_caches: List[torch.Tensor],
-        attn_metadata: AttentionMetadata,
         intermediate_tensors: Optional[IntermediateTensors] = None,
         inputs_embeds: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, IntermediateTensors]:
-        hidden_states = self.transformer(input_ids, positions, kv_caches,
-                                         attn_metadata, intermediate_tensors,
-                                         inputs_embeds)
+        hidden_states = self.transformer(input_ids, positions,
+                                         intermediate_tensors, inputs_embeds)
         return hidden_states
 
     def compute_logits(
@@ -332,26 +339,8 @@ class GPTBigCodeForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
 
     def load_weights(self, weights: Iterable[Tuple[str,
                                                    torch.Tensor]]) -> Set[str]:
-        params_dict = dict(self.named_parameters(remove_duplicate=False))
-        loaded_params: Set[str] = set()
-        for name, loaded_weight in weights:
-            if "lm_head.weight" in name:
-                continue
-            if ".attn.bias" in name:
-                # Skip attention mask.
-                # NOTE: "c_attn.bias" should not be skipped.
-                continue
-            if is_pp_missing_parameter(name, self):
-                continue
-            param = params_dict[name]
-            weight_loader = getattr(param, "weight_loader",
-                                    default_weight_loader)
-            # TODO (@robertgshaw2-neuralmagic): move to fp8 linear method
-            if "c_attn.input_scale" in name or "c_attn.weight_scale" in name:
-                weight_loader(param, loaded_weight, 'q')
-                weight_loader(param, loaded_weight, 'k')
-                weight_loader(param, loaded_weight, 'v')
-            else:
-                weight_loader(param, loaded_weight)
-            loaded_params.add(name)
-        return loaded_params
+        loader = AutoWeightsLoader(
+            self,
+            skip_prefixes=(["lm_head."]),
+        )
+        return loader.load_weights(weights)

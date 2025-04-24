@@ -24,8 +24,8 @@ struct KernelVecType<float> {
 
 template <>
 struct KernelVecType<c10::Half> {
-#ifdef __powerpc64__
-  // Power architecture-specific vector types
+#if defined(__powerpc64__) || defined(__s390x__)
+  // Power and s390x architecture-specific vector types
   using q_load_vec_type = vec_op::FP32Vec8;
   using k_load_vec_type = vec_op::FP32Vec16;
   using v_load_vec_type = vec_op::FP32Vec16;
@@ -460,11 +460,11 @@ void paged_attention_v1(
     torch::Tensor& value_cache, int64_t num_kv_heads, double scale,
     torch::Tensor& block_tables, torch::Tensor& seq_lens, int64_t block_size,
     int64_t max_seq_len, const std::optional<torch::Tensor>& alibi_slopes,
-    const std::string& kv_cache_dtype, double k_scale, double v_scale,
-    const int64_t tp_rank, const int64_t blocksparse_local_blocks,
+    const std::string& kv_cache_dtype, torch::Tensor& k_scale,
+    torch::Tensor& v_scale, const int64_t tp_rank,
+    const int64_t blocksparse_local_blocks,
     const int64_t blocksparse_vert_stride, const int64_t blocksparse_block_size,
     const int64_t blocksparse_head_sliding_step) {
-  TORCH_CHECK(k_scale == 1.0f && v_scale == 1.0f);
   TORCH_CHECK(blocksparse_vert_stride <= 1,
               "CPU backend does not support blocksparse attention yet.");
   VLLM_DISPATCH_FLOATING_TYPES(query.scalar_type(), "paged_attention_v1_impl",
@@ -782,11 +782,11 @@ void paged_attention_v2(
     torch::Tensor& value_cache, int64_t num_kv_heads, double scale,
     torch::Tensor& block_tables, torch::Tensor& seq_lens, int64_t block_size,
     int64_t max_seq_len, const std::optional<torch::Tensor>& alibi_slopes,
-    const std::string& kv_cache_dtype, double k_scale, double v_scale,
-    const int64_t tp_rank, const int64_t blocksparse_local_blocks,
+    const std::string& kv_cache_dtype, torch::Tensor& k_scale,
+    torch::Tensor& v_scale, const int64_t tp_rank,
+    const int64_t blocksparse_local_blocks,
     const int64_t blocksparse_vert_stride, const int64_t blocksparse_block_size,
     const int64_t blocksparse_head_sliding_step) {
-  TORCH_CHECK(k_scale == 1.0f && v_scale == 1.0f);
   TORCH_CHECK(blocksparse_vert_stride <= 1,
               "CPU backend does not support blocksparse attention yet.");
   VLLM_DISPATCH_FLOATING_TYPES(query.scalar_type(), "paged_attention_v2_impl",

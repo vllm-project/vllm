@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 from ...utils import VLLM_PATH, RemoteOpenAIServer
 
 chatml_jinja_path = VLLM_PATH / "examples/template_chatml.jinja"

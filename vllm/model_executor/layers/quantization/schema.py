@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """
 This file contains the Pydantic schemas for various quantization-related
 parameters. When a relevant quantization technique is specified, these

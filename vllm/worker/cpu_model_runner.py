@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import dataclasses
 import weakref
 from collections import defaultdict
@@ -144,9 +146,7 @@ class ModelInputForCPUBuilder(ModelRunnerInputBuilderBase[ModelInputForCPU]):
                  runner: "CPUModelRunner",
                  finished_requests_ids: Optional[List[str]] = None) -> None:
         super().__init__()
-        self.seq_group_metadata_list: List[SequenceGroupMetadata] = []
         self.runner = runner
-
         self.chunked_prefill = (runner.scheduler_config.chunked_prefill_enabled
                                 or runner.cache_config.enable_prefix_caching)
         self.model_input_cls = self.runner._model_input_cls
@@ -156,10 +156,17 @@ class ModelInputForCPUBuilder(ModelRunnerInputBuilderBase[ModelInputForCPU]):
         self.device = self.runner.device
         self.multi_modal_input_mapper = self.runner.multi_modal_input_mapper
         self.enable_lora = self.runner.lora_config is not None
+        if self.runner.attn_backend is not None:
+            # spec decode (e.g. Medusa) does not have atten backend
+            attn_backend = self.runner.attn_backend
+            self.att_metadata_builder = attn_backend.get_builder_cls()(self)
+
+    def prepare(self,
+                finished_requests_ids: Optional[List[str]] = None) -> None:
+        self.seq_group_metadata_list: List[SequenceGroupMetadata] = []
         self.input_data = ModelInputForCPUBuilder.ModelInputData(
             self.runner.model_config.uses_mrope)
-        self.att_metadata_builder = self.runner.attn_backend.get_builder_cls()(
-            self)
+        self.att_metadata_builder.prepare()
 
     def add_seq_group(self, seq_group_metadata: SequenceGroupMetadata):
         self.seq_group_metadata_list.append(seq_group_metadata)
@@ -375,25 +382,30 @@ class ModelInputForCPUBuilder(ModelRunnerInputBuilderBase[ModelInputForCPU]):
 
             image_grid_thw = mm_kwargs.get("image_grid_thw", None)
             video_grid_thw = mm_kwargs.get("video_grid_thw", None)
-            assert image_grid_thw is not None or video_grid_thw is not None, (
-                "mrope embedding type requires multi-modal input mapper "
-                "returns 'image_grid_thw' or 'video_grid_thw'.")
+            audio_feature_lengths = mm_kwargs.get("audio_feature_lengths",
+                                                  None)
+            assert (
+                image_grid_thw is not None or video_grid_thw is not None
+                or audio_feature_lengths is not None), (
+                    "mrope embedding type requires multi-modal input mapper "
+                    "returns 'image_grid_thw' or 'video_grid_thw' or "
+                    "'audio_feature_lengths'.")
 
+            second_per_grid_ts = mm_kwargs.get("second_per_grid_ts", None)
+            use_audio_in_video = mm_kwargs.get("use_audio_in_video", False)
             hf_config = self.runner.model_config.hf_config
             token_ids = seq_data.get_token_ids()
 
             mrope_positions, mrope_position_delta = \
                 MRotaryEmbedding.get_input_positions(
                     token_ids,
+                    hf_config=hf_config,
                     image_grid_thw=image_grid_thw,
                     video_grid_thw=video_grid_thw,
-                    image_token_id=hf_config.image_token_id,
-                    video_token_id=hf_config.video_token_id,
-                    vision_start_token_id=hf_config.vision_start_token_id,
-                    vision_end_token_id=hf_config.vision_end_token_id,
-                    spatial_merge_size=hf_config.vision_config.
-                    spatial_merge_size,
+                    second_per_grid_ts=second_per_grid_ts,
                     context_len=computed_len,
+                    audio_feature_lengths=audio_feature_lengths,
+                    use_audio_in_video=use_audio_in_video,
                 )
             seq_data.mrope_position_delta = mrope_position_delta
 
@@ -431,6 +443,7 @@ class CPUModelRunnerBase(ModelRunnerBase[TModelInputForCPU]):
     """
     _model_input_cls: Type[TModelInputForCPU]
     _builder_cls: Type[ModelInputForCPUBuilder]
+    builder: ModelInputForCPUBuilder
 
     def __init__(
         self,
@@ -464,6 +477,7 @@ class CPUModelRunnerBase(ModelRunnerBase[TModelInputForCPU]):
             self.kv_cache_dtype,
             self.block_size,
             self.model_config.is_attention_free,
+            use_mla=self.model_config.use_mla,
         ) if needs_attn_backend else None
 
         # Multi-modal data support
@@ -476,6 +490,10 @@ class CPUModelRunnerBase(ModelRunnerBase[TModelInputForCPU]):
         self.model: nn.Module  # Set after init_Model
         # Set after load_model.
         self.lora_manager: Optional[LRUCacheWorkerLoRAManager] = None
+
+        if hasattr(self, "_builder_cls"):
+            # multi-step model runner does not have `_builder_cls`
+            self.builder = self._builder_cls(weakref.proxy(self))
 
     def load_model(self) -> None:
         self.model = get_model(vllm_config=self.vllm_config)
@@ -509,6 +527,9 @@ class CPUModelRunnerBase(ModelRunnerBase[TModelInputForCPU]):
             )
             self.model = self.lora_manager.create_lora_manager(self.model)
 
+    def get_model(self) -> nn.Module:
+        return self.model
+
     def _prepare_model_input_tensors(
         self,
         seq_group_metadata_list: List[SequenceGroupMetadata],
@@ -519,10 +540,10 @@ class CPUModelRunnerBase(ModelRunnerBase[TModelInputForCPU]):
         metadata for possible additional steps, e.g., sampling.
 
         """
-        builder = self._builder_cls(weakref.proxy(self), finished_requests_ids)
-        builder.set_seq_group_list(seq_group_metadata_list)
+        self.builder.prepare(finished_requests_ids)
+        self.builder.set_seq_group_list(seq_group_metadata_list)
 
-        return builder.build()  # type: ignore
+        return self.builder.build()  # type: ignore
 
     # sampler property will be used by spec_decode_worker
     @property
@@ -642,8 +663,6 @@ class CPUModelRunner(CPUModelRunnerBase[ModelInputForCPUWithSamplingMetadata]):
             hidden_states = model_executable(
                 input_ids=model_input.input_tokens,
                 positions=model_input.input_positions,
-                kv_caches=kv_caches,
-                attn_metadata=model_input.attn_metadata,
                 intermediate_tensors=intermediate_tensors,
                 **execute_model_kwargs,
                 **multimodal_kwargs,

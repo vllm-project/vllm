@@ -1,16 +1,19 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import enum
 from enum import Enum
 from fractions import Fraction
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Union
 
 import torch
 from torch.nn.parameter import Parameter
 
 from vllm import _custom_ops as ops
-from vllm.model_executor.layers.linear import LinearBase, LinearMethodBase
+from vllm.model_executor.layers.linear import LinearMethodBase
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
-from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
+from vllm.model_executor.layers.quantization.utils.gptq_utils import (
+    get_linear_quant_method)
 from vllm.model_executor.parameter import (ChannelQuantScaleParameter,
                                            GroupQuantScaleParameter,
                                            PackedColumnParameter,
@@ -30,7 +33,34 @@ class GPTQConfig(QuantizationConfig):
         group_size: int,
         desc_act: bool,
         lm_head_quantized: bool,
+        dynamic: Dict[str, Dict[str, Union[int, bool]]],
     ) -> None:
+        # GPTQModel use `dynamic` config property to allow per module
+        # quantization config so each module can be individually optimized.
+        # Format is Dict[str, Dict] where key is a regex string that can
+        # perform both positive ("+:" prefixed) or negative ("-:" prefixed)
+        # matching of a module.
+        # Default to positive match, override base quant config mode, if no
+        # prefix is used. Value is in dict format of field key and override
+        # value.
+        # Negative matching will skip quantization init for this module
+        # entirely:
+        # non-quantized inference. More details and quantization examples can be
+        # found at: https://github.com/ModelCloud/GPTQModel
+        # Example:
+        #  # last 1/2 of the layers 10-21 has 8bit vs 4bit for 0-9
+        #  # last 1/4 of the layers 16-21 has 8bit and group_size 64
+        # dynamic = {
+        #  #`.*\.` matches the layers_node prefix
+        #  # positive match layer 10-15
+        #  r"+:.*\.(?:1[0-5])\..*": {"bits": 8,},
+        #  # positive match layer 16-21
+        #  r"+:.*\.(?:1[6-9]|20|21)\..*": {"bits": 8, "group_size": 64,},
+        #  r"-:.*\.moe\..*": {}, # negative match (skip) all `moe` layers
+        # }
+        super().__init__()
+        self.dynamic = dynamic
+
         self.weight_bits = weight_bits
         self.group_size = group_size
         self.desc_act = desc_act
@@ -44,8 +74,9 @@ class GPTQConfig(QuantizationConfig):
     def __repr__(self) -> str:
         return (f"GPTQConfig(weight_bits={self.weight_bits}, "
                 f"group_size={self.group_size}, "
-                f"desc_act={self.desc_act}),"
-                f"lm_head_quantized={self.lm_head_quantized}")
+                f"desc_act={self.desc_act}), "
+                f"lm_head_quantized={self.lm_head_quantized}), "
+                f"dynamic={self.dynamic}")
 
     @classmethod
     def get_name(cls) -> str:
@@ -66,19 +97,20 @@ class GPTQConfig(QuantizationConfig):
 
     @classmethod
     def from_config(cls, config: Dict[str, Any]) -> "GPTQConfig":
+        dynamic = cls.get_from_keys_or(config, ["dynamic"], default={})
+        dynamic = {} if dynamic is None else dynamic
+
         weight_bits = cls.get_from_keys(config, ["bits"])
         group_size = cls.get_from_keys(config, ["group_size"])
         desc_act = cls.get_from_keys(config, ["desc_act"])
         lm_head_quantized = cls.get_from_keys_or(config, ["lm_head"],
                                                  default=False)
-        return cls(weight_bits, group_size, desc_act, lm_head_quantized)
+        return cls(weight_bits, group_size, desc_act, lm_head_quantized,
+                   dynamic)
 
     def get_quant_method(self, layer: torch.nn.Module,
                          prefix: str) -> Optional["GPTQLinearMethod"]:
-        if (isinstance(layer, LinearBase) or
-            (isinstance(layer, ParallelLMHead) and self.lm_head_quantized)):
-            return GPTQLinearMethod(self)
-        return None
+        return get_linear_quant_method(self, layer, prefix, GPTQLinearMethod)
 
 
 class ExllamaState(Enum):

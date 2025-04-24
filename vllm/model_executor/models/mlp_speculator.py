@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import math
 from typing import Iterable, List, Set, Tuple
 
@@ -62,7 +64,7 @@ class MLPSpeculator(nn.Module):
     https://arxiv.org/pdf/2404.19124
 
     Trained speculators of this type are available on HF hub at:
-    https://huggingface.co/ibm-fms and https://huggingface.co/ibm-granite
+    https://huggingface.co/ibm-ai-platform and https://huggingface.co/ibm-granite
     """
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
@@ -81,8 +83,8 @@ class MLPSpeculator(nn.Module):
 
         if self.tie_weights:
             assert (
-                self.n_predict >
-                1), "You cannot tie weights between stages when only 1 exists"
+                self.n_predict > 1
+            ), "You cannot tie weights between stages when only 1 exists"
             embedding = VocabParallelEmbedding(
                 config.vocab_size,
                 self.inner_dim,

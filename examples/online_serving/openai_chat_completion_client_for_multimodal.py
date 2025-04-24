@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """An example showing how to use vLLM to serve multimodal models 
 and run online serving with OpenAI client.
 
@@ -8,10 +9,10 @@ vllm serve llava-hf/llava-1.5-7b-hf --chat-template template_llava.jinja
 
 (multi-image inference with Phi-3.5-vision-instruct)
 vllm serve microsoft/Phi-3.5-vision-instruct --task generate \
-    --trust-remote-code --max-model-len 4096 --limit-mm-per-prompt image=2
+    --trust-remote-code --max-model-len 4096 --limit-mm-per-prompt '{"image":2}'
 
 (audio inference with Ultravox)
-vllm serve fixie-ai/ultravox-v0_3 --max-model-len 4096
+vllm serve fixie-ai/ultravox-v0_5-llama-3_2-1b --max-model-len 4096
 """
 import base64
 
@@ -302,12 +303,7 @@ example_function_map = {
 }
 
 
-def main(args) -> None:
-    chat_type = args.chat_type
-    example_function_map[chat_type]()
-
-
-if __name__ == "__main__":
+def parse_args():
     parser = FlexibleArgumentParser(
         description='Demo on using OpenAI client for online serving with '
         'multimodal language models served with vLLM.')
@@ -317,5 +313,14 @@ if __name__ == "__main__":
                         default="single-image",
                         choices=list(example_function_map.keys()),
                         help='Conversation type with multimodal data.')
-    args = parser.parse_args()
+    return parser.parse_args()
+
+
+def main(args) -> None:
+    chat_type = args.chat_type
+    example_function_map[chat_type]()
+
+
+if __name__ == "__main__":
+    args = parse_args()
     main(args)

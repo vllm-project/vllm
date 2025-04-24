@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import inspect
 from typing import Callable, Dict, List, Optional, TypeVar, Union, overload
 from unittest.mock import patch
@@ -76,8 +78,8 @@ def support_torch_compile(
     During runtime, when we actually mark dimensions of tensors,
      it depends on the value of arguments:
 
-    - if it is a single integer, the corresponding dimension of the argument
-        will be marked as dynamic.
+    - if it is a single integer (can be negative), the corresponding dimension 
+        of the argument will be marked as dynamic.
     - if it is `None`, ignored.
     - if it is `IntermediateTensors`, all the tensors in the intermediate
         tensors will be marked as dynamic.
@@ -177,10 +179,20 @@ def _support_torch_compile(
             for k, dims in dynamic_arg_dims.items():
                 arg = bound_args.arguments.get(k)
                 if arg is not None:
+                    dims = [dims] if isinstance(dims, int) else dims
                     if isinstance(arg, torch.Tensor):
+                        # In case dims is specified with negative indexing
+                        dims = [
+                            arg.ndim + dim if dim < 0 else dim for dim in dims
+                        ]
                         torch._dynamo.mark_dynamic(arg, dims)
                     elif isinstance(arg, IntermediateTensors):
                         for tensor in arg.tensors.values():
+                            # In case dims is specified with negative indexing
+                            dims = [
+                                tensor.ndim + dim if dim < 0 else dim
+                                for dim in dims
+                            ]
                             torch._dynamo.mark_dynamic(tensor, dims)
                     else:
                         raise ValueError(
@@ -188,6 +200,8 @@ def _support_torch_compile(
                             f" {dims} for argument {k} with type {type(arg)}.")
             # here, it is the starting point of the `torch.compile` process
             start_monitoring_torch_compile(self.vllm_config)
+            logger.debug("Start compiling function %s",
+                         self.original_code_object)
 
         # if we don't use custom dispatcher, we can directly call the
         # compiled function and let torch.compile handle the dispatching,

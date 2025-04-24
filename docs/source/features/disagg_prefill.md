@@ -4,9 +4,9 @@
 
 This page introduces you the disaggregated prefilling feature in vLLM.
 
-```{note}
+:::{note}
 This feature is experimental and subject to change.
-```
+:::
 
 ## Why disaggregated prefilling?
 
@@ -15,9 +15,9 @@ Two main reasons:
 - **Tuning time-to-first-token (TTFT) and inter-token-latency (ITL) separately**. Disaggregated prefilling put prefill and decode phase of LLM inference inside different vLLM instances. This gives you the flexibility to assign different parallel strategies (e.g. `tp` and `pp`) to tune TTFT without affecting ITL, or to tune ITL without affecting TTFT.
 - **Controlling tail ITL**. Without disaggregated prefilling, vLLM may insert some prefill jobs during the decoding of one request. This results in higher tail latency. Disaggregated prefilling helps you solve this issue and control tail ITL. Chunked prefill with a proper chunk size also can achieve the same goal, but in practice it's hard to figure out the correct chunk size value. So disaggregated prefilling is a much more reliable way to control tail ITL.
 
-```{note}
+:::{note}
 Disaggregated prefill DOES NOT improve throughput.
-```
+:::
 
 ## Usage example
 
@@ -39,21 +39,21 @@ Key abstractions for disaggregated prefilling:
 - **LookupBuffer**: LookupBuffer provides two API: `insert` KV cache and `drop_select` KV cache. The semantics of `insert` and `drop_select` are similar to SQL, where `insert` inserts a KV cache into the buffer, and `drop_select` returns the KV cache that matches the given condition and drop it from the buffer.
 - **Pipe**: A single-direction FIFO pipe for tensor transmission. It supports `send_tensor` and `recv_tensor`.
 
-```{note}
+:::{note}
 `insert` is non-blocking operation but `drop_select` is blocking operation.
-```
+:::
 
 Here is a figure illustrating how the above 3 abstractions are organized:
 
-```{image} /assets/features/disagg_prefill/abstraction.jpg
+:::{image} /assets/features/disagg_prefill/abstraction.jpg
 :alt: Disaggregated prefilling abstractions
-```
+:::
 
 The workflow of disaggregated prefilling is as follows:
 
-```{image} /assets/features/disagg_prefill/overview.jpg
+:::{image} /assets/features/disagg_prefill/overview.jpg
 :alt: Disaggregated prefilling workflow
-```
+:::
 
 The `buffer` corresponds to `insert` API in LookupBuffer, and the `drop_select` corresponds to `drop_select` API in LookupBuffer.
 

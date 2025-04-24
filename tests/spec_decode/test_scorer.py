@@ -1,5 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import random
-from typing import List
 
 import pytest
 import torch
@@ -13,7 +14,7 @@ from vllm.worker.worker import Worker
 from .utils import create_batch, create_worker
 
 
-def create_proposal(propose_lens: List[int], vocab_size: int,
+def create_proposal(propose_lens: list[int], vocab_size: int,
                     device: str) -> SpeculativeProposals:
     batch_size = len(propose_lens)
     max_propose_len = max(propose_lens)
@@ -60,6 +61,7 @@ def test_scorer(model_name: str, batch_size: int, max_propose_len: int,
     num_gpu_blocks = 2048 // block_size
     scorer_worker = create_worker(Worker, model_name, block_size,
                                   num_gpu_blocks, seed)
+    scorer_worker.model_runner.disable_logprobs = True  # accessed by mqa_scorer
     scorer_worker.model_runner.model.sampler.include_gpu_probs_tensor = True
     scorer_worker.model_runner.model.sampler.\
         should_modify_greedy_probs_inplace = True

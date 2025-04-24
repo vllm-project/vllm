@@ -1,17 +1,27 @@
-from typing import Any, List, Optional, Tuple, Type, TypedDict, Union
+# SPDX-License-Identifier: Apache-2.0
+
+from typing import Any, Optional, TypedDict, Union
 
 import numpy.typing as npt
 import pytest
 import torch
 from PIL import Image
 
-from vllm.entrypoints.llm import LLM
 from vllm.multimodal.image import rescale_image_size
 from vllm.multimodal.video import rescale_video_size, sample_frames_from_video
 
 from ....conftest import (IMAGE_ASSETS, VIDEO_ASSETS, PromptImageInput,
                           PromptVideoInput, VllmRunner)
 from ...utils import check_logprobs_close
+
+
+@pytest.fixture(scope="function", autouse=True)
+def use_v0_only(monkeypatch):
+    """
+    V1 Test: batch_make_xxxxx_embeddings calls a V0 internal
+    """
+    monkeypatch.setenv('VLLM_USE_V1', '0')
+
 
 models = ["Qwen/Qwen2-VL-2B-Instruct"]
 target_dtype = "half"
@@ -68,21 +78,21 @@ class Qwen2VLPromptVideoEmbeddingInput(TypedDict):
 
 
 def batch_make_image_embeddings(
-        image_batches: List[Union[Image.Image, List[Image.Image]]], processor,
-        llm: LLM) -> List[Qwen2VLPromptImageEmbeddingInput]:
+        image_batches: list[Union[Image.Image, list[Image.Image]]], processor,
+        llm: VllmRunner) -> list[Qwen2VLPromptImageEmbeddingInput]:
     """batched image embeddings for Qwen2-VL
 
     This will infer all images' embeddings in a single batch, 
       and split the result according to input batches.
 
     image_batches:
-      - Single-image batches: `List[Image.Image]`
-      - Multiple-image batches: `List[List[Image.Image]]]`
+      - Single-image batches: `list[Image.Image]`
+      - Multiple-image batches: `list[list[Image.Image]]]`
     
-    returns: `List[Qwen2VLPromptImageEmbeddingInput]`
+    returns: `list[Qwen2VLPromptImageEmbeddingInput]`
     """
 
-    image_batches_: List[Any] = image_batches[:]
+    image_batches_: list[Any] = image_batches[:]
 
     # convert single-image batches to multiple-image batches
     for idx in range(len(image_batches_)):
@@ -92,7 +102,7 @@ def batch_make_image_embeddings(
         assert isinstance(image_batches_[idx], list)
 
     # append all images into a list (as a batch)
-    images: List[Image.Image] = []
+    images: list[Image.Image] = []
     for image_batch in image_batches_:
         images += image_batch
 
@@ -105,30 +115,32 @@ def batch_make_image_embeddings(
     pixel_values = preprocess_result["pixel_values"]
     image_grid_thw = preprocess_result["image_grid_thw"]
 
-    # pixel values to embeddinds & grid_thws
-    with torch.no_grad():
-        visual = llm.llm_engine.model_executor.driver_worker. \
-            model_runner.model.visual
+    # pixel values to embeddings & grid_thws
+    def get_image_embeds(model):
+        with torch.no_grad():
+            visual = model.visual
 
-        pixel_values_on_device = pixel_values.to(visual.device,
-                                                 dtype=visual.dtype)
-        image_grid_thw_on_device = image_grid_thw.to(visual.device,
-                                                     dtype=torch.int64)
-        image_embeds = visual(pixel_values_on_device,
-                              grid_thw=image_grid_thw_on_device)
+            pixel_values_on_device = pixel_values.to(visual.device,
+                                                     dtype=visual.dtype)
+            image_grid_thw_on_device = image_grid_thw.to(visual.device,
+                                                         dtype=torch.int64)
+            return visual(pixel_values_on_device,
+                          grid_thw=image_grid_thw_on_device)
+
+    # V1 Test: this calls a V0 internal.
+    image_embeds = torch.concat(llm.apply_model(get_image_embeds))
 
     # split into original batches
-    result: List[Qwen2VLPromptImageEmbeddingInput] = []
+    result: list[Qwen2VLPromptImageEmbeddingInput] = []
     image_counter = 0
     embed_counter = 0
     for image_batch in image_batches_:
         cur_batch_image_count = len(image_batch)
         merge_size = image_processor.merge_size
-        cur_batch_embed_len = sum([
-            grid_thw.prod() // merge_size // merge_size
+        cur_batch_embed_len = sum(
+            grid_thw.prod(-1) // merge_size // merge_size
             for grid_thw in image_grid_thw[image_counter:image_counter +
-                                           cur_batch_image_count]
-        ])
+                                           cur_batch_image_count])
 
         result.append({
             "image_embeds":
@@ -151,7 +163,7 @@ def batch_make_image_embeddings(
 
 def batch_make_video_embeddings(
         video_batches: PromptVideoInput, processor,
-        llm: LLM) -> List[Qwen2VLPromptVideoEmbeddingInput]:
+        llm: VllmRunner) -> list[Qwen2VLPromptVideoEmbeddingInput]:
     """batched video embeddings for Qwen2-VL
 
     A NDArray represents a single video's all frames.
@@ -160,21 +172,21 @@ def batch_make_video_embeddings(
       and split the result according to input batches.
 
     video_batches:
-      - Single-video batches: `List[NDArray]`
-      - Multiple-video batches: `List[List[NDArray]]`
+      - Single-video batches: `list[NDArray]`
+      - Multiple-video batches: `list[list[NDArray]]`
     """
 
-    video_batches_: List[Any] = video_batches[:]
+    video_batches_: list[Any] = video_batches[:]
 
     for idx in range(len(video_batches_)):
         if not isinstance(video_batches_[idx], list):
-            single_video_batch: List[npt.NDArray] = [video_batches_[idx]]
+            single_video_batch: list[npt.NDArray] = [video_batches_[idx]]
             video_batches_[idx] = single_video_batch
 
         assert isinstance(video_batches_[idx], list)
 
     # append all videos into a list (as a batch)
-    videos: List[npt.NDArray] = []
+    videos: list[npt.NDArray] = []
     for video_batch in video_batches_:
         videos += video_batch
 
@@ -187,30 +199,32 @@ def batch_make_video_embeddings(
     pixel_values = preprocess_result["pixel_values_videos"]
     video_grid_thw = preprocess_result["video_grid_thw"]
 
-    # pixel values to embeddinds & grid_thws
-    with torch.no_grad():
-        visual = llm.llm_engine.model_executor.driver_worker.\
-            model_runner.model.visual
+    # pixel values to embeddings & grid_thws
+    def get_image_embeds(model):
+        with torch.no_grad():
+            visual = model.visual
 
-        pixel_values_on_device = pixel_values.to(visual.device,
-                                                 dtype=visual.dtype)
-        video_grid_thw_on_device = video_grid_thw.to(visual.device,
-                                                     dtype=torch.int64)
-        video_embeds = visual(pixel_values_on_device,
-                              grid_thw=video_grid_thw_on_device)
+            pixel_values_on_device = pixel_values.to(visual.device,
+                                                     dtype=visual.dtype)
+            video_grid_thw_on_device = video_grid_thw.to(visual.device,
+                                                         dtype=torch.int64)
+            return visual(pixel_values_on_device,
+                          grid_thw=video_grid_thw_on_device)
+
+    # V1 Test: this calls a V0 internal.
+    video_embeds = torch.concat(llm.apply_model(get_image_embeds))
 
     # split into original batches
-    result: List[Qwen2VLPromptVideoEmbeddingInput] = []
+    result: list[Qwen2VLPromptVideoEmbeddingInput] = []
     video_counter = 0
     embed_counter = 0
     for video_batch in video_batches_:
         cur_batch_video_count = len(video_batch)
         merge_size = image_processor.merge_size
-        cur_batch_embed_len = sum([
-            grid_thw.prod() // merge_size // merge_size
+        cur_batch_embed_len = sum(
+            grid_thw.prod(-1) // merge_size // merge_size
             for grid_thw in video_grid_thw[video_counter:video_counter +
-                                           cur_batch_video_count]
-        ])
+                                           cur_batch_video_count])
 
         result.append({
             "video_embeds":
@@ -232,8 +246,8 @@ def batch_make_video_embeddings(
 
 
 def run_embedding_input_test(
-    vllm_runner: Type[VllmRunner],
-    inputs: List[Tuple[List[str], PromptImageInput, PromptVideoInput]],
+    vllm_runner: type[VllmRunner],
+    inputs: list[tuple[list[str], PromptImageInput, PromptVideoInput]],
     model: str,
     *,
     dtype: str,
@@ -250,7 +264,6 @@ def run_embedding_input_test(
 
     processor = AutoProcessor.from_pretrained(model)
 
-    # NOTE:
     # max_model_len should be greater than image_feature_size
     with vllm_runner(model,
                      task="generate",
@@ -280,9 +293,9 @@ def run_embedding_input_test(
                 max_tokens,
                 num_logprobs=num_logprobs,
                 images=batch_make_image_embeddings(
-                    images, processor, vllm_model.model) if images else None,
+                    images, processor, vllm_model) if images else None,
                 videos=batch_make_video_embeddings(
-                    videos, processor, vllm_model.model) if videos else None)
+                    videos, processor, vllm_model) if videos else None)
             for prompts, images, videos in inputs
         ]
 
@@ -320,8 +333,8 @@ def test_qwen2_vl_image_embeddings_input(vllm_runner, image_assets, model,
                                          num_logprobs: int) -> None:
     images = [asset.pil_image for asset in image_assets]
 
-    inputs_per_case: List[Tuple[
-        List[str], PromptImageInput, PromptVideoInput]] = [(
+    inputs_per_case: list[tuple[
+        list[str], PromptImageInput, PromptVideoInput]] = [(
             [prompt for _ in size_factors],
             [rescale_image_size(image, factor) for factor in size_factors],
             [],
@@ -362,7 +375,7 @@ def test_qwen2_vl_multiple_image_embeddings_input(vllm_runner, image_assets,
                                                   num_logprobs: int) -> None:
     images = [asset.pil_image for asset in image_assets]
 
-    inputs_per_case: List[Tuple[List[str], PromptImageInput,
+    inputs_per_case: list[tuple[list[str], PromptImageInput,
                                 PromptVideoInput]] = [(
                                     [MULTIIMAGE_PROMPT for _ in size_factors],
                                     [[
@@ -410,8 +423,8 @@ def test_qwen2_vl_video_embeddings_input(vllm_runner, video_assets, model,
         for asset in video_assets
     ]
 
-    inputs_per_case: List[Tuple[
-        List[str], PromptImageInput, PromptVideoInput]] = [(
+    inputs_per_case: list[tuple[
+        list[str], PromptImageInput, PromptVideoInput]] = [(
             [prompt for _ in size_factors],
             [],
             [rescale_video_size(video, factor) for factor in size_factors],

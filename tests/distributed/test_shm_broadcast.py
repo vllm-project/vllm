@@ -1,7 +1,8 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import multiprocessing
 import random
 import time
-from typing import List
 
 import numpy as np
 import torch.distributed as dist
@@ -11,7 +12,7 @@ from vllm.distributed.utils import StatelessProcessGroup
 from vllm.utils import get_ip, get_open_port, update_environment_variables
 
 
-def get_arrays(n: int, seed: int = 0) -> List[np.ndarray]:
+def get_arrays(n: int, seed: int = 0) -> list[np.ndarray]:
     np.random.seed(seed)
     sizes = np.random.randint(1, 10_000, n)
     # on average, each array will have 5k elements

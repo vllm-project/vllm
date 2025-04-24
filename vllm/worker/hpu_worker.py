@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 ###############################################################################
 # Copyright (C) 2024 Habana Labs, Ltd. an Intel Company
 ###############################################################################
@@ -130,7 +132,6 @@ class HPUWorker(LocalOrDistributedWorkerBase):
         self,
         execute_model_req: Optional[ExecuteModelRequest] = None,
     ) -> Optional[List[SamplerOutput]]:
-        assert execute_model_req is not None
         # VLLM_HPU_LOG_STEP_GRAPH_COMPILATION     - will log graph compilations per engine step, only when there was any - highly recommended to use alongside PT_HPU_METRICS_GC_DETAILS! # noqa:E501
         # VLLM_HPU_LOG_STEP_GRAPH_COMPILATION_ALL - will log graph compilations per engine step, always, even if there were none # noqa:E501
         # VLLM_HPU_LOG_STEP_CPU_FALLBACKS         - will log cpu fallbacks per engine step, only when there was any # noqa:E501
@@ -144,7 +145,8 @@ class HPUWorker(LocalOrDistributedWorkerBase):
             'VLLM_HPU_LOG_STEP_CPU_FALLBACKS_ALL', '0') != '0'
         log_cpu_fallbacks = os.environ.get('VLLM_HPU_LOG_STEP_CPU_FALLBACKS',
                                            '0') != '0' or log_cpu_fallbacks_all
-        if log_graph_compilation or log_cpu_fallbacks:
+        if (log_graph_compilation or log_cpu_fallbacks) and \
+            execute_model_req is not None:
             from habana_frameworks.torch.hpu.metrics import metric_localcontext
             seq_group_metadata_list = execute_model_req.seq_group_metadata_list
             is_prompt = any([
@@ -173,13 +175,13 @@ class HPUWorker(LocalOrDistributedWorkerBase):
                 cpu_fallback_ctx as cpu_fallback_local_metric:
                 output = LocalOrDistributedWorkerBase.execute_model(
                     self, execute_model_req)
-            if (log_graph_compilation and gc_local_metric.stats()[0][1] > 0
-                ) or log_graph_compilation_all:
+            if (log_graph_compilation and gc_local_metric.stats()[0][1]
+                    > 0) or log_graph_compilation_all:
                 msg = ("VLLM_HPU_STEP_GRAPH_COMPILATION: "
                        f"{gc_local_metric.stats()}, {input_stats}")
                 logger.warning(msg)
-            if (log_cpu_fallbacks and cpu_fallback_local_metric.stats()[0][1] >
-                    0) or log_cpu_fallbacks_all:
+            if (log_cpu_fallbacks and cpu_fallback_local_metric.stats()[0][1]
+                    > 0) or log_cpu_fallbacks_all:
                 msg = ("VLLM_HPU_STEP_CPU_FALLBACK: "
                        f"{cpu_fallback_local_metric.stats()}, {input_stats}")
                 logger.warning(msg)
@@ -256,9 +258,10 @@ class HPUWorker(LocalOrDistributedWorkerBase):
 
         This also warms up the model, which may record CUDA graphs.
         """
-        raise_if_cache_size_invalid(num_gpu_blocks,
-                                    self.cache_config.block_size,
-                                    self.model_config.max_model_len)
+        raise_if_cache_size_invalid(
+            num_gpu_blocks, self.cache_config.block_size,
+            self.model_config.max_model_len,
+            self.parallel_config.pipeline_parallel_size)
 
         self.cache_config.num_gpu_blocks = num_gpu_blocks
         self.cache_config.num_cpu_blocks = num_cpu_blocks
@@ -440,13 +443,13 @@ def init_worker_distributed_environment(
                                       parallel_config.pipeline_parallel_size)
 
 
-def raise_if_cache_size_invalid(num_gpu_blocks, block_size,
-                                max_model_len) -> None:
+def raise_if_cache_size_invalid(num_gpu_blocks, block_size, max_model_len,
+                                pipeline_parallel_size) -> None:
     if num_gpu_blocks <= 0:
         raise ValueError("No available memory for the cache blocks. "
                          "Try increasing `gpu_memory_utilization` when "
                          "initializing the engine.")
-    max_seq_len = block_size * num_gpu_blocks
+    max_seq_len = block_size * (num_gpu_blocks // pipeline_parallel_size)
     if max_model_len > max_seq_len:
         raise ValueError(
             f"The model's max seq len ({max_model_len}) "

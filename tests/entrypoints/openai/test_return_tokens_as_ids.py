@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 # Separate these tests out from test_completion and test_chat, because they
 # require launching a second server with a different flag. Running both servers
 # at the same time on a single node will OOM.
@@ -15,18 +17,28 @@ from .test_completion import MODEL_NAME
 
 
 @pytest.fixture(scope="module")
-def server_with_return_tokens_as_token_ids_flag(
-        default_server_args):  # noqa: F811
-    args_with_flag = default_server_args + ["--return-tokens-as-token-ids"]
-    with RemoteOpenAIServer(MODEL_NAME, args_with_flag) as remote_server:
-        yield remote_server
+def server_fixture(request, default_server_args):  # noqa: F811
+    use_server_flag = request.param
+    if use_server_flag:
+        args_with_flag = default_server_args + ["--return-tokens-as-token-ids"]
+        with RemoteOpenAIServer(MODEL_NAME, args_with_flag) as remote_server:
+            yield (remote_server, True)
+    else:
+        with RemoteOpenAIServer(MODEL_NAME,
+                                default_server_args) as remote_server:
+            yield (remote_server, False)
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("server_fixture", [True, False], indirect=True)
 async def test_completion_return_tokens_as_token_ids_completion(
-        server_with_return_tokens_as_token_ids_flag):
-    async with server_with_return_tokens_as_token_ids_flag.get_async_client(
-    ) as client:
+        server_fixture):
+    server, use_server_flag = server_fixture
+    request_args = {}
+    if not use_server_flag:
+        request_args["return_tokens_as_token_ids"] = True
+
+    async with server.get_async_client() as client:
 
         completion = await client.completions.create(
             model=MODEL_NAME,
@@ -37,7 +49,8 @@ async def test_completion_return_tokens_as_token_ids_completion(
             echo=True,
             temperature=0,
             max_tokens=10,
-            logprobs=1)
+            logprobs=1,
+            extra_body=request_args)
 
         text = completion.choices[0].text
         token_strs = completion.choices[0].logprobs.tokens
@@ -58,10 +71,14 @@ async def test_completion_return_tokens_as_token_ids_completion(
 
 
 @pytest.mark.asyncio
-async def test_chat_return_tokens_as_token_ids_completion(
-        server_with_return_tokens_as_token_ids_flag):
-    async with server_with_return_tokens_as_token_ids_flag.get_async_client(
-    ) as client:
+@pytest.mark.parametrize("server_fixture", [True, False], indirect=True)
+async def test_chat_return_tokens_as_token_ids_completion(server_fixture):
+    server, use_server_flag = server_fixture
+    request_args = {}
+    if not use_server_flag:
+        request_args["return_tokens_as_token_ids"] = True
+
+    async with server.get_async_client() as client:
         response = await client.chat.completions.create(
             model=MODEL_NAME,
             # Include Unicode characters to test for dividing a single
@@ -76,7 +93,8 @@ async def test_chat_return_tokens_as_token_ids_completion(
             }],
             temperature=0,
             max_tokens=8,
-            logprobs=True)
+            logprobs=True,
+            extra_body=request_args)
 
         text = response.choices[0].message.content
         tokenizer = get_tokenizer(tokenizer_name=MODEL_NAME)

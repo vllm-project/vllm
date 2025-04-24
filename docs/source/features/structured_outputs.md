@@ -16,7 +16,7 @@ The following parameters are supported, which must be added as extra parameters:
 - `guided_json`: the output will follow the JSON schema.
 - `guided_grammar`: the output will follow the context free grammar.
 - `guided_whitespace_pattern`: used to override the default whitespace pattern for guided json decoding.
-- `guided_decoding_backend`: used to select the guided decoding backend to use.
+- `guided_decoding_backend`: used to select the guided decoding backend to use. Additional backend-specific options can be supplied in a comma separated list following a colon after the backend name. For example `"xgrammar:no-fallback"` will not allow vLLM to fallback to a different backend on error.
 
 You can see the complete list of supported parameters on the [OpenAI-Compatible Server](#openai-compatible-server)page.
 
@@ -50,7 +50,7 @@ completion = client.chat.completions.create(
             "content": "Generate an example email address for Alan Turing, who works in Enigma. End in .com and new line. Example result: alan.turing@enigma.com\n",
         }
     ],
-    extra_body={"guided_regex": "\w+@\w+\.com\n", "stop": ["\n"]},
+    extra_body={"guided_regex": r"\w+@\w+\.com\n", "stop": ["\n"]},
 )
 print(completion.choices[0].message.content)
 ```
@@ -95,27 +95,27 @@ completion = client.chat.completions.create(
 print(completion.choices[0].message.content)
 ```
 
-```{tip}
+:::{tip}
 While not strictly necessary, normally it´s better to indicate in the prompt that a JSON needs to be generated and which fields and how should the LLM fill them.
 This can improve the results notably in most cases.
-```
+:::
 
 Finally we have the `guided_grammar`, which probably is the most difficult one to use but it´s really powerful, as it allows us to define complete languages like SQL queries.
 It works by using a context free EBNF grammar, which for example we can use to define a specific format of simplified SQL queries, like in the example below:
 
 ```python
 simplified_sql_grammar = """
-    ?start: select_statement
+    root ::= select_statement
 
-    ?select_statement: "SELECT " column_list " FROM " table_name
+    select_statement ::= "SELECT " column " from " table " where " condition
 
-    ?column_list: column_name ("," column_name)*
+    column ::= "col_1 " | "col_2 "
 
-    ?table_name: identifier
+    table ::= "table_1 " | "table_2 "
 
-    ?column_name: identifier
+    condition ::= column "= " number
 
-    ?identifier: /[a-zA-Z_][a-zA-Z0-9_]*/
+    number ::= "1 " | "2 "
 """
 
 completion = client.chat.completions.create(
@@ -193,7 +193,7 @@ class Step(BaseModel):
 
 
 class MathResponse(BaseModel):
-    steps: List[Step]
+    steps: list[Step]
     final_answer: str
 
 

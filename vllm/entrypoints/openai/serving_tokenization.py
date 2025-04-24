@@ -1,5 +1,8 @@
-from typing import Final, List, Optional, Union
+# SPDX-License-Identifier: Apache-2.0
 
+from typing import Final, Optional, Union
+
+import jinja2
 from fastapi import Request
 
 from vllm.config import ModelConfig
@@ -86,11 +89,11 @@ class OpenAIServingTokenization(OpenAIServing):
                      request.prompt,
                      add_special_tokens=request.add_special_tokens,
                  )
-        except ValueError as e:
+        except (ValueError, TypeError, jinja2.TemplateError) as e:
             logger.exception("Error in preprocessing prompt inputs")
             return self.create_error_response(str(e))
 
-        input_ids: List[int] = []
+        input_ids: list[int] = []
         for i, engine_prompt in enumerate(engine_prompts):
             self._log_inputs(request_id,
                              request_prompts[i],

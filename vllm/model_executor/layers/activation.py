@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Custom activation functions."""
 import math
 from typing import Optional
@@ -30,8 +31,10 @@ class FatreluAndMul(CustomOp):
     def __init__(self, threshold: float = 0.):
         super().__init__()
         self.threshold = threshold
-        if current_platform.is_cuda_alike() or current_platform.is_cpu():
+        if current_platform.is_cuda_alike():
             self.op = torch.ops._C.fatrelu_and_mul
+        elif current_platform.is_cpu():
+            self._forward_method = self.forward_native
 
     def forward_native(self, x: torch.Tensor) -> torch.Tensor:
         d = x.shape[-1] // 2
@@ -86,6 +89,13 @@ class SiluAndMul(CustomOp):
         self.op(out, x)
         return out
 
+    def forward_neuron(self, x: torch.Tensor) -> torch.Tensor:
+        d = x.shape[-1] // 2
+        x_reshaped = x.view(-1, x.shape[-1])
+        s = x_reshaped[:, :d] * F.sigmoid(x_reshaped[:, :d])
+        result = s * x_reshaped[:, d:]
+        return result.view(*x.shape[:-1], d)
+
 
 @CustomOp.register("mul_and_silu")
 class MulAndSilu(CustomOp):
@@ -100,11 +110,13 @@ class MulAndSilu(CustomOp):
 
     def __init__(self):
         super().__init__()
-        if current_platform.is_cuda_alike() or current_platform.is_cpu():
+        if current_platform.is_cuda_alike():
             self.op = torch.ops._C.mul_and_silu
         elif current_platform.is_xpu():
             from vllm._ipex_ops import ipex_ops
             self.op = ipex_ops.silu_and_mul
+        elif current_platform.is_cpu():
+            self._forward_method = self.forward_native
 
     def forward_native(self, x: torch.Tensor) -> torch.Tensor:
         """PyTorch-native implementation equivalent to forward()."""
@@ -342,6 +354,7 @@ def get_act_fn(act_fn_name: str) -> nn.Module:
 _ACTIVATION_AND_MUL_REGISTRY = LazyDict({
     "gelu": lambda: GeluAndMul(),
     "silu": lambda: SiluAndMul(),
+    "gelu_and_mul": lambda: GeluAndMul(),
 })
 
 

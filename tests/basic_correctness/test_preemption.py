@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Compare the short outputs of HF and vLLM when using greedy sampling.
 
 VLLM_TEST_ENABLE_ARTIFICIAL_PREEMPT=1 has to be set before running this test.
@@ -16,8 +17,17 @@ from vllm.core.scheduler import (ARTIFICIAL_PREEMPTION_MAX_CNT,
 from ..models.utils import check_outputs_equal
 
 MODELS = [
-    "facebook/opt-125m",
+    "distilbert/distilgpt2",
 ]
+
+
+@pytest.fixture(scope="function", autouse=True)
+def use_v0_only(monkeypatch):
+    """
+    We should enable this for V1, but VLLM_TEST_ENABLE_ARTIFICIAL_PREEMPT,
+    so use VLLM_USE_V1=0 for all tests in the file.
+    """
+    monkeypatch.setenv('VLLM_USE_V1', '0')
 
 
 @pytest.fixture(scope="module", autouse=True)
@@ -29,10 +39,10 @@ def check_settings():
 
 
 @pytest.fixture
-def worker_use_ray() -> bool:
-    # When SPMD worker is used, use ray_use_worker=True
+def distributed_executor_backend() -> str:
+    # When SPMD worker is used, use distributed_executor_backend="ray"
     # to test delta input optimization works with preemption.
-    return envs.VLLM_USE_RAY_SPMD_WORKER
+    return "ray" if envs.VLLM_USE_RAY_SPMD_WORKER else "mp"
 
 
 @pytest.mark.parametrize("model", MODELS)
@@ -47,7 +57,7 @@ def test_chunked_prefill_recompute(
     dtype: str,
     max_tokens: int,
     chunked_prefill_token_size: int,
-    worker_use_ray: bool,
+    distributed_executor_backend: str,
 ) -> None:
     """Ensure that chunked prefill works with preemption."""
     max_num_seqs = min(chunked_prefill_token_size, 256)
@@ -66,7 +76,7 @@ def test_chunked_prefill_recompute(
             max_num_batched_tokens=max_num_batched_tokens,
             enable_chunked_prefill=enable_chunked_prefill,
             max_num_seqs=max_num_seqs,
-            worker_use_ray=worker_use_ray,
+            distributed_executor_backend=distributed_executor_backend,
             disable_log_stats=False,
     ) as vllm_model:
         vllm_outputs = vllm_model.generate_greedy(example_prompts, max_tokens)
@@ -93,7 +103,7 @@ def test_preemption(
     model: str,
     dtype: str,
     max_tokens: int,
-    worker_use_ray: bool,
+    distributed_executor_backend: str,
 ) -> None:
     """By default, recompute preemption is enabled"""
 
@@ -104,7 +114,7 @@ def test_preemption(
             model,
             dtype=dtype,
             disable_log_stats=False,
-            worker_use_ray=worker_use_ray,
+            distributed_executor_backend=distributed_executor_backend,
     ) as vllm_model:
         vllm_outputs = vllm_model.generate_greedy(example_prompts, max_tokens)
         assert (vllm_model.model.llm_engine.scheduler[0].artificial_preempt_cnt
@@ -144,7 +154,7 @@ def test_preemption_infeasible(
     model: str,
     dtype: str,
     max_tokens: int,
-    worker_use_ray: bool,
+    distributed_executor_backend: str,
 ) -> None:
     """Verify infeasible preemption request will be ignored."""
     BLOCK_SIZE = 16
@@ -159,7 +169,7 @@ def test_preemption_infeasible(
             # ignored instead of hanging forever.
             num_gpu_blocks_override=prefill_blocks + decode_blocks // 2,
             max_model_len=((prefill_blocks + decode_blocks // 2) * BLOCK_SIZE),
-            worker_use_ray=worker_use_ray,
+            distributed_executor_backend=distributed_executor_backend,
     ) as vllm_model:
         sampling_params = SamplingParams(max_tokens=max_tokens,
                                          ignore_eos=True)
