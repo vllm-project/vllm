@@ -239,6 +239,10 @@ def test_reshape_and_cache_flash(
     current_platform.seed_everything(seed)
     torch.set_default_device(device)
 
+    # fp8 conversion requires continugous memory buffer. Reduce the number of
+    # blocks and tokens to consume less memory.
+    num_tokens = num_tokens // 2
+    num_blocks = num_blocks // 2
     # Create a random slot mapping.
     num_slots = block_size * num_blocks
     slot_mapping_lst = random.sample(range(num_slots), num_tokens)
