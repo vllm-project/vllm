@@ -22,11 +22,11 @@ from vllm.config import (BlockSize, CacheConfig, CacheDType, CompilationConfig,
                          GuidedDecodingBackendV1, HfOverrides,
                          KVTransferConfig, LoadConfig, LoadFormat, LoRAConfig,
                          ModelConfig, ModelImpl, MultiModalConfig,
-                         ObservabilityConfig, ParallelConfig, PoolerConfig,
-                         PoolType, PrefixCachingHashAlgo, PromptAdapterConfig,
-                         SchedulerConfig, SchedulerPolicy, SpeculativeConfig,
-                         TaskOption, TokenizerPoolConfig, VllmConfig,
-                         get_attr_docs, get_field)
+                         ObservabilityConfig, PaddingConfig, ParallelConfig,
+                         PoolerConfig, PoolType, PrefixCachingHashAlgo,
+                         PromptAdapterConfig, SchedulerConfig, SchedulerPolicy,
+                         SpeculativeConfig, TaskOption, TokenizerPoolConfig,
+                         VllmConfig, get_attr_docs, get_field)
 from vllm.executor.executor_base import ExecutorBase
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS
@@ -254,6 +254,10 @@ class EngineArgs:
     model_impl: str = "auto"
 
     calculate_kv_scales: bool = CacheConfig.calculate_kv_scales
+
+    # padding_max_token_size: Optional[int] = None
+    # padding_min_token_size: Optional[int] = None
+    padding_gap: Optional[int] = None
 
     additional_config: Optional[Dict[str, Any]] = None
     enable_reasoning: Optional[bool] = None
@@ -968,6 +972,19 @@ class EngineArgs:
                             "(only cuda platform is supported)")
 
         parser.add_argument(
+            '--padding-gap',
+            type=int,
+            default=EngineArgs.padding_gap,
+            help="the padding gap between fixed token lengths, " \
+            "we pad the request into a list of fixed length " \
+            "to save from recompilation during model executing." \
+            "if set to 0, we do exponential padding " \
+            "(always pad to the power of 2), " \
+            "if set to other numbers," \
+            " we do incremental padding with padding_gap."
+        )
+
+        parser.add_argument(
             "--additional-config",
             type=json.loads,
             default=None,
@@ -1307,6 +1324,8 @@ class EngineArgs:
             or "all" in detailed_trace_modules,
         )
 
+        padding_config = PaddingConfig(padding_gap=self.padding_gap)
+
         config = VllmConfig(
             model_config=model_config,
             cache_config=cache_config,
@@ -1319,6 +1338,7 @@ class EngineArgs:
             decoding_config=decoding_config,
             observability_config=observability_config,
             prompt_adapter_config=prompt_adapter_config,
+            padding_config=padding_config,
             compilation_config=self.compilation_config,
             kv_transfer_config=self.kv_transfer_config,
             additional_config=self.additional_config,

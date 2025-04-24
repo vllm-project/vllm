@@ -31,7 +31,8 @@ class MambaCacheManager(ConstantSizeCache):
         # Determine max batch size to set size of MambaCache
         max_batch_size = vllm_config.scheduler_config.max_num_seqs
         if not vllm_config.model_config.enforce_eager:
-            max_batch_size = vllm_config.pad_for_cudagraph(max_batch_size)
+            max_batch_size = vllm_config.padding_config.get_padded_token_len(
+                max_batch_size)
 
         # Initialize parent class
         super().__init__(max_batch_size)

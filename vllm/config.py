@@ -3629,6 +3629,104 @@ class CompilationConfig(BaseModel):
 
 
 @dataclass
+class PaddingConfig:
+    padding_gap: int
+
+    # not configurable, set after init.
+    min_token_size: int = PrivateAttr
+    max_token_size: int = PrivateAttr
+    num_token_paddings: list[int] = PrivateAttr
+
+    def compute_hash(self) -> str:
+        """
+        WARNING: Whenever a new field is added to this config,
+        ensure that it is included in the factors list if
+        it affects the computation graph.
+
+        Provide a hash that uniquely identifies all the configs
+        that affect the structure of the computation
+        graph from input ids/embeddings to the final hidden states,
+        excluding anything before input ids/embeddings and after
+        the final hidden states.
+        """
+        # no factors to consider.
+        # this config will not affect the computation graph.
+        factors: list[Any] = []
+        hash_str = hashlib.md5(str(factors).encode(),
+                               usedforsecurity=False).hexdigest()
+        return hash_str
+
+    def __post_init__(self):
+        # Set default values for GPU and TPU respectively.
+        if current_platform.is_cuda():
+            self.padding_gap = 8 if self.padding_gap is None else max(
+                self.padding_gap, 8)
+            self.min_token_size = 8
+            self.num_token_paddings = [1, 2, 4]
+        else:
+            self.padding_gap = 0 if self.padding_gap is None \
+                else self.padding_gap
+            self.min_token_size = 16
+            self.num_token_paddings = []
+
+    def get_token_paddings(self, max_num_batched_tokens, max_num_seqs):
+        '''padding logic: 
+        For GPU: Use incremental padding, starting from [1, 2, 4],
+            incremented by 8 until reaching either max_num_batched_tokens or 
+            max_num_seqs depending on VLLM V0 or V1.
+        For TPU: If padding_gap = 0, use exponential padding, starting from 16,
+            pad to the power of 2 until reaching max_num_batched_tokens
+            If padding_gap != 0, first increase by twice until padding_gap, 
+            then increase by padding_gap until max_num_batched_tokens.
+            Note that padding_gap might be adjusted to avoid to many graphs. 
+        '''
+        if current_platform.is_cuda():
+            if envs.VLLM_USE_V1:
+                self.max_token_size = min(512, max_num_batched_tokens)
+            else:
+                self.max_token_size = min(8192, max_num_seqs)
+        elif current_platform.is_tpu():
+            self.max_token_size = max_num_batched_tokens
+        num = self.min_token_size
+        if self.padding_gap == 0:
+            while True:
+                self.num_token_paddings.append(num)
+                if num >= self.max_token_size:
+                    break
+                num *= 2
+        else:
+            padding_gap = self.padding_gap
+            if current_platform.is_tpu():
+                # roughly calculate number of paddings, if it's larger than 16,
+                # increment padding_gap by twice.
+                while True:
+                    if (self.max_token_size -
+                            self.min_token_size) // padding_gap <= 16:
+                        break
+                    padding_gap *= 2
+                if (padding_gap != self.padding_gap):
+                    print(f"adjust padding_gap from {self.padding_gap} \
+                        to {padding_gap}")
+                    self.padding_gap = padding_gap
+            while num <= padding_gap:
+                self.num_token_paddings.append(num)
+                num *= 2
+            num //= 2
+            while num < self.max_token_size:
+                num += padding_gap
+                self.num_token_paddings.append(num)
+
+    def get_padded_token_len(self, num_tokens: int) -> int:
+        """Return the first element in paddings list 
+           greater or equal to num_tokens.
+        """
+        import bisect
+        index = bisect.bisect_left(self.num_token_paddings, num_tokens)
+        assert index < len(self.num_token_paddings)
+        return self.num_token_paddings[index]
+
+
+@dataclass
 class VllmConfig:
     """Dataclass which contains all vllm-related configuration. This
     simplifies passing around the distinct configurations in the codebase.
@@ -3654,6 +3752,8 @@ class VllmConfig:
                                                   init=True)  # type: ignore
     kv_transfer_config: KVTransferConfig = field(default=None,
                                                  init=True)  # type: ignore
+    padding_config: PaddingConfig = field(default=None,
+                                          init=True)  # type: ignore
     # some opaque config, only used to provide additional information
     # for the hash computation, mainly used for testing, debugging or out of
     # tree config registration.
@@ -3739,6 +3839,10 @@ class VllmConfig:
             vllm_factors.append(self.kv_transfer_config.compute_hash())
         else:
             vllm_factors.append("None")
+        if self.padding_config:
+            vllm_factors.append(self.padding_config.compute_hash())
+        else:
+            vllm_factors.append("None")
         if self.additional_config:
             vllm_factors.append(self.additional_config.compute_hash())
         else:
@@ -3748,13 +3852,6 @@ class VllmConfig:
         hash_str = hashlib.md5(str(factors).encode(),
                                usedforsecurity=False).hexdigest()[:10]
         return hash_str
-
-    def pad_for_cudagraph(self, batch_size: int) -> int:
-        # if batch_size > self.compilation_config.max_capture_size,
-        # it should raise an IndexError.
-        # the caller should make sure the batch_size is within the range,
-        # i.e., batch_size <= self.compilation_config.max_capture_size
-        return self.compilation_config.bs_to_padded_graph_size[batch_size]
 
     @staticmethod
     def _get_quantization_config(
@@ -3853,6 +3950,10 @@ class VllmConfig:
             self.compilation_config.level = CompilationLevel.PIECEWISE
             self.compilation_config.set_splitting_ops_for_v1()
 
+        self.padding_config.get_token_paddings(
+            self.scheduler_config.max_num_batched_tokens,
+            self.scheduler_config.max_num_seqs)
+        # todo: use paddingconfig.size to update cuda graph size.
         self._set_cudagraph_sizes()
 
         if self.cache_config is not None and \
@@ -3893,73 +3994,8 @@ class VllmConfig:
             self.instance_id = random_uuid()[:5]
 
     def _set_cudagraph_sizes(self):
-        """
-        cudagraph batchsize padding logic:
-
-        `[1, 2, 4] + [8 * i for i in range(1, 1025)]` is a list of all possible
-        batch sizes that cudagraph will capture.
-
-        Depending on the engine's configuration of `max_num_seqs`, the
-        candidate batch sizes to capture cudagraph will shrink to the subset
-        which just cover the range of `[1, max_num_seqs]`. In the common case,
-        `max_num_seqs` is 256, and the cudagraph batch sizes will be
-        `[1, 2, 4, 8, 16, 24, 32, 40, ..., 256]`.
-
-        However, if users specify the cudagraph capture sizes through
-        compilation config, we will use the specified sizes instead.
-
-        In the end, `vllm_config.compilation_config.cudagraph_capture_sizes`
-        will be the final sizes to capture cudagraph (in descending order).
-
-        During runtime, if batchsize is larger than
-        `vllm_config.compilation_config.cudagraph_capture_sizes`,
-        no cudagraph will be used.
-        If the batch size is no larger than
-        `vllm_config.compilation_config.cudagraph_capture_sizes`,
-        we can quickly find the padded graph size for a given batch size by
-        looking up `vllm_config.compilation_config.bs_to_padded_graph_size`.
-        """
-
-        # calculate the default `batch_size_capture_list`
-        if not envs.VLLM_USE_V1:
-            batch_size_capture_list = []
-            max_batchsize_to_capture = 0
-            if self.scheduler_config is not None and \
-                self.model_config is not None and \
-                    not self.model_config.enforce_eager:
-
-                possible_sizes = [1, 2, 4] + [8 * i for i in range(1, 1025)]
-                # find the minimum size that is larger than max_num_seqs,
-                # which then becomes the max_batchsize_to_capture
-                larger_sizes = [
-                    x for x in possible_sizes
-                    if x >= self.scheduler_config.max_num_seqs
-                ]
-                if larger_sizes:
-                    max_batchsize_to_capture = larger_sizes[0]
-                else:
-                    max_batchsize_to_capture = possible_sizes[-1]
-
-                # filter out the sizes that are
-                # larger than max_batchsize_to_capture
-                batch_size_capture_list = [
-                    size for size in possible_sizes
-                    if size <= max_batchsize_to_capture
-                ]
-        else:
-            batch_size_capture_list = []
-            if self.model_config is not None and \
-                not self.model_config.enforce_eager:
-                batch_size_capture_list = [1, 2, 4
-                                           ] + [i for i in range(8, 513, 8)]
-                max_num_tokens = self.scheduler_config.max_num_batched_tokens
-                batch_size_capture_list = [
-                    size for size in batch_size_capture_list
-                    if size <= max_num_tokens
-                ]
-
         self.compilation_config.init_with_cudagraph_sizes(
-            batch_size_capture_list)
+            copy.deepcopy(self.padding_config.num_token_paddings))
 
     def __str__(self):
         return (
