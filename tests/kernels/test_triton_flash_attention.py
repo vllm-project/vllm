@@ -138,7 +138,6 @@ def input_helper(
     layout=None,
     use_alibi=None,
     causal=None,
-    persistent=None,
     is_fp8=False,
     fp8_kv=False,
     use_o_scale=False,
@@ -203,7 +202,6 @@ def input_helper(
                               alibi_slopes=alibi_slopes,
                               alibi_batch=Z,
                               alibi_nheads=HQ,
-                              persistent=persistent,
                               q_descale=q_descale,
                               k_descale=k_descale,
                               v_descale=v_descale,
@@ -290,62 +288,6 @@ def test_op_fwd(Z,
     current_platform.seed_everything(0)
     q, k, v, input_metadata = input_helper(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD,
                                            dtype, layout, use_alibi, causal)
-
-    o = torch.empty_like(q)
-
-    # triton implementation
-    tri_out, _ = triton_attention_rocm(q, k, v, o, input_metadata)
-
-    # Transpose here if layout is bshd so we have same reference code for all
-    # layouts
-    if layout == 'bshd':
-        q = q.transpose(1, 2).clone()
-        k = k.transpose(1, 2).clone()
-        v = v.transpose(1, 2).clone()
-    # Replicate K and V if using MQA/GQA
-    if HQ != HK:
-        k = k.view(k.shape[0], k.shape[1], -1, k.shape[2],
-                   k.shape[3]).expand(-1, -1, HQ // HK, -1,
-                                      -1).reshape(k.shape[0], -1, k.shape[2],
-                                                  k.shape[3])
-        v = v.view(v.shape[0], v.shape[1], -1, v.shape[2],
-                   v.shape[3]).expand(-1, -1, HQ // HK, -1,
-                                      -1).reshape(v.shape[0], -1, v.shape[2],
-                                                  v.shape[3])
-
-    ref_impl = ReferenceAttention(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD,
-                                  use_alibi, dtype, input_metadata)
-    ref_out = ref_impl.fwd(q, k, v)
-
-    torch.testing.assert_close(ref_out, tri_out, atol=2e-2, rtol=2e-2)
-
-
-@pytest.mark.parametrize('Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD', [
-    (4, 48, 12, 1, 1, 64),
-    (4, 48, 48, 1, 1, 128),
-    (4, 48, 24, 3, 3, 128),
-    (4, 4, 4, 128, 128, 65),
-    (4, 4, 4, 113, 123, 1),
-])
-@pytest.mark.parametrize('causal', [True, False])
-@pytest.mark.parametrize('use_alibi', [True, False])
-@pytest.mark.parametrize('layout', ['bshd'])
-@pytest.mark.parametrize('persistent', ['fixed', 'dynamic'])
-def test_op_persistent_fwd(Z,
-                           HQ,
-                           HK,
-                           N_CTX_Q,
-                           N_CTX_K,
-                           D_HEAD,
-                           causal,
-                           use_alibi,
-                           layout,
-                           persistent,
-                           dtype=torch.float16):
-    current_platform.seed_everything(0)
-    q, k, v, input_metadata = input_helper(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD,
-                                           dtype, layout, use_alibi, causal,
-                                           persistent)
 
     o = torch.empty_like(q)
 
