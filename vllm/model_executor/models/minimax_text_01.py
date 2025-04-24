@@ -1048,9 +1048,8 @@ class MiniMaxText01ForCausalLM(nn.Module, HasInnerState, IsHybrid,
                 intermediate_tensors: Optional[IntermediateTensors] = None,
                 inputs_embeds: Optional[torch.Tensor] = None,
                 **kwargs) -> torch.Tensor:
-        hidden_states = self.model(input_ids, positions, self.kv_cache,
-                                   intermediate_tensors, inputs_embeds,
-                                   **kwargs)
+        hidden_states = self.model(input_ids, positions, intermediate_tensors,
+                                   inputs_embeds, **kwargs)
 
         return hidden_states
 
