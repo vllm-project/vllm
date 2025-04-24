@@ -391,7 +391,7 @@ def try_get_local_file(model: Union[str, Path],
 
 def get_hf_file_to_dict(file_name: str,
                         model: Union[str, Path],
-                        revision: Optional[str] = 'main') -> dict:
+                        revision: Optional[str] = 'main'):
     """
     Downloads a file from the Hugging Face Hub and returns
     its contents as a dictionary.
