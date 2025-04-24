@@ -166,13 +166,18 @@ class JitCache(KernelInterface):
         fn,
         arg_names,
         check_keys,
-        cache_lock: CacheLock,
+        cache_lock,
         cache_launch_grid=False,
         assume_const=None,
     ):
         # we depend on the triton version, right now, 3.0 -- 3.2 are supported
-        assert (int(triton_version.split(".")[0]) == 3
-                and int(triton_version.split(".")[1]) <= 2)
+        if not (int(triton_version.split(".")[0]) == 3
+                and int(triton_version.split(".")[1]) <= 2):
+            logger.warning("JITCache is incompatible to installed Triton " \
+                           "version: %s! The cache acts in pass-through mode" \
+                           " (no caching happening).", triton_version)
+            self.run = fn.run
+            return
         self.arg_names = arg_names
         self.fn = fn
         self.base_fn = fn
