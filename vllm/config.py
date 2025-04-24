@@ -1778,6 +1778,7 @@ class ParallelConfig:
             "worker_extension_cls must be a string (qualified class name).")
 
 
+PreemptionMode = Literal["swap", "recompute"]
 SchedulerPolicy = Literal["fcfs", "priority"]
 
 
@@ -1854,7 +1855,7 @@ class SchedulerConfig:
     NOTE: This is not currently configurable. It will be overridden by
     max_num_batched_tokens in case max multimodal embedding size is larger."""
 
-    preemption_mode: Optional[str] = None
+    preemption_mode: Optional[PreemptionMode] = None
     """Whether to perform preemption by swapping or
     recomputation. If not specified, we determine the mode as follows:
     We use recomputation by default since it incurs lower overhead than
