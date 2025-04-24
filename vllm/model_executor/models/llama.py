@@ -113,10 +113,6 @@ class LlamaAttention(nn.Module):
         super().__init__()
         layer_idx = extract_layer_index(prefix)
         self.hidden_size = hidden_size
-        self.input_hidden_size = hidden_size
-        if hasattr(config, "input_hidden_size") and \
-            config.input_hidden_size is not None:
-            self.input_hidden_size = config.input_hidden_size
         tp_size = get_tensor_model_parallel_world_size()
         self.total_num_heads = num_heads
         assert self.total_num_heads % tp_size == 0
@@ -144,7 +140,7 @@ class LlamaAttention(nn.Module):
         self.max_position_embeddings = max_position_embeddings
 
         self.qkv_proj = QKVParallelLinear(
-            hidden_size=self.input_hidden_size,
+            hidden_size=hidden_size,
             head_size=self.head_dim,
             total_num_heads=self.total_num_heads,
             total_num_kv_heads=self.total_num_kv_heads,
@@ -335,7 +331,7 @@ class LlamaModel(nn.Module):
         else:
             self.norm = PPMissingLayer()
 
-        self.aux_hidden_state_layers = []
+        self.aux_hidden_state_layers: tuple[int] = tuple()
 
         self.make_empty_intermediate_tensors = (
             make_empty_intermediate_tensors_factory(
@@ -533,12 +529,12 @@ class LlamaForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors)
 
-    def set_aux_hidden_state_layers(self, layers: list[int]) -> None:
+    def set_aux_hidden_state_layers(self, layers: tuple[int]) -> None:
         self.model.aux_hidden_state_layers = layers
 
-    def get_eagle3_aux_hidden_state_layers(self) -> list[int]:
+    def get_eagle3_aux_hidden_state_layers(self) -> tuple[int]:
         num_layers = len(self.model.layers)
-        return [2, num_layers // 2, num_layers - 3]
+        return (2, num_layers // 2, num_layers - 3)
 
     def _init_model(self,
                     vllm_config: VllmConfig,

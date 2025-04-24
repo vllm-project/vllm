@@ -80,7 +80,6 @@ def main():
         max_model_len=max_model_len,
         max_num_seqs=args.max_num_seqs,
         gpu_memory_utilization=0.8,
-        compilation_config=0,
         speculative_config={
             "method": "eagle3" if "eagle3" in eagle_dir.lower() else "eagle",
             "model": eagle_dir,

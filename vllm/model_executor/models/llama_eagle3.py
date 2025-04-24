@@ -93,7 +93,6 @@ class LlamaModel(nn.Module):
             self.config.hidden_size,
             prefix=maybe_prefix(prefix, "embed_tokens"),
         )
-        self.config.input_hidden_size = 2 * self.config.hidden_size
         self.layers = nn.ModuleList([
             LlamaDecoderLayer(
                 self.config,

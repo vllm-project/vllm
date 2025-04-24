@@ -2601,6 +2601,12 @@ class SpeculativeConfig:
                              "speculative decoding is > 1, but got "
                              f"{self.disable_by_batch_size=}")
 
+        if self.method == "eagle3" and self.target_model_config and \
+            "llama" not in self.target_model_config.hf_text_config.model_type:
+            raise ValueError(
+                "Eagle3 is only supported for Llama models. "
+                f"Got {self.target_model_config.hf_text_config.model_type=}")
+
     @property
     def num_lookahead_slots(self) -> int:
         """The number of additional slots the scheduler should allocate per
