@@ -13,7 +13,7 @@ from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalEncDecInputs,
                                     MultiModalInputs)
 from vllm.prompt_adapter.request import PromptAdapterRequest
-from vllm.transformers_utils.tokenizer_group import BaseTokenizerGroup
+from vllm.transformers_utils.tokenizer_group import TokenizerGroup
 
 from .data import (DecoderOnlyInputs, EncoderDecoderInputs, ProcessorInputs,
                    PromptType, SingletonInputs, SingletonPrompt, token_inputs)
@@ -27,7 +27,7 @@ class InputPreprocessor:
     def __init__(
         self,
         model_config: ModelConfig,
-        tokenizer: Optional[BaseTokenizerGroup],
+        tokenizer: Optional[TokenizerGroup],
         mm_registry: MultiModalRegistry = MULTIMODAL_REGISTRY,
     ) -> None:
         super().__init__()
@@ -36,7 +36,7 @@ class InputPreprocessor:
         self.tokenizer = tokenizer
         self.mm_registry = mm_registry
 
-    def get_tokenizer_group(self) -> BaseTokenizerGroup:
+    def get_tokenizer_group(self) -> TokenizerGroup:
         if self.tokenizer is None:
             raise ValueError("You cannot pass text prompts when "
                              "`skip_tokenizer_init` is True")

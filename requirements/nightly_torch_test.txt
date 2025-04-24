@@ -1,0 +1,28 @@
+# Dependency that able to run entrypoints test
+# pytest and its extensions
+pytest
+pytest-asyncio
+pytest-forked
+pytest-mock
+pytest-rerunfailures
+pytest-shard
+pytest-timeout
+
+
+librosa # required by audio tests in entrypoints/openai
+sentence-transformers
+numba == 0.61.2; python_version > '3.9'
+# testing utils
+awscli
+boto3
+botocore
+datasets
+ray >= 2.10.0
+peft
+runai-model-streamer==0.11.0
+runai-model-streamer-s3==0.11.0
+tensorizer>=2.9.0
+lm-eval==0.4.8
+buildkite-test-collector==0.1.9
+
+lm-eval[api]==0.4.8 # required for model evaluation test
