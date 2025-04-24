@@ -2,7 +2,7 @@
 
 from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Optional, Tuple, Type
+from typing import TYPE_CHECKING, Any, Optional, Type, Union
 
 import torch
 
@@ -16,13 +16,11 @@ from vllm.attention.backends.mla.common import (MLACommonBackend,
 from vllm.attention.backends.utils import (compute_slot_mapping,
                                            compute_slot_mapping_start_idx,
                                            is_block_tables_empty)
-from vllm.attention.ops.rocm_aiter_mla import (aiter_mla_decode_forward,
+from vllm.attention.ops.rocm_aiter_mla import (aiter_mla_decode_fwd,
                                                get_aiter_mla_metadata)
-from vllm.attention.ops.triton_merge_attn_states import merge_attn_states
 
 if TYPE_CHECKING:
-    from vllm.worker.model_runner import (ModelInputForGPUBuilder,
-                                          ModelInputForGPUWithSamplingMetadata)
+    from vllm.worker.model_runner import ModelInputForGPUBuilder
 
 
 def is_aiter_mla_enabled() -> bool:
@@ -102,28 +100,18 @@ class AiterMLAMetadata(MLACommonMetadata):
 
         return self._cached_decode_metadata
 
-    def advance_step(self,
-                     model_input: "ModelInputForGPUWithSamplingMetadata",
-                     sampled_token_ids: Optional[torch.Tensor],
-                     block_size: int,
-                     num_seqs: int,
-                     num_queries: int,
-                     turn_prefills_into_decodes: bool = False):
-        """
-        Update metadata in-place to advance one decode step.
-        """
-        self.advance_step_assertions(
-            num_seqs=num_seqs,
-            num_queries=num_queries,
-            turn_prefills_into_decodes=turn_prefills_into_decodes)
+    def _ops_advance_step(self, num_seqs: int, num_queries: int,
+                          block_size: int, input_tokens: torch.Tensor,
+                          sampled_token_ids: torch.Tensor,
+                          input_positions: torch.Tensor) -> None:
 
         ops.advance_step_flashinfer(
             num_seqs=num_seqs,
             num_queries=num_queries,
             block_size=block_size,
-            input_tokens=model_input.input_tokens,
+            input_tokens=input_tokens,
             sampled_token_ids=sampled_token_ids,
-            input_positions=model_input.input_positions,
+            input_positions=input_positions,
             seq_lens=self.seq_lens_tensor,
             slot_mapping=self.slot_mapping,
             block_tables=self.block_tables,
@@ -379,60 +367,20 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
         from aiter import flash_attn_varlen_func
         self.flash_attn_varlen_func = flash_attn_varlen_func
 
-    def _get_fwd_prefill_attn_output(self, q: torch.Tensor, k: torch.Tensor,
-                                     v: torch.Tensor,
-                                     prefill_metadata: MLACommonMetadata,
-                                     kv_c_and_k_pe_cache: torch.Tensor,
-                                     attn_metadata: MLACommonMetadata,
-                                     has_context: bool) -> torch.Tensor:
+    def _flash_attn_varlen_diff_headdims(
+            self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor,
+            softmax_scale: float, return_softmax_lse: bool,
+            **kwargs) -> Union[tuple[torch.Tensor, ...], torch.Tensor]:
         output = self.flash_attn_varlen_func(
             q=q,
             k=k,
             v=v,
-            cu_seqlens_q=prefill_metadata.query_start_loc,
-            cu_seqlens_k=prefill_metadata.query_start_loc,
-            max_seqlen_q=prefill_metadata.max_prefill_seq_len,
-            max_seqlen_k=prefill_metadata.max_prefill_seq_len,
-            softmax_scale=self.scale,
-            causal=True,
-            return_lse=has_context,
+            softmax_scale=softmax_scale,
+            return_lse=return_softmax_lse,
+            **kwargs,
         )
 
-        if has_context:
-            suffix_output, suffix_lse = output
-            context_output, context_lse = self._compute_prefill_context( \
-                q, kv_c_and_k_pe_cache, attn_metadata)
-
-            output = torch.empty_like(suffix_output)
-            merge_attn_states(
-                output=output,
-                prefix_output=context_output,
-                prefix_lse=context_lse,
-                suffix_output=suffix_output,
-                suffix_lse=suffix_lse,
-            )
-
-        return output.reshape(-1, self.num_heads * v.shape[-1])
-
-    def _get_prefill_ctx_attn_output(
-            self, index: int, q: torch.Tensor, k: torch.Tensor,
-            v: torch.Tensor,
-            metadata: MLACommonMetadata) -> Tuple[torch.Tensor, ...]:
-        assert metadata.context_chunk_cu_seq_lens is not None
-        assert metadata.context_chunk_max_seq_lens is not None
-
-        return self.flash_attn_varlen_func(
-            q=q,
-            k=k,
-            v=v,
-            cu_seqlens_q=metadata.query_start_loc,
-            cu_seqlens_k=metadata.context_chunk_cu_seq_lens[index],
-            max_seqlen_q=metadata.max_query_len,
-            max_seqlen_k=metadata.context_chunk_max_seq_lens[index],
-            softmax_scale=self.scale,
-            causal=False,  # Context is unmasked
-            return_lse=True,
-        )
+        return output
 
     def _forward_decode(
         self,
@@ -456,9 +404,9 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
 
         kv_buffer = kv_c_and_k_pe_cache.unsqueeze(2)
 
-        aiter_mla_decode_forward(q, kv_buffer, o, self.scale,
-                                 attn_metadata.paged_kv_indptr,
-                                 attn_metadata.paged_kv_indices,
-                                 attn_metadata.paged_kv_last_page_lens)
+        aiter_mla_decode_fwd(q, kv_buffer, o, self.scale,
+                             attn_metadata.paged_kv_indptr,
+                             attn_metadata.paged_kv_indices,
+                             attn_metadata.paged_kv_last_page_lens)
 
         return self._v_up_proj_and_o_proj(o)

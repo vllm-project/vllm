@@ -1,21 +1,19 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from dataclasses import dataclass
-from typing import Any, Optional
+from typing import Any, Optional, Union
 
 import torch
 
 import vllm.envs as envs
 from vllm.attention.ops.rocm_aiter_mla import aiter_mla_decode_forward
-from vllm.attention.ops.triton_merge_attn_states import merge_attn_states
 # yapf conflicts with isort for this docstring
 # yapf: disable
 from vllm.v1.attention.backends.mla.common import (MLACommonBackend,
                                                    MLACommonDecodeMetadata,
                                                    MLACommonImpl,
                                                    MLACommonMetadata,
-                                                   MLACommonMetadataBuilder,
-                                                   MLACommonPrefillMetadata)
+                                                   MLACommonMetadataBuilder)
 
 # yapf: enable
 
@@ -197,60 +195,24 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
         from aiter import flash_attn_varlen_func
         self.flash_attn_varlen_func = flash_attn_varlen_func
 
-    def _get_fwd_prefill_attn_output(self, q: torch.Tensor, k: torch.Tensor,
-                                     v: torch.Tensor,
-                                     kv_c_and_k_pe_cache: torch.Tensor,
-                                     attn_metadata: MLACommonMetadata,
-                                     has_context: bool) -> torch.Tensor:
-        assert attn_metadata.prefill is not None
-
+    def _flash_attn_varlen_diff_headdims(
+            self,
+            q: torch.Tensor,
+            k: torch.Tensor,
+            v: torch.Tensor,
+            softmax_scale: float,
+            return_softmax_lse: bool = False,
+            **kwargs) -> Union[tuple[torch.Tensor, ...], torch.Tensor]:
         output = self.flash_attn_varlen_func(
             q=q,
             k=k,
             v=v,
-            cu_seqlens_q=attn_metadata.prefill.query_start_loc,
-            cu_seqlens_k=attn_metadata.prefill.query_start_loc,
-            max_seqlen_q=attn_metadata.prefill.max_query_len,
-            max_seqlen_k=attn_metadata.prefill.max_query_len,
-            softmax_scale=self.scale,
-            causal=True,
-            return_lse=has_context,
+            softmax_scale=softmax_scale,
+            return_lse=return_softmax_lse,
+            **kwargs,
         )
 
-        if has_context:
-            suffix_output, suffix_lse = output
-            context_output, context_lse = self._compute_prefill_context( \
-                q, kv_c_and_k_pe_cache, attn_metadata)
-
-            output = torch.empty_like(suffix_output)
-            merge_attn_states(
-                output=output,
-                prefix_output=context_output,
-                prefix_lse=context_lse,
-                suffix_output=suffix_output,
-                suffix_lse=suffix_lse,
-            )
-
-        return output.reshape(-1, self.num_heads * v.shape[-1])
-
-    def _get_prefill_ctx_attn_output(
-        self, index: int, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor,
-        prefill_metadata: MLACommonPrefillMetadata
-    ) -> tuple[torch.Tensor, ...]:
-        assert prefill_metadata.chunked_context is not None
-
-        return self.flash_attn_varlen_func(
-            q=q,
-            k=k,
-            v=v,
-            cu_seqlens_q=prefill_metadata.query_start_loc,
-            cu_seqlens_k=prefill_metadata.chunked_context.cu_seq_lens[index],
-            max_seqlen_q=prefill_metadata.max_query_len,
-            max_seqlen_k=prefill_metadata.chunked_context.max_seq_lens[index],
-            softmax_scale=self.scale,
-            causal=False,  # Context is unmasked
-            return_lse=True,
-        )
+        return output
 
     def _forward_decode(
         self,

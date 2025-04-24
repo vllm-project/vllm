@@ -40,28 +40,36 @@ You can force the use of `TransformersForCausalLM` by setting `model_impl="trans
 vLLM may not fully optimise the Transformers implementation so you may see degraded performance if comparing a native model to a Transformers model in vLLM.
 :::
 
-#### Supported features
+#### Custom models
 
-The Transformers modeling backend explicitly supports the following features:
+If a model is neither supported natively by vLLM or Transformers, it can still be used in vLLM!
 
-- <project:#quantization-index> (except GGUF)
-- <project:#lora-adapter>
-- <project:#distributed-serving>
+For a model to be compatible with the Transformers backend for vLLM it must:
 
-#### Remote Code
+- be a Transformers compatible custom model (see [Transformers - Customizing models](https://huggingface.co/docs/transformers/en/custom_models)):
+  * The model directory must have the correct structure (e.g. `config.json` is present).
+  * `config.json` must contain `auto_map.AutoModel`.
+- be a Transformers backend for vLLM compatible model (see <project:#writing-custom-models>):
+  * Customisation should be done in the base model (e.g. in `MyModel`, not `MyModelForCausalLM`).
 
-If your model is neither supported natively by vLLM or Transformers, you can still run it in vLLM!
+If the compatible model is:
 
-Simply set `trust_remote_code=True` and vLLM will run any model on the Model Hub that is compatible with Transformers.
-Provided that the model writer implements their model in a compatible way, this means that you can run new models before they are officially supported in Transformers or vLLM!
+- on the Hugging Face Model Hub, simply set `trust_remote_code=True` for <project:#offline-inference> or `--trust-remode-code` for the <project:#openai-compatible-server>.
+- in a local directory, simply pass directory path to `model=<MODEL_DIR>` for <project:#offline-inference> or `vllm serve <MODEL_DIR>` for the <project:#openai-compatible-server>.
 
-```python
-from vllm import LLM
-llm = LLM(model=..., task="generate", trust_remote_code=True)  # Name or path of your model
-llm.apply_model(lambda model: print(model.__class__))
-```
+This means that, with the Transformers backend for vLLM, new models can be used before they are officially supported in Transformers or vLLM!
+
+(writing-custom-models)=
+
+#### Writing custom models
+
+This section details the necessary modifications to make to a Transformers compatible custom model that make it compatible with the Transformers backend for vLLM. (We assume that a Transformers compatible custom model has already been created, see [Transformers - Customizing models](https://huggingface.co/docs/transformers/en/custom_models)).
 
 To make your model compatible with the Transformers backend, it needs:
+
+1. `kwargs` passed down through all modules from `MyModel` to `MyAttention`.
+2. `MyAttention` must use `ALL_ATTENTION_FUNCTIONS` to call attention.
+3. `MyModel` must contain `_supports_attention_backend = True`.
 
 ```{code-block} python
 :caption: modeling_my_model.py
@@ -71,7 +79,7 @@ from torch import nn
 
 class MyAttention(nn.Module):
 
-  def forward(self, hidden_states, **kwargs): # <- kwargs are required
+  def forward(self, hidden_states, **kwargs):
     ...
     attention_interface = ALL_ATTENTION_FUNCTIONS[self.config._attn_implementation]
     attn_output, attn_weights = attention_interface(
@@ -87,11 +95,11 @@ class MyModel(PreTrainedModel):
   _supports_attention_backend = True
 ```
 
-Here is what happens in the background:
+Here is what happens in the background when this model is loaded:
 
-1. The config is loaded
-2. `MyModel` Python class is loaded from the `auto_map`, and we check that the model `_supports_attention_backend`.
-3. The `TransformersForCausalLM` backend is used. See <gh-file:vllm/model_executor/models/transformers.py>, which leverage `self.config._attn_implementation = "vllm"`, thus the need to use `ALL_ATTENTION_FUNCTION`.
+1. The config is loaded.
+2. `MyModel` Python class is loaded from the `auto_map` in config, and we check that the model `is_backend_compatible()`.
+3. `MyModel` is loaded into `TransformersForCausalLM` (see <gh-file:vllm/model_executor/models/transformers.py>) which sets `self.config._attn_implementation = "vllm"` so that vLLM's attention layer is used.
 
 That's it!
 
@@ -129,7 +137,7 @@ class MyConfig(PretrainedConfig):
 
 ### Hugging Face Hub
 
-By default, vLLM loads models from [Hugging Face (HF) Hub](https://huggingface.co/models).
+By default, vLLM loads models from [Hugging Face (HF) Hub](https://huggingface.co/models). To change the download path for models, you can set the `HF_HOME` environment variable; for more details, refer to [their official documentation](https://huggingface.co/docs/huggingface_hub/package_reference/environment_variables#hfhome).
 
 To determine whether a given model is natively supported, you can check the `config.json` file inside the HF repository.
 If the `"architectures"` field contains a model architecture listed below, then it should be natively supported.
@@ -334,7 +342,7 @@ See [this page](#generative-models) for more information on how to use generativ
   * ✅︎
 - * `Glm4ForCausalLM`
   * GLM-4-0414
-  * `THUDM/GLM-4-32B-Chat-0414`, etc.
+  * `THUDM/GLM-4-32B-0414`, etc.
   * ✅︎
   * ✅︎
 - * `GPT2LMHeadModel`
@@ -497,6 +505,11 @@ See [this page](#generative-models) for more information on how to use generativ
   * `adept/persimmon-8b-base`, `adept/persimmon-8b-chat`, etc.
   *
   * ✅︎
+- * `Plamo2ForCausalLM`
+  * PLaMo2
+  * `pfnet/plamo-2-1b`, `pfnet/plamo-2-8b`, etc.
+  *
+  *
 - * `QWenLMHeadModel`
   * Qwen
   * `Qwen/Qwen-7B`, `Qwen/Qwen-7B-Chat`, etc.
@@ -735,6 +748,11 @@ If your model is not in the above list, we will try to automatically convert the
   * `BAAI/bge-reranker-v2-m3`, etc.
   *
   *
+- * `ModernBertForSequenceClassification`
+  * ModernBert-based
+  * `Alibaba-NLP/gte-reranker-modernbert-base`, etc.
+  *
+  *
 :::
 
 (supported-mm-models)=
@@ -774,7 +792,7 @@ llm = LLM(
 Online serving:
 
 ```bash
-vllm serve Qwen/Qwen2-VL-7B-Instruct --limit-mm-per-prompt image=4
+vllm serve Qwen/Qwen2-VL-7B-Instruct --limit-mm-per-prompt '{"image":4}'
 ```
 
 **This is no longer required if you are using vLLM V1.**
@@ -990,7 +1008,7 @@ See [this page](#generative-models) for more information on how to use generativ
   * `microsoft/Phi-4-multimodal-instruct`, etc.
   * ✅︎
   *
-  *
+  * ✅︎
 - * `PixtralForConditionalGeneration`
   * Pixtral
   * T + I<sup>+</sup>
@@ -1026,6 +1044,13 @@ See [this page](#generative-models) for more information on how to use generativ
   * ✅︎
   * ✅︎
   * ✅︎
+- * `Qwen2_5OmniThinkerForConditionalGeneration`
+  * Qwen2.5-Omni
+  * T + I<sup>E+</sup> + V<sup>E+</sup> + A<sup>+</sup>
+  * `Qwen/Qwen2.5-Omni-7B`
+  *
+  * ✅︎
+  * ✅︎\*
 - * `SkyworkR1VChatModel`
   * Skywork-R1V-38B
   * T + I
@@ -1093,6 +1118,14 @@ For more details, please see: <gh-pr:4087#issuecomment-2250397630>
 
 :::{warning}
 Our PaliGemma implementations have the same problem as Gemma 3 (see above) for both V0 and V1.
+:::
+
+:::{note}
+To use Qwen2.5-Omni, you have to install Hugging Face Transformers library from source via
+`pip install git+https://github.com/huggingface/transformers.git`.
+
+Read audio from video pre-processing is currently supported on V0 (but not V1), because overlapping modalities is not yet supported in V1.
+`--mm-processor-kwargs '{"use_audio_in_video": True}'`.
 :::
 
 ### Pooling Models
