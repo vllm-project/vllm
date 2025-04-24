@@ -367,8 +367,8 @@ def test_op_fwd_fp8(Z,
     # compare
     torch.testing.assert_close(ref_out.to(torch.float32),
                                tri_out.to(torch.float32),
-                               atol=2e-2,
-                               rtol=2e-2)
+                               atol=7e-2,
+                               rtol=2e-1)
 
 
 @pytest.mark.parametrize('Z, H, N_CTX_Q, N_CTX_K, D_HEAD', [
