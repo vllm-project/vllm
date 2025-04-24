@@ -1199,14 +1199,24 @@ def apply_hf_chat_template(
             "allowed, so you must provide a chat template if the tokenizer "
             "does not define one.")
 
-    return tokenizer.apply_chat_template(
-        conversation=conversation,  # type: ignore[arg-type]
-        tools=tools,  # type: ignore[arg-type]
-        chat_template=hf_chat_template,
-        tokenize=tokenize,
-        **kwargs,
-    )
+    try:
 
+        return tokenizer.apply_chat_template(
+            conversation=conversation,  # type: ignore[arg-type]
+            tools=tools,  # type: ignore[arg-type]
+            chat_template=hf_chat_template,
+            tokenize=tokenize,
+            **kwargs,
+        )
+
+    # External library exceptions can sometimes occur despite the framework's
+    # internal exception management capabilities.
+    except Exception as e:
+
+        # Log and report any library-related exceptions for further
+        # investigation.
+        logger.exception(traceback.format_exc())
+        raise ValueError from e
 
 def apply_mistral_chat_template(
     tokenizer: MistralTokenizer,
