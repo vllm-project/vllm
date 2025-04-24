@@ -233,7 +233,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   // kernels from being torch.compile'd.
   // See the following document for more info on custom types and ops that use
   // custom types:
-  // https://docs.google.com/document/d/18fBMPuOJ0fY5ZQ6YyrHUppw9FA332CpNtgB6SOIgyuA 
+  // https://docs.google.com/document/d/18fBMPuOJ0fY5ZQ6YyrHUppw9FA332CpNtgB6SOIgyuA
 
   // Marlin (Dense) Optimized Quantized GEMM for GPTQ.
   ops.def(
