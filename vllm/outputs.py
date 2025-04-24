@@ -179,6 +179,13 @@ class RequestOutput:
                 group.finish_seq(seq_group)
             if assembled_seq_group is None:
                 return None
+
+            # clear finished seq in seq_id_to_seq_group
+            if len(group.to_be_finished) == 0:
+                for sub_request_id in list(group.seq_id_to_index.keys()):
+                    if sub_request_id in seq_id_to_seq_group:
+                        del seq_id_to_seq_group[sub_request_id]
+
             return cls.from_seq_group(assembled_seq_group, use_cache,
                                       seq_id_to_seq_group)
 
