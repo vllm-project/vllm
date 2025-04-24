@@ -27,6 +27,7 @@ logger = init_logger(__name__)
 
 
 @ToolParserManager.register_module("llama3_json")
+@ToolParserManager.register_module("llama4_json")
 class Llama3JsonToolParser(ToolParser):
     """
     Tool call parser for Llama 3.1 models intended for use with the
