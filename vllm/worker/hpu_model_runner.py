@@ -2232,7 +2232,7 @@ class HPUModelRunner(HPUModelRunnerBase[ModelInputForHPUWithSamplingMetadata]):
                                      f'{"prompt" if is_prompt else "decode"}_'
                                      f'bs{batch_size}_'
                                      f'seq{seq_len}')):
-                    output = self.sample(
+                    output = self.model.sample(
                         logits=logits,
                         sampling_metadata=sampling_metadata,
                     )
