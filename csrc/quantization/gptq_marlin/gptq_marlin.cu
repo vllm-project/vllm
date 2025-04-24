@@ -761,7 +761,6 @@ torch::Tensor gptq_marlin_gemm(
     b_zeros = torch::empty({0}, options);
   }
   bool has_zp = b_zeros.size(-1) > 0;
-
   if (has_zp) {
     TORCH_CHECK(
         b_q_type == vllm::kU4 || b_q_type == vllm::kU8,
