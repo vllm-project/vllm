@@ -3,7 +3,6 @@
 import math
 from collections import OrderedDict
 from collections.abc import Iterable, Mapping, Sequence
-from functools import cached_property
 from typing import List, Literal, Optional, Set, Tuple, TypedDict, Union
 
 import torch
@@ -14,7 +13,6 @@ from transformers import BartTokenizer, BatchFeature, PretrainedConfig
 
 from vllm.config import VllmConfig
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
-from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.bart import (BartDecoder, BartEncoder,
                                              BartParallelLMHead,
@@ -673,7 +671,6 @@ class Florence2LanguageForConditionalGeneration(nn.Module, SupportsV0Only):
 
         self.logits_processor = LogitsProcessor(self.vocab_size,
                                                 config.vocab_size)
-        self.sampler = get_sampler()
 
     def forward(
         self,
@@ -715,11 +712,6 @@ class Florence2LanguageForConditionalGeneration(nn.Module, SupportsV0Only):
         logits = self.logits_processor(self.lm_head, hidden_states,
                                        sampling_metadata)
         return logits
-
-    def sample(self, logits: torch.Tensor,
-               sampling_metadata: SamplingMetadata) -> SamplerOutput:
-        next_tokens = self.sampler(logits, sampling_metadata)
-        return next_tokens
 
     def load_weights(self, weights: Iterable[Tuple[str,
                                                    torch.Tensor]]) -> Set[str]:
@@ -929,12 +921,6 @@ class Florence2ForConditionalGeneration(nn.Module, SupportsMultiModal,
             raise NotImplementedError(
                 'Florence2 only supports COSINE as temporal embedding.')
 
-    @cached_property
-    def sampler(self):
-        if hasattr(self.language_model, "sampler"):
-            return self.language_model.sampler
-        return get_sampler()
-
     def _validate_pixel_values(
         self, data: Union[torch.Tensor, List[torch.Tensor]]
     ) -> Union[torch.Tensor, List[torch.Tensor]]:
@@ -1109,13 +1095,6 @@ class Florence2ForConditionalGeneration(nn.Module, SupportsMultiModal,
     ) -> Optional[torch.Tensor]:
         return self.language_model.compute_logits(hidden_states,
                                                   sampling_metadata)
-
-    def sample(
-        self,
-        logits: torch.Tensor,
-        sampling_metadata: SamplingMetadata,
-    ) -> SamplerOutput:
-        return self.language_model.sample(logits, sampling_metadata)
 
     def load_weights(self, weights: Iterable[Tuple[str,
                                                    torch.Tensor]]) -> Set[str]:
