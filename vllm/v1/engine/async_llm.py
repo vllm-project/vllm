@@ -81,9 +81,7 @@ class AsyncLLM(EngineClient):
         self.tokenizer = init_tokenizer_from_configs(
             model_config=vllm_config.model_config,
             scheduler_config=vllm_config.scheduler_config,
-            parallel_config=vllm_config.parallel_config,
             lora_config=vllm_config.lora_config)
-        self.tokenizer.ping()
 
         # Processor (converts Inputs --> EngineCoreRequests).
         self.processor = Processor(

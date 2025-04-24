@@ -10,7 +10,7 @@ from transformers import (AutoTokenizer, PreTrainedTokenizer,
 from vllm.inputs import token_inputs
 from vllm.sequence import Logprob, SamplingParams, Sequence, SequenceGroup
 from vllm.transformers_utils.detokenizer import Detokenizer
-from vllm.transformers_utils.tokenizer_group import get_tokenizer_group
+from vllm.transformers_utils.tokenizer_group import TokenizerGroup
 from vllm.transformers_utils.tokenizers.mistral import MistralTokenizer
 from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.engine.detokenizer import (FastIncrementalDetokenizer,
@@ -212,7 +212,7 @@ def test_oov_decode(tokenizer, fast):
 
 @pytest.fixture
 def detokenizer(tokenizer_name: str) -> Detokenizer:
-    init_kwargs = dict(
+    tokenizer_group = TokenizerGroup(
         tokenizer_id=tokenizer_name,
         enable_lora=False,
         max_num_seqs=100,
@@ -220,11 +220,6 @@ def detokenizer(tokenizer_name: str) -> Detokenizer:
         tokenizer_mode="mistral" if "mistral" in tokenizer_name else "auto",
         trust_remote_code=False,
         revision=None,
-    )
-
-    tokenizer_group = get_tokenizer_group(
-        None,
-        **init_kwargs,
     )
 
     return Detokenizer(tokenizer_group)
