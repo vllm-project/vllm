@@ -272,6 +272,37 @@ class BaseMiniMaxVL01MultiModalProcessor(BaseMultiModalProcessor[_I]):
 class MiniMaxVL01MultiModalProcessor(
         BaseMiniMaxVL01MultiModalProcessor[MiniMaxVL01ProcessingInfo]):
 
+    def _call_hf_processor(
+        self,
+        prompt: str,
+        mm_data: Mapping[str, object],
+        mm_kwargs: Mapping[str, object],
+    ) -> BatchFeature:
+        processed_outputs = super()._call_hf_processor(
+            prompt=prompt,
+            mm_data=mm_data,
+            mm_kwargs=mm_kwargs,
+        )
+
+        pixel_values = processed_outputs.get("pixel_values")
+        if pixel_values is not None:
+            image_sizes = processed_outputs.get("image_sizes")
+            if image_sizes is not None and len(
+                    pixel_values) != len(image_sizes) and isinstance(
+                        pixel_values, list) and isinstance(image_sizes, list):
+                if isinstance(pixel_values[0], list):
+                    pixel_values = [
+                        item for sublist in pixel_values for item in sublist
+                    ]
+                    processed_outputs["pixel_values"] = pixel_values
+
+                if len(pixel_values) != len(image_sizes) and len(
+                        image_sizes) == 1 and len(pixel_values) > 1:
+                    image_sizes = [image_sizes[0]] * len(pixel_values)
+                    processed_outputs["image_sizes"] = image_sizes
+
+        return processed_outputs
+
     def _get_mm_fields_config(
         self,
         hf_inputs: BatchFeature,
