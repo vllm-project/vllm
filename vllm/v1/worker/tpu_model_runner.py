@@ -10,6 +10,7 @@ import torch.distributed
 import torch.nn as nn
 # TPU XLA related
 import torch_xla.core.xla_model as xm
+import torch_xla.distributed.spmd as xs
 import torch_xla.runtime as xr
 
 import vllm.envs as envs
@@ -17,6 +18,7 @@ from vllm.attention.backends.abstract import AttentionType
 from vllm.attention.layer import Attention
 from vllm.compilation.wrapper import TorchCompileWrapperWithCustomDispatcher
 from vllm.config import VllmConfig
+from vllm.distributed.tpu_distributed_utils import shard_model
 from vllm.forward_context import set_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader import get_model
@@ -94,6 +96,7 @@ class TPUModelRunner:
         self,
         vllm_config: VllmConfig,
         device: torch.device,
+        use_spmd: bool,
     ):
         self.vllm_config = vllm_config
         self.model_config = vllm_config.model_config
@@ -113,6 +116,14 @@ class TPUModelRunner:
         parallel_config = self.parallel_config
         self.device = device
         self.check_recompilation = envs.VLLM_XLA_CHECK_RECOMPILATION
+
+        # SPMD Related
+        self.use_spmd = use_spmd
+        if use_spmd:
+            num_devices = xr.global_runtime_device_count()
+            mesh_shape = (num_devices, 1)
+            device_ids = np.array(range(num_devices))
+            self.mesh = xs.Mesh(device_ids, mesh_shape, ('x', 'y'))
 
         self.enforce_eager = model_config.enforce_eager
 
@@ -841,6 +852,11 @@ class TPUModelRunner:
         # loading.
         xm.mark_step()
         xm.wait_device_ops()
+
+        shard_model(model, self.mesh)
+        # torch compile after model sharding are done
+        model.model = torch.compile(model.model, backend="openxla")
+
         self.model = model
         self.sampler = TPUSampler()
 
@@ -1017,6 +1033,14 @@ class TPUModelRunner:
             kv_caches,
             self.vllm_config.compilation_config.static_forward_context,
             self.kv_caches)
+        if self.use_spmd:
+            # Shard KV Cache
+            for cache in self.kv_caches:
+                xs.mark_sharding(cache, self.mesh, (None, 'x', None, None))
+
+        logger.info(
+            f"check kv cache len {len(self.kv_caches)}, shape {self.kv_caches[0].shape}"
+        )
         logger.info("end init kv cache")
 
     def reset_dynamo_cache(self):

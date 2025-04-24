@@ -93,11 +93,13 @@ class TPUWorker:
         torch.set_grad_enabled(False)
         torch.set_default_dtype(self.model_config.dtype)
 
+        use_spmd = True
         # Initialize the distributed environment.
         init_tpu_worker_distributed_environment(self.parallel_config,
                                                 self.rank,
                                                 self.distributed_init_method,
-                                                self.local_rank)
+                                                self.local_rank,
+                                                use_spmd=use_spmd)
 
         # Device initialization should happen after initializing
         # the distributed runtime.
@@ -131,7 +133,9 @@ class TPUWorker:
             xr.initialize_cache(per_rank_path, readonly=False)
 
         # Init ModelRunner here, so that we have access to self.device.
-        self.model_runner = TPUModelRunner(self.vllm_config, self.device)
+        self.model_runner = TPUModelRunner(self.vllm_config,
+                                           self.device,
+                                           use_spmd=use_spmd)
 
     def determine_available_memory(self) -> int:
         kv_caches: dict[str, torch.Tensor] = {}
@@ -241,6 +245,7 @@ def init_tpu_worker_distributed_environment(
     rank: int,
     distributed_init_method: Optional[str] = None,
     local_rank: int = -1,
+    use_spmd: bool = False,
 ) -> None:
     """Initialize the distributed environment."""
     use_spmd = True

@@ -456,11 +456,6 @@ class DefaultModelLoader(BaseModelLoader):
         with set_default_torch_dtype(model_config.dtype):
             with target_device:
                 model = _initialize_model(vllm_config=vllm_config)
-            # orig_device = target_device
-            # target_device = torch.device("cpu")
-            # # For SPMD we init model on CPU, then use mark_sharding to shard
-            # # model and move shards to TPU.
-            # model = _initialize_model(vllm_config=vllm_config)
 
             # Load full weights to CPU for now
             weights_to_load = {name for name, _ in model.named_parameters()}
@@ -484,8 +479,22 @@ class DefaultModelLoader(BaseModelLoader):
             _process_weights_after_loading(model, model_config, target_device)
 
             if use_spmd:
+                # import torch_xla.distributed.spmd as xs
+                # from torch_xla import runtime as xr
                 model = model.to('xla')
-                model.model = torch.compile(model.model, backend="openxla")
+                # num_devices = xr.global_runtime_device_count()
+                # mesh_shape = (num_devices, 1)
+                # device_ids = np.array(range(num_devices))
+                # mesh = xs.Mesh(device_ids, mesh_shape, ('x', 'y'))
+
+                # backbone_lm = model.model
+                # for layer in backbone_lm.layers:
+                #     w13 = layer.mlp.gate_up_proj.weight
+                #     w2 = layer.mlp.down_proj.weight
+                #     xs.mark_sharding(w13, mesh, ('x', None))
+                #     xs.mark_sharding(w2, mesh, (None, 'x'))
+
+                # model.model = torch.compile(model.model, backend="openxla")
 
         return model.eval()
 
