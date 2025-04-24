@@ -113,15 +113,11 @@ class MiniMaxText01RMSNormTP(CustomOp):
         x = x * torch.rsqrt(variance + self.variance_epsilon)
 
         weight = self.weight
-        if x.size(-1) != weight.size(0):
-            new_size = x.size(-1)
-            new_weight = torch.zeros(new_size,
-                                     device=weight.device,
-                                     dtype=weight.dtype)
-            repeat_times = (new_size + weight.size(0) - 1) // weight.size(0)
-            repeated_weight = weight.repeat(repeat_times)
-            new_weight[:] = repeated_weight[:new_size]
-            weight = new_weight
+        if x.size(-1) != self.weight.size(0):
+            weight_cpu = self.weight.cpu()
+            repeated_cpu = weight_cpu.repeat(
+                x.size(-1) // weight_cpu.size(0) + 1)
+            weight = repeated_cpu[:x.size(-1)].to(self.weight.device)
 
         if x.dim() > 1:
             weight = weight.view(1, -1)
