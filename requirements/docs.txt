@@ -7,6 +7,7 @@ sphinx-togglebutton==0.3.2
 myst-parser==3.0.1
 msgspec
 cloudpickle
+commonmark # Required by sphinx-argparse when using :markdownhelp:
 
 # packages to install to build the documentation
 cachetools
