@@ -249,12 +249,9 @@ class EngineCore:
         return engine_core_outputs
 
     def shutdown(self):
+        self.structured_output_manager.clear_backend()
         if self.model_executor:
             self.model_executor.shutdown()
-
-        so_backend = self.structured_output_manager.backend
-        if so_backend is not None:
-            so_backend.destroy()
 
     def profile(self, is_start: bool = True):
         self.model_executor.profile(is_start)

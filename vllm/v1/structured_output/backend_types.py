@@ -91,5 +91,5 @@ class StructuredOutputBackend(ABC):
     @abstractmethod
     def destroy(self):
         """
-        Clear objects in the backend to avoid nanobind leaked.
+        Backend-specific cleanup.
         """
