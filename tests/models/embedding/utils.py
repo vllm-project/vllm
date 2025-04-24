@@ -49,9 +49,9 @@ class EmbedModelInfo(NamedTuple):
 
 
 def correctness_test(hf_model,
-                      inputs,
-                      vllm_outputs: Sequence[list[float]],
-                      dimensions: Optional[int] = None):
+                     inputs,
+                     vllm_outputs: Sequence[list[float]],
+                     dimensions: Optional[int] = None):
 
     hf_outputs = hf_model.encode(inputs)
     if dimensions:
