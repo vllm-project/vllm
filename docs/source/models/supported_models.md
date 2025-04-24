@@ -1108,11 +1108,7 @@ To use `TIGER-Lab/Mantis-8B-siglip-llama3`, you have to pass `--hf_overrides '{"
 :::
 
 :::{warning}
-AllenAI Molmo-7B-D-0924 (multi-modal)
-
-⚠️ Accuracy Note: For improved output quality (especially in object localization tasks), we recommend using the pinned dependency versions listed in [`requirements/molmo.txt`](https://github.com/vllm-project/vllm/blob/main/requirements/molmo.txt).  
-These versions match the environment that achieved consistent results on both A10 and L40 GPUs.  
-_Note: This setup currently works with `vllm==0.7.0`._
+For improved output quality of `AllenAI/Molmo-7B-D-0924` (especially in object localization tasks), we recommend using the pinned dependency versions listed in <gh-file:requirements/molmo.txt> (including `vllm==0.7.0`). These versions match the environment that achieved consistent results on both A10 and L40 GPUs.
 :::
 
 :::{note}
