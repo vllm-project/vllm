@@ -504,7 +504,7 @@ class Scheduler(SchedulerInterface):
 
         events = self.kv_cache_manager.take_events()
         if events:
-            batch = KVEventBatch(ts=time.time(), events=events)
+            batch = KVEventBatch(ts=time.monotonic(), events=events)
             self.kv_event_publisher.publish(batch)
 
         # Advance the number of computed tokens for the request AFTER
@@ -738,8 +738,7 @@ class Scheduler(SchedulerInterface):
                         new_logprobs=new_logprobs,
                         new_prompt_logprobs_tensors=prompt_logprobs_tensors,
                         stop_reason=request.stop_reason,
-                        events=request.take_events(),
-                    ))
+                        events=request.take_events()))
             else:
                 # Invariant: EngineCore returns no partial prefill outputs.
                 assert not prompt_logprobs_tensors

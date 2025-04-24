@@ -139,7 +139,6 @@ class EngineCoreOutputs(
     # [num_reqs]
     outputs: list[EngineCoreOutput] = []
     scheduler_stats: Optional[SchedulerStats] = None
-
     timestamp: float = 0.0
 
     utility_output: Optional[UtilityOutput] = None

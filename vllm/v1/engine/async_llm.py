@@ -74,7 +74,6 @@ class AsyncLLM(EngineClient):
                     loggers.append(LoggingStatLogger(engine_index=i))
                 loggers.append(
                     PrometheusStatLogger(vllm_config, engine_index=i))
-
                 self.stat_loggers.append(loggers)
 
         # Tokenizer (+ ensure liveness if running in another process).
@@ -381,7 +380,8 @@ class AsyncLLM(EngineClient):
                         AsyncLLM._record_stats(
                             stat_loggers[outputs.engine_index],
                             scheduler_stats=outputs.scheduler_stats,
-                            iteration_stats=iteration_stats)
+                            iteration_stats=iteration_stats,
+                        )
             except Exception as e:
                 logger.exception("AsyncLLM output_handler failed.")
                 output_processor.propagate_error(e)
