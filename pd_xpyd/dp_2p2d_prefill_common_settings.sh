@@ -4,12 +4,8 @@ BASH_DIR=$(dirname "${BASH_SOURCE[0]}")
 source "$BASH_DIR"/pd_bucket.sh
 
 source ./pd_xpyd/pd_env.sh
-source ./pd_xpyd/start_etc_mooncake_master.sh
 
 export VLLM_EP_SIZE=16
-
-export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib
-export MOONCAKE_CONFIG_PATH=./pd_xpyd/2p2d_mooncake_p.json 
 
 model_path=/mnt/disk2/hf_models/DeepSeek-R1-BF16-w8afp8-static-no-ste-G2/
 
@@ -20,7 +16,7 @@ export VLLM_GRAPH_PROMPT_RATIO=1
 # params
 model_len=16384
 max_num_batched_tokens=16384
-max_num_seqs=32
+max_num_seqs=512
 input_min=500
 input_max=4096
 output_max=2200
