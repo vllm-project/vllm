@@ -7,7 +7,7 @@ steps:
   - label: ":docker: build image"
     depends_on: ~
     commands:
-      - "docker build --build-arg max_jobs=16 --tag {{ docker_image_amd }} -f Dockerfile.rocm  --build-arg ARG_PYTORCH_ROCM_ARCH='gfx90a;gfx942' --target test --progress plain ."
+      - "docker build --build-arg max_jobs=16 --tag {{ docker_image_amd }} -f docker/Dockerfile.rocm  --build-arg ARG_PYTORCH_ROCM_ARCH='gfx90a;gfx942' --target test --progress plain ."
       - "docker push {{ docker_image_amd }}"
     key: "amd-build"
     env:
@@ -20,6 +20,7 @@ steps:
           limit: 5
     agents:
       queue: amd-cpu
+    soft_fail: false
 
 {% for step in steps %}
 {% if step.mirror_hardwares and "amd" in step.mirror_hardwares %}
@@ -37,10 +38,10 @@ steps:
       queue: amd_gpu
 {% endif%}
     commands: 
-      - bash .buildkite/run-amd-test.sh "cd {{ (step.working_dir or default_working_dir) | safe  }} ; {{ step.command  or (step.commands | join(" && ")) | safe }}"
+      - bash .buildkite/scripts/hardware_ci/run-amd-test.sh "cd {{ (step.working_dir or default_working_dir) | safe  }} ; {{ step.command  or (step.commands | join(" && ")) | safe }}"
     env:
       DOCKER_BUILDKIT: "1"
     priority: 100
-    soft_fail: true
+    soft_fail: false
 {% endif %}
 {% endfor %}
