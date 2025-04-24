@@ -251,7 +251,7 @@ class Scheduler(SchedulerInterface):
                 # cycle to fill in the bitmask, which could be a big no-op.
                 structured_output_request_ids[request.request_id] = req_index
             req_to_new_block_ids[request.request_id] = (
-                new_blocks.to_block_ids())
+                self.kv_cache_manager.to_block_ids(new_blocks))
             num_scheduled_tokens[request.request_id] = num_new_tokens
             token_budget -= num_new_tokens
             req_index += 1
@@ -321,6 +321,7 @@ class Scheduler(SchedulerInterface):
                 # Get already-cached tokens.
                 computed_blocks, num_computed_tokens = \
                     self.kv_cache_manager.get_computed_blocks(request)
+                print("num_computed_tokens", num_computed_tokens)
 
                 # Get externally-cached tokens if using a KVConnector.
                 num_external_tokens = (
@@ -397,7 +398,8 @@ class Scheduler(SchedulerInterface):
                 if self.lora_config and request.lora_request:
                     scheduled_loras.add(request.lora_request.lora_int_id)
                 req_to_new_block_ids[request.request_id] = (
-                    computed_blocks + new_blocks).to_block_ids()
+                    self.kv_cache_manager.to_block_ids(computed_blocks +
+                                                       new_blocks))
                 num_scheduled_tokens[request.request_id] = num_new_tokens
                 token_budget -= num_new_tokens
                 request.status = RequestStatus.RUNNING

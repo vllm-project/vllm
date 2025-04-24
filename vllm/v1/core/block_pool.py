@@ -5,7 +5,7 @@ from typing import Callable, Optional
 
 from vllm.logger import init_logger
 from vllm.v1.core.kv_cache_utils import (BlockHashType, FreeKVCacheBlockQueue,
-                                         KVCacheBlock,
+                                         GroupedKVCacheBlock, KVCacheBlock,
                                          generate_block_hash_extra_keys,
                                          hash_block_tokens)
 from vllm.v1.request import Request
@@ -27,10 +27,11 @@ class BlockPool:
     """
 
     def __init__(self, num_gpu_blocks: int, enable_caching: bool,
-                 num_kv_cache_groups: int):
+                 num_specialized_managers: int, caching_hash_fn: Callable):
         assert isinstance(num_gpu_blocks, int) and num_gpu_blocks > 0
         self.num_gpu_blocks = num_gpu_blocks
         self.enable_caching = enable_caching
+        self.caching_hash_fn = caching_hash_fn
         # All kv-cache blocks.
         self.blocks: list[KVCacheBlock] = [
             KVCacheBlock(idx) for idx in range(num_gpu_blocks)
@@ -40,7 +41,7 @@ class BlockPool:
         # enabled).
         self.free_block_queue = FreeKVCacheBlockQueue(self.blocks)
 
-        # {block_hash: {block ID: block}}. A cached block is
+        # {manager_id: {block_hash: {block ID: list[block]}}}. A cached block is
         # a full block with a block hash that can be used for prefix caching.
         # The cached block may be used by running requests or in the
         # free_block_queue that could potentially be evicted.
@@ -50,8 +51,8 @@ class BlockPool:
         # we want to make sure the allocated block IDs won't change so that
         # block tables are append-only.
         self.cached_block_hash_to_block: list[dict[BlockHashType, dict[
-            int, KVCacheBlock]]] = [
-                defaultdict(dict) for _ in range(num_kv_cache_groups)
+            int, GroupedKVCacheBlock]]] = [
+                defaultdict(dict) for _ in range(num_specialized_managers)
             ]
 
         # To represent a placeholder block with block_id=0.
@@ -59,13 +60,13 @@ class BlockPool:
         # avoid freeing it.
         self.null_block = self.free_block_queue.popleft()
 
-        self.num_kv_cache_groups = num_kv_cache_groups
+        self.num_specialized_managers = num_specialized_managers
 
     def get_cached_block(
         self,
         block_hash: BlockHashType,
-        kv_cache_group_id: int,
-    ) -> Optional[KVCacheBlock]:
+        manager_id: int,
+    ) -> Optional[GroupedKVCacheBlock]:
         """Get a cached block by the block hash, or None if cache miss.
         If there are duplicated blocks, we return the first block in the cache.
 
@@ -75,7 +76,7 @@ class BlockPool:
         Returns:
             The cached block if it exists, or None.
         """
-        cached_blocks = self.cached_block_hash_to_block[kv_cache_group_id].get(
+        cached_blocks = self.cached_block_hash_to_block[manager_id].get(
             block_hash)
         if not cached_blocks:
             return None
@@ -85,13 +86,12 @@ class BlockPool:
     def cache_full_blocks(
         self,
         request: Request,
-        blocks: list[KVCacheBlock],
+        blocks: list[GroupedKVCacheBlock],
         block_hashes: list[BlockHashType],
         num_cached_blocks: int,
         num_full_blocks: int,
         block_size: int,
-        hash_fn: Callable,
-        kv_cache_group_id: int,
+        manager_id: int,
     ) -> None:
         """Cache a list of full blocks for prefix caching.
         This function takes a list of blocks that will have their block hash
@@ -110,8 +110,7 @@ class BlockPool:
             num_full_blocks: The number of blocks that are full and should
                 be cached after this function.
             block_size: Number of tokens in each block.
-            hash_fn: The hash function to use for block hashes.
-            kv_cache_group_id: The id of the kv cache group.
+            manager_id: The id of the kv cache manager.
         """
         if num_cached_blocks == num_full_blocks:
             return
@@ -128,6 +127,7 @@ class BlockPool:
             prev_block_hash_value = prev_block.block_hash.hash_value
 
         for i, blk in enumerate(new_full_blocks):
+            assert all(b.block_hash is None for b in blk.blocks)
             assert blk.block_hash is None
 
             if i < len(new_block_hashes):
@@ -158,14 +158,17 @@ class BlockPool:
                     request, start_token_idx, end_token_idx, -1)
 
                 # Compute the hash of the current block.
-                block_hash = hash_block_tokens(hash_fn, prev_block_hash_value,
+                block_hash = hash_block_tokens(self.caching_hash_fn,
+                                               prev_block_hash_value,
                                                block_tokens, extra_keys)
                 block_hashes.append(block_hash)
 
             # Update and added the full block to the cache.
+            for b in blk.blocks:
+                b.block_hash = block_hash
+                b.manager_id = manager_id
             blk.block_hash = block_hash
-            blk.kv_cache_group_id = kv_cache_group_id
-            self.cached_block_hash_to_block[kv_cache_group_id][block_hash][
+            self.cached_block_hash_to_block[manager_id][block_hash][
                 blk.block_id] = blk
             prev_block_hash_value = block_hash.hash_value
 
@@ -213,22 +216,23 @@ class BlockPool:
             True if the block is evicted, False otherwise.
         """
         block_hash = block.block_hash
-        kv_cache_group_id = block.kv_cache_group_id
+        manager_id = block.manager_id
         if block_hash and block_hash in self.cached_block_hash_to_block[
-                kv_cache_group_id]:
-            block.reset_hash()
-            del self.cached_block_hash_to_block[kv_cache_group_id][block_hash][
+                manager_id]:
+            for b in self.cached_block_hash_to_block[manager_id][block_hash][
+                    block.block_id].blocks:
+                b.reset_hash()
+            del self.cached_block_hash_to_block[manager_id][block_hash][
                 block.block_id]
 
-            if len(self.cached_block_hash_to_block[kv_cache_group_id]
+            if len(self.cached_block_hash_to_block[manager_id]
                    [block_hash]) == 0:
-                del self.cached_block_hash_to_block[kv_cache_group_id][
-                    block_hash]
+                del self.cached_block_hash_to_block[manager_id][block_hash]
 
             return True
         return False
 
-    def touch(self, blocks: list[KVCacheBlock]) -> None:
+    def touch(self, blocks: list[list[GroupedKVCacheBlock]]) -> None:
         """Touch a block increases its reference count by 1, and may remove
         the block from the free queue. This is used when a block is hit by
         another request with the same prefix.
@@ -236,14 +240,17 @@ class BlockPool:
         Args:
             blocks: A list of blocks to touch.
         """
-        for block in blocks:
-            # ref_cnt=0 means this block is in the free list (i.e. eviction
-            # candidate), so remove it.
-            if block.ref_cnt == 0 and block != self.null_block:
-                self.free_block_queue.remove(block)
-            block.incr_ref()
+        for block_one_layer in blocks:
+            for block_two_layer in block_one_layer:
+                for block in block_two_layer.blocks:
+                    # ref_cnt=0 means this block is in the free list (i.e. eviction
+                    # candidate), so remove it.
+                    if block.ref_cnt == 0 and block != self.null_block:
+                        self.free_block_queue.remove(block)
+                    block.incr_ref()
 
-    def free_blocks(self, ordered_blocks: Iterable[KVCacheBlock]) -> None:
+    def free_blocks(self,
+                    ordered_blocks: Iterable[GroupedKVCacheBlock]) -> None:
         """Free a list of blocks. The blocks should be ordered by their
         eviction priority, where the first block will be evicted first.
 
@@ -251,11 +258,13 @@ class BlockPool:
             ordered_blocks: A list of blocks to free ordered by their eviction
                 priority.
         """
-        for block in ordered_blocks:
-            block.decr_ref()
-            # null_block should not be added to the free list.
-            if block.ref_cnt == 0 and block != self.null_block:
-                self.free_block_queue.append(block)
+        # TODO: make sure blocks in the first group are evicted first
+        for blk in ordered_blocks:
+            for block in blk.blocks:
+                block.decr_ref()
+                # null_block should not be added to the free list.
+                if block.ref_cnt == 0 and block != self.null_block:
+                    self.free_block_queue.append(block)
 
     def reset_prefix_cache(self) -> bool:
         """Reset prefix cache. This function may be used in RLHF
@@ -275,7 +284,7 @@ class BlockPool:
 
         # Remove all hashes so that no new blocks will hit.
         self.cached_block_hash_to_block = [
-            defaultdict(dict) for _ in range(self.num_kv_cache_groups)
+            defaultdict(dict) for _ in range(self.num_specialized_managers)
         ]
 
         # Remove all hashes from all blocks.

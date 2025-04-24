@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 """KV-Cache Utilities."""
+from contextlib import contextmanager
 import math
 import os
 from collections import defaultdict, deque
@@ -126,7 +127,7 @@ class KVCacheBlock:
     prev_free_block: Optional["KVCacheBlock"] = None
     next_free_block: Optional["KVCacheBlock"] = None
 
-    kv_cache_group_id: int = -1
+    manager_id: int = -1
 
     def incr_ref(self):
         self.ref_cnt += 1
@@ -147,7 +148,7 @@ class KVCacheBlock:
     def reset_hash(self):
         """Reset the block hash when the block is evicted."""
         self._block_hash = None
-        self.kv_cache_group_id = -1
+        self.manager_id = -1
 
     def __repr__(self) -> str:
         # Use block_id instead of KVCacheBlock object to avoid calling __repr__
@@ -829,3 +830,33 @@ def unify_kv_cache_configs(kv_cache_configs: list[KVCacheConfig]):
         kv_cache_config.num_blocks = min_num_blocks
 
     return kv_cache_configs
+
+
+@contextmanager
+def remove_last_block_hash_for_divisible_prompt_length(
+        block_hashes: dict[int, list[BlockHashType]], num_tokens: int):
+    """
+    Remove the last block hash for the case where the prompt length is divisible
+    by the block size and all blocks are cached.
+    """
+    last_block_hashs: dict[int, BlockHashType] = {}
+    for block_size in block_hashes:
+        if len(block_hashes[block_size]) * block_size == num_tokens:
+            last_block_hashs[block_size] = block_hashes[block_size].pop()
+    yield
+    for block_size, block_hash in last_block_hashs.items():
+        block_hashes[block_size].append(block_hash)
+
+
+# KVCacheBlocks for the same set of token of groups managed by the same manager
+@dataclass
+class GroupedKVCacheBlock:
+    blocks: tuple[KVCacheBlock, ...]
+    block_hash: Optional[BlockHashType] = None
+    block_id: int = -1
+
+    @staticmethod
+    def from_kv_cache_blocks(blocks: tuple[KVCacheBlock, ...]):
+        return GroupedKVCacheBlock(blocks=blocks,
+                                   block_hash=blocks[0].block_hash,
+                                   block_id=blocks[0].block_id)
