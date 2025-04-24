@@ -66,7 +66,7 @@ The sharded loader expects model files to follow the same naming pattern as the 
 vllm serve /path/to/sharded/model --load-format runai_streamer_sharded --model-loader-extra-config '{"pattern":"custom-model-rank-{rank}-part-{part}.safetensors"}'
 ```
 
-To create sharded model files, you can use the script provided in `examples/offline_inference/save_sharded_state.py`. This script demonstrates how to save a model in the sharded format that is compatible with the Run:ai Model Streamer sharded loader.
+To create sharded model files, you can use the script provided in <gh-file:examples/offline_inference/save_sharded_state.py>. This script demonstrates how to save a model in the sharded format that is compatible with the Run:ai Model Streamer sharded loader.
 
 The sharded loader supports all the same tunable parameters as the regular Run:ai Model Streamer, including `concurrency` and `memory_limit`. These can be configured in the same way:
 
