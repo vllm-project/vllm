@@ -175,7 +175,7 @@ class LLM:
         gpu_memory_utilization: float = 0.9,
         swap_space: float = 4,
         cpu_offload_gb: float = 0,
-        enforce_eager: Optional[bool] = None,
+        enforce_eager: bool = False,
         max_seq_len_to_capture: int = 8192,
         disable_custom_all_reduce: bool = False,
         disable_async_output_proc: bool = False,
@@ -188,12 +188,7 @@ class LLM:
         compilation_config: Optional[Union[int, dict[str, Any]]] = None,
         **kwargs,
     ) -> None:
-        '''
-        LLM constructor.
-
-        Note: if enforce_eager is unset (enforce_eager is None)
-        it defaults to False.
-        '''
+        """LLM constructor."""
 
         if "disable_log_stats" not in kwargs:
             kwargs["disable_log_stats"] = True

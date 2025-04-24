@@ -24,11 +24,10 @@ from vllm.config import (BlockSize, CacheConfig, CacheDType, CompilationConfig,
                          ObservabilityConfig, ParallelConfig, PoolerConfig,
                          PrefixCachingHashAlgo, PromptAdapterConfig,
                          SchedulerConfig, SchedulerPolicy, SpeculativeConfig,
-                         TaskOption, TokenizerPoolConfig, VllmConfig,
-                         get_attr_docs, get_field)
+                         TaskOption, TokenizerMode, TokenizerPoolConfig,
+                         VllmConfig, get_attr_docs, get_field)
 from vllm.executor.executor_base import ExecutorBase
 from vllm.logger import init_logger
-from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS
 from vllm.plugins import load_general_plugins
 from vllm.reasoning import ReasoningParserManager
 from vllm.test_utils import MODEL_WEIGHTS_S3_BUCKET, MODELS_ON_S3
@@ -48,26 +47,18 @@ TypeHint = Union[type[Any], object]
 TypeHintT = Union[type[T], object]
 
 
-def optional_arg(val: str, return_type: Callable[[str], T]) -> Optional[T]:
-    if val == "" or val == "None":
-        return None
-    try:
-        return return_type(val)
-    except ValueError as e:
-        raise argparse.ArgumentTypeError(
-            f"Value {val} cannot be converted to {return_type}.") from e
+def optional_type(return_type: Callable[[str], T]) -> Optional[T]:
 
+    def _optional_type(val: str) -> Optional[T]:
+        if val == "" or val == "None":
+            return None
+        try:
+            return return_type(val)
+        except ValueError as e:
+            raise argparse.ArgumentTypeError(
+                f"Value {val} cannot be converted to {return_type}.") from e
 
-def optional_str(val: str) -> Optional[str]:
-    return optional_arg(val, str)
-
-
-def optional_int(val: str) -> Optional[int]:
-    return optional_arg(val, int)
-
-
-def optional_float(val: str) -> Optional[float]:
-    return optional_arg(val, float)
+    return _optional_type
 
 
 def nullable_kvs(val: str) -> Optional[dict[str, int]]:
@@ -110,7 +101,7 @@ def nullable_kvs(val: str) -> Optional[dict[str, int]]:
 
 def optional_dict(val: str) -> Optional[dict[str, int]]:
     if re.match("^{.*}$", val):
-        return optional_arg(val, json.loads)
+        return optional_type(json.loads)(val)
 
     logger.warning(
         "Failed to parse JSON string. Attempting to parse as "
@@ -122,21 +113,22 @@ def optional_dict(val: str) -> Optional[dict[str, int]]:
 @dataclass
 class EngineArgs:
     """Arguments for vLLM engine."""
-    model: str = 'facebook/opt-125m'
-    served_model_name: Optional[Union[str, List[str]]] = None
-    tokenizer: Optional[str] = None
-    hf_config_path: Optional[str] = None
+    model: str = ModelConfig.model
+    served_model_name: Optional[Union[
+        str, List[str]]] = ModelConfig.served_model_name
+    tokenizer: Optional[str] = ModelConfig.tokenizer
+    hf_config_path: Optional[str] = ModelConfig.hf_config_path
     task: TaskOption = "auto"
     skip_tokenizer_init: bool = False
-    tokenizer_mode: str = 'auto'
+    tokenizer_mode: TokenizerMode = ModelConfig.tokenizer_mode
     trust_remote_code: bool = False
-    allowed_local_media_path: str = ""
+    allowed_local_media_path: str = ModelConfig.allowed_local_media_path
     download_dir: Optional[str] = LoadConfig.download_dir
     load_format: str = LoadConfig.load_format
-    config_format: ConfigFormat = ConfigFormat.AUTO
+    config_format: ConfigFormat = ModelConfig.config_format
     dtype: str = 'auto'
     kv_cache_dtype: CacheDType = CacheConfig.cache_dtype
-    seed: Optional[int] = None
+    seed: Optional[int] = ModelConfig.seed
     max_model_len: Optional[int] = None
     # Note: Specifying a custom executor backend by passing a class
     # is intended for expert use only. The API may change without
@@ -155,8 +147,8 @@ class EngineArgs:
     enable_prefix_caching: Optional[bool] = CacheConfig.enable_prefix_caching
     prefix_caching_hash_algo: PrefixCachingHashAlgo = \
         CacheConfig.prefix_caching_hash_algo
-    disable_sliding_window: bool = False
-    disable_cascade_attn: bool = False
+    disable_sliding_window: bool = ModelConfig.disable_sliding_window
+    disable_cascade_attn: bool = ModelConfig.disable_cascade_attn
     use_v2_block_manager: bool = True
     swap_space: float = CacheConfig.swap_space
     cpu_offload_gb: float = CacheConfig.cpu_offload_gb
@@ -168,7 +160,7 @@ class EngineArgs:
     long_prefill_token_threshold: int = \
         SchedulerConfig.long_prefill_token_threshold
     max_num_seqs: Optional[int] = SchedulerConfig.max_num_seqs
-    max_logprobs: int = 20  # Default value for OpenAI Chat Completions API
+    max_logprobs: int = ModelConfig.max_logprobs
     disable_log_stats: bool = False
     revision: Optional[str] = None
     code_revision: Optional[str] = None
@@ -178,8 +170,8 @@ class EngineArgs:
     hf_overrides: Optional[HfOverrides] = None
     tokenizer_revision: Optional[str] = None
     quantization: Optional[str] = None
-    enforce_eager: Optional[bool] = None
-    max_seq_len_to_capture: int = 8192
+    enforce_eager: bool = ModelConfig.enforce_eager
+    max_seq_len_to_capture: int = ModelConfig.max_seq_len_to_capture
     disable_custom_all_reduce: bool = ParallelConfig.disable_custom_all_reduce
     # The following three fields are deprecated and will be removed in a future
     # release. Setting them will have no effect. Please remove them from your
@@ -323,11 +315,16 @@ class EngineArgs:
                 # Initialise the kwargs dictionary for the field
                 kwargs[name] = {"default": default, "help": help}
 
-                # Make note of if the field is optional and get the actual
-                # type of the field if it is
+                # Get the type of the field
+                field_type = field.type
                 optional = is_optional(field.type)
-                field_type = get_args(
-                    field.type)[0] if optional else field.type
+                # It it's optional, retrieve the contained type
+                if optional:
+                    field_type = get_args(field_type)[:-1]
+                    if len(field_type) > 1:
+                        field_type = Union[field_type]
+                    else:
+                        field_type = field_type[0]
 
                 # Set type, action and choices for the field depending on the
                 # type of the field
@@ -357,97 +354,87 @@ class EngineArgs:
                     ), ("All non-Ellipsis tuple elements must be of the same "
                         f"type. Got {dtypes}.")
                     kwargs[name]["type"] = dtype
+                elif can_be_type(field_type, list):
+                    if is_type_in_union(field_type, list):
+                        field_type = get_type_from_union(field_type, list)
+                    dtypes = get_args(field_type)
+                    assert len(dtypes) == 1, (
+                        "List type must have exactly one type. Got "
+                        f"{field_type} with types {dtypes}")
+                    kwargs[name]["type"] = dtypes[0]
                     kwargs[name]["nargs"] = "+"
                 elif can_be_type(field_type, int):
-                    kwargs[name]["type"] = optional_int if optional else int
+                    kwargs[name]["type"] = int
+                    # Some int fields can use human-readable int
+                    if name in {"max_model_len"}:
+                        kwargs[name]["type"] = human_readable_int
                 elif can_be_type(field_type, float):
-                    kwargs[name][
-                        "type"] = optional_float if optional else float
+                    kwargs[name]["type"] = float
                 elif can_be_type(field_type, dict):
                     kwargs[name]["type"] = optional_dict
                 elif (can_be_type(field_type, str)
                       or is_custom_type(field_type)):
-                    kwargs[name]["type"] = optional_str if optional else str
+                    kwargs[name]["type"] = str
                 else:
                     raise ValueError(
                         f"Unsupported type {field.type} for argument {name}. ")
+
+                # Wrap valid types in optional_type if the field is optional
+                if optional and kwargs[name]["type"] in {
+                        int, float, str, human_readable_int
+                }:
+                    kwargs[name]["type"] = optional_type(kwargs[name]["type"])
             return kwargs
 
         # Model arguments
-        parser.add_argument(
-            '--model',
-            type=str,
-            default=EngineArgs.model,
-            help='Name or path of the huggingface model to use.')
-        parser.add_argument(
-            '--task',
-            default=EngineArgs.task,
-            choices=get_args(TaskOption),
-            help='The task to use the model for. Each vLLM instance only '
-            'supports one task, even if the same model can be used for '
-            'multiple tasks. When the model only supports one task, ``"auto"`` '
-            'can be used to select it; otherwise, you must specify explicitly '
-            'which task to use.')
-        parser.add_argument(
-            '--tokenizer',
-            type=optional_str,
-            default=EngineArgs.tokenizer,
-            help='Name or path of the huggingface tokenizer to use. '
-            'If unspecified, model name or path will be used.')
-        parser.add_argument(
-            "--hf-config-path",
-            type=optional_str,
-            default=EngineArgs.hf_config_path,
-            help='Name or path of the huggingface config to use. '
-            'If unspecified, model name or path will be used.')
-        parser.add_argument(
-            '--skip-tokenizer-init',
-            action='store_true',
-            help='Skip initialization of tokenizer and detokenizer. '
-            'Expects valid prompt_token_ids and None for prompt from '
-            'the input. The generated output will contain token ids.')
-        parser.add_argument(
-            '--revision',
-            type=optional_str,
-            default=None,
-            help='The specific model version to use. It can be a branch '
-            'name, a tag name, or a commit id. If unspecified, will use '
-            'the default version.')
-        parser.add_argument(
-            '--code-revision',
-            type=optional_str,
-            default=None,
-            help='The specific revision to use for the model code on '
-            'Hugging Face Hub. It can be a branch name, a tag name, or a '
-            'commit id. If unspecified, will use the default version.')
-        parser.add_argument(
-            '--tokenizer-revision',
-            type=optional_str,
-            default=None,
-            help='Revision of the huggingface tokenizer to use. '
-            'It can be a branch name, a tag name, or a commit id. '
-            'If unspecified, will use the default version.')
-        parser.add_argument(
-            '--tokenizer-mode',
-            type=str,
-            default=EngineArgs.tokenizer_mode,
-            choices=['auto', 'slow', 'mistral', 'custom'],
-            help='The tokenizer mode.\n\n* "auto" will use the '
-            'fast tokenizer if available.\n* "slow" will '
-            'always use the slow tokenizer. \n* '
-            '"mistral" will always use the `mistral_common` tokenizer. \n* '
-            '"custom" will use --tokenizer to select the '
-            'preregistered tokenizer.')
-        parser.add_argument('--trust-remote-code',
-                            action='store_true',
-                            help='Trust remote code from huggingface.')
-        parser.add_argument(
-            '--allowed-local-media-path',
-            type=str,
-            help="Allowing API requests to read local images or videos "
-            "from directories specified by the server file system. "
-            "This is a security risk. "
-            "Should only be enabled in trusted environments.")
+        model_kwargs = get_kwargs(ModelConfig)
+        model_group = parser.add_argument_group(
+            title="ModelConfig",
+            description=ModelConfig.__doc__,
+        )
+        model_group.add_argument("--model", **model_kwargs["model"])
+        model_group.add_argument("--task", **model_kwargs["task"])
+        model_group.add_argument("--tokenizer", **model_kwargs["tokenizer"])
+        model_group.add_argument("--tokenizer-mode",
+                                 **model_kwargs["tokenizer_mode"])
+        model_group.add_argument("--trust-remote-code",
+                                 **model_kwargs["trust_remote_code"])
+        model_group.add_argument("--dtype", **model_kwargs["dtype"])
+        model_group.add_argument("--seed", **model_kwargs["seed"])
+        model_group.add_argument("--hf-config-path",
+                                 **model_kwargs["hf_config_path"])
+        model_group.add_argument("--allowed-local-media-path",
+                                 **model_kwargs["allowed_local_media_path"])
+        model_group.add_argument("--revision", **model_kwargs["revision"])
+        model_group.add_argument("--code-revision",
+                                 **model_kwargs["code_revision"])
+        model_group.add_argument('--rope-scaling',
+                                 **model_kwargs["rope_scaling"])
+        model_group.add_argument('--rope-theta', **model_kwargs["rope_theta"])
+        model_group.add_argument("--tokenizer-revision",
+                                 **model_kwargs["tokenizer_revision"])
+        model_group.add_argument('--max-model-len',
+                                 **model_kwargs["max_model_len"])
+        model_group.add_argument('--quantization', '-q',
+                                 **model_kwargs["quantization"])
+        model_group.add_argument('--enforce-eager',
+                                 **model_kwargs["enforce_eager"])
+        model_group.add_argument('--max-seq-len-to-capture',
+                                 **model_kwargs["max_seq_len_to_capture"])
+        model_group.add_argument('--max-logprobs',
+                                 **model_kwargs["max_logprobs"])
+        model_group.add_argument('--disable-sliding-window',
+                                 **model_kwargs["disable_sliding_window"])
+        model_group.add_argument("--disable-cascade-attn",
+                                 **model_kwargs["disable_cascade_attn"])
+        model_group.add_argument("--skip-tokenizer-init",
+                                 **model_kwargs["skip_tokenizer_init"])
+        model_group.add_argument("--served-model-name",
+                                 **model_kwargs["served_model_name"])
+        model_group.add_argument('--config-format',
+                                 choices=[f.value for f in ConfigFormat],
+                                 **model_kwargs["config_format"])
+
         # Model loading arguments
         load_kwargs = get_kwargs(LoadConfig)
         load_group = parser.add_argument_group(
@@ -463,38 +450,6 @@ class EngineArgs:
                                 **load_kwargs["model_loader_extra_config"])
         load_group.add_argument('--use-tqdm-on-load',
                                 **load_kwargs["use_tqdm_on_load"])
-
-        parser.add_argument(
-            '--config-format',
-            default=EngineArgs.config_format,
-            choices=[f.value for f in ConfigFormat],
-            help='The format of the model config to load.\n\n'
-            '* "auto" will try to load the config in hf format '
-            'if available else it will try to load in mistral format ')
-        parser.add_argument(
-            '--dtype',
-            type=str,
-            default=EngineArgs.dtype,
-            choices=[
-                'auto', 'half', 'float16', 'bfloat16', 'float', 'float32'
-            ],
-            help='Data type for model weights and activations.\n\n'
-            '* "auto" will use FP16 precision for FP32 and FP16 models, and '
-            'BF16 precision for BF16 models.\n'
-            '* "half" for FP16. Recommended for AWQ quantization.\n'
-            '* "float16" is the same as "half".\n'
-            '* "bfloat16" for a balance between precision and range.\n'
-            '* "float" is shorthand for FP32 precision.\n'
-            '* "float32" for FP32 precision.')
-        parser.add_argument('--max-model-len',
-                            type=human_readable_int,
-                            default=EngineArgs.max_model_len,
-                            help='Model context length. If unspecified, will '
-                            'be automatically derived from the model config. '
-                            'Supports k/m/g/K/M/G in human-readable format.\n'
-                            'Examples:\n'
-                            '- 1k → 1000\n'
-                            '- 1K → 1024\n')
 
         # Guided decoding arguments
         guided_decoding_kwargs = get_kwargs(DecodingConfig)
@@ -513,7 +468,7 @@ class EngineArgs:
 
         parser.add_argument(
             '--logits-processor-pattern',
-            type=optional_str,
+            type=optional_type(str),
             default=None,
             help='Optional regex pattern specifying valid logits processor '
             'qualified names that can be passed with the `logits_processors` '
@@ -583,10 +538,6 @@ class EngineArgs:
         cache_group.add_argument('--calculate-kv-scales',
                                  **cache_kwargs["calculate_kv_scales"])
 
-        parser.add_argument('--disable-sliding-window',
-                            action='store_true',
-                            help='Disables sliding window, '
-                            'capping to sliding window size.')
         parser.add_argument('--use-v2-block-manager',
                             action='store_true',
                             default=True,
@@ -596,43 +547,10 @@ class EngineArgs:
                             'Setting this flag to True or False'
                             ' has no effect on vLLM behavior.')
 
-        parser.add_argument('--seed',
-                            type=int,
-                            default=EngineArgs.seed,
-                            help='Random seed for operations.')
-        parser.add_argument(
-            '--max-logprobs',
-            type=int,
-            default=EngineArgs.max_logprobs,
-            help=('Max number of log probs to return logprobs is specified in'
-                  ' SamplingParams.'))
         parser.add_argument('--disable-log-stats',
                             action='store_true',
                             help='Disable logging statistics.')
-        # Quantization settings.
-        parser.add_argument('--quantization',
-                            '-q',
-                            type=optional_str,
-                            choices=[*QUANTIZATION_METHODS, None],
-                            default=EngineArgs.quantization,
-                            help='Method used to quantize the weights. If '
-                            'None, we first check the `quantization_config` '
-                            'attribute in the model config file. If that is '
-                            'None, we assume the model weights are not '
-                            'quantized and use `dtype` to determine the data '
-                            'type of the weights.')
-        parser.add_argument(
-            '--rope-scaling',
-            default=None,
-            type=json.loads,
-            help='RoPE scaling configuration in JSON format. '
-            'For example, ``{"rope_type":"dynamic","factor":2.0}``')
-        parser.add_argument('--rope-theta',
-                            default=None,
-                            type=float,
-                            help='RoPE theta. Use with `rope_scaling`. In '
-                            'some cases, changing the RoPE theta improves the '
-                            'performance of the scaled model.')
+
         parser.add_argument(
             '--hf-token',
             type=str,
@@ -649,20 +567,6 @@ class EngineArgs:
                             help='Extra arguments for the HuggingFace config. '
                             'This should be a JSON string that will be '
                             'parsed into a dictionary.')
-        parser.add_argument('--enforce-eager',
-                            action='store_true',
-                            help='Always use eager-mode PyTorch. If False, '
-                            'will use eager mode and CUDA graph in hybrid '
-                            'for maximal performance and flexibility.')
-        parser.add_argument('--max-seq-len-to-capture',
-                            type=int,
-                            default=EngineArgs.max_seq_len_to_capture,
-                            help='Maximum sequence length covered by CUDA '
-                            'graphs. When a sequence has context length '
-                            'larger than this, we fall back to eager mode. '
-                            'Additionally for encoder-decoder models, if the '
-                            'sequence length of the encoder input is larger '
-                            'than this, we fall back to the eager mode.')
 
         # Tokenizer arguments
         tokenizer_kwargs = get_kwargs(TokenizerPoolConfig)
@@ -787,20 +691,6 @@ class EngineArgs:
             'recomputing; If \'swap\', the engine performs preemption by '
             'block swapping.')
 
-        parser.add_argument(
-            "--served-model-name",
-            nargs="+",
-            type=str,
-            default=None,
-            help="The model name(s) used in the API. If multiple "
-            "names are provided, the server will respond to any "
-            "of the provided names. The model name in the model "
-            "field of a response will be the first name in this "
-            "list. If not specified, the model name will be the "
-            "same as the ``--model`` argument. Noted that this name(s) "
-            "will also be used in `model_name` tag content of "
-            "prometheus metrics, if multiple names provided, metrics "
-            "tag will take the first one.")
         parser.add_argument('--qlora-adapter-name-or-path',
                             type=str,
                             default=None,
@@ -930,7 +820,7 @@ class EngineArgs:
             'class without changing the existing functions.')
         parser.add_argument(
             "--generation-config",
-            type=optional_str,
+            type=optional_type(str),
             default="auto",
             help="The folder path to the generation config. "
             "Defaults to 'auto', the generation config will be loaded from "
@@ -954,8 +844,7 @@ class EngineArgs:
         parser.add_argument("--enable-sleep-mode",
                             action="store_true",
                             default=False,
-                            help="Enable sleep mode for the engine. "
-                            "(only cuda platform is supported)")
+                            help="")
 
         parser.add_argument(
             "--additional-config",
@@ -973,16 +862,6 @@ class EngineArgs:
             help="Whether to enable reasoning_content for the model. "
             "If enabled, the model will be able to generate reasoning content."
         )
-
-        parser.add_argument(
-            "--disable-cascade-attn",
-            action="store_true",
-            default=False,
-            help="Disable cascade attention for V1. While cascade attention "
-            "does not change the mathematical correctness, disabling it "
-            "could be useful for preventing potential numerical issues. "
-            "Note that even if this is set to False, cascade attention will be "
-            "only used when the heuristic tells that it's beneficial.")
 
         return parser
 
