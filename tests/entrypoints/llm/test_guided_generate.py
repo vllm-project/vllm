@@ -3,9 +3,11 @@
 import json
 import re
 import weakref
+from enum import Enum
 
 import jsonschema
 import pytest
+from pydantic import BaseModel
 
 from vllm.distributed import cleanup_dist_env_and_memory
 from vllm.entrypoints.llm import LLM
@@ -284,15 +286,26 @@ def test_validation_against_both_guided_decoding_options(sample_regex, llm):
 
 @pytest.mark.skip_global_cleanup
 def test_disable_guided_decoding_fallback(sample_regex, llm):
+    # see has_xgrammar_unsupported_json_features()
+    unsupported_json = {
+        "type": "object",
+        "properties": {
+            "example": {
+                "type": "string",
+                "minLength": 5  # unsupported by xgrammar
+            }
+        }
+    }
     sampling_params = SamplingParams(temperature=0.8,
                                      top_p=0.95,
                                      guided_decoding=GuidedDecodingParams(
-                                         regex=sample_regex,
+                                         json=unsupported_json,
                                          backend="xgrammar:no-fallback"))
 
     with pytest.raises(
             ValueError,
-            match="xgrammar does not support regex guided decoding"):
+            match="xgrammar does not support advanced JSON schema features "
+            "like enums, patterns or numeric ranges."):
         llm.generate(prompts="This should fail",
                      sampling_params=sampling_params,
                      use_tqdm=True)
@@ -330,3 +343,102 @@ def test_guided_json_object(llm, guided_decoding_backend: str):
             # Parse to verify it is valid JSON
             parsed_json = json.loads(generated_text)
             assert isinstance(parsed_json, dict)
+
+
+class CarType(str, Enum):
+    sedan = "sedan"
+    suv = "SUV"
+    truck = "Truck"
+    coupe = "Coupe"
+
+
+class CarDescription(BaseModel):
+    brand: str
+    model: str
+    car_type: CarType
+
+
+@pytest.mark.skip_global_cleanup
+@pytest.mark.parametrize("guided_decoding_backend", GUIDED_DECODING_BACKENDS)
+def test_guided_json_completion_with_enum(llm, guided_decoding_backend: str):
+    json_schema = CarDescription.model_json_schema()
+    sampling_params = SamplingParams(temperature=1.0,
+                                     max_tokens=1000,
+                                     guided_decoding=GuidedDecodingParams(
+                                         json=json_schema,
+                                         backend=guided_decoding_backend))
+    outputs = llm.generate(
+        prompts="Generate a JSON with the brand, model and car_type of"
+        "the most iconic car from the 90's",
+        sampling_params=sampling_params,
+        use_tqdm=True)
+
+    assert outputs is not None
+    for output in outputs:
+        assert output is not None
+        assert isinstance(output, RequestOutput)
+        prompt = output.prompt
+
+        generated_text = output.outputs[0].text
+        assert generated_text is not None
+        print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
+        output_json = json.loads(generated_text)
+        jsonschema.validate(instance=output_json, schema=json_schema)
+
+
+@pytest.mark.skip_global_cleanup
+def test_guidance_no_additional_properties(llm):
+    schema = {
+        'type': 'object',
+        'properties': {
+            'a1': {
+                'type': 'string'
+            },
+            'a2': {
+                'type': 'string'
+            },
+            'a3': {
+                'type': 'string'
+            }
+        },
+        'required': ['a1', 'a2', 'a3'],
+    }
+
+    prompt = (
+        "<|im_start|>system\nYou are Qwen, created by Alibaba Cloud. You are a "
+        "helpful assistant.<|im_end|>\n<|im_start|>user\nPlease generate a "
+        "large JSON object with key-value pairs a1=b1, a2=b2, ..., a20=b20"
+        "<|im_end|>\n<|im_start|>assistant\n")
+
+    def generate_with_backend(backend):
+        guided_params = GuidedDecodingParams(json=schema, backend=backend)
+        sampling_params = SamplingParams(temperature=0,
+                                         max_tokens=256,
+                                         guided_decoding=guided_params)
+
+        outputs = llm.generate(prompts=prompt, sampling_params=sampling_params)
+        assert outputs is not None
+        generated_text = outputs[0].outputs[0].text
+        assert generated_text is not None
+        parsed_json = json.loads(generated_text)
+        assert isinstance(parsed_json, dict)
+        jsonschema.validate(instance=parsed_json, schema=schema)
+        return parsed_json
+
+    base_generated = generate_with_backend('guidance:disable-any-whitespace')
+    assert "a1" in base_generated
+    assert "a2" in base_generated
+    assert "a3" in base_generated
+    # by default additional keys are generated
+    assert "a4" in base_generated
+    assert "a5" in base_generated
+    assert "a6" in base_generated
+
+    generated = generate_with_backend(
+        'guidance:no-additional-properties,disable-any-whitespace')
+    assert "a1" in generated
+    assert "a2" in generated
+    assert "a3" in generated
+    assert "a4" not in generated
+    assert "a5" not in generated
+    assert "a6" not in generated

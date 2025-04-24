@@ -20,7 +20,6 @@ from vllm.model_executor.layers.linear import (MergedColumnParallelLinear,
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
-from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     DEFAULT_VOCAB_PADDING_SIZE, ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.sampling_metadata import SamplingMetadata
@@ -29,7 +28,7 @@ from vllm.sequence import IntermediateTensors
 from . import mixtral
 from .granitemoe import GraniteMoeAttention, GraniteMoeMoE
 from .interfaces import SupportsLoRA, SupportsPP
-from .utils import make_layers, maybe_prefix
+from .utils import AutoWeightsLoader, make_layers, maybe_prefix
 
 
 class GraniteMoeSharedMLP(nn.Module):
@@ -152,6 +151,8 @@ class GraniteMoeSharedModel(nn.Module):
         quant_config = vllm_config.quant_config
         lora_config = vllm_config.lora_config
 
+        self.config = config
+        self.quant_config = quant_config  # Required by MixtralModel
         self.padding_idx = config.pad_token_id
         lora_vocab = (lora_config.lora_extra_vocab_size *
                       (lora_config.max_loras or 1)) if lora_config else 0
@@ -207,6 +208,40 @@ class GraniteMoeSharedModel(nn.Module):
         hidden_states = self.norm(hidden_states)
         return hidden_states
 
+    def load_weights(self, weights: Iterable[Tuple[str,
+                                                   torch.Tensor]]) -> Set[str]:
+        new_weights = {}
+        for n, p in weights:
+            if n.endswith('.block_sparse_moe.input_linear.weight'):
+                for e in range(p.size(0)):
+                    w1_name = n.replace(
+                        '.block_sparse_moe.input_linear.weight',
+                        f".block_sparse_moe.experts.{e}.w1.weight")
+                    w3_name = n.replace(
+                        '.block_sparse_moe.input_linear.weight',
+                        f".block_sparse_moe.experts.{e}.w3.weight")
+                    w1_param, w3_param = p[e].chunk(2, dim=0)
+                    assert w1_name not in new_weights
+                    assert w3_name not in new_weights
+                    new_weights[w1_name] = w1_param
+                    new_weights[w3_name] = w3_param
+            elif n.endswith('.block_sparse_moe.output_linear.weight'):
+                for e in range(p.size(0)):
+                    w2_name = n.replace(
+                        '.block_sparse_moe.output_linear.weight',
+                        f".block_sparse_moe.experts.{e}.w2.weight")
+                    w2_param = p[e]
+                    assert w2_name not in new_weights
+                    new_weights[w2_name] = w2_param
+            elif n.endswith('.block_sparse_moe.router.layer.weight'):
+                gate_name = n.replace('.block_sparse_moe.router.layer.weight',
+                                      ".block_sparse_moe.gate.weight")
+                assert gate_name not in new_weights
+                new_weights[gate_name] = p
+            else:
+                new_weights[n] = p
+        return mixtral.MixtralModel.load_weights(self, new_weights.items())
+
 
 class GraniteMoeSharedForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
     fall_back_to_pt_during_load = False
@@ -234,7 +269,6 @@ class GraniteMoeSharedForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
 
         self.config = config
         self.lora_config = lora_config
-        self.quant_config = quant_config
 
         self.model = GraniteMoeSharedModel(vllm_config=vllm_config,
                                            prefix=maybe_prefix(
@@ -259,8 +293,6 @@ class GraniteMoeSharedForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
                                                 config.vocab_size,
                                                 scale=1 /
                                                 self.config.logits_scaling)
-
-        self.sampler = get_sampler()
 
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.get_input_embeddings(input_ids)
@@ -297,47 +329,11 @@ class GraniteMoeSharedForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
                         device=device),
         })
 
-    def sample(
-        self,
-        logits: Optional[torch.Tensor],
-        sampling_metadata: SamplingMetadata,
-    ) -> Optional[SamplerOutput]:
-        next_tokens = self.sampler(logits, sampling_metadata)
-        return next_tokens
-
     def load_weights(self, weights: Iterable[Tuple[str,
                                                    torch.Tensor]]) -> Set[str]:
-        new_weights = {}
-        for n, p in weights:
-            if n.endswith('.block_sparse_moe.input_linear.weight'):
-                for e in range(p.size(0)):
-                    w1_name = n.replace(
-                        '.block_sparse_moe.input_linear.weight',
-                        f".block_sparse_moe.experts.{e}.w1.weight")
-                    w3_name = n.replace(
-                        '.block_sparse_moe.input_linear.weight',
-                        f".block_sparse_moe.experts.{e}.w3.weight")
-                    w1_param, w3_param = p[e].chunk(2, dim=0)
-                    assert w1_name not in new_weights
-                    assert w3_name not in new_weights
-                    new_weights[w1_name] = w1_param
-                    new_weights[w3_name] = w3_param
-            elif n.endswith('.block_sparse_moe.output_linear.weight'):
-                for e in range(p.size(0)):
-                    w2_name = n.replace(
-                        '.block_sparse_moe.output_linear.weight',
-                        f".block_sparse_moe.experts.{e}.w2.weight")
-                    w2_param = p[e]
-                    assert w2_name not in new_weights
-                    new_weights[w2_name] = w2_param
-            elif n.endswith('.block_sparse_moe.router.layer.weight'):
-                gate_name = n.replace('.block_sparse_moe.router.layer.weight',
-                                      ".block_sparse_moe.gate.weight")
-                assert gate_name not in new_weights
-                new_weights[gate_name] = p
-            elif n == 'lm_head.weight' and self.config.tie_word_embeddings:
-                pass
-            else:
-                new_weights[n] = p
-        return mixtral.MixtralForCausalLM.load_weights(self,
-                                                       new_weights.items())
+        loader = AutoWeightsLoader(
+            self,
+            skip_prefixes=(["lm_head."]
+                           if self.config.tie_word_embeddings else None),
+        )
+        return loader.load_weights(weights)
