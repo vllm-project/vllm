@@ -22,6 +22,13 @@ OPS_IN_MODEL = [
 
 RMS_OP = torch.ops._C.rms_norm.default
 
+RMS_QUANT_OPS = {
+    "static_fp8": [
+        torch.ops._C.rms_norm_static_fp8_quant.default,
+        torch.ops._C.fused_add_rms_norm_static_fp8_quant.default
+    ],
+}
+
 SILU_MUL_OP = torch.ops._C.silu_and_mul.default
 
 SILU_MUL_QUANT_OP = torch.ops._C.silu_and_mul_quant.default

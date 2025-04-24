@@ -1,11 +1,11 @@
+# SPDX-License-Identifier: Apache-2.0
 import pytest
 import torch
 
 import vllm.envs as envs
 from vllm._custom_ops import scaled_fp8_quant
 from vllm.compilation.activation_quant_fusion import ActivationQuantFusionPass
-from vllm.compilation.fusion import find_auto_fn, find_auto_fn_maybe
-from vllm.compilation.reshapes import RedundantReshapesPass
+from vllm.compilation.fx_utils import find_auto_fn, find_auto_fn_maybe
 from vllm.config import CompilationConfig
 from vllm.model_executor.layers.activation import SiluAndMul
 
@@ -36,10 +36,9 @@ def test_fusion_silu_and_mul_quant(num_tokens, hidden_size):
     # Reshape pass is needed for the fusion pass to work
     config = CompilationConfig.PassConfig(enable_fusion=True,
                                           enable_reshape=True)
-    reshape_pass = RedundantReshapesPass(config)
     fusion_pass = ActivationQuantFusionPass.instance(config)
 
-    backend = TestBackend(reshape_pass, fusion_pass)
+    backend = TestBackend(fusion_pass)
     model = TestModel()
 
     # First dimension dynamic
