@@ -13,7 +13,6 @@ from vllm.utils import supports_kw
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
     from vllm.model_executor.layers.pooler import PoolerOutput
-    from vllm.model_executor.layers.sampler import SamplerOutput
     from vllm.model_executor.pooling_metadata import PoolingMetadata
     from vllm.model_executor.sampling_metadata import SamplingMetadata
 
@@ -101,14 +100,6 @@ class VllmModelForTextGeneration(VllmModel[T], Protocol[T]):
         sampling_metadata: "SamplingMetadata",
     ) -> Optional[T]:
         """Return `None` if TP rank > 0."""
-        ...
-
-    def sample(
-        self,
-        logits: T,
-        sampling_metadata: "SamplingMetadata",
-    ) -> "SamplerOutput":
-        """Only called on TP rank 0."""
         ...
 
 

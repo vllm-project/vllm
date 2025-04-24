@@ -50,11 +50,10 @@ class MultiStepWorker(ProposerWorkerBase, DelegateWorkerBase):
 
     def set_include_gpu_probs_tensor(self) -> None:
         # Need include_gpu_probs_tensor for MultiStepWorker
-        self.model_runner.model.sampler.include_gpu_probs_tensor = True
+        self.model_runner.sampler.include_gpu_probs_tensor = True
 
     def set_should_modify_greedy_probs_inplace(self) -> None:
-        self.model_runner.model.sampler.should_modify_greedy_probs_inplace = (
-            True)
+        self.model_runner.sampler.should_modify_greedy_probs_inplace = True
 
     @torch.inference_mode()
     def sampler_output(
