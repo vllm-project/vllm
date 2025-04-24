@@ -16,7 +16,6 @@ from vllm.distributed import (ensure_model_parallel_initialized,
                               init_distributed_environment)
 from vllm.logger import init_logger
 from vllm.model_executor import set_random_seed
-from vllm.usage.usage_lib import UsageContext
 from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import (AttentionSpec, KVCacheConfig,
@@ -83,8 +82,7 @@ class TPUWorker:
         if self.model_config.seed is None:
             self.model_config.seed = 0
 
-    def init_device(self,
-                    usage_context: UsageContext = UsageContext.ENGINE_CONTEXT):
+    def init_device(self):
         os.environ["PJRT_DEVICE"] = "TPU"
         # Note: Currently the XLA compiler wrongly uses 2D ring strategy on 1D
         # ring, the xla tpu compiler flag
@@ -136,7 +134,7 @@ class TPUWorker:
         self.model_runner = TPUModelRunner(self.vllm_config, self.device)
 
         # If usage stat is enabled, collect relevant info.
-        report_usage_stats(self.vllm_config, usage_context)
+        report_usage_stats(self.vllm_config)
 
     def determine_available_memory(self) -> int:
         kv_caches: dict[str, torch.Tensor] = {}
