@@ -107,3 +107,7 @@ class StructuredOutputManager:
         # np.ndarray, because that is much more efficient for serialization
         # and deserialization when sending this to the GPU workers.
         return bitmask_tensor.numpy()
+
+    def clear_backend(self) -> None:
+        if self.backend is not None:
+            self.backend.destroy()

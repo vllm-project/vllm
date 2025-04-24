@@ -253,6 +253,7 @@ class EngineCore:
         return engine_core_outputs
 
     def shutdown(self):
+        self.structured_output_manager.clear_backend()
         if self.model_executor:
             self.model_executor.shutdown()
 
