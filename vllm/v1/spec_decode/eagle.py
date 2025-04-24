@@ -55,7 +55,7 @@ class EagleProposer:
         # [batch_size, max_num_blocks_per_req]
         block_table: torch.Tensor,
         sampling_metadata: SamplingMetadata,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+    ) -> torch.Tensor:
         num_tokens = target_token_ids.shape[0]
         batch_size = next_token_ids.shape[0]
         last_token_indices = cu_num_tokens[1:] - 1
@@ -98,17 +98,15 @@ class EagleProposer:
             )
         sample_hidden_states = hidden_states_logits[last_token_indices]
         logits = self.model.compute_logits(sample_hidden_states, None)
-        draft_token_ids, draft_probs = compute_probs_and_sample_next_token(
-            logits, sampling_metadata)
+        draft_token_ids = logits.argmax(dim=-1)
 
         # Early exit if there is only one draft token to be generated.
         if self.num_speculative_tokens == 1:
-            # [batch_size, 1] and [batch_size, 1, vocab_size]
-            return draft_token_ids.view(-1, 1), draft_probs.unsqueeze(dim=1)
+            # [batch_size, 1]
+            return draft_token_ids.view(-1, 1)
 
         # Generate the remaining draft tokens.
         draft_token_ids_list = [draft_token_ids]
-        draft_probs_list = [draft_probs]
 
         positions = target_positions[last_token_indices]
         hidden_states = hidden_states_fwd[last_token_indices]
@@ -163,16 +161,12 @@ class EagleProposer:
                     positions=clamped_positions,
                 )
             logits = self.model.compute_logits(hidden_states_logits, None)
-            draft_token_ids, probs = compute_probs_and_sample_next_token(
-                logits, sampling_metadata)
+            draft_token_ids = logits.argmax(dim=-1)
             draft_token_ids_list.append(draft_token_ids)
-            draft_probs_list.append(probs)
 
         # [batch_size, num_speculative_tokens]
         draft_token_ids = torch.stack(draft_token_ids_list, dim=1)
-        # [batch_size, num_speculative_tokens, vocab_size]
-        draft_probs = torch.stack(draft_probs_list, dim=1)
-        return draft_token_ids, draft_probs
+        return draft_token_ids
 
     @staticmethod
     def prepare_inputs(
@@ -255,6 +249,10 @@ class EagleProposer:
             self.model.lm_head = target_model.lm_head
 
 
+# NOTE(woosuk): Currently, the below code is not used and we always use argmax
+# to sample the draft tokens. We will use this after we find a way to manage
+# the draft prob tensor.
+# Refer to https://github.com/vllm-project/vllm/pull/16899 for the details.
 # FIXME(woosuk): The logic here is duplicated with the main sampling code.
 # We should refactor this to reuse the same sampling implementation.
 def compute_probs_and_sample_next_token(
@@ -281,7 +279,9 @@ def compute_probs_and_sample_next_token(
     # TODO(woosuk): Consider seeds.
     q = torch.empty_like(probs)
     q.exponential_()
-    next_token_ids = probs.div_(q).argmax(dim=-1).view(-1)
+    # NOTE(woosuk): We shouldn't use `probs.div_(q)` because the draft_probs
+    # will be used later for rejection sampling.
+    next_token_ids = probs.div(q).argmax(dim=-1).view(-1)
     if not sampling_metadata.all_random:
         greedy_token_ids = probs.argmax(dim=-1)
         next_token_ids = torch.where(

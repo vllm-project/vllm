@@ -120,7 +120,7 @@ def test_eagle_correctness(
     with monkeypatch.context() as m:
         m.setenv("VLLM_USE_V1", "1")
 
-        ref_llm = LLM(model=model_name, max_model_len=1024)
+        ref_llm = LLM(model=model_name, max_model_len=2048)
         ref_outputs = ref_llm.chat(test_prompts, sampling_config)
         del ref_llm
 
@@ -128,12 +128,14 @@ def test_eagle_correctness(
         ) if use_eagle3 else eagle_model_name()
         spec_llm = LLM(
             model=model_name,
+            trust_remote_code=True,
             speculative_config={
                 "method": "eagle3" if use_eagle3 else "eagle",
                 "model": spec_model_name,
                 "num_speculative_tokens": 3,
+                "max_model_len": 2048,
             },
-            max_model_len=1024,
+            max_model_len=2048,
         )
         spec_outputs = spec_llm.chat(test_prompts, sampling_config)
         matches = 0
