@@ -1079,6 +1079,7 @@ model_example_map = {
     "paligemma2": run_paligemma2,
     "phi3_v": run_phi3v,
     "phi4_mm": run_phi4mm,
+    "phi4_multimodal": run_phi4_multimodal,
     "pixtral_hf": run_pixtral_hf,
     "qwen_vl": run_qwen_vl,
     "qwen2_vl": run_qwen2_vl,
