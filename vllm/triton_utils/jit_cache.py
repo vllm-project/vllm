@@ -359,9 +359,9 @@ class JitCache(KernelInterface):
 
 def jitcache(
     check_keys: List[str],
-    cache_lock: CacheLock = None,
+    cache_lock: CacheLock | None = None,
     cache_launch_grid: bool = False,
-    assume_const: List[str] = None,
+    assume_const: List[str] | None = None,
 ):
     """
     Decorator for caching a :code:`triton.jit`'d function.
