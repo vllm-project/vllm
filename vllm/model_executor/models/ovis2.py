@@ -47,6 +47,8 @@ from .utils import merge_multimodal_embeddings
 
 # Cannot find the following number from hf config.
 IMAGE_TOKEN = "<image>"
+IMAGE_ATOM_TOKEN_ID = 151666
+IMAGE_PAD_TOKEN_ID = 151672
 NUMBER_OF_TOKEN_TO_RESERVE_FOR_SEGMENT = 256
 
 
@@ -104,10 +106,6 @@ class Ovis2ProcessingInfo(BaseProcessingInfo):
             ((9 + 1) * NUMBER_OF_TOKEN_TO_RESERVE_FOR_SEGMENT)
         }
 
-    def get_max_image_tokens(self) -> int:
-        # 6 image pos token
-        return (9 + 1) * NUMBER_OF_TOKEN_TO_RESERVE_FOR_SEGMENT + 11
-
     def get_image_size_with_most_features(self) -> ImageSize:
         image_processor = self.get_image_processor()
         return ImageSize(width=image_processor.size['shortest_edge'] * 9 * 2,
@@ -116,7 +114,7 @@ class Ovis2ProcessingInfo(BaseProcessingInfo):
 
 class Ovis2DummyInputsBuilder(BaseDummyInputsBuilder[Ovis2ProcessingInfo]):
 
-    def get_dummy_text(self, mm_counts):
+    def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
         num_images = mm_counts.get("image", 0)
         return IMAGE_TOKEN * num_images
 
@@ -291,7 +289,7 @@ class Ovis2ForConditionalGeneration(nn.Module, SupportsMultiModal):
         if multimodal_embeddings is not None:
             inputs_embeds = merge_multimodal_embeddings(
                 input_ids, inputs_embeds, multimodal_embeddings,
-                [151672, 151666])
+                [IMAGE_ATOM_TOKEN_ID, IMAGE_PAD_TOKEN_ID])
         return inputs_embeds
 
     def forward(
