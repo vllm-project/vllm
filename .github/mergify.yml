@@ -126,6 +126,28 @@ pull_request_rules:
       remove:
         - tpu
 
+- name: label-tool-calling
+  description: Automatically add tool-calling label
+  conditions:
+    - or:
+      - files~=^tests/tool_use/
+      - files~=^tests/mistral_tool_use/
+      - files~=^tests/entrypoints/openai/tool_parsers/
+      - files=tests/entrypoints/openai/test_chat_with_tool_reasoning.py
+      - files~=^vllm/entrypoints/openai/tool_parsers/
+      - files=docs/source/features/tool_calling.md
+      - files=docs/source/getting_started/examples/openai_chat_completion_client_with_tools.md
+      - files=docs/source/getting_started/examples/chat_with_tools.md
+      - files~=^examples/tool_chat_*
+      - files=examples/offline_inference/chat_with_tools.py
+      - files=examples/online_serving/openai_chat_completion_client_with_tools_required.py
+      - files=examples/online_serving/openai_chat_completion_tool_calls_with_reasoning.py
+      - files=examples/online_serving/openai_chat_completion_client_with_tools.py
+  actions:
+    label:
+      add:
+        - tool-calling
+
 - name: ping author on conflicts and add 'needs-rebase' label
   conditions:
       - conflict
