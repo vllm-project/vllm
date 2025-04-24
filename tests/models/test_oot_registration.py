@@ -20,7 +20,7 @@ def test_plugin(
 
         with pytest.raises(Exception) as excinfo:
             LLM(model=dummy_opt_path, load_format="dummy")
-        error_msg = "has no vLLM implementation and the Transformers implementation is not compatible with vLLM"  # noqa: E501
+        error_msg = "Cannot find model module"
         assert (error_msg in str(excinfo.value))
 
 
