@@ -124,6 +124,9 @@ class XgrammarBackend(StructuredOutputBackend):
     def allocate_token_bitmask(self, max_num_seqs: int):
         return xgr.allocate_token_bitmask(max_num_seqs, self.vocab_size)
 
+    def destroy(self):
+        del self.compiler
+
 
 @dataclass
 class XgrammarGrammar(StructuredOutputGrammar):
