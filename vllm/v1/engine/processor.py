@@ -145,17 +145,16 @@ class Processor:
         if not params.guided_decoding or not self.decoding_config:
             return
 
-        supported_backends = [
-            "xgrammar", "xgrammar:disable-any-whitespace", "guidance",
-            "guidance:disable-any-whitespace", "auto"
-        ]
-
         engine_level_backend = self.decoding_config.guided_decoding_backend
-        if engine_level_backend not in supported_backends:
-            raise ValueError(f"Only {supported_backends} structured output is "
-                             "supported in V1.")
         if params.guided_decoding.backend:
-            if params.guided_decoding.backend != engine_level_backend:
+            # Request-level backend selection is not supported in V1.
+            # The values may differ if `params` is reused and was set
+            # to a specific backend based on `auto` behavior in a previous
+            # request. We remember that it was set as a result of `auto`
+            # using the `_auto` option set on the backend in the params.
+            if (params.guided_decoding.backend != engine_level_backend
+                    and not (engine_level_backend == "auto" and "_auto"
+                             in params.guided_decoding.backend_options())):
                 raise ValueError(
                     "Request-level structured output backend selection is no "
                     "longer supported. The request specified "
@@ -190,6 +189,8 @@ class Processor:
                 # The request includes some jsonschema feature(s) that
                 # are not supported in xgrammar. Fall back to guidance.
                 params.guided_decoding.backend = "guidance"
+            # Remember that this backend was set automatically
+            params.guided_decoding.add_option("_auto")
 
     def process_inputs(
         self,
