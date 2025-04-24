@@ -75,10 +75,14 @@ HF_MOUNT="/root/.cache/huggingface"
 commands=$@
 echo "Commands:$commands"
 #ignore certain kernels tests
-if [[ $commands == *" kernels "* ]]; then
+if [[ $commands == *" kernels/core"* ]]; then
   commands="${commands} \
   --ignore=kernels/core/test_fused_quant_layernorm.py \
-  --ignore=kernels/core/test_permute_cols.py \
+  --ignore=kernels/core/test_permute_cols.py"
+fi
+
+if [[ $commands == *" kernels/attention"* ]]; then
+  commands="${commands} \
   --ignore=kernels/attention/stest_attention_selector.py \
   --ignore=kernels/attention/test_blocksparse_attention.py \
   --ignore=kernels/attention/test_encoder_decoder_attn.py \
@@ -87,18 +91,30 @@ if [[ $commands == *" kernels "* ]]; then
   --ignore=kernels/attention/test_prefix_prefill.py \
   --ignore=kernels/attention/test_cascade_flash_attn.py \
   --ignore=kernels/attention/test_mha_attn.py \
-  --ignore=kernels/attention/test_attention.py \
+  --ignore=kernels/attention/test_attention.py"
+fi
+
+if [[ $commands == *" kernels/quantization"* ]]; then
+  commands="${commands} \
   --ignore=kernels/quantization/test_int8_quant.py \
   --ignore=kernels/quantization/test_aqlm.py \
   --ignore=kernels/quantization/test_machete_mm.py \
   --ignore=kernels/quantization/test_block_fp8.py \
   --ignore=kernels/quantization/test_block_int8.py \
   --ignore=kernels/quantization/test_marlin_gemm.py \
-  --ignore=kernels/quantization/test_int8_kernel.py \
+  --ignore=kernels/quantization/test_int8_kernel.py"
+fi
+
+if [[ $commands == *" kernels/mamba"* ]]; then
+  commands="${commands} \
   --ignore=kernels/mamba/test_mamba_ssm.py \
   --ignore=kernels/mamba/test_mamba_mixer2.py \
   --ignore=kernels/mamba/test_causal_conv1d.py \
-  --ignore=kernels/mamba/test_mamba_ssm_ssd.py \
+  --ignore=kernels/mamba/test_mamba_ssm_ssd.py"
+fi
+
+if [[ $commands == *" kernels/moe"* ]]; then
+  commands="${commands} \
   --ignore=kernels/moe/test_moe.py \
   --ignore=kernels/moe/test_cutlass_moe.py \
   --ignore=kernels/moe/test_triton_moe_ptpc_fp8.py"
