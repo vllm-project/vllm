@@ -1,19 +1,16 @@
-# The vLLM Dockerfile is used to construct vLLM image that can be directly used
-# to run the OpenAI compatible server.
+# The vLLM Dockerfile is used to construct vLLM image against torch nightly that can be directly used for testing
 
-# Please update any changes made here to
-# docs/source/contributing/dockerfile/dockerfile.md and
-# docs/source/assets/contributing/dockerfile-stages-dependency.png
-
-ARG CUDA_VERSION=12.4.1
+# for torch nightly, cuda >=12.6 is required,
+# use 12.8 due to FlashAttention issue with cuda 12.6 (https://github.com/vllm-project/vllm/issues/15435#issuecomment-2775924628)
+ARG CUDA_VERSION=12.8.0
+#
 #################### BASE BUILD IMAGE ####################
 # prepare basic build environment
 FROM nvidia/cuda:${CUDA_VERSION}-devel-ubuntu20.04 AS base
-ARG CUDA_VERSION=12.4.1
+ARG CUDA_VERSION=12.8.0
 ARG PYTHON_VERSION=3.12
 ARG TARGETPLATFORM
 ENV DEBIAN_FRONTEND=noninteractive
-
 # Install Python and other dependencies
 RUN echo 'tzdata tzdata/Areas select America' | debconf-set-selections \
     && echo 'tzdata tzdata/Zones/America select Los_Angeles' | debconf-set-selections \
@@ -26,7 +23,8 @@ RUN echo 'tzdata tzdata/Areas select America' | debconf-set-selections \
     && update-alternatives --set python3 /usr/bin/python${PYTHON_VERSION} \
     && ln -sf /usr/bin/python${PYTHON_VERSION}-config /usr/bin/python3-config \
     && curl -sS https://bootstrap.pypa.io/get-pip.py | python${PYTHON_VERSION} \
-    && python3 --version && python3 -m pip --version
+    && python3 --version \
+    && python3 -m pip --version
 # Install uv for faster pip installs
 RUN --mount=type=cache,target=/root/.cache/uv \
     python3 -m pip install uv
@@ -52,28 +50,67 @@ RUN ldconfig /usr/local/cuda-$(echo $CUDA_VERSION | cut -d. -f1,2)/compat/
 WORKDIR /workspace
 
 # install build and runtime dependencies
-
-# arm64 (GH200) build follows the practice of "use existing pytorch" build,
-# we need to install torch and torchvision from the nightly builds first,
-# pytorch will not appear as a vLLM dependency in all of the following steps
-# after this step
-RUN --mount=type=cache,target=/root/.cache/uv \
-    if [ "$TARGETPLATFORM" = "linux/arm64" ]; then \
-        uv pip install --system --index-url https://download.pytorch.org/whl/nightly/cu128 "torch==2.8.0.dev20250318+cu128" "torchvision==0.22.0.dev20250319";  \
-        uv pip install --system --index-url https://download.pytorch.org/whl/nightly/cu128 --pre pytorch_triton==3.3.0+gitab727c40; \
-    fi
-
 COPY requirements/common.txt requirements/common.txt
-COPY requirements/cuda.txt requirements/cuda.txt
+COPY use_existing_torch.py use_existing_torch.py
+COPY pyproject.toml pyproject.toml
+
+# install build and runtime dependencies without stable torch version
+RUN python3 use_existing_torch.py
+
+# install torch nightly
+ARG PINNED_TORCH_VERSION
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv pip install --system -r requirements/cuda.txt
+    if [ -n "$PINNED_TORCH_VERSION" ]; then \
+      pkgs="$PINNED_TORCH_VERSION"; \
+    else \
+      pkgs="torch torchaudio torchvision"; \
+    fi && \
+    uv pip install --system $pkgs --index-url https://download.pytorch.org/whl/nightly/cu128
+
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv pip install --system numba==0.61.2
+
+RUN --mount=type=cache,target=/root/.cache/uv \
+uv pip install --system -r requirements/common.txt
+
+# must put before installing xformers, so it can install the correct version of xfomrers.
+ARG torch_cuda_arch_list='8.0;8.6;8.9;9.0'
+ENV TORCH_CUDA_ARCH_LIST=${torch_cuda_arch_list}
+
+# Build xformers with cuda and torch nightly
+# following official xformers guidance: https://github.com/facebookresearch/xformers#build
+# todo(elainewy): cache xformers build result for faster build
+ARG max_jobs=16
+ENV MAX_JOBS=${max_jobs}
+ARG XFORMERS_COMMIT=f2de641ef670510cadab099ce6954031f52f191c
+
+ENV CCACHE_DIR=/root/.cache/ccache
+RUN --mount=type=cache,target=/root/.cache/ccache \
+     --mount=type=cache,target=/root/.cache/uv \
+    echo 'git clone xformers...' \
+    && git clone https://github.com/facebookresearch/xformers.git --recursive \
+    && cd xformers \
+    && git checkout ${XFORMERS_COMMIT} \
+    && git submodule update --init --recursive \
+    && echo 'finish git clone xformers...' \
+    && rm -rf build \
+    && python3 setup.py bdist_wheel --dist-dir=../xformers-dist --verbose \
+    && cd .. \
+    && rm -rf xformers
+
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv pip install --system xformers-dist/*.whl --verbose
+
+# build can take a long time, and the torch nightly version fetched from url can be different in next docker stage.
+# track the nightly torch version used in the build, when we set up runtime environment we can make sure the version is the same
+RUN uv pip freeze | grep -i '^torch\|^torchvision\|^torchaudio' > torch_build_versions.txt
+RUN cat torch_build_versions.txt
 
 # cuda arch list used by torch
-# can be useful for both `dev` and `test`
+# can be useful for `test`
 # explicitly set the list to avoid issues with torch 2.2
 # see https://github.com/pytorch/pytorch/pull/123243
-ARG torch_cuda_arch_list='7.0 7.5 8.0 8.6 8.9 9.0+PTX'
-ENV TORCH_CUDA_ARCH_LIST=${torch_cuda_arch_list}
+
 # Override the arch list for flash-attn to reduce the binary size
 ARG vllm_fa_cmake_gpu_arches='80-real;90-real'
 ENV VLLM_FA_CMAKE_GPU_ARCHES=${vllm_fa_cmake_gpu_arches}
@@ -83,32 +120,32 @@ ENV VLLM_FA_CMAKE_GPU_ARCHES=${vllm_fa_cmake_gpu_arches}
 FROM base AS build
 ARG TARGETPLATFORM
 
-# install build dependencies
-COPY requirements/build.txt requirements/build.txt
-
 # This timeout (in seconds) is necessary when installing some dependencies via uv since it's likely to time out
 # Reference: https://github.com/astral-sh/uv/pull/1694
 ENV UV_HTTP_TIMEOUT=500
 
+COPY . .
+
+RUN python3 use_existing_torch.py
+
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip install --system -r requirements/build.txt
 
-COPY . .
 ARG GIT_REPO_CHECK=0
 RUN --mount=type=bind,source=.git,target=.git \
     if [ "$GIT_REPO_CHECK" != "0" ]; then bash tools/check_repo.sh ; fi
 
-# max jobs used by Ninja to build extensions
-ARG max_jobs=2
+# Max jobs used by Ninja to build extensions
+ARG max_jobs=16
 ENV MAX_JOBS=${max_jobs}
-# number of threads used by nvcc
-ARG nvcc_threads=8
+ARG nvcc_threads=2
 ENV NVCC_THREADS=$nvcc_threads
 
 ARG USE_SCCACHE
 ARG SCCACHE_BUCKET_NAME=vllm-build-sccache
 ARG SCCACHE_REGION_NAME=us-west-2
 ARG SCCACHE_S3_NO_CREDENTIALS=0
+
 # if USE_SCCACHE is set, use sccache to speed up compilation
 RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=bind,source=.git,target=.git \
@@ -139,41 +176,13 @@ RUN --mount=type=cache,target=/root/.cache/ccache \
         python3 setup.py bdist_wheel --dist-dir=dist --py-limited-api=cp38; \
     fi
 
-# Check the size of the wheel if RUN_WHEEL_CHECK is true
-COPY .buildkite/check-wheel-size.py check-wheel-size.py
-# sync the default value with .buildkite/check-wheel-size.py
-ARG VLLM_MAX_SIZE_MB=400
-ENV VLLM_MAX_SIZE_MB=$VLLM_MAX_SIZE_MB
-ARG RUN_WHEEL_CHECK=true
-RUN if [ "$RUN_WHEEL_CHECK" = "true" ]; then \
-        python3 check-wheel-size.py dist; \
-    else \
-        echo "Skipping wheel size check."; \
-    fi
-#################### EXTENSION Build IMAGE ####################
+#################### WHEEL BUILD IMAGE ####################
 
-#################### DEV IMAGE ####################
-FROM base as dev
-
-# This timeout (in seconds) is necessary when installing some dependencies via uv since it's likely to time out
-# Reference: https://github.com/astral-sh/uv/pull/1694
-ENV UV_HTTP_TIMEOUT=500
-
-COPY requirements/lint.txt requirements/lint.txt
-COPY requirements/test.txt requirements/test.txt
-COPY requirements/dev.txt requirements/dev.txt
-# Workaround for #17068
-RUN --mount=type=cache,target=/root/.cache/uv \
-    uv pip install --system mamba-ssm==2.2.4 --no-build-isolation
-RUN --mount=type=cache,target=/root/.cache/uv \
-    uv pip install --system -r requirements/dev.txt
-#################### DEV IMAGE ####################
-
-#################### vLLM installation IMAGE ####################
-# image with vLLM installed
-# TODO: Restore to base image after FlashInfer AOT wheel fixed
+################### VLLM INSTALLED IMAGE ####################
+# Setup clean environment for vLLM and its dependencies for test and api server using ubuntu22.04 with AOT flashinfer
 FROM nvidia/cuda:${CUDA_VERSION}-devel-ubuntu22.04 AS vllm-base
-ARG CUDA_VERSION=12.4.1
+# prepare for environment starts
+ARG CUDA_VERSION=12.8.0
 ARG PYTHON_VERSION=3.12
 WORKDIR /vllm-workspace
 ENV DEBIAN_FRONTEND=noninteractive
@@ -196,7 +205,7 @@ RUN echo 'tzdata tzdata/Areas select America' | debconf-set-selections \
     && ln -sf /usr/bin/python${PYTHON_VERSION}-config /usr/bin/python3-config \
     && curl -sS https://bootstrap.pypa.io/get-pip.py | python${PYTHON_VERSION} \
     && python3 --version && python3 -m pip --version
-# Install uv for faster pip installs
+
 RUN --mount=type=cache,target=/root/.cache/uv \
     python3 -m pip install uv
 
@@ -210,69 +219,77 @@ ENV UV_HTTP_TIMEOUT=500
 # or future versions of triton.
 RUN ldconfig /usr/local/cuda-$(echo $CUDA_VERSION | cut -d. -f1,2)/compat/
 
-# arm64 (GH200) build follows the practice of "use existing pytorch" build,
-# we need to install torch and torchvision from the nightly builds first,
-# pytorch will not appear as a vLLM dependency in all of the following steps
-# after this step
-RUN --mount=type=cache,target=/root/.cache/uv \
-    if [ "$TARGETPLATFORM" = "linux/arm64" ]; then \
-        uv pip install --system --index-url https://download.pytorch.org/whl/nightly/cu128 "torch==2.8.0.dev20250318+cu128" "torchvision==0.22.0.dev20250319";  \
-        uv pip install --system --index-url https://download.pytorch.org/whl/nightly/cu128 --pre pytorch_triton==3.3.0+gitab727c40; \
-    fi
+# get the nightly torch version used in the build to make sure the version is the same
+COPY --from=base /workspace/torch_build_versions.txt ./torch_build_versions.txt
 
-# Install vllm wheel first, so that torch etc will be installed.
-RUN --mount=type=bind,from=build,src=/workspace/dist,target=/vllm-workspace/dist \
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv pip install --system $(cat torch_build_versions.txt | xargs) --index-url https://download.pytorch.org/whl/nightly/cu128
+
+# install the vllm wheel
+RUN --mount=type=bind,from=build,src=/workspace/dist,target=/vllm-workspace/vllm-dist \
     --mount=type=cache,target=/root/.cache/uv \
-    uv pip install --system dist/*.whl --verbose
+    uv pip install --system vllm-dist/*.whl --verbose
 
-# If we need to build FlashInfer wheel before its release:
-# $ export FLASHINFER_ENABLE_AOT=1
-# $ # Note we remove 7.0 from the arch list compared to the list below, since FlashInfer only supports sm75+
-# $ export TORCH_CUDA_ARCH_LIST='7.5 8.0 8.6 8.9 9.0+PTX'
-# $ git clone https://github.com/flashinfer-ai/flashinfer.git --recursive
-# $ cd flashinfer
-# $ git checkout 524304395bd1d8cd7d07db083859523fcaa246a4
-# $ rm -rf build
-# $ python3 setup.py bdist_wheel --dist-dir=dist --verbose
-# $ ls dist
-# $ # upload the wheel to a public location, e.g. https://wheels.vllm.ai/flashinfer/524304395bd1d8cd7d07db083859523fcaa246a4/flashinfer_python-0.2.1.post1+cu124torch2.5-cp38-abi3-linux_x86_64.whl
+# install xformers again for the new environment
+RUN --mount=type=bind,from=base,src=/workspace/xformers-dist,target=/vllm-workspace/xformers-dist \
+    --mount=type=cache,target=/root/.cache/uv \
+    uv pip install --system /vllm-workspace/xformers-dist/*.whl --verbose
 
+ARG torch_cuda_arch_list='8.0;8.6;8.9;9.0'
+
+# install package for build flashinfer
+# see issue: https://github.com/flashinfer-ai/flashinfer/issues/738
+RUN pip install setuptools==75.6.0 packaging==23.2 ninja==1.11.1.3 build==1.2.2.post1
+
+
+# build flashinfer for torch nightly from source around 10 mins
+# release version: v0.2.2.post1
+# todo(elainewy): cache flashinfer build result for faster build
+ENV CCACHE_DIR=/root/.cache/ccache
+RUN --mount=type=cache,target=/root/.cache/ccache \
+    --mount=type=cache,target=/root/.cache/uv \
+    echo "git clone flashinfer..." \
+    && git clone --recursive https://github.com/flashinfer-ai/flashinfer.git \
+    && cd flashinfer \
+    && git checkout v0.2.2.post1 \
+    && git submodule update --init --recursive \
+    && echo "finish git clone flashinfer..." \
+    && rm -rf build \
+    && export TORCH_CUDA_ARCH_LIST=${torch_cuda_arch_list} \
+    && FLASHINFER_ENABLE_AOT=1 python3 setup.py bdist_wheel --dist-dir=../flashinfer-dist --verbose \
+    && cd .. \
+    && rm -rf flashinfer
+
+# install flashinfer
 RUN --mount=type=cache,target=/root/.cache/uv \
-. /etc/environment && \
-if [ "$TARGETPLATFORM" != "linux/arm64" ]; then \
-    uv pip install --system https://github.com/flashinfer-ai/flashinfer/releases/download/v0.2.1.post2/flashinfer_python-0.2.1.post2+cu124torch2.6-cp38-abi3-linux_x86_64.whl ; \
-fi
+    uv pip install --system flashinfer-dist/*.whl --verbose
+
+# install common packages
+COPY requirements/common.txt requirements/common.txt
+COPY use_existing_torch.py use_existing_torch.py
+COPY pyproject.toml pyproject.toml
+
 COPY examples examples
 COPY benchmarks benchmarks
 COPY ./vllm/collect_env.py .
 
-# Although we build Flashinfer with AOT mode, there's still
-# some issues w.r.t. JIT compilation. Therefore we need to
-# install build dependencies for JIT compilation.
-# TODO: Remove this once FlashInfer AOT wheel is fixed
-COPY requirements/build.txt requirements/build.txt
+RUN python3 use_existing_torch.py
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv pip install --system -r requirements/build.txt
+    uv pip install --system -r requirements/common.txt
 
-#################### vLLM installation IMAGE ####################
+################### VLLM INSTALLED IMAGE ####################
 
-#################### TEST IMAGE ####################
-# image to run unit testing suite
-# note that this uses vllm installed by `pip`
-FROM vllm-base AS test
 
-ADD . /vllm-workspace/
+#################### UNITTEST IMAGE #############################
+FROM vllm-base as test
+COPY tests/ tests/
+
+# install build and runtime dependencies without stable torch version
+COPY requirements/nightly_torch_test.txt requirements/nightly_torch_test.txt
 
 # This timeout (in seconds) is necessary when installing some dependencies via uv since it's likely to time out
 # Reference: https://github.com/astral-sh/uv/pull/1694
 ENV UV_HTTP_TIMEOUT=500
-
-# install development dependencies (for testing)
-# Workaround for #17068
-RUN --mount=type=cache,target=/root/.cache/uv \
-    uv pip install --system mamba-ssm==2.2.4 --no-build-isolation
-RUN --mount=type=cache,target=/root/.cache/uv \
-    uv pip install --system -r requirements/dev.txt
 
 # install development dependencies (for testing)
 RUN --mount=type=cache,target=/root/.cache/uv \
@@ -283,43 +300,8 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip install --system hf_transfer
 ENV HF_HUB_ENABLE_HF_TRANSFER 1
 
-# Copy in the v1 package for testing (it isn't distributed yet)
-COPY vllm/v1 /usr/local/lib/python3.12/dist-packages/vllm/v1
-
-# doc requires source code
-# we hide them inside `test_docs/` , so that this source code
-# will not be imported by other tests
-RUN mkdir test_docs
-RUN mv docs test_docs/
-RUN mv vllm test_docs/
-#################### TEST IMAGE ####################
-
-#################### OPENAI API SERVER ####################
-# base openai image with additional requirements, for any subsequent openai-style images
-FROM vllm-base AS vllm-openai-base
-
-# This timeout (in seconds) is necessary when installing some dependencies via uv since it's likely to time out
-# Reference: https://github.com/astral-sh/uv/pull/1694
-ENV UV_HTTP_TIMEOUT=500
-
-# install additional dependencies for openai api server
 RUN --mount=type=cache,target=/root/.cache/uv \
-    if [ "$TARGETPLATFORM" = "linux/arm64" ]; then \
-        uv pip install --system accelerate hf_transfer 'modelscope!=1.15.0' 'bitsandbytes>=0.42.0' 'timm==0.9.10' boto3 runai-model-streamer runai-model-streamer[s3]; \
-    else \
-        uv pip install --system accelerate hf_transfer 'modelscope!=1.15.0' 'bitsandbytes>=0.45.3' 'timm==0.9.10' boto3 runai-model-streamer runai-model-streamer[s3]; \
-    fi
+    uv pip install --system -r requirements/nightly_torch_test.txt
 
-ENV VLLM_USAGE_SOURCE production-docker-image
+#################### UNITTEST IMAGE #############################
 
-# define sagemaker first, so it is not default from `docker build`
-FROM vllm-openai-base AS vllm-sagemaker
-
-COPY examples/online_serving/sagemaker-entrypoint.sh .
-RUN chmod +x sagemaker-entrypoint.sh
-ENTRYPOINT ["./sagemaker-entrypoint.sh"]
-
-FROM vllm-openai-base AS vllm-openai
-
-ENTRYPOINT ["python3", "-m", "vllm.entrypoints.openai.api_server"]
-#################### OPENAI API SERVER ####################
