@@ -153,14 +153,24 @@ def test_matryoshka(
 
     with vllm_runner(model, task="embed", dtype=dtype,
                      max_model_len=None) as vllm_model:
-        vllm_outputs = vllm_model.encode(
-            example_prompts,
-            pooling_params=PoolingParams(dimensions=dimensions))
+        matryoshka_dimensions = (
+            vllm_model.model.llm_engine.model_config.matryoshka_dimensions)
+        assert matryoshka_dimensions is not None
 
-    check_embeddings_close(
-        embeddings_0_lst=hf_outputs,
-        embeddings_1_lst=vllm_outputs,
-        name_0="hf",
-        name_1="vllm",
-        tol=1e-2,
-    )
+        if dimensions not in matryoshka_dimensions:
+            with pytest.raises(ValueError):
+                vllm_model.encode(
+                    example_prompts,
+                    pooling_params=PoolingParams(dimensions=dimensions))
+        else:
+            vllm_outputs = vllm_model.encode(
+                example_prompts,
+                pooling_params=PoolingParams(dimensions=dimensions))
+
+            check_embeddings_close(
+                embeddings_0_lst=hf_outputs,
+                embeddings_1_lst=vllm_outputs,
+                name_0="hf",
+                name_1="vllm",
+                tol=1e-2,
+            )

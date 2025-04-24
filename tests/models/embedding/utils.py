@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from collections.abc import Sequence
-from typing import NamedTuple
+from typing import NamedTuple, Optional
 
 import torch
 import torch.nn.functional as F
@@ -43,5 +43,24 @@ def matryoshka_fy(tensor, dimensions):
 class EmbedModelInfo(NamedTuple):
     name: str
     is_matryoshka: bool
+    matryoshka_dimensions: Optional[list[int]] = None
     architecture: str = ""
     enable_test: bool = True
+
+
+def correctness_test(hf_model,
+                     inputs,
+                     vllm_outputs: Sequence[list[float]],
+                     dimensions: Optional[int] = None):
+
+    hf_outputs = hf_model.encode(inputs)
+    if dimensions:
+        hf_outputs = matryoshka_fy(hf_outputs, dimensions)
+
+    check_embeddings_close(
+        embeddings_0_lst=hf_outputs,
+        embeddings_1_lst=vllm_outputs,
+        name_0="hf",
+        name_1="vllm",
+        tol=1e-2,
+    )
