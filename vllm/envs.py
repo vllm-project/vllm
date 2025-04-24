@@ -794,6 +794,7 @@ def compute_hash() -> str:
         if key in environment_variables:
             factorize(key)
 
-    hash_str = hashlib.md5(str(factors).encode()).hexdigest()
+    hash_str = hashlib.md5(str(factors).encode(),
+                           usedforsecurity=False).hexdigest()
 
     return hash_str
