@@ -18,7 +18,7 @@ from vllm.forward_context import set_forward_context
 from vllm.inputs import INPUT_REGISTRY, InputRegistry
 from vllm.logger import init_logger
 from vllm.model_executor import SamplingMetadataCache
-from vllm.model_executor.layers.sampler import SamplerOutput
+from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.model_loader import get_model
 from vllm.multimodal import (MULTIMODAL_REGISTRY, BatchedTensorInputs,
                              MultiModalKwargs, MultiModalPlaceholderMap,
@@ -410,6 +410,7 @@ class XPUModelRunner(ModelRunnerBase[ModelInputForXPUWithSamplingMetadata]):
 
         # Lazy initialization.
         self.model: nn.Module  # Set after init_Model
+        self.sampler = get_sampler()
 
         self.sampling_metadata_cache: SamplingMetadataCache = \
               SamplingMetadataCache() \
