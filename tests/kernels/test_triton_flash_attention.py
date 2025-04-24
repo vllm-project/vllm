@@ -122,7 +122,8 @@ def quantize_input(q, k, v, fp8_kv=False, use_o_scale=False):
     # model.
     p_scale = None
 
-    o_scale = torch.rand(1, device="cuda") if use_o_scale else None
+    o_scale = torch.rand(1, device="cuda",
+                         requires_grad=False) if use_o_scale else None
 
     return q, k, v, q_descale, k_descale, v_descale, p_scale, o_scale
 
@@ -168,7 +169,8 @@ def input_helper(
     if use_bias:
         bias = torch.randn((1, HQ, N_CTX_Q, N_CTX_K),
                            dtype=dtype,
-                           device="cuda")
+                           device="cuda",
+                           requires_grad=False)
     else:
         bias = None
 
@@ -326,7 +328,7 @@ def test_op_fwd(Z,
 ])
 @pytest.mark.parametrize('causal', [True, False])
 @pytest.mark.parametrize('layout', ['bhsd'])
-@pytest.mark.parametrize('use_o_scale', ['True', 'False'])
+@pytest.mark.parametrize('use_o_scale', [True, False])
 def test_op_fwd_fp8(Z,
                     H,
                     N_CTX_Q,
