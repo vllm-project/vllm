@@ -104,6 +104,8 @@ class P2pNcclConnector(KVConnectorBase_V1):
             The number of elements in kv_caches and layer_names should be
             the same.
         """
+        assert self.p2p_nccl_pipe is not None
+
         attn_metadata = forward_context.attn_metadata
 
         def inject_kv_into_layer(
@@ -197,6 +199,7 @@ class P2pNcclConnector(KVConnectorBase_V1):
             attn_metadata (AttentionMetadata): the attention metadata.
             **kwargs: additional arguments for the save operation.
         """
+        assert self.p2p_nccl_pipe is not None
 
         def extract_kv_from_layer(
             layer: torch.Tensor,
@@ -229,6 +232,7 @@ class P2pNcclConnector(KVConnectorBase_V1):
 
     def wait_for_save(self):
         if self.is_producer:
+            assert self.p2p_nccl_pipe is not None
             self.p2p_nccl_pipe.wait_for_sent()
 
     def get_num_new_matched_tokens(
@@ -252,12 +256,12 @@ class P2pNcclConnector(KVConnectorBase_V1):
         if self.is_producer:
             return 0
 
-        num_external_tokens = (
-                len(request.prompt_token_ids) - 1 - num_computed_tokens)
-
-        logger.info("🍒num_external_tokens:%d, num_prompt_tokens:%d, "
-                    "num_computed_tokens:%d", num_external_tokens,
-                    len(request.prompt_token_ids), num_computed_tokens)
+        num_external_tokens = (len(request.prompt_token_ids) - 1 -
+                               num_computed_tokens)
+        logger.info(
+            "🍒num_external_tokens:%d, num_prompt_tokens:%d, "
+            "num_computed_tokens:%d", num_external_tokens,
+            len(request.prompt_token_ids), num_computed_tokens)
 
         return num_external_tokens
 
