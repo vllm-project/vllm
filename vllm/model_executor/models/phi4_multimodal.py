@@ -1356,7 +1356,8 @@ class Phi4MultimodalForCausalLM(nn.Module, SupportsLoRA, SupportsMultiModal):
         """
         return MultiModelKeys.from_string_field(
             language_model="model.",
-            connector=["audio_projection_for_vision", "audio_projection"],
+            connector=["img_projection", "vision_speech_projection", 
+                       "speech_projection"],
             tower_model=["image_embed", "audio_embed"],
         )
 
