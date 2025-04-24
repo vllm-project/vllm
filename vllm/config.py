@@ -52,8 +52,6 @@ if TYPE_CHECKING:
     from vllm.model_executor.layers.quantization.base_config import (
         QuantizationConfig)
     from vllm.model_executor.model_loader.loader import BaseModelLoader
-    from vllm.transformers_utils.tokenizer_group.base_tokenizer_group import (
-        BaseTokenizerGroup)
 
     ConfigType = type[DataclassInstance]
 else:
@@ -1250,6 +1248,10 @@ class ModelConfig:
         return (hasattr(self.hf_config, "matryoshka_dimensions")
                 or getattr(self.hf_config, "is_matryoshka", False))
 
+    @property
+    def matryoshka_dimensions(self):
+        return getattr(self.hf_config, "matryoshka_dimensions", None)
+
 
 BlockSize = Literal[1, 8, 16, 32, 64, 128]
 CacheDType = Literal["auto", "fp8", "fp8_e4m3", "fp8_e5m2"]
@@ -1407,83 +1409,33 @@ class CacheConfig:
             logger.warning("Possibly too large swap space. %s", msg)
 
 
-PoolType = Literal["ray"]
-
-
 @config
 @dataclass
 class TokenizerPoolConfig:
-    """Configuration for the tokenizer pool."""
+    """This config is deprecated and will be removed in a future release.
+
+    Passing these parameters will have no effect. Please remove them from your
+    configurations.
+    """
 
     pool_size: int = 0
-    """Number of tokenizer workers in the pool to use for asynchronous
-    tokenization. If 0, will use synchronous tokenization."""
-
-    pool_type: Union[PoolType, type["BaseTokenizerGroup"]] = "ray"
-    """Type of tokenizer pool to use for asynchronous tokenization. Ignored if
-    tokenizer_pool_size is 0."""
-
+    """This parameter is deprecated and will be removed in a future release.
+    Passing this parameter will have no effect. Please remove it from your
+    configurations."""
+    pool_type: str = "ray"
+    """This parameter is deprecated and will be removed in a future release.
+    Passing this parameter will have no effect. Please remove it from your
+    configurations."""
     extra_config: dict = field(default_factory=dict)
-    """Additional config for the pool. The way the config will be used depends
-    on the pool type. This should be a JSON string that will be parsed into a
-    dictionary. Ignored if tokenizer_pool_size is 0."""
+    """This parameter is deprecated and will be removed in a future release.
+    Passing this parameter will have no effect. Please remove it from your
+    configurations."""
 
-    def compute_hash(self) -> str:
-        """
-        WARNING: Whenever a new field is added to this config,
-        ensure that it is included in the factors list if
-        it affects the computation graph.
-
-        Provide a hash that uniquely identifies all the configs
-        that affect the structure of the computation
-        graph from input ids/embeddings to the final hidden states,
-        excluding anything before input ids/embeddings and after
-        the final hidden states.
-        """
-        # no factors to consider.
-        # this config will not affect the computation graph.
-        factors: list[Any] = []
-        hash_str = hashlib.md5(str(factors).encode(),
-                               usedforsecurity=False).hexdigest()
-        return hash_str
-
-    def __post_init__(self):
-        if self.pool_type not in ("ray", ) and not isinstance(
-                self.pool_type, type):
-            raise ValueError(f"Unknown pool type: {self.pool_type}")
-        if not isinstance(self.extra_config, dict):
-            raise ValueError("extra_config must be a dictionary.")
-
-    @classmethod
-    def create_config(
-        cls, tokenizer_pool_size: int,
-        tokenizer_pool_type: Union[PoolType, type["BaseTokenizerGroup"]],
-        tokenizer_pool_extra_config: Optional[Union[str, dict]]
-    ) -> Optional["TokenizerPoolConfig"]:
-        """Create a TokenizerPoolConfig from the given parameters.
-
-        If tokenizer_pool_size is 0, return None.
-
-        Args:
-            tokenizer_pool_size: Number of tokenizer workers in the pool.
-            tokenizer_pool_type: Type of the pool.
-            tokenizer_pool_extra_config: Additional config for the pool.
-                The way the config will be used depends on the
-                pool type. This can be a JSON string (will be parsed).
-        """
-        if tokenizer_pool_size:
-            if isinstance(tokenizer_pool_extra_config, str):
-                tokenizer_pool_extra_config_parsed = json.loads(
-                    tokenizer_pool_extra_config)
-            else:
-                tokenizer_pool_extra_config_parsed = (
-                    tokenizer_pool_extra_config or {})
-            tokenizer_pool_config = cls(tokenizer_pool_size,
-                                        tokenizer_pool_type,
-                                        tokenizer_pool_extra_config_parsed)
-        else:
-            tokenizer_pool_config = None
-        return tokenizer_pool_config
+    def __post_init__(self) -> None:
+        logger.warning_once(
+            "TokenizerPoolConfig is deprecated and will be removed in a "
+            "future release. Passing this parameter will have no effect. "
+            "Please remove it from your configurations.")
 
 
 class LoadFormat(str, enum.Enum):
@@ -1624,8 +1576,8 @@ class ParallelConfig:
     """Disable the custom all-reduce kernel and fall back to NCCL."""
 
     tokenizer_pool_config: Optional[TokenizerPoolConfig] = None
-    """Config for the tokenizer pool. If None, will use synchronous
-    tokenization."""
+    """This parameter is deprecated and will be removed in a future release.
+    Please remove it from your configs"""
 
     ray_workers_use_nsight: bool = False
     """Whether to profile Ray workers with nsight, see https://docs.ray.io/en/latest/ray-observability/user-guides/profiling.html#profiling-nsight-profiler."""
@@ -2544,7 +2496,6 @@ class SpeculativeConfig:
             max_parallel_loading_workers,
             disable_custom_all_reduce=target_parallel_config.
             disable_custom_all_reduce,
-            tokenizer_pool_config=target_parallel_config.tokenizer_pool_config,
             ray_workers_use_nsight=target_parallel_config.
             ray_workers_use_nsight,
             placement_group=target_parallel_config.placement_group,
@@ -2614,18 +2565,41 @@ class SpeculativeConfig:
         return f"SpeculativeConfig({method=}, {model=}, {num_spec_tokens=})"
 
 
+LoRADType = Literal["auto", "float16", "bfloat16"]
+
+
+@config
 @dataclass
 class LoRAConfig:
-    max_lora_rank: int
-    max_loras: int
+    """Configuration for LoRA."""
+
+    max_lora_rank: int = 16
+    """Max LoRA rank."""
+    max_loras: int = 1
+    """Max number of LoRAs in a single batch."""
     fully_sharded_loras: bool = False
+    """By default, only half of the LoRA computation is sharded with tensor
+    parallelism. Enabling this will use the fully sharded layers. At high
+    sequence length, max rank or tensor parallel size, this is likely faster.
+    """
     max_cpu_loras: Optional[int] = None
-    lora_dtype: Optional[Union[torch.dtype, str]] = None
+    """Maximum number of LoRAs to store in CPU memory. Must be >= than
+    `max_loras`."""
+    lora_dtype: Union[torch.dtype, LoRADType] = "auto"
+    """Data type for LoRA. If auto, will default to base model dtype."""
     lora_extra_vocab_size: int = 256
+    """Maximum size of extra vocabulary that can be present in a LoRA adapter
+    (added to the base model vocabulary)."""
     # This is a constant.
     lora_vocab_padding_size: ClassVar[int] = 256
-    long_lora_scaling_factors: Optional[tuple[float]] = None
+    long_lora_scaling_factors: Optional[tuple[float, ...]] = None
+    """Specify multiple scaling factors (which can be different from base model
+    scaling factor - see eg. Long LoRA) to allow for multiple LoRA adapters
+    trained with those scaling factors to be used at the same time. If not
+    specified, only adapters trained with the base model scaling factor are
+    allowed."""
     bias_enabled: bool = False
+    """Enable bias for LoRA adapters."""
 
     def compute_hash(self) -> str:
         """
@@ -2690,12 +2664,19 @@ class LoRAConfig:
                 "V1 LoRA does not support long LoRA, please use V0.")
 
 
+@config
 @dataclass
 class PromptAdapterConfig:
-    max_prompt_adapters: int
-    max_prompt_adapter_token: int
+    max_prompt_adapters: int = 1
+    """Max number of PromptAdapters in a batch."""
+    max_prompt_adapter_token: int = 0
+    """Max number of PromptAdapters tokens."""
     max_cpu_prompt_adapters: Optional[int] = None
-    prompt_adapter_dtype: Optional[torch.dtype] = None
+    """Maximum number of PromptAdapters to store in CPU memory. Must be >= than
+    `max_prompt_adapters`."""
+    prompt_adapter_dtype: Union[torch.dtype, str] = "auto"
+    """Data type for PromptAdapter. If auto, will default to base model dtype.
+    """
 
     def compute_hash(self) -> str:
         """
@@ -2727,7 +2708,7 @@ class PromptAdapterConfig:
             self.max_cpu_prompt_adapters = self.max_prompt_adapters
 
     def verify_with_model_config(self, model_config: ModelConfig):
-        if self.prompt_adapter_dtype in (None, "auto"):
+        if self.prompt_adapter_dtype == "auto":
             self.prompt_adapter_dtype = model_config.dtype
         elif isinstance(self.prompt_adapter_dtype, str):
             self.prompt_adapter_dtype = getattr(torch,
