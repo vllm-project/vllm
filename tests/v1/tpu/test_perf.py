@@ -67,7 +67,7 @@ TEST_PARAMS = [
         # (This is the active CI/CD instance)
         # commit id: ccb246776d93ef105904a8ec015b3587240a1183
         # tpu: v6e (current vllm CI/CD)
-        expected_avg_time=1.5,
+        expected_avg_time=1.7,  # measured with VLLM_XLA_CACHE_PATH=  
         err_tol=0.20,
     ),
 ]
