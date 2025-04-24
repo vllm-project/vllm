@@ -492,6 +492,9 @@ class MLACommonMetadata(AttentionMetadata):
     # captured.
     block_tables: Optional[torch.Tensor]
 
+    # the current max len in tensor context_lens_tensor
+    max_context_len: Optional[int] = None
+
     # Maximum query length in the batch.
     max_query_len: Optional[int] = None
 
@@ -560,6 +563,8 @@ class MLACommonMetadata(AttentionMetadata):
                          self.seq_start_loc[:self.num_prefills + 1])
         context_lens_tensor = (None if self.context_lens_tensor is None else
                                self.context_lens_tensor[:self.num_prefills])
+        max_context_len = (None if context_lens_tensor is None else
+                                    context_lens_tensor.max().item())
         block_tables = (None if self.block_tables is None else
                         self.block_tables[:self.num_prefills])
         input_positions = (None if self.input_positions is None else
@@ -587,6 +592,7 @@ class MLACommonMetadata(AttentionMetadata):
             query_start_loc=query_start_loc,
             seq_start_loc=seq_start_loc,
             context_lens_tensor=context_lens_tensor,
+            max_context_len=max_context_len,
             block_tables=block_tables,
             head_dim=self.head_dim,
             is_profile_run=self.is_profile_run,
@@ -644,6 +650,7 @@ class MLACommonMetadata(AttentionMetadata):
             seq_start_loc=self.seq_start_loc[self.num_prefills:]
             if self.seq_start_loc is not None else None,
             context_lens_tensor=None,
+            max_context_len=None,
             block_tables=block_tables,
             input_positions=input_positions,
             head_dim=self.head_dim,
