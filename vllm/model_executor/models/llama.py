@@ -1,3 +1,4 @@
+# SPDX-FileCopyrightText: Copyright 2025 Arm Limited and/or its affiliate open-source-office@arm.com
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
@@ -450,6 +451,9 @@ class LlamaModel(nn.Module):
                 if is_pp_missing_parameter(name, self):
                     continue
 
+                if name not in params_dict:
+                    continue
+
                 param = params_dict[name]
                 weight_loader = param.weight_loader
                 weight_loader(param, loaded_weight, shard_id)
@@ -461,7 +465,8 @@ class LlamaModel(nn.Module):
 
                 if is_pp_missing_parameter(name, self):
                     continue
-
+                if name not in params_dict:
+                    continue
                 param = params_dict[name]
                 weight_loader = getattr(param, "weight_loader",
                                         default_weight_loader)
