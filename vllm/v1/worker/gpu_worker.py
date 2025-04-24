@@ -20,7 +20,7 @@ from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.model_executor import set_random_seed
 from vllm.platforms import current_platform
-from vllm.utils import GiB_bytes
+from vllm.utils import GiB_bytes, MemorySnapshot, memory_profiling
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.worker.gpu_model_runner import GPUModelRunner
@@ -73,6 +73,7 @@ class Worker(WorkerBase):
                     torch_profiler_trace_dir, use_gzip=True))
         else:
             self.profiler = None
+        self.baseline_snapshot = MemorySnapshot()
 
     def sleep(self, level: int = 1) -> None:
         free_bytes_before_sleep = torch.cuda.mem_get_info()[0]
@@ -175,7 +176,11 @@ class Worker(WorkerBase):
         _, total_gpu_memory = torch.cuda.mem_get_info()
         # Execute a forward pass with dummy inputs to profile the memory usage
         # of the model.
-        self.model_runner.profile_run()
+        # self.model_runner.profile_run()
+        with memory_profiling(
+                self.baseline_snapshot,
+                weights_memory=self.model_runner.model_memory_usage) as result:
+            self.model_runner.profile_run()
 
         free_gpu_memory, _ = torch.cuda.mem_get_info()
         # NOTE(woosuk): Here we assume that the other processes using the same
@@ -193,16 +198,29 @@ class Worker(WorkerBase):
         # gpu outside of `torch`. NCCL operations, for example, can use a few
         # GB during a forward pass
         torch.cuda.empty_cache()
-        torch_allocated_bytes = torch.cuda.memory_stats(
-        )["allocated_bytes.all.current"]
-        total_allocated_bytes = torch.cuda.mem_get_info(
-        )[1] - torch.cuda.mem_get_info()[0]
-        non_torch_allocations = total_allocated_bytes - torch_allocated_bytes
-        if non_torch_allocations > 0:
-            peak_memory += non_torch_allocations
         available_kv_cache_memory = (
             total_gpu_memory * self.cache_config.gpu_memory_utilization -
             peak_memory)
+        memory_for_current_instance = total_gpu_memory * \
+            self.cache_config.gpu_memory_utilization
+
+        msg = (f"Memory profiling takes {result.profile_time:.2f} seconds\n"
+               "the current vLLM instance can use "
+               "total_gpu_memory "
+               f"({(total_gpu_memory / GiB_bytes):.2f}GiB)"
+               " x gpu_memory_utilization "
+               f"({self.cache_config.gpu_memory_utilization:.2f})"
+               f" = {(memory_for_current_instance / GiB_bytes):.2f}GiB\n"
+               "model weights take "
+               f"{(result.weights_memory / GiB_bytes):.2f}GiB;"
+               " non_torch_memory takes "
+               f"{(result.non_torch_increase / GiB_bytes):.2f}GiB;"
+               " PyTorch activation peak memory takes "
+               f"{(result.torch_peak_increase / GiB_bytes):.2f}GiB;"
+               " the rest of the memory reserved for KV Cache is "
+               f"{(available_kv_cache_memory / GiB_bytes):.2f}GiB.")
+
+        logger.info(msg)
 
         return int(available_kv_cache_memory)
 
