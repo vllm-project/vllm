@@ -8,7 +8,7 @@ from typing import Optional, Union
 from vllm.outputs import CompletionOutput, RequestOutput
 from vllm.sampling_params import RequestOutputKind
 from vllm.transformers_utils.tokenizer import AnyTokenizer
-from vllm.transformers_utils.tokenizer_group import BaseTokenizerGroup
+from vllm.transformers_utils.tokenizer_group import TokenizerGroup
 from vllm.v1.engine import EngineCoreOutput, EngineCoreRequest, FinishReason
 from vllm.v1.engine.detokenizer import IncrementalDetokenizer
 from vllm.v1.engine.logprobs import LogprobsProcessor
@@ -37,12 +37,9 @@ class RequestOutputCollector:
             self.output = output
             self.ready.set()
         elif isinstance(self.output, RequestOutput):
-            if self.aggregate:
-                # Coalesce the outputs in delta case.
-                self.output.add(output)
-            else:
-                # Just replace latest in non-delta case.
-                self.output = output
+            # This ensures that request outputs with different request indexes
+            # (if n > 1) do not override each other.
+            self.output.add(output, aggregate=self.aggregate)
 
     async def get(self) -> RequestOutput:
         """Get operation blocks on put event."""
@@ -228,7 +225,7 @@ class OutputProcessor:
 
     def __init__(
         self,
-        tokenizer: BaseTokenizerGroup,
+        tokenizer: TokenizerGroup,
         log_stats: bool,
     ):
         self.log_stats = log_stats

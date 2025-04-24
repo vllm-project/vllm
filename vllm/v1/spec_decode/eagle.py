@@ -12,6 +12,8 @@ from vllm.model_executor.models.llama_eagle import EagleLlamaForCausalLM
 from vllm.v1.attention.backends.flash_attn import FlashAttentionMetadata
 from vllm.v1.sample.metadata import SamplingMetadata
 
+PADDING_SLOT_ID = -1
+
 
 class EagleProposer:
 
@@ -23,6 +25,7 @@ class EagleProposer:
         self.vllm_config = vllm_config
         self.num_speculative_tokens = (
             vllm_config.speculative_config.num_speculative_tokens)
+        self.max_model_len = vllm_config.model_config.max_model_len
         self.block_size = vllm_config.cache_config.block_size
         # We need +1 here because the arange is used to set query_start_loc,
         # which has one more element than batch_size.
@@ -48,7 +51,7 @@ class EagleProposer:
         # [batch_size, max_num_blocks_per_req]
         block_table: torch.Tensor,
         sampling_metadata: SamplingMetadata,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+    ) -> torch.Tensor:
         num_tokens = target_token_ids.shape[0]
         batch_size = next_token_ids.shape[0]
         last_token_indices = cu_num_tokens[1:] - 1
@@ -91,17 +94,15 @@ class EagleProposer:
             )
         sample_hidden_states = hidden_states[last_token_indices]
         logits = self.model.compute_logits(sample_hidden_states, None)
-        draft_token_ids, draft_probs = compute_probs_and_sample_next_token(
-            logits, sampling_metadata)
+        draft_token_ids = logits.argmax(dim=-1)
 
         # Early exit if there is only one draft token to be generated.
         if self.num_speculative_tokens == 1:
-            # [batch_size, 1] and [batch_size, 1, vocab_size]
-            return draft_token_ids.view(-1, 1), draft_probs.unsqueeze(dim=1)
+            # [batch_size, 1]
+            return draft_token_ids.view(-1, 1)
 
         # Generate the remaining draft tokens.
         draft_token_ids_list = [draft_token_ids]
-        draft_probs_list = [draft_probs]
 
         positions = target_positions[last_token_indices]
         hidden_states = sample_hidden_states
@@ -112,34 +113,56 @@ class EagleProposer:
             # Update the inputs.
             input_ids = draft_token_ids_list[-1]
             positions += 1
+
+            # NOTE(woosuk): We should handle the case where the draft model
+            # generates tokens beyond the max model length. Since it is complex
+            # to remove such requests from the batch, we keep them in the batch
+            # but adjust the position ids and slot mappings to avoid the
+            # out-of-range access during the model execution. The draft tokens
+            # generated with this adjustment should be ignored.
+            exceeds_max_model_len = positions >= self.max_model_len
+            # Mask out the position ids that exceed the max model length.
+            # Otherwise, we may get out-of-range error in RoPE.
+            clamped_positions = torch.where(exceeds_max_model_len, 0,
+                                            positions)
+
+            # Increment the sequence lengths.
             attn_metadata.max_seq_len += 1
             attn_metadata.seq_lens += 1
+            # Consider max model length.
+            attn_metadata.max_seq_len = min(attn_metadata.max_seq_len,
+                                            self.max_model_len)
+            # For the requests that exceed the max model length, we set the
+            # sequence length to 1 to minimize their overheads in attention.
+            attn_metadata.seq_lens.masked_fill_(exceeds_max_model_len, 1)
+
             # Compute the slot mapping.
-            block_numbers = positions // self.block_size
+            block_numbers = clamped_positions // self.block_size
             block_ids = block_table.gather(dim=1,
                                            index=block_numbers.view(-1, 1))
             block_ids = block_ids.view(-1)
             attn_metadata.slot_mapping = (block_ids * self.block_size +
-                                          positions % self.block_size)
+                                          clamped_positions % self.block_size)
+            # Mask out the slot mappings that exceed the max model length.
+            # Otherwise, the KV cache will be inadvertently updated with the
+            # padding tokens.
+            attn_metadata.slot_mapping.masked_fill_(exceeds_max_model_len,
+                                                    PADDING_SLOT_ID)
 
             # Run the model.
             with set_forward_context(attn_metadata, self.vllm_config):
                 hidden_states = self.model(
                     input_ids=input_ids,
                     hidden_states=hidden_states,
-                    positions=positions,
+                    positions=clamped_positions,
                 )
             logits = self.model.compute_logits(hidden_states, None)
-            draft_token_ids, probs = compute_probs_and_sample_next_token(
-                logits, sampling_metadata)
+            draft_token_ids = logits.argmax(dim=-1)
             draft_token_ids_list.append(draft_token_ids)
-            draft_probs_list.append(probs)
 
         # [batch_size, num_speculative_tokens]
         draft_token_ids = torch.stack(draft_token_ids_list, dim=1)
-        # [batch_size, num_speculative_tokens, vocab_size]
-        draft_probs = torch.stack(draft_probs_list, dim=1)
-        return draft_token_ids, draft_probs
+        return draft_token_ids
 
     @staticmethod
     def prepare_inputs(
@@ -209,6 +232,10 @@ class EagleProposer:
         self.model.lm_head = target_model.lm_head
 
 
+# NOTE(woosuk): Currently, the below code is not used and we always use argmax
+# to sample the draft tokens. We will use this after we find a way to manage
+# the draft prob tensor.
+# Refer to https://github.com/vllm-project/vllm/pull/16899 for the details.
 # FIXME(woosuk): The logic here is duplicated with the main sampling code.
 # We should refactor this to reuse the same sampling implementation.
 def compute_probs_and_sample_next_token(
@@ -235,7 +262,9 @@ def compute_probs_and_sample_next_token(
     # TODO(woosuk): Consider seeds.
     q = torch.empty_like(probs)
     q.exponential_()
-    next_token_ids = probs.div_(q).argmax(dim=-1).view(-1)
+    # NOTE(woosuk): We shouldn't use `probs.div_(q)` because the draft_probs
+    # will be used later for rejection sampling.
+    next_token_ids = probs.div(q).argmax(dim=-1).view(-1)
     if not sampling_metadata.all_random:
         greedy_token_ids = probs.argmax(dim=-1)
         next_token_ids = torch.where(

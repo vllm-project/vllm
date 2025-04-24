@@ -6,6 +6,7 @@ import enum
 import hashlib
 import inspect
 import json
+import re
 import sys
 import textwrap
 import warnings
@@ -51,15 +52,15 @@ if TYPE_CHECKING:
     from vllm.model_executor.layers.quantization.base_config import (
         QuantizationConfig)
     from vllm.model_executor.model_loader.loader import BaseModelLoader
-    from vllm.transformers_utils.tokenizer_group.base_tokenizer_group import (
-        BaseTokenizerGroup)
 
-    Config = TypeVar("Config", bound=DataclassInstance)
+    ConfigType = type[DataclassInstance]
 else:
     QuantizationConfig = None
-    Config = TypeVar("Config")
+    ConfigType = type
 
 logger = init_logger(__name__)
+
+ConfigT = TypeVar("ConfigT", bound=ConfigType)
 
 # This value is chosen to have a balance between ITL and TTFT. Note it is
 # not optimized for throughput.
@@ -120,7 +121,7 @@ def get_attr_docs(cls: type[Any]) -> dict[str, str]:
     def pairwise(iterable):
         """
         Manually implement https://docs.python.org/3/library/itertools.html#itertools.pairwise
-        
+
         Can be removed when Python 3.9 support is dropped.
         """
         iterator = iter(iterable)
@@ -162,7 +163,7 @@ def get_attr_docs(cls: type[Any]) -> dict[str, str]:
     return out
 
 
-def config(cls: type[Config]) -> type[Config]:
+def config(cls: ConfigT) -> ConfigT:
     """
     A decorator that ensures all fields in a dataclass have default values
     and that each field has a docstring.
@@ -181,7 +182,7 @@ def config(cls: type[Config]) -> type[Config]:
     return cls
 
 
-def get_field(cls: type[Config], name: str) -> Field:
+def get_field(cls: ConfigType, name: str) -> Field:
     """Get the default factory field of a dataclass by name. Used for getting
     default factory fields in `EngineArgs`."""
     if not is_dataclass(cls):
@@ -266,7 +267,7 @@ class ModelConfig:
         config_format: The config format which shall be loaded.
             Defaults to 'auto' which defaults to 'hf'.
         hf_token: The token to use as HTTP bearer authorization for remote files
-            . If `True`, will use the token generated when running 
+            . If `True`, will use the token generated when running
             `huggingface-cli login` (stored in `~/.huggingface`).
         hf_overrides: If a dictionary, contains arguments to be forwarded to the
             HuggingFace config. If a callable, it is called to update the
@@ -326,6 +327,8 @@ class ModelConfig:
         factors.append(self.rope_theta)
         # hf_config can control how the model looks!
         factors.append(self.hf_config.to_json_string())
+        str_factors = str(factors)
+        assert_hashable(str_factors)
         return hashlib.sha256(str(factors).encode()).hexdigest()
 
     def __init__(
@@ -750,7 +753,8 @@ class ModelConfig:
         optimized_quantization_methods = [
             "fp8", "marlin", "modelopt", "gptq_marlin_24", "gptq_marlin",
             "awq_marlin", "fbgemm_fp8", "compressed_tensors",
-            "compressed-tensors", "experts_int8", "quark", "nvfp4"
+            "compressed-tensors", "experts_int8", "quark", "nvfp4", "bitblas",
+            "gptq_bitblas"
         ]
         if self.quantization is not None:
             self.quantization = self.quantization.lower()
@@ -1245,7 +1249,7 @@ class ModelConfig:
                 or getattr(self.hf_config, "is_matryoshka", False))
 
 
-BlockSize = Literal[8, 16, 32, 64, 128]
+BlockSize = Literal[1, 8, 16, 32, 64, 128]
 CacheDType = Literal["auto", "fp8", "fp8_e4m3", "fp8_e5m2"]
 PrefixCachingHashAlgo = Literal["builtin", "sha256"]
 
@@ -1255,11 +1259,14 @@ PrefixCachingHashAlgo = Literal["builtin", "sha256"]
 class CacheConfig:
     """Configuration for the KV cache."""
 
-    block_size: Optional[BlockSize] = None
+    block_size: BlockSize = None  # type: ignore
     """Size of a contiguous cache block in number of tokens. This is ignored on
     neuron devices and set to `--max-model-len`. On CUDA devices, only block
     sizes up to 32 are supported. On HPU devices, block size defaults to 128.
-    """
+
+    This config has no static default. If left unspecified by the user, it will
+    be set in `Platform.check_and_update_configs()` based on the current
+    platform."""
     gpu_memory_utilization: float = 0.9
     """The fraction of GPU memory to be used for the model executor, which can
     range from 0 to 1. For example, a value of 0.5 would imply 50% GPU memory
@@ -1398,83 +1405,33 @@ class CacheConfig:
             logger.warning("Possibly too large swap space. %s", msg)
 
 
-PoolType = Literal["ray"]
-
-
 @config
 @dataclass
 class TokenizerPoolConfig:
-    """Configuration for the tokenizer pool."""
+    """This config is deprecated and will be removed in a future release.
+
+    Passing these parameters will have no effect. Please remove them from your
+    configurations.
+    """
 
     pool_size: int = 0
-    """Number of tokenizer workers in the pool to use for asynchronous
-    tokenization. If 0, will use synchronous tokenization."""
-
-    pool_type: Union[PoolType, type["BaseTokenizerGroup"]] = "ray"
-    """Type of tokenizer pool to use for asynchronous tokenization. Ignored if
-    tokenizer_pool_size is 0."""
-
+    """This parameter is deprecated and will be removed in a future release.
+    Passing this parameter will have no effect. Please remove it from your
+    configurations."""
+    pool_type: str = "ray"
+    """This parameter is deprecated and will be removed in a future release.
+    Passing this parameter will have no effect. Please remove it from your
+    configurations."""
     extra_config: dict = field(default_factory=dict)
-    """Additional config for the pool. The way the config will be used depends
-    on the pool type. This should be a JSON string that will be parsed into a
-    dictionary. Ignored if tokenizer_pool_size is 0."""
+    """This parameter is deprecated and will be removed in a future release.
+    Passing this parameter will have no effect. Please remove it from your
+    configurations."""
 
-    def compute_hash(self) -> str:
-        """
-        WARNING: Whenever a new field is added to this config,
-        ensure that it is included in the factors list if
-        it affects the computation graph.
-
-        Provide a hash that uniquely identifies all the configs
-        that affect the structure of the computation
-        graph from input ids/embeddings to the final hidden states,
-        excluding anything before input ids/embeddings and after
-        the final hidden states.
-        """
-        # no factors to consider.
-        # this config will not affect the computation graph.
-        factors: list[Any] = []
-        hash_str = hashlib.md5(str(factors).encode(),
-                               usedforsecurity=False).hexdigest()
-        return hash_str
-
-    def __post_init__(self):
-        if self.pool_type not in ("ray", ) and not isinstance(
-                self.pool_type, type):
-            raise ValueError(f"Unknown pool type: {self.pool_type}")
-        if not isinstance(self.extra_config, dict):
-            raise ValueError("extra_config must be a dictionary.")
-
-    @classmethod
-    def create_config(
-        cls, tokenizer_pool_size: int,
-        tokenizer_pool_type: Union[PoolType, type["BaseTokenizerGroup"]],
-        tokenizer_pool_extra_config: Optional[Union[str, dict]]
-    ) -> Optional["TokenizerPoolConfig"]:
-        """Create a TokenizerPoolConfig from the given parameters.
-
-        If tokenizer_pool_size is 0, return None.
-
-        Args:
-            tokenizer_pool_size: Number of tokenizer workers in the pool.
-            tokenizer_pool_type: Type of the pool.
-            tokenizer_pool_extra_config: Additional config for the pool.
-                The way the config will be used depends on the
-                pool type. This can be a JSON string (will be parsed).
-        """
-        if tokenizer_pool_size:
-            if isinstance(tokenizer_pool_extra_config, str):
-                tokenizer_pool_extra_config_parsed = json.loads(
-                    tokenizer_pool_extra_config)
-            else:
-                tokenizer_pool_extra_config_parsed = (
-                    tokenizer_pool_extra_config or {})
-            tokenizer_pool_config = cls(tokenizer_pool_size,
-                                        tokenizer_pool_type,
-                                        tokenizer_pool_extra_config_parsed)
-        else:
-            tokenizer_pool_config = None
-        return tokenizer_pool_config
+    def __post_init__(self) -> None:
+        logger.warning_once(
+            "TokenizerPoolConfig is deprecated and will be removed in a "
+            "future release. Passing this parameter will have no effect. "
+            "Please remove it from your configurations.")
 
 
 class LoadFormat(str, enum.Enum):
@@ -1489,6 +1446,7 @@ class LoadFormat(str, enum.Enum):
     BITSANDBYTES = "bitsandbytes"
     MISTRAL = "mistral"
     RUNAI_STREAMER = "runai_streamer"
+    RUNAI_STREAMER_SHARDED = "runai_streamer_sharded"
     FASTSAFETENSORS = "fastsafetensors"
 
 
@@ -1583,8 +1541,21 @@ class ParallelConfig:
     the product of the tensor parallel size and data parallel size."""
     data_parallel_rank: int = 0
     """Rank of the data parallel group."""
-    data_parallel_rank_local: Optional[int] = None
-    """Local rank of the data parallel group, defaults to global rank."""
+    _data_parallel_rank_local: Optional[int] = field(default=None, init=False)
+    """Private field to store the local rank of the data parallel group."""
+
+    @property
+    def data_parallel_rank_local(self) -> int:
+        """Local rank of the data parallel group, defaults to global rank."""
+        if self._data_parallel_rank_local is None:
+            return self.data_parallel_rank
+        return self._data_parallel_rank_local
+
+    @data_parallel_rank_local.setter
+    def data_parallel_rank_local(self, value: int) -> None:
+        """Set the local rank of the data parallel group."""
+        self._data_parallel_rank_local = value
+
     data_parallel_master_ip: str = "127.0.0.1"
     """IP of the data parallel master."""
     data_parallel_master_port: int = 29500
@@ -1601,8 +1572,8 @@ class ParallelConfig:
     """Disable the custom all-reduce kernel and fall back to NCCL."""
 
     tokenizer_pool_config: Optional[TokenizerPoolConfig] = None
-    """Config for the tokenizer pool. If None, will use synchronous
-    tokenization."""
+    """This parameter is deprecated and will be removed in a future release.
+    Please remove it from your configs"""
 
     ray_workers_use_nsight: bool = False
     """Whether to profile Ray workers with nsight, see https://docs.ray.io/en/latest/ray-observability/user-guides/profiling.html#profiling-nsight-profiler."""
@@ -1624,7 +1595,7 @@ class ParallelConfig:
     """The full name of the worker class to use. If "auto", the worker class
     will be determined based on the platform."""
     sd_worker_cls: str = "auto"
-    """The full name of the worker class to use for speculative decofing. 
+    """The full name of the worker class to use for speculative decofing.
     If "auto", the worker class will be determined based on the platform."""
     worker_extension_cls: str = ""
     """The full name of the worker extension class to use. The worker extension
@@ -1693,6 +1664,7 @@ class ParallelConfig:
         factors: list[Any] = []
         factors.append(self.pipeline_parallel_size)
         factors.append(self.tensor_parallel_size)
+        factors.append(self.enable_expert_parallel)
         return hashlib.sha256(str(factors).encode()).hexdigest()
 
     def __post_init__(self) -> None:
@@ -1815,13 +1787,13 @@ class SchedulerConfig:
 
     max_num_batched_tokens: int = None  # type: ignore
     """Maximum number of tokens to be processed in a single iteration.
-    
+
     This config has no static default. If left unspecified by the user, it will
     be set in `EngineArgs.create_engine_config` based on the usage context."""
 
     max_num_seqs: int = None  # type: ignore
     """Maximum number of sequences to be processed in a single iteration.
-    
+
     This config has no static default. If left unspecified by the user, it will
     be set in `EngineArgs.create_engine_config` based on the usage context."""
 
@@ -1867,7 +1839,7 @@ class SchedulerConfig:
     # TODO (ywang96): Make this configurable.
     max_num_encoder_input_tokens: int = field(init=False)
     """Multimodal encoder compute budget, only used in V1.
-    
+
     NOTE: This is not currently configurable. It will be overridden by
     max_num_batched_tokens in case max multimodal embedding size is larger."""
 
@@ -2123,139 +2095,113 @@ class DeviceConfig:
             self.device = torch.device(self.device_type)
 
 
+SpeculativeMethod = Literal["ngram", "eagle", "medusa", "mlp_speculator",
+                            "draft_model"]
+SpeculativeAcceptanceMethod = Literal["rejection_sampler",
+                                      "typical_acceptance_sampler"]
+
+
+@config
 @dataclass
 class SpeculativeConfig:
-    """
-    Configuration for speculative decoding.
-    Configurable parameters include:
-    - General Speculative Decoding Control:
-        - num_speculative_tokens (int): The number of speculative
-            tokens, if provided. It will default to the number in the draft
-            model config if present, otherwise, it is required.
-        - model (Optional[str]): The name of the draft model, eagle head,
-            or additional weights, if provided.
-        - method (Optional[str]): The name of the speculative method to use.
-            If users provide and set the `model` param, the speculative method
-            type will be detected automatically if possible, if `model` param
-            is not provided, the method name must be provided.
-            - Possible values:
-                - ngram
-                    Related additional configuration:
-                    - prompt_lookup_max (Optional[int]):
-                        Maximum size of ngram token window when using Ngram
-                        proposer, required when method is set to ngram.
-                    - prompt_lookup_min (Optional[int]):
-                        Minimum size of ngram token window when using Ngram
-                        proposer, if provided. Defaults to 1.
-                - eagle
-                - medusa
-                - mlp_speculator
-                - draft_model
-        - acceptance_method (str): The method to use for accepting draft
-            tokens. This can take two possible values: 'rejection_sampler' and
-            'typical_acceptance_sampler' for RejectionSampler and
-            TypicalAcceptanceSampler respectively. If not specified, it
-            defaults to 'rejection_sampler'.
-            - Possible values:
-                - rejection_sampler
-                - typical_acceptance_sampler
-                    Related additional configuration:
-                    - posterior_threshold (Optional[float]):
-                        A threshold value that sets a lower bound on the
-                        posterior probability of a token in the target model
-                        for it to be accepted. This threshold is used only
-                        when we use the TypicalAcceptanceSampler for token
-                        acceptance.
-                    - posterior_alpha (Optional[float]):
-                        Scaling factor for entropy-based threshold, applied
-                        when using TypicalAcceptanceSampler.
-        - draft_tensor_parallel_size (Optional[int]): The degree of the tensor
-            parallelism for the draft model. Can only be 1 or the same as the
-            target model's tensor parallel size.
-        - disable_logprobs (bool): If set to True, token log probabilities are
-            not returned during speculative decoding. If set to False, token
-            log probabilities are returned according to the log probability
-            settings in SamplingParams. If not specified, it defaults to True.
+    """Configuration for speculative decoding."""
 
-    - Draft Model Configuration:
-        - quantization (Optional[str]): Quantization method that was used to
-            quantize the draft model weights. If None, we assume the
-            model weights are not quantized. Note that it only takes effect
-            when using the draft model-based speculative method.
-        - max_model_len (Optional[int]): The maximum model length of the
-            draft model. Used when testing the ability to skip
-            speculation for some sequences.
-        - revision: The specific model version to use for the draft model. It
-            can be a branch name, a tag name, or a commit id. If unspecified,
-            will use the default version.
-        - code_revision: The specific revision to use for the draft model code
-            on Hugging Face Hub. It can be a branch name, a tag name, or a
-            commit id. If unspecified, will use the default version.
-
-    - Advanced Control:
-        - disable_mqa_scorer (bool): Disable the MQA scorer and fall back to
-            batch expansion for scoring proposals. If not specified, it
-            defaults to False.
-        - disable_by_batch_size (Optional[int]): Disable speculative decoding
-            for new incoming requests when the number of enqueued requests is
-            larger than this value, if provided.
-
-    Although the parameters above are structured hierarchically, there is no
-    need to nest them during configuration.
-
-    Non-configurable internal parameters include:
-    - Model Configuration:
-        - target_model_config (ModelConfig): The configuration of the target
-            model.
-        - draft_model_config (ModelConfig): The configuration of the draft
-            model initialized internal.
-    - Parallelism Configuration:
-        - target_parallel_config (ParallelConfig): The parallel configuration
-            for the target model.
-        - draft_parallel_config (ParallelConfig): The parallel configuration
-            for the draft model initialized internal.
-    - Execution Control:
-        - enable_chunked_prefill (bool): Whether vLLM is configured to use
-            chunked prefill or not. Used for raising an error since it's not
-            yet compatible with speculative decode.
-        - disable_log_stats (bool): Whether to disable the periodic printing of
-            stage times in speculative decoding.
-    """
-    # speculative configs from cli args
+    # General speculative decoding control
     num_speculative_tokens: int = field(default=None,
                                         init=True)  # type: ignore
-    method: Optional[str] = None
-    acceptance_method: str = "rejection_sampler"
-    draft_tensor_parallel_size: Optional[int] = None
-    disable_logprobs: bool = True
-
+    """The number of speculative tokens, if provided. It will default to the
+    number in the draft model config if present, otherwise, it is required."""
     model: Optional[str] = None
-    quantization: Optional[str] = None
-    max_model_len: Optional[int] = None
-    revision: Optional[str] = None
-    code_revision: Optional[str] = None
+    """The name of the draft model, eagle head, or additional weights, if
+    provided."""
+    method: Optional[SpeculativeMethod] = None
+    """The name of the speculative method to use. If users provide and set the
+    `model` param, the speculative method type will be detected automatically
+    if possible, if `model` param is not provided, the method name must be
+    provided.
 
+    If using `ngram` method, the related configuration `prompt_lookup_max` and
+    `prompt_lookup_min` should be considered."""
+    acceptance_method: SpeculativeAcceptanceMethod = "rejection_sampler"
+    """The method to use for accepting draft tokens:\n
+    - "rejection_sampler" maps to `RejectionSampler`.\n
+    - "typical_acceptance_sampler" maps to `TypicalAcceptanceSampler`.
+
+    If using `typical_acceptance_sampler`, the related configuration
+    `posterior_threshold` and `posterior_alpha` should be considered."""
+    draft_tensor_parallel_size: Optional[int] = None
+    """The degree of the tensor parallelism for the draft model. Can only be 1
+    or the same as the target model's tensor parallel size."""
+    disable_logprobs: bool = True
+    """If set to True, token log probabilities are not returned during
+    speculative decoding. If set to False, token log probabilities are returned
+    according to the log probability settings in SamplingParams."""
+
+    # Draft model configuration
+    quantization: Optional[str] = None
+    """Quantization method that was used to quantize the draft model weights.
+    If `None`, we assume the model weights are not quantized. Note that it only
+    takes effect when using the draft model-based speculative method."""
+    max_model_len: Optional[int] = None
+    """The maximum model length of the draft model. Used when testing the
+    ability to skip speculation for some sequences."""
+    revision: Optional[str] = None
+    """The specific model version to use for the draft model. It can be a
+    branch name, a tag name, or a commit id. If unspecified, will use the
+    default version."""
+    code_revision: Optional[str] = None
+    """The specific revision to use for the draft model code on Hugging Face
+    Hub. It can be a branch name, a tag name, or a commit id. If unspecified,
+    will use the default version."""
+
+    # Advanced control
     disable_mqa_scorer: bool = False
+    """Disable the MQA scorer and fall back to batch expansion for scoring
+    proposals."""
     disable_by_batch_size: Optional[int] = None
+    """Disable speculative decoding for new incoming requests when the number
+    of enqueued requests is larger than this value, if provided."""
+
+    # Ngram proposer configuration
     prompt_lookup_max: Optional[int] = None
+    """Maximum size of ngram token window when using Ngram proposer, required
+    when method is set to ngram."""
     prompt_lookup_min: Optional[int] = None
+    """Minimum size of ngram token window when using Ngram proposer, if
+    provided. Defaults to 1."""
+
+    # Typical acceptance sampler configuration
     posterior_threshold: Optional[float] = None
+    """A threshold value that sets a lower bound on the posterior probability
+    of a token in the target model for it to be accepted. This threshold is
+    used only when we use the `TypicalAcceptanceSampler` for token acceptance.
+    """
     posterior_alpha: Optional[float] = None
+    """Scaling factor for entropy-based threshold, applied when using
+    `TypicalAcceptanceSampler`."""
 
     # required configuration params passed from engine
     target_model_config: ModelConfig = field(default=None,
                                              init=True)  # type: ignore
+    """The configuration of the target model."""
     target_parallel_config: ParallelConfig = field(default=None,
                                                    init=True)  # type: ignore
+    """The parallel configuration for the target model."""
     enable_chunked_prefill: bool = field(default=None,
                                          init=True)  # type: ignore
+    """Whether vLLM is configured to use chunked prefill or not. Used for
+    raising an error since it's not yet compatible with speculative decode."""
     disable_log_stats: bool = field(default=None, init=True)  # type: ignore
+    """Whether to disable the periodic printing of stage times in speculative
+    decoding."""
 
     # params generated in the post-init stage
     draft_model_config: ModelConfig = field(default=None,
                                             init=True)  # type: ignore
+    """The configuration of the draft model initialized internal."""
     draft_parallel_config: ParallelConfig = field(default=None,
                                                   init=True)  # type: ignore
+    """The parallel configuration for the draft model initialized internal."""
 
     def compute_hash(self) -> str:
         """
@@ -2306,7 +2252,8 @@ class SpeculativeConfig:
         if self.model is None and self.num_speculative_tokens is not None:
             # TODO(Shangming): Refactor mtp configuration logic when supporting
             # mtp acceleration for more models besides deepseek_v3
-            if self.target_model_config.hf_text_config.model_type \
+            if self.target_model_config and \
+                self.target_model_config.hf_text_config.model_type \
                         == "deepseek_v3":
                 # use the draft model from the same model:
                 self.model = self.target_model_config.model
@@ -2545,7 +2492,6 @@ class SpeculativeConfig:
             max_parallel_loading_workers,
             disable_custom_all_reduce=target_parallel_config.
             disable_custom_all_reduce,
-            tokenizer_pool_config=target_parallel_config.tokenizer_pool_config,
             ray_workers_use_nsight=target_parallel_config.
             ray_workers_use_nsight,
             placement_group=target_parallel_config.placement_group,
@@ -2685,13 +2631,6 @@ class LoRAConfig:
         elif isinstance(self.lora_dtype, str):
             self.lora_dtype = getattr(torch, self.lora_dtype)
 
-    def verify_with_scheduler_config(self, scheduler_config: SchedulerConfig):
-        # Reminder: Please update docs/source/features/compatibility_matrix.md
-        # If the feature combo become valid
-        if scheduler_config.chunked_prefill_enabled:
-            logger.warning("LoRA with chunked prefill is still experimental "
-                           "and may be unstable.")
-
     def verify_lora_support(self):
         if self.long_lora_scaling_factors is not None and envs.VLLM_USE_V1:
             raise ValueError(
@@ -2752,6 +2691,9 @@ class MultiModalConfig:
     The maximum number of input items allowed per prompt for each modality.
     This should be a JSON string that will be parsed into a dictionary.
     Defaults to 1 (V0) or 999 (V1) for each modality.
+
+    For example, to allow up to 16 images and 2 videos per prompt:
+    ``{"images": 16, "videos": 2}``
     """
 
     def compute_hash(self) -> str:
@@ -3112,7 +3054,7 @@ def get_served_model_name(model: str,
 
 
 GuidedDecodingBackendV0 = Literal["auto", "outlines", "lm-format-enforcer",
-                                  "xgrammar"]
+                                  "xgrammar", "guidance"]
 GuidedDecodingBackendV1 = Literal["auto", "xgrammar", "guidance"]
 
 
@@ -3819,8 +3761,6 @@ class VllmConfig:
         if self.lora_config:
             self.lora_config.verify_with_cache_config(self.cache_config)
             self.lora_config.verify_with_model_config(self.model_config)
-            self.lora_config.verify_with_scheduler_config(
-                self.scheduler_config)
             self.lora_config.verify_lora_support()
         if self.prompt_adapter_config:
             self.prompt_adapter_config.verify_with_model_config(
@@ -4057,3 +3997,30 @@ def get_current_vllm_config() -> VllmConfig:
         from vllm.config import VllmConfig
         return VllmConfig()
     return _current_vllm_config
+
+
+def contains_object_print(text):
+    """
+    Check if the text looks like a printed Python object, e.g.
+    contains any substring matching the pattern: "at 0xFFFFFFF>"
+    We match against 0x followed by 2-16 hex chars (there's
+    a max of 16 on a 64 bit system).
+
+    Args:
+        text (str): The text to check
+
+    Returns:
+        bool: True if a match is found, False otherwise
+    """
+    pattern = r'at 0x[a-fA-F0-9]{2,16}>'
+    match = re.search(pattern, text)
+    return match is not None
+
+
+def assert_hashable(text):
+    if not contains_object_print(text):
+        return True
+    raise AssertionError(
+        f"vLLM tried to hash some configs that may have Python objects ids "
+        f"in them. This is a bug, please file an issue. "
+        f"Text being hashed: {text}")

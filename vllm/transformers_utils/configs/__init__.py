@@ -21,7 +21,6 @@ from vllm.transformers_utils.configs.moonvit import MoonViTConfig
 from vllm.transformers_utils.configs.mpt import MPTConfig
 from vllm.transformers_utils.configs.nemotron import NemotronConfig
 from vllm.transformers_utils.configs.nvlm_d import NVLM_D_Config
-from vllm.transformers_utils.configs.olmo2 import Olmo2Config
 from vllm.transformers_utils.configs.ovis2 import OvisConfig
 from vllm.transformers_utils.configs.skyworkr1v import SkyworkR1VChatConfig
 from vllm.transformers_utils.configs.solar import SolarConfig
@@ -47,7 +46,6 @@ __all__ = [
     "KimiVLConfig",
     "NemotronConfig",
     "NVLM_D_Config",
-    "Olmo2Config",
     "OvisConfig",
     "SkyworkR1VChatConfig",
     "SolarConfig",
