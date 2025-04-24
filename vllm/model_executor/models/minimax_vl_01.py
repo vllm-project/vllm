@@ -591,7 +591,6 @@ class MiniMaxVL01ForConditionalGeneration(nn.Module, SupportsMultiModal,
             inputs_embeds = self.get_input_embeddings(for_inputs_embeds_ids)
 
             # 2. Merge text and images
-            # 添加安全检查确保input_ids有正确的维度并且pixel_values不为空
             has_valid_shape = isinstance(input_ids, torch.Tensor) and len(
                 input_ids.shape) > 1
             has_images = pixel_values is not None and (
