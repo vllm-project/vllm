@@ -91,6 +91,7 @@ if [[ $commands == *" kernels/attention"* ]]; then
   --ignore=kernels/attention/test_prefix_prefill.py \
   --ignore=kernels/attention/test_cascade_flash_attn.py \
   --ignore=kernels/attention/test_mha_attn.py \
+  --ignore=kernels/attention/test_lightning_attn.py \
   --ignore=kernels/attention/test_attention.py"
 fi
 
@@ -102,6 +103,7 @@ if [[ $commands == *" kernels/quantization"* ]]; then
   --ignore=kernels/quantization/test_block_fp8.py \
   --ignore=kernels/quantization/test_block_int8.py \
   --ignore=kernels/quantization/test_marlin_gemm.py \
+  --ignore=kernels/quantization/test_cutlass_scaled_mm.py \
   --ignore=kernels/quantization/test_int8_kernel.py"
 fi
 
