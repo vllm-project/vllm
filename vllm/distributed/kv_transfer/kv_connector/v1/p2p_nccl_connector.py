@@ -34,13 +34,14 @@ class ReqMeta:
     @staticmethod
     def make_meta(request_id: str, token_ids: list[int], block_ids: list[int],
                   block_size: int) -> "ReqMeta":
+        valid_num_tokens = len(token_ids)
         token_ids_tensor = torch.tensor(token_ids)
         block_ids_tensor = torch.tensor(block_ids)
         num_blocks = block_ids_tensor.shape[0]
         block_offsets = torch.arange(0, block_size)
         slot_mapping = block_offsets.reshape((1, block_size)) + \
-                       block_ids_tensor.reshape((num_blocks, 1)) * block_size
-        slot_mapping = slot_mapping.flatten()
+                block_ids_tensor.reshape((num_blocks, 1)) * block_size
+        slot_mapping = slot_mapping.flatten()[:valid_num_tokens]
         return ReqMeta(
             request_id=request_id,
             token_ids=token_ids_tensor,
@@ -122,17 +123,21 @@ class P2pNcclConnector(KVConnectorBase_V1):
                 slot_mapping (torch.Tensor): the slot mapping. In shape
                     [num_tokens].
             """
-            dst_shape = dst_kv_cache_layer.shape
+            dst_kv_cache_layer_shape = dst_kv_cache_layer.shape
             if isinstance(attn_metadata, MLACommonMetadata):
+                num_pages = dst_kv_cache_layer_shape[0]
+                page_size = dst_kv_cache_layer_shape[1]
                 dst_kv_cache_layer = dst_kv_cache_layer.reshape(
-                    -1, dst_shape[-1])
-                dst_kv_cache_layer[slot_mapping] = src_kv_cache
-                dst_kv_cache_layer = dst_kv_cache_layer.reshape(dst_shape)
+                    num_pages * page_size, -1)
+                dst_kv_cache_layer[slot_mapping, ...] = src_kv_cache
+                dst_kv_cache_layer.reshape(dst_kv_cache_layer_shape)
             else:
+                num_pages = dst_kv_cache_layer_shape[1]
+                page_size = dst_kv_cache_layer_shape[2]
                 dst_kv_cache_layer = dst_kv_cache_layer.reshape(
-                    2, -1, dst_shape[-1])
-                dst_kv_cache_layer[:, slot_mapping] = src_kv_cache
-                dst_kv_cache_layer = dst_kv_cache_layer.reshape(dst_shape)
+                    2, num_pages * page_size, -1)
+                dst_kv_cache_layer[:, slot_mapping, ...] = src_kv_cache
+                dst_kv_cache_layer.reshape(dst_kv_cache_layer_shape)
 
         # Get the metadata
         metadata: KVConnectorMetadata = \
