@@ -244,7 +244,17 @@ class P2pNcclConnector(KVConnectorBase_V1):
             the number of tokens that can be loaded from the
             external KV cache beyond what is already computed.
         """
-        return 0
+        if self.is_producer:
+            return 0
+
+        num_external_tokens = (
+                len(request.prompt_token_ids) - 1 - num_computed_tokens)
+
+        logger.info("🍒num_external_tokens:%d, num_prompt_tokens:%d, "
+                    "num_computed_tokens:%d", num_external_tokens,
+                    len(request.prompt_token_ids), num_computed_tokens)
+
+        return num_external_tokens
 
     def update_state_after_alloc(self, request: "Request",
                                  num_external_tokens: int):
@@ -254,7 +264,7 @@ class P2pNcclConnector(KVConnectorBase_V1):
         If blocks were allocated, add to _requests_need_load,
         such that we load the KVs in the next forward pass.
         """
-        if not self.is_producer:
+        if not self.is_producer and num_external_tokens > 0:
             self._requests_need_load[request.request_id] = request
 
     def build_connector_meta(
