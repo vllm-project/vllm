@@ -68,7 +68,7 @@ def _check_marlin_supported(
                              capability_tuple.to_int())
 
     supported_types = query_marlin_supported_quant_types(
-        has_zp, device_capability)
+        has_zp, True, device_capability)
 
     if quant_type not in supported_types:
         return (False, f"Marlin does not support weight_bits = {quant_type}. "
