@@ -429,13 +429,14 @@ class KVCacheManager:
         assert sorted(type_ids) == type_ids, "type_ids must be sorted"
         manager_to_group: list[list[int]] = []
         for i, type_id in enumerate(type_ids):
-            if type_id == 0:
+            if i == 0:
                 manager_to_group.append([i])
             else:
                 if type_id == type_ids[i - 1]:
                     manager_to_group[-1].append(i)
                 else:
                     manager_to_group.append([i])
+        print("manager_to_group", manager_to_group)
         return manager_to_group
 
     def to_block_ids(self, kv_cache_blocks: KVCacheBlocks) -> list[list[int]]:
