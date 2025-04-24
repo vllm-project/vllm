@@ -15,6 +15,7 @@ Authors:
 
 import inspect
 import time
+from typing import List
 
 from triton import KernelInterface
 from triton import __version__ as triton_version
@@ -84,6 +85,11 @@ class PreparedKernel:
         self.non_const_arg_names = non_const_arg_names
         self.non_const_vals_lst = []
         self.update_args_index = {}
+        # We construct the list of arguments that are passed to the combiled
+        # kernel beforehand. For the arguments that could change each time the
+        # kernel is called, store a dummy value that will be set each time
+        # __call__ is called. For the arguments that are labelld as assume to
+        # be constant, we skip this step and use the initial stored values.
         for i, arg_n in enumerate(self.non_const_arg_names):
             if arg_n in update_only_arg_names:
                 self.update_args_index[arg_n] = i
@@ -352,13 +358,31 @@ class JitCache(KernelInterface):
 
 
 def jitcache(
-    check_keys,
-    cache_lock=None,
-    cache_launch_grid=False,
-    assume_const=None,
+    check_keys: List[str],
+    cache_lock: CacheLock = None,
+    cache_launch_grid: bool = False,
+    assume_const: List[str] = None,
 ):
     """
     Decorator for caching a :code:`triton.jit`'d function.
+    Basically, the :code:`JitCache` trades safety in all scenarios and high 
+    launch overhead of the original triton launcher against a low launch 
+    overhead but reduced/relaxed safety checks applicable only to applications-
+    specific use. It is then the job of the developers to ensure that the 
+    relaxed safety checks still hold for the particular application.
+
+    The :code:`JitCache` checks which compiled version of a kernel to use 
+    based on the mandatory :code:`check_keys` list. The developer needs to 
+    select these arguments based on her/his knowledge of the application.
+
+    If a :code:`CacheLock` is provided, then the :code:`JitCache` adds new 
+    entries to the cache as long es the lock is unlocked. Once the CacheLock 
+    is locked and a kernel version is required that is not cached, it will 
+    throw an error. 
+
+    If no :code:`CacheLock` is provided, the :code:`JitCache` runs in the 
+    "dynamic" mode and creates new kernel variants if they are needed. This 
+    simplifies the application design but could add unexpected latency jitters.
 
     :param check_keys: The list of tl.constexpr that are used to index
                        the cache. Only types int, bool, float are supported.
@@ -371,7 +395,7 @@ def jitcache(
     :param assume_const: A list of parameters that are NOT marked as
                          tl.constexpr but should be treated as constants in
                          this kernel launch.
-    :param assume_const: list[str]
+    :type assume_const: list[str]
     """
 
     def decorator(fn):
