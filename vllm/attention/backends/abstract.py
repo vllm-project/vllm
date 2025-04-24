@@ -107,7 +107,7 @@ class AttentionBackend(ABC, Generic[AttentionMetadataType,
 
 
 @dataclass
-class AttentionMetadata:
+class AttentionMetadata(Generic[AttentionMetadataType]):
     """Attention metadata for prefill and decode batched together."""
     # Total number of prefill requests.
     num_prefills: int

@@ -22,7 +22,9 @@ from vllm.utils import async_tensor_h2d
 # lack attention.
 
 
-class PlaceholderAttentionBackend(AttentionBackend):
+class PlaceholderAttentionBackend(
+        AttentionBackend["PlaceholderAttentionMetadata",
+                         "PlaceholderAttentionMetadataBuilder"]):
     """Placeholder backend for when no attention is needed."""
 
     @staticmethod
@@ -71,7 +73,8 @@ class PlaceholderAttentionBackend(AttentionBackend):
 
 
 @dataclass
-class PlaceholderAttentionMetadata(AttentionMetadata):
+class PlaceholderAttentionMetadata(
+        AttentionMetadata["PlaceholderAttentionMetadata"]):
     """Attention metadata for prefill and decode batched together."""
     # (batch_size,). The sequence length per sequence. Sequence length means
     # the computed tokens + new tokens None if it is a decoding.
