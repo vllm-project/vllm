@@ -2,9 +2,9 @@
 
 import time
 from collections.abc import Mapping, Sequence
-from typing import Literal, Optional, Union, get_args
+from typing import Literal, Optional, Union
 
-from vllm.config import GuidedDecodingBackendV1, VllmConfig
+from vllm.config import VllmConfig
 from vllm.inputs import ProcessorInputs, PromptType, SingletonInputs
 from vllm.inputs.parse import split_enc_dec_inputs
 from vllm.inputs.preprocess import InputPreprocessor
@@ -145,12 +145,7 @@ class Processor:
         if not params.guided_decoding or not self.decoding_config:
             return
 
-        supported_backends = get_args(GuidedDecodingBackendV1)
-
         engine_level_backend = self.decoding_config.guided_decoding_backend
-        if engine_level_backend not in supported_backends:
-            raise ValueError(f"Only {supported_backends} structured output is "
-                             "supported in V1.")
         if params.guided_decoding.backend:
             # Request-level backend selection is not supported in V1.
             # The values may differ if `params` is reused and was set
