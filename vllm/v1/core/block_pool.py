@@ -176,7 +176,7 @@ class BlockPool:
                     token_ids=request.
                     all_token_ids[num_cached_blocks *
                                   block_size:num_full_blocks * block_size],
-                    num_toks_per_block=[block_size] * len(new_hashes),
+                    block_size=block_size,
                     lora_id=request.lora_request.id
                     if request.lora_request else None,
                 ))

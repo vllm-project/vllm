@@ -33,7 +33,7 @@ class BlockStored(KVCacheEvent):
     block_hashes: list[int]
     parent_block_hash: Optional[int]
     token_ids: list[int]
-    num_toks_per_block: list[int]
+    block_size: int
     lora_id: Optional[int]
 
 
