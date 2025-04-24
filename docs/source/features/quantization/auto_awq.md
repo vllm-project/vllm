@@ -12,7 +12,7 @@ You can quantize your own models by installing AutoAWQ or picking one of the [65
 pip install autoawq
 ```
 
-After installing AutoAWQ, you are ready to quantize a model. Please refer to the `AutoAWQ documentation <https://casper-hansen.github.io/AutoAWQ/examples/#basic-quantization>`_ for further details. Here is an example of how to quantize `mistralai/Mistral-7B-Instruct-v0.2`:
+After installing AutoAWQ, you are ready to quantize a model. Please refer to the [AutoAWQ documentation](https://casper-hansen.github.io/AutoAWQ/examples/#basic-quantization) for further details. Here is an example of how to quantize `mistralai/Mistral-7B-Instruct-v0.2`:
 
 ```python
 from awq import AutoAWQForCausalLM
