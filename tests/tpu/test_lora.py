@@ -4,6 +4,16 @@ import pytest
 import vllm
 from vllm.lora.request import LoRARequest
 
+# This file contains tests to ensure that LoRA works correctly on the TPU
+# backend. We use a series of custom trained adapters for Qwen2.5-3B-Instruct
+# for this. The adapters are:
+# Username6568/Qwen2.5-3B-Instruct-1_plus_1_equals_x_adapter, where x ranges
+# from 1 to 4.
+
+# These adapters are trained using a standard huggingface peft training script,
+# where all the inputs are "What is 1+1? \n" and all the outputs are "x". We run
+# 100 training iterations with a training batch size of 100.
+
 
 @pytest.fixture(scope="function", autouse=True)
 def use_v1_only(monkeypatch: pytest.MonkeyPatch):
