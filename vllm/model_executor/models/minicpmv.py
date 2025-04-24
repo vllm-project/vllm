@@ -25,7 +25,7 @@
 import math
 from collections import defaultdict
 from collections.abc import Iterable, Mapping, Sequence
-from functools import cached_property, partial
+from functools import partial
 from typing import (Any, Callable, Literal, Optional, Set, Tuple, TypedDict,
                     Union)
 
@@ -40,7 +40,6 @@ from vllm.config import VllmConfig
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.resampler import (BaseResampler, Resampler2,
                                                   get_2d_sincos_pos_embed)
-from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.model_loader.utils import set_default_torch_dtype
 from vllm.model_executor.models.llama import LlamaForCausalLM
 from vllm.model_executor.models.minicpm import MiniCPMForCausalLM
@@ -758,13 +757,6 @@ class MiniCPMVBaseModel(nn.Module, SupportsMultiModal, SupportsPP):
         self.make_empty_intermediate_tensors = (
             self.llm.make_empty_intermediate_tensors)
 
-    @cached_property
-    def sampler(self):
-        if hasattr(self.llm, "sampler"):
-            return self.llm.sampler
-
-        return get_sampler()
-
     def _parse_and_validate_vision_input(
         self,
         modality: str,
@@ -945,14 +937,6 @@ class MiniCPMVBaseModel(nn.Module, SupportsMultiModal, SupportsPP):
         sampling_metadata: SamplingMetadata,
     ) -> Optional[torch.Tensor]:
         return self.llm.compute_logits(hidden_states, sampling_metadata)
-
-    def sample(
-        self,
-        logits: torch.Tensor,
-        sampling_metadata: SamplingMetadata,
-    ) -> Optional[SamplerOutput]:
-        next_tokens = self.sampler(logits, sampling_metadata)
-        return next_tokens
 
     def load_weights(self, weights: Iterable[Tuple[str,
                                                    torch.Tensor]]) -> Set[str]:

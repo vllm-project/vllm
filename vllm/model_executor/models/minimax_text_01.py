@@ -33,7 +33,6 @@ from vllm.model_executor.layers.linear import (ColumnParallelLinear,
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
-from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     DEFAULT_VOCAB_PADDING_SIZE, ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
@@ -994,7 +993,6 @@ class MiniMaxText01ForCausalLM(nn.Module, HasInnerState, IsHybrid,
             self.logits_processor = LogitsProcessor(self.unpadded_vocab_size,
                                                     self.config.vocab_size)
 
-            self.sampler = Sampler()
         else:
             self.lm_head = PPMissingLayer()
 
@@ -1029,16 +1027,6 @@ class MiniMaxText01ForCausalLM(nn.Module, HasInnerState, IsHybrid,
                                        sampling_metadata)
 
         return logits
-
-    def sample(
-        self,
-        logits: torch.Tensor,
-        sampling_metadata: SamplingMetadata,
-    ):
-
-        next_tokens = self.sampler(logits, sampling_metadata)
-
-        return next_tokens
 
     def make_empty_intermediate_tensors(
             self, batch_size: int, dtype: torch.dtype,

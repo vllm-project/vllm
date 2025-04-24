@@ -38,6 +38,7 @@ from vllm.v1.outputs import (EMPTY_MODEL_RUNNER_OUTPUT, LogprobsTensors,
                              ModelRunnerOutput)
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.rejection_sampler import RejectionSampler
+from vllm.v1.sample.sampler import Sampler
 from vllm.v1.spec_decode.eagle import EagleProposer
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 from vllm.v1.spec_decode.ngram_proposer import NgramProposer
@@ -152,6 +153,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         )
         self.max_num_encoder_input_tokens = encoder_compute_budget
         self.encoder_cache_size = encoder_cache_size
+
+        # Sampler
+        self.sampler = Sampler()
 
         # Lazy initialization
         # self.model: nn.Module  # Set after load_model
@@ -1096,7 +1100,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # Sample the next token and get logprobs if needed.
         sampling_metadata = self.input_batch.sampling_metadata
         if spec_decode_metadata is None:
-            sampler_output = self.model.sample(
+            sampler_output = self.sampler(
                 logits=logits,
                 sampling_metadata=sampling_metadata,
             )
@@ -1106,7 +1110,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # logits tensor. This means any in-place operations on bonus_logits
             # won't affect the original logits tensor.
             bonus_logits = logits[spec_decode_metadata.bonus_logits_indices]
-            sampler_output = self.model.sample(
+            sampler_output = self.sampler(
                 logits=bonus_logits,
                 sampling_metadata=sampling_metadata,
             )
@@ -1383,8 +1387,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             tgt_token_ids = prompt_token_ids[start_tok:start_tok + num_logits]
 
             # Compute prompt logprobs.
-            logprobs = self.model.sampler.compute_logprobs(logits)
-            token_ids, logprobs, ranks = self.model.sampler.gather_logprobs(
+            logprobs = self.sampler.compute_logprobs(logits)
+            token_ids, logprobs, ranks = self.sampler.gather_logprobs(
                 logprobs, num_prompt_logprobs, tgt_token_ids)
 
             # Transfer GPU->CPU async.
@@ -1502,8 +1506,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             bad_words_token_ids={},
         )
         try:
-            sampler_output = self.model.sample(
-                logits=logits, sampling_metadata=dummy_metadata)
+            sampler_output = self.sampler(logits=logits,
+                                          sampling_metadata=dummy_metadata)
         except RuntimeError as e:
             if 'out of memory' in str(e):
                 raise RuntimeError(

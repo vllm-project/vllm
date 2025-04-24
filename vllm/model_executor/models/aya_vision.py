@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0 Adapted from
 # https://github.com/huggingface/transformers/tree/main/src/transformers/models/aya_vision
-from functools import cached_property
 from typing import (Iterable, Literal, Mapping, Optional, Sequence, Set, Tuple,
                     TypedDict, Union, cast)
 
@@ -17,7 +16,6 @@ from transformers.models.got_ocr2.image_processing_got_ocr2 import (
 
 from vllm.config import VllmConfig
 from vllm.jsontree import json_map_leaves
-from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import MultiModalDataDict, MultiModalKwargs
@@ -461,17 +459,3 @@ class AyaVisionForConditionalGeneration(nn.Module, SupportsMultiModal,
     ) -> Optional[torch.Tensor]:
         return self.language_model.compute_logits(hidden_states,
                                                   sampling_metadata)
-
-    @cached_property
-    def sampler(self):
-        if hasattr(self.language_model, "sampler"):
-            return self.language_model.sampler
-
-        return get_sampler()
-
-    def sample(
-        self,
-        logits: torch.Tensor,
-        sampling_metadata: SamplingMetadata,
-    ) -> Optional[SamplerOutput]:
-        return self.language_model.sample(logits, sampling_metadata)
