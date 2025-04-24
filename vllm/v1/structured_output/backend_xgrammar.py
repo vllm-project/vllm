@@ -35,9 +35,7 @@ class XgrammarBackend(StructuredOutputBackend):
         tokenizer_group = init_tokenizer_from_configs(
             model_config=vllm_config.model_config,
             scheduler_config=vllm_config.scheduler_config,
-            parallel_config=vllm_config.parallel_config,
             lora_config=vllm_config.lora_config)  # type: ignore[arg-type]
-        tokenizer_group.ping()
 
         self.disable_any_whitespace = False
         backend_options = GuidedDecodingParams(
@@ -125,6 +123,9 @@ class XgrammarBackend(StructuredOutputBackend):
 
     def allocate_token_bitmask(self, max_num_seqs: int):
         return xgr.allocate_token_bitmask(max_num_seqs, self.vocab_size)
+
+    def destroy(self):
+        del self.compiler
 
 
 @dataclass
