@@ -181,7 +181,8 @@ class UsageMessage:
                 self.gpu_type = torch_xla.tpu.get_tpu_type()
                 self.gpu_memory_per_device = (
                     torch_xla.core.xla_model.get_memory_info()["bytes_limit"])
-            except ImportError:
+            # To suppress errors like "TPU initialization failed: open(/dev/vfio/0): Device or resource busy"
+            except Exception:
                 pass
         self.provider = _detect_cloud_provider()
         self.architecture = platform.machine()
