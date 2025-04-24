@@ -492,6 +492,17 @@ class AsyncLLM(EngineClient):
         """Prevent an adapter from being evicted."""
         return await self.engine_core.pin_lora_async(lora_id)
 
+    async def collective_rpc(self,
+                             method: str,
+                             timeout: Optional[float] = None,
+                             args: tuple = (),
+                             kwargs: Optional[dict] = None):
+        """
+        Perform a collective RPC call to the given path.
+        """
+        return await self.engine_core.collective_rpc_async(
+            method, timeout, args, kwargs)
+
     @property
     def is_running(self) -> bool:
         # Is None before the loop is started.
