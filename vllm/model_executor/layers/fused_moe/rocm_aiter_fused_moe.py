@@ -259,28 +259,29 @@ if current_platform.is_rocm():
     )
 
 
-def rocm_aiter_fused_experts(
-        hidden_states: torch.Tensor,
-        w1: torch.Tensor,
-        w2: torch.Tensor,
-        topk_weights: torch.Tensor,
-        topk_ids: torch.Tensor,
-        activation: str = "silu",
-        apply_router_weight_on_input: bool = False,
-        use_fp8_w8a8: bool = False,
-        use_int8_w8a8: bool = False,
-        use_int8_w8a16: bool = False,
-        use_int4_w4a16: bool = False,
-        per_channel_quant: bool = False,
-        global_num_experts: int = -1,
-        expert_map: Optional[torch.Tensor] = None,
-        w1_scale: Optional[torch.Tensor] = None,
-        w2_scale: Optional[torch.Tensor] = None,
-        w1_zp: Optional[torch.Tensor] = None,
-        w2_zp: Optional[torch.Tensor] = None,
-        a1_scale: Optional[torch.Tensor] = None,
-        a2_scale: Optional[torch.Tensor] = None,
-        block_shape: Optional[List[int]] = None) -> torch.Tensor:
+def rocm_aiter_fused_experts(hidden_states: torch.Tensor,
+                             w1: torch.Tensor,
+                             w2: torch.Tensor,
+                             topk_weights: torch.Tensor,
+                             topk_ids: torch.Tensor,
+                             inplace: bool = False,
+                             activation: str = "silu",
+                             apply_router_weight_on_input: bool = False,
+                             use_fp8_w8a8: bool = False,
+                             use_int8_w8a8: bool = False,
+                             use_int8_w8a16: bool = False,
+                             use_int4_w4a16: bool = False,
+                             per_channel_quant: bool = False,
+                             global_num_experts: int = -1,
+                             expert_map: Optional[torch.Tensor] = None,
+                             w1_scale: Optional[torch.Tensor] = None,
+                             w2_scale: Optional[torch.Tensor] = None,
+                             w1_zp: Optional[torch.Tensor] = None,
+                             w2_zp: Optional[torch.Tensor] = None,
+                             a1_scale: Optional[torch.Tensor] = None,
+                             a2_scale: Optional[torch.Tensor] = None,
+                             block_shape: Optional[List[int]] = None,
+                             allow_deep_gemm: bool = False) -> torch.Tensor:
 
     from vllm.model_executor.layers.quantization.utils.fp8_utils import (
         per_token_group_quant_fp8)
