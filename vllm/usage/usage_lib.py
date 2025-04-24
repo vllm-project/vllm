@@ -19,6 +19,7 @@ import torch
 
 import vllm.envs as envs
 from vllm.connections import global_http_connection
+from vllm.utils import cuda_device_count_stateless, cuda_get_device_properties
 from vllm.version import __version__ as VLLM_VERSION
 
 _config_home = envs.VLLM_CONFIG_ROOT
@@ -168,10 +169,9 @@ class UsageMessage:
         # Platform information
         from vllm.platforms import current_platform
         if current_platform.is_cuda_alike():
-            device_property = torch.cuda.get_device_properties(0)
-            self.gpu_count = torch.cuda.device_count()
-            self.gpu_type = device_property.name
-            self.gpu_memory_per_device = device_property.total_memory
+            self.gpu_count = cuda_device_count_stateless()
+            self.gpu_type, self.gpu_memory_per_device = (
+                cuda_get_device_properties(0, ("name", "total_memory")))
         if current_platform.is_cuda():
             self.cuda_runtime = torch.version.cuda
         self.provider = _detect_cloud_provider()
