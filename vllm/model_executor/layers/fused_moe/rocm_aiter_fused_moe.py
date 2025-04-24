@@ -289,6 +289,7 @@ def rocm_aiter_fused_experts(
     topk_weights = topk_weights.to(torch.float32)
     topk_ids = topk_ids.to(torch.int32)
 
+    # w8a8 block-scaled
     if block_shape is not None and use_fp8_w8a8:
         assert not apply_router_weight_on_input, (
             "apply_router_weight_on_input is not supported for block scaled moe"
@@ -305,6 +306,7 @@ def rocm_aiter_fused_experts(
             topk_ids, topk_weights, hidden_states.dtype, expert_map, a1, w1,
             w2, w1_scale, w2_scale, a1_scale, block_shape, None)
 
+    # w8a8 per-channel quantization
     elif per_channel_quant and apply_router_weight_on_input and use_fp8_w8a8:
         # AITER tkw1 kernel for FP8 models with `apply_router_weight_on_input`
         # This applies topk_weights on the GEMM output of the first FC layer
@@ -315,7 +317,6 @@ def rocm_aiter_fused_experts(
             "Only support topk=1 when"
             " `apply_router_weight_on_input` is True")
 
-        # per_channel_quant
         return torch.ops.vllm.rocm_aiter_asm_moe_tkw1(
             hidden_states,
             w1,
@@ -331,6 +332,7 @@ def rocm_aiter_fused_experts(
             expert_mask=expert_map,
             activation_str=activation)
 
+    # w8a8 per-tensor activation per-tensor weight
     elif use_fp8_w8a8:
         assert not apply_router_weight_on_input, (
             "apply_router_weight_on_input is not supported for fp8_w8a8")
@@ -357,6 +359,7 @@ def rocm_aiter_fused_experts(
         topk_ids = topk_ids.to(torch.int32)
         topk_weights = torch.ones_like(topk_weights, dtype=torch.float32)
 
+    # w16a16 fallback to rocm_aiter_ck_moe w16a16
     return torch.ops.vllm.rocm_aiter_ck_moe(hidden_states=hidden_states,
                                             w1=w1,
                                             w2=w2,
