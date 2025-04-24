@@ -357,7 +357,8 @@ class SharedStorageConnector(KVConnectorBase_V1):
         ids.
         """
         input_ids_bytes = input_ids.numpy().tobytes()
-        input_ids_hash = hashlib.md5(input_ids_bytes).hexdigest()
+        input_ids_hash = hashlib.md5(input_ids_bytes,
+                                     usedforsecurity=False).hexdigest()
         foldername = os.path.join(self._storage_path, input_ids_hash)
         if create_folder:
             os.makedirs(foldername, exist_ok=True)
