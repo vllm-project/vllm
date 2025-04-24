@@ -254,7 +254,7 @@ class ModelConfig:
     """The specific revision to use for the model code on the Hugging Face Hub.
     It can be a branch name, a tag name, or a commit id. If unspecified, will
     use the default version."""
-    rope_scaling: Optional[dict[str, Any]] = None
+    rope_scaling: dict[str, Any] = field(default_factory=dict)
     """RoPE scaling configuration in JSON format. For example,
     `{"rope_type":"dynamic","factor":2.0}`."""
     rope_theta: Optional[float] = None
@@ -316,11 +316,11 @@ class ModelConfig:
     that this name(s) will also be used in `model_name` tag content of
     prometheus metrics, if multiple names provided, metrics tag will take the
     first one."""
-    limit_mm_per_prompt: Optional[dict[str, int]] = None
+    limit_mm_per_prompt: dict[str, int] = field(default_factory=dict)
     """Maximum number of data items per modality per prompt. Only applicable
     for multimodal models."""
     use_async_output_proc: bool = True
-    """Whether to use async output processor. Defaults to True."""
+    """Whether to use async output processor."""
     config_format: ConfigFormat = ConfigFormat.AUTO
     """The format of the model config to load:\n
     - "auto" will try to load the config in hf format if available else it
@@ -333,37 +333,53 @@ class ModelConfig:
     (stored in `~/.huggingface`)."""
     hf_overrides: HfOverrides = field(default_factory=dict)
     """If a dictionary, contains arguments to be forwarded to the Hugging Face
-    config. If a callable, it is called to update the HuggingFace config."""
+    config. If a callable, it is called to update the HuggingFace config. When
+    specified via CLI, the argument must be a valid JSON string."""
     mm_processor_kwargs: Optional[dict[str, Any]] = None
     """Arguments to be forwarded to the model's processor for multi-modal data,
-    e.g., image processor."""
+    e.g., image processor. Overrides for the multi-modal processor obtained
+    from `AutoProcessor.from_pretrained`. The available overrides depend on the
+    model that is being run. For example, for Phi-3-Vision: `{"num_crops": 4}`.
+    When specified via CLI, the argument must be a valid JSON string."""
     disable_mm_preprocessor_cache: bool = False
-    """If true, then disables caching of the multi-modal preprocessor/mapper.
-    (not recommended)"""
-    override_neuron_config: Optional[dict[str, Any]] = None
-    """Initialize non default neuron config or override default neuron config
+    """If `True`, disable caching of the multi-modal preprocessor/mapper (not
+    recommended)."""
+    override_neuron_config: dict[str, Any] = field(default_factory=dict)
+    """Initialize non-default neuron config or override default neuron config
     that are specific to Neuron devices, this argument will be used to
     configure the neuron config that can not be gathered from the vllm
-    arguments."""
-    override_pooler_config: Optional["PoolerConfig"] = None
-    """Initialize non default pooling config or override default pooling config
-    for the pooling model."""
+    arguments. e.g. `{"cast_logits_dtype": "bloat16"}`. When specified via CLI,
+    the argument must be a valid JSON string."""
+    override_pooler_config: Optional[Union[dict, "PoolerConfig"]] = None
+    """Initialize non-default pooling config or override default pooling config
+    for the pooling model. e.g. `{"pooling_type": "mean", "normalize": false}`.
+    When specified via CLI, the argument must be a valid JSON string."""
     logits_processor_pattern: Optional[str] = None
     """Optional regex pattern specifying valid logits processor qualified names
     that can be passed with the `logits_processors` extra completion argument.
-    Defaults to None, which allows no processors."""
+    Defaults to `None`, which allows no processors."""
     generation_config: str = "auto"
-    """Configuration parameter file for generation."""
+    """The folder path to the generation config. Defaults to `"auto"`, the
+    generation config will be loaded from model path. If set to `"vllm"`, no
+    generation config is loaded, vLLM defaults will be used. If set to a folder
+    path, the generation config will be loaded from the specified folder path.
+    If `max_new_tokens` is specified in generation config, then it sets a
+    server-wide limit on the number of output tokens for all requests."""
+    override_generation_config: dict[str, Any] = field(default_factory=dict)
+    """Overrides or sets generation config. e.g. `{"temperature": 0.5}`. If
+    used with `--generation-config auto`, the override parameters will be
+    merged with the default config from the model. If used with
+    `--generation-config vllm`, only the override parameters are used.
+    When specified via CLI, the argument must be a valid JSON string."""
     enable_sleep_mode: bool = False
     """Enable sleep mode for the engine (only cuda platform is supported)."""
-    override_generation_config: dict[str, Any] = field(default_factory=dict)
-    """Override the generation config with the given config."""
     model_impl: Union[str, ModelImpl] = ModelImpl.AUTO
-    """Which implementation of the model to use: "auto" will try to use the
-    vLLM implementation if it exists and fall back to the Transformers
-    implementation if no vLLM implementation is available. "vllm" will use the
-    vLLM model implementation. "transformers" will use the Transformers model
-    implementation."""
+    """Which implementation of the model to use:\n
+    - "auto" will try to use the vLLM implementation, if it exists, and fall
+    back to the Transformers implementation if no vLLM implementation is
+    available.\n
+    - "vllm" will use the vLLM model implementation.\n
+    - "transformers" will use the Transformers model implementation."""
 
     def compute_hash(self) -> str:
         """
@@ -413,7 +429,7 @@ class ModelConfig:
             hf_overrides_kw = self.hf_overrides
             hf_overrides_fn = None
 
-        if self.rope_scaling is not None:
+        if self.rope_scaling:
             hf_override: dict[str, Any] = {"rope_scaling": self.rope_scaling}
             hf_overrides_kw.update(hf_override)
             hf_overrides_str = json.dumps(hf_overrides_kw)
@@ -510,8 +526,7 @@ class ModelConfig:
             encoder_config=self.encoder_config)
         self.served_model_name = get_served_model_name(self.model,
                                                        self.served_model_name)
-        self.multimodal_config = self._init_multimodal_config(
-            self.limit_mm_per_prompt)
+        self.multimodal_config = self._init_multimodal_config()
         if not self.skip_tokenizer_init:
             self._verify_tokenizer_mode()
 
@@ -520,8 +535,7 @@ class ModelConfig:
         self.has_noops = self._init_has_noops()
         self.has_inner_state = self._init_has_inner_state()
 
-        if (not current_platform.is_neuron()
-                and self.override_neuron_config is not None):
+        if (not current_platform.is_neuron() and self.override_neuron_config):
             raise ValueError(
                 "`override_neuron_config` is only supported on Neuron.")
 
@@ -573,13 +587,11 @@ class ModelConfig:
                     model, ignore_pattern=["*.pt", "*.safetensors", "*.bin"])
                 self.tokenizer = s3_tokenizer.dir
 
-    def _init_multimodal_config(
-        self, limit_mm_per_prompt: Optional[dict[str, int]]
-    ) -> Optional["MultiModalConfig"]:
+    def _init_multimodal_config(self) -> Optional["MultiModalConfig"]:
         if self.registry.is_multimodal_model(self.architectures):
-            return MultiModalConfig(limit_per_prompt=limit_mm_per_prompt or {})
+            return MultiModalConfig(limit_per_prompt=self.limit_mm_per_prompt)
 
-        if limit_mm_per_prompt:
+        if self.limit_mm_per_prompt:
             raise ValueError("`limit_mm_per_prompt` is only supported for "
                              "multimodal models.")
 
@@ -2712,7 +2724,8 @@ class PromptAdapterConfig:
 class MultiModalConfig:
     """Controls the behavior of multimodal models."""
 
-    limit_per_prompt: dict[str, int] = field(default_factory=dict)
+    limit_per_prompt: dict[str, int] = get_field(ModelConfig,
+                                                 "limit_mm_per_prompt")
     """
     The maximum number of input items allowed per prompt for each modality.
     This should be a JSON string that will be parsed into a dictionary.
@@ -2809,10 +2822,6 @@ class PoolerConfig:
         hash_str = hashlib.md5(str(factors).encode(),
                                usedforsecurity=False).hexdigest()
         return hash_str
-
-    @staticmethod
-    def from_json(json_str: str) -> "PoolerConfig":
-        return PoolerConfig(**json.loads(json_str))
 
 
 _STR_DTYPE_TO_TORCH_DTYPE = {

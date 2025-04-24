@@ -20,7 +20,7 @@ from vllm.config import (BlockSize, CacheConfig, CacheDType, CompilationConfig,
                          DeviceConfig, DistributedExecutorBackend,
                          GuidedDecodingBackendV1, HfOverrides,
                          KVTransferConfig, LoadConfig, LoadFormat, LoRAConfig,
-                         ModelConfig, ModelImpl, MultiModalConfig,
+                         ModelConfig, ModelDType, ModelImpl, MultiModalConfig,
                          ObservabilityConfig, ParallelConfig, PoolerConfig,
                          PrefixCachingHashAlgo, PromptAdapterConfig,
                          SchedulerConfig, SchedulerPolicy, SpeculativeConfig,
@@ -28,6 +28,7 @@ from vllm.config import (BlockSize, CacheConfig, CacheDType, CompilationConfig,
                          VllmConfig, get_attr_docs, get_field)
 from vllm.executor.executor_base import ExecutorBase
 from vllm.logger import init_logger
+from vllm.model_executor.layers.quantization import QuantizationMethods
 from vllm.plugins import load_general_plugins
 from vllm.reasoning import ReasoningParserManager
 from vllm.test_utils import MODEL_WEIGHTS_S3_BUCKET, MODELS_ON_S3
@@ -118,18 +119,18 @@ class EngineArgs:
         str, List[str]]] = ModelConfig.served_model_name
     tokenizer: Optional[str] = ModelConfig.tokenizer
     hf_config_path: Optional[str] = ModelConfig.hf_config_path
-    task: TaskOption = "auto"
-    skip_tokenizer_init: bool = False
+    task: TaskOption = ModelConfig.task
+    skip_tokenizer_init: bool = ModelConfig.skip_tokenizer_init
     tokenizer_mode: TokenizerMode = ModelConfig.tokenizer_mode
-    trust_remote_code: bool = False
+    trust_remote_code: bool = ModelConfig.trust_remote_code
     allowed_local_media_path: str = ModelConfig.allowed_local_media_path
     download_dir: Optional[str] = LoadConfig.download_dir
     load_format: str = LoadConfig.load_format
     config_format: ConfigFormat = ModelConfig.config_format
-    dtype: str = 'auto'
+    dtype: ModelDType = ModelConfig.dtype
     kv_cache_dtype: CacheDType = CacheConfig.cache_dtype
     seed: Optional[int] = ModelConfig.seed
-    max_model_len: Optional[int] = None
+    max_model_len: Optional[int] = ModelConfig.max_model_len
     # Note: Specifying a custom executor backend by passing a class
     # is intended for expert use only. The API may change without
     # notice.
@@ -162,14 +163,15 @@ class EngineArgs:
     max_num_seqs: Optional[int] = SchedulerConfig.max_num_seqs
     max_logprobs: int = ModelConfig.max_logprobs
     disable_log_stats: bool = False
-    revision: Optional[str] = None
-    code_revision: Optional[str] = None
-    rope_scaling: Optional[Dict[str, Any]] = None
-    rope_theta: Optional[float] = None
-    hf_token: Optional[Union[bool, str]] = None
-    hf_overrides: Optional[HfOverrides] = None
-    tokenizer_revision: Optional[str] = None
-    quantization: Optional[str] = None
+    revision: Optional[str] = ModelConfig.revision
+    code_revision: Optional[str] = ModelConfig.code_revision
+    rope_scaling: dict[str, Any] = get_field(ModelConfig, "rope_scaling")
+    rope_theta: Optional[float] = ModelConfig.rope_theta
+    hf_token: Optional[Union[bool, str]] = ModelConfig.hf_token
+    hf_overrides: Optional[HfOverrides] = \
+        get_field(ModelConfig, "hf_overrides")
+    tokenizer_revision: Optional[str] = ModelConfig.tokenizer_revision
+    quantization: Optional[QuantizationMethods] = ModelConfig.quantization
     enforce_eager: bool = ModelConfig.enforce_eager
     max_seq_len_to_capture: int = ModelConfig.max_seq_len_to_capture
     disable_custom_all_reduce: bool = ParallelConfig.disable_custom_all_reduce
@@ -220,7 +222,8 @@ class EngineArgs:
     disable_chunked_mm_input: bool = SchedulerConfig.disable_chunked_mm_input
 
     guided_decoding_backend: str = DecodingConfig.guided_decoding_backend
-    logits_processor_pattern: Optional[str] = None
+    logits_processor_pattern: Optional[
+        str] = ModelConfig.logits_processor_pattern
 
     speculative_config: Optional[Dict[str, Any]] = None
 
@@ -228,22 +231,25 @@ class EngineArgs:
     show_hidden_metrics_for_version: Optional[str] = None
     otlp_traces_endpoint: Optional[str] = None
     collect_detailed_traces: Optional[str] = None
-    disable_async_output_proc: bool = False
+    disable_async_output_proc: bool = not ModelConfig.use_async_output_proc
     scheduling_policy: SchedulerPolicy = SchedulerConfig.policy
     scheduler_cls: Union[str, Type[object]] = SchedulerConfig.scheduler_cls
 
-    override_neuron_config: Optional[Dict[str, Any]] = None
-    override_pooler_config: Optional[PoolerConfig] = None
+    override_neuron_config: dict[str, Any] = \
+        get_field(ModelConfig, "override_neuron_config")
+    override_pooler_config: Optional[PoolerConfig] = \
+        ModelConfig.override_pooler_config
     compilation_config: Optional[CompilationConfig] = None
     worker_cls: str = ParallelConfig.worker_cls
     worker_extension_cls: str = ParallelConfig.worker_extension_cls
 
     kv_transfer_config: Optional[KVTransferConfig] = None
 
-    generation_config: Optional[str] = "auto"
-    override_generation_config: Optional[Dict[str, Any]] = None
-    enable_sleep_mode: bool = False
-    model_impl: str = "auto"
+    generation_config: str = ModelConfig.generation_config
+    enable_sleep_mode: bool = ModelConfig.enable_sleep_mode
+    override_generation_config: dict[str, Any] = \
+        get_field(ModelConfig, "override_generation_config")
+    model_impl: str = ModelConfig.model_impl
 
     calculate_kv_scales: bool = CacheConfig.calculate_kv_scales
 
@@ -408,22 +414,22 @@ class EngineArgs:
         model_group.add_argument("--revision", **model_kwargs["revision"])
         model_group.add_argument("--code-revision",
                                  **model_kwargs["code_revision"])
-        model_group.add_argument('--rope-scaling',
+        model_group.add_argument("--rope-scaling",
                                  **model_kwargs["rope_scaling"])
-        model_group.add_argument('--rope-theta', **model_kwargs["rope_theta"])
+        model_group.add_argument("--rope-theta", **model_kwargs["rope_theta"])
         model_group.add_argument("--tokenizer-revision",
                                  **model_kwargs["tokenizer_revision"])
-        model_group.add_argument('--max-model-len',
+        model_group.add_argument("--max-model-len",
                                  **model_kwargs["max_model_len"])
-        model_group.add_argument('--quantization', '-q',
+        model_group.add_argument("--quantization", "-q",
                                  **model_kwargs["quantization"])
-        model_group.add_argument('--enforce-eager',
+        model_group.add_argument("--enforce-eager",
                                  **model_kwargs["enforce_eager"])
-        model_group.add_argument('--max-seq-len-to-capture',
+        model_group.add_argument("--max-seq-len-to-capture",
                                  **model_kwargs["max_seq_len_to_capture"])
-        model_group.add_argument('--max-logprobs',
+        model_group.add_argument("--max-logprobs",
                                  **model_kwargs["max_logprobs"])
-        model_group.add_argument('--disable-sliding-window',
+        model_group.add_argument("--disable-sliding-window",
                                  **model_kwargs["disable_sliding_window"])
         model_group.add_argument("--disable-cascade-attn",
                                  **model_kwargs["disable_cascade_attn"])
@@ -431,9 +437,48 @@ class EngineArgs:
                                  **model_kwargs["skip_tokenizer_init"])
         model_group.add_argument("--served-model-name",
                                  **model_kwargs["served_model_name"])
-        model_group.add_argument('--config-format',
+        # This one is a special case because it is the
+        # opposite of ModelConfig.use_async_output_proc
+        model_group.add_argument(
+            "--disable-async-output-proc",
+            action="store_true",
+            default=EngineArgs.disable_async_output_proc,
+            help="Disable async output processing. This may result in "
+            "lower performance.")
+        model_group.add_argument("--config-format",
                                  choices=[f.value for f in ConfigFormat],
                                  **model_kwargs["config_format"])
+        # This one is a special case because it can bool
+        # or str. TODO: Handle this in get_kwargs
+        model_group.add_argument(
+            "--hf-token",
+            type=str,
+            nargs="?",
+            const=True,
+            default=model_kwargs["config_format"]["default"],
+            help=model_kwargs["config_format"]["help"])
+        model_group.add_argument("--hf-overrides",
+                                 **model_kwargs["hf_overrides"])
+        model_group.add_argument("--mm-processor-kwargs",
+                                 **model_kwargs["mm_processor_kwargs"])
+        model_group.add_argument(
+            "--disable-mm-preprocessor-cache",
+            **model_kwargs["disable_mm_preprocessor_cache"])
+        model_group.add_argument("--override-neuron-config",
+                                 **model_kwargs["override_neuron_config"])
+        model_group.add_argument("--override-pooler-config",
+                                 **model_kwargs["override_pooler_config"])
+        model_group.add_argument("--logits-processor-pattern",
+                                 **model_kwargs["logits_processor_pattern"])
+        model_group.add_argument("--generation-config",
+                                 **model_kwargs["generation_config"])
+        model_group.add_argument("--override-generation-config",
+                                 **model_kwargs["override_generation_config"])
+        model_group.add_argument("--enable-sleep-mode",
+                                 **model_kwargs["enable_sleep_mode"])
+        model_group.add_argument("--model-impl",
+                                 choices=[f.value for f in ModelImpl],
+                                 **model_kwargs["model_impl"])
 
         # Model loading arguments
         load_kwargs = get_kwargs(LoadConfig)
@@ -466,26 +511,6 @@ class EngineArgs:
             choices=list(ReasoningParserManager.reasoning_parsers),
             **guided_decoding_kwargs["reasoning_backend"])
 
-        parser.add_argument(
-            '--logits-processor-pattern',
-            type=optional_type(str),
-            default=None,
-            help='Optional regex pattern specifying valid logits processor '
-            'qualified names that can be passed with the `logits_processors` '
-            'extra completion argument. Defaults to None, which allows no '
-            'processors.')
-        parser.add_argument(
-            '--model-impl',
-            type=str,
-            default=EngineArgs.model_impl,
-            choices=[f.value for f in ModelImpl],
-            help='Which implementation of the model to use.\n\n'
-            '* "auto" will try to use the vLLM implementation if it exists '
-            'and fall back to the Transformers implementation if no vLLM '
-            'implementation is available.\n'
-            '* "vllm" will use the vLLM model implementation.\n'
-            '* "transformers" will use the Transformers model '
-            'implementation.\n')
         # Parallel arguments
         parallel_kwargs = get_kwargs(ParallelConfig)
         parallel_group = parser.add_argument_group(
@@ -551,23 +576,6 @@ class EngineArgs:
                             action='store_true',
                             help='Disable logging statistics.')
 
-        parser.add_argument(
-            '--hf-token',
-            type=str,
-            nargs='?',
-            const=True,
-            default=None,
-            help='The token to use as HTTP bearer authorization'
-            ' for remote files. If `True`, will use the token '
-            'generated when running `huggingface-cli login` '
-            '(stored in `~/.huggingface`).')
-        parser.add_argument('--hf-overrides',
-                            type=json.loads,
-                            default=EngineArgs.hf_overrides,
-                            help='Extra arguments for the HuggingFace config. '
-                            'This should be a JSON string that will be '
-                            'parsed into a dictionary.')
-
         # Tokenizer arguments
         tokenizer_kwargs = get_kwargs(TokenizerPoolConfig)
         tokenizer_group = parser.add_argument_group(
@@ -589,20 +597,6 @@ class EngineArgs:
         )
         multimodal_group.add_argument('--limit-mm-per-prompt',
                                       **multimodal_kwargs["limit_per_prompt"])
-
-        parser.add_argument(
-            '--mm-processor-kwargs',
-            default=None,
-            type=json.loads,
-            help=('Overrides for the multi-modal processor obtained from '
-                  '``AutoProcessor.from_pretrained``. The available overrides '
-                  'depend on the model that is being run.'
-                  'For example, for Phi-3-Vision: ``{"num_crops": 4}``.'))
-        parser.add_argument(
-            '--disable-mm-preprocessor-cache',
-            action='store_true',
-            help='If True, disable caching of the processed multi-modal '
-            'inputs.')
 
         # LoRA related configs
         lora_kwargs = get_kwargs(LoRAConfig)
@@ -724,13 +718,6 @@ class EngineArgs:
             "modules. This involves use of possibly costly and or blocking "
             "operations and hence might have a performance impact.")
 
-        parser.add_argument(
-            '--disable-async-output-proc',
-            action='store_true',
-            default=EngineArgs.disable_async_output_proc,
-            help="Disable async output processing. This may result in "
-            "lower performance.")
-
         # Scheduler arguments
         scheduler_kwargs = get_kwargs(SchedulerConfig)
         scheduler_group = parser.add_argument_group(
@@ -769,19 +756,6 @@ class EngineArgs:
         parser.add_argument('--scheduler-cls',
                             **scheduler_kwargs["scheduler_cls"])
 
-        parser.add_argument(
-            '--override-neuron-config',
-            type=json.loads,
-            default=None,
-            help="Override or set neuron device configuration. "
-            "e.g. ``{\"cast_logits_dtype\": \"bloat16\"}``.")
-        parser.add_argument(
-            '--override-pooler-config',
-            type=PoolerConfig.from_json,
-            default=None,
-            help="Override or set the pooling method for pooling models. "
-            "e.g. ``{\"pooling_type\": \"mean\", \"normalize\": false}``.")
-
         parser.add_argument('--compilation-config',
                             '-O',
                             type=CompilationConfig.from_cli,
@@ -818,33 +792,6 @@ class EngineArgs:
             help='The worker extension class on top of the worker cls, '
             'it is useful if you just want to add new functions to the worker '
             'class without changing the existing functions.')
-        parser.add_argument(
-            "--generation-config",
-            type=optional_type(str),
-            default="auto",
-            help="The folder path to the generation config. "
-            "Defaults to 'auto', the generation config will be loaded from "
-            "model path. If set to 'vllm', no generation config is loaded, "
-            "vLLM defaults will be used. If set to a folder path, the "
-            "generation config will be loaded from the specified folder path. "
-            "If `max_new_tokens` is specified in generation config, then "
-            "it sets a server-wide limit on the number of output tokens "
-            "for all requests.")
-
-        parser.add_argument(
-            "--override-generation-config",
-            type=json.loads,
-            default=None,
-            help="Overrides or sets generation config in JSON format. "
-            "e.g. ``{\"temperature\": 0.5}``. If used with "
-            "--generation-config=auto, the override parameters will be merged "
-            "with the default config from the model. If generation-config is "
-            "None, only the override parameters are used.")
-
-        parser.add_argument("--enable-sleep-mode",
-                            action="store_true",
-                            default=False,
-                            help="")
 
         parser.add_argument(
             "--additional-config",
