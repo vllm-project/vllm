@@ -741,8 +741,8 @@ def main(args: argparse.Namespace):
                     "input_lens", "output_lens", "ttfts", "itls",
                     "generated_texts", "errors"
             ]:
-                if field in result_json:
-                    del result_json[field]
+                if field in benchmark_result:
+                    del benchmark_result[field]
 
         # Traffic
         result_json["request_rate"] = (args.request_rate if args.request_rate
