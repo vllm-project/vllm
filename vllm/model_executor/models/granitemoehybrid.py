@@ -13,7 +13,7 @@ from vllm.distributed import divide, get_tensor_model_parallel_world_size
 from vllm.distributed.parallel_state import get_pp_group
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.layernorm import RMSNorm
-from vllm.model_executor.layers.linear import ReplicatedLinear
+from vllm.model_executor.layers.linear import ColumnParallelLinear, RowParallelLinear
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.mamba.mamba_mixer2 import (
     MambaMixer2, extra_groups_for_head_shards)
@@ -132,7 +132,7 @@ class GraniteMoeHybridAttentionDecoderLayer(nn.Module):
         self.hidden_size = config.hidden_size
         self.residual_multiplier = config.residual_multiplier
 
-        self.self_attn = GraniteMoeHybridMultiheadLatentAttention(
+        self.self_attn = GraniteMoeHybridAttention(
             config,
             cache_config=cache_config,
             quant_config=quant_config,
@@ -191,7 +191,7 @@ class GraniteMoeHybridAttentionDecoderLayer(nn.Module):
         return hidden_states, residual
 
 
-class GraniteMoeHybridMultiheadLatentAttention(nn.Module):
+class GraniteMoeHybridAttention(nn.Module):
 
     def __init__(
         self,
@@ -203,33 +203,35 @@ class GraniteMoeHybridMultiheadLatentAttention(nn.Module):
         super().__init__()
         self.causal = True
         self.hidden_size = config.hidden_size
+        self.attention_bias = config.attention_bias
+        self.attention_multiplier = config.attention_multiplier
         self.num_heads = config.num_attention_heads
         self.head_dim = self.hidden_size // self.num_heads
-        self.num_key_value_heads = config.num_key_value_heads
-        self.num_key_value_groups = self.num_heads // self.num_key_value_heads
-        self.attention_bias = config.attention_bias
+        self.num_key_value_heads = config.num_key_value_heads    
         
-        self.attention_multiplier = config.attention_multiplier
-        
-        self.q_proj = ReplicatedLinear(   self.hidden_size,
+        self.q_proj = ColumnParallelLinear(self.hidden_size,
                                           self.num_heads * self.head_dim,
                                           bias=self.attention_bias,
-                                          quant_config=quant_config)
+                                          quant_config=quant_config,
+                                          prefix=f"{prefix}.q_proj")
         
-        self.k_proj = ReplicatedLinear(   self.hidden_size,
+        self.k_proj = ColumnParallelLinear(self.hidden_size,
                                           self.num_key_value_heads * self.head_dim,
                                           bias=self.attention_bias,
-                                          quant_config=quant_config)
+                                          quant_config=quant_config,
+                                          prefix=f"{prefix}.k_proj")
         
-        self.v_proj = ReplicatedLinear(   self.hidden_size,
+        self.v_proj = ColumnParallelLinear(self.hidden_size,
                                           self.num_key_value_heads * self.head_dim,
                                           bias=self.attention_bias,
-                                          quant_config=quant_config)
+                                          quant_config=quant_config,
+                                          prefix=f"{prefix}.v_proj")
         
-        self.o_proj = ReplicatedLinear(self.hidden_size,
+        self.o_proj = RowParallelLinear(  self.hidden_size,
                                           self.hidden_size,
                                           bias=self.attention_bias,
-                                          quant_config=quant_config)
+                                          quant_config=quant_config,
+                                          prefix=f"{prefix}.o_proj")
       
         self.position_embedding_type = config.position_embedding_type
         if self.position_embedding_type == "rope":
@@ -434,15 +436,7 @@ class GraniteMoeHybridModel(nn.Module):
 
 class GraniteMoeHybridForCausalLM(nn.Module, HasInnerState, SupportsLoRA, SupportsPP,
                        IsHybrid, SupportsV0Only, SupportsQuant):
-    #LoRA
-    packed_modules_mapping = {
-        "qkv_proj": [
-            "q_proj",
-            "k_proj",
-            "v_proj",
-        ],
-        "gate_up_proj": ["up_proj", "down_proj"]
-    }
+    packed_modules_mapping = {}
     embedding_modules = {
         "embed_tokens": "input_embeddings",
         "lm_head": "output_embeddings",
@@ -450,20 +444,6 @@ class GraniteMoeHybridForCausalLM(nn.Module, HasInnerState, SupportsLoRA, Suppor
     embedding_padding_modules = ["lm_head"]
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
-
-        # layer_types in hf_config are "multihead_latent_attention" or "mamba2"
-        # vLLM cache initialization expects that property layers_block_type returns exactly "attention" or "mamba", so we remap the strings here:
-        def _layers_block_type(self):
-            result = []
-            for l in self.layer_types:
-                if 'attention' in l:
-                    result.append('attention')
-                if 'mamba' in l:
-                    result.append('mamba')
-            return result
-        #inject custom property getter code:
-        vllm_config.model_config.hf_config.__class__.layers_block_type = property(lambda self: _layers_block_type(self))
-
         config = vllm_config.model_config.hf_config
         self.vllm_config = vllm_config
         self.model_config = vllm_config.model_config
