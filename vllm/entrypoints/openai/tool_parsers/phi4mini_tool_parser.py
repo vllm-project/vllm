@@ -6,16 +6,18 @@ from collections.abc import Sequence
 from typing import Any, Optional, Union
 
 import partial_json_parser
-from transformers import PreTrainedTokenizerBase
 from partial_json_parser.core.options import Allow
+from transformers import PreTrainedTokenizerBase
 
-from vllm.entrypoints.openai.protocol import (ChatCompletionRequest, DeltaFunctionCall,
-                                              DeltaMessage, DeltaToolCall,
+from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
+                                              DeltaFunctionCall, DeltaMessage,
+                                              DeltaToolCall,
                                               ExtractedToolCallInformation,
                                               FunctionCall, ToolCall)
 from vllm.entrypoints.openai.tool_parsers.abstract_tool_parser import (
     ToolParser, ToolParserManager)
-from vllm.entrypoints.openai.tool_parsers.utils import extract_intermediate_diff, find_common_prefix, is_complete_json, partial_json_loads
+from vllm.entrypoints.openai.tool_parsers.utils import (
+    extract_intermediate_diff)
 from vllm.logger import init_logger
 from vllm.utils import random_uuid
 
@@ -282,4 +284,3 @@ class Phi4MiniJsonToolParser(ToolParser):
                 "Skipping chunk as a result of tool streaming extraction "
                 "error")
             return None
-
