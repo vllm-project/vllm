@@ -34,6 +34,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 # This timeout (in seconds) is necessary when installing some dependencies via uv since it's likely to time out
 # Reference: https://github.com/astral-sh/uv/pull/1694
 ENV UV_HTTP_TIMEOUT=500
+ENV UV_INDEX_STRATEGY="unsafe-best-match"
 
 # Upgrade to GCC 10 to avoid https://gcc.gnu.org/bugzilla/show_bug.cgi?id=92519
 # as it was causing spam when compiling the CUTLASS kernels
@@ -66,7 +67,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 COPY requirements/common.txt requirements/common.txt
 COPY requirements/cuda.txt requirements/cuda.txt
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv pip install --system -r requirements/cuda.txt --index-strategy unsafe-best-match
+    uv pip install --system -r requirements/cuda.txt
 
 # cuda arch list used by torch
 # can be useful for both `dev` and `test`
@@ -94,9 +95,10 @@ COPY requirements/build.txt requirements/build.txt
 # This timeout (in seconds) is necessary when installing some dependencies via uv since it's likely to time out
 # Reference: https://github.com/astral-sh/uv/pull/1694
 ENV UV_HTTP_TIMEOUT=500
+ENV UV_INDEX_STRATEGY="unsafe-best-match"
 
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv pip install --system -r requirements/build.txt --index-strategy unsafe-best-match
+    uv pip install --system -r requirements/build.txt
 
 COPY . .
 ARG GIT_REPO_CHECK=0
@@ -163,12 +165,13 @@ FROM base as dev
 # This timeout (in seconds) is necessary when installing some dependencies via uv since it's likely to time out
 # Reference: https://github.com/astral-sh/uv/pull/1694
 ENV UV_HTTP_TIMEOUT=500
+ENV UV_INDEX_STRATEGY="unsafe-best-match"
 
 COPY requirements/lint.txt requirements/lint.txt
 COPY requirements/test.txt requirements/test.txt
 COPY requirements/dev.txt requirements/dev.txt
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv pip install --system -r requirements/dev.txt --index-strategy unsafe-best-match
+    uv pip install --system -r requirements/dev.txt
 #################### DEV IMAGE ####################
 
 #################### vLLM installation IMAGE ####################
@@ -205,6 +208,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 # This timeout (in seconds) is necessary when installing some dependencies via uv since it's likely to time out
 # Reference: https://github.com/astral-sh/uv/pull/1694
 ENV UV_HTTP_TIMEOUT=500
+ENV UV_INDEX_STRATEGY="unsafe-best-match"
 
 # Workaround for https://github.com/openai/triton/issues/2507 and
 # https://github.com/pytorch/pytorch/issues/107960 -- hopefully
@@ -226,8 +230,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 RUN --mount=type=bind,from=build,src=/workspace/dist,target=/vllm-workspace/dist \
     --mount=type=cache,target=/root/.cache/uv \
     uv pip install --system dist/*.whl --verbose \
-    --extra-index-url https://download.pytorch.org/whl/cu128 \
-    --index-strategy unsafe-best-match
+    --extra-index-url https://download.pytorch.org/whl/cu128
 
 # TESTING: install xformers from source to test 2.7.0 final RC
 RUN --mount=type=cache,target=/root/.cache/uv \
@@ -267,7 +270,7 @@ uv pip list
 # TODO: Remove this once FlashInfer AOT wheel is fixed
 COPY requirements/build.txt requirements/build.txt
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv pip install --system -r requirements/build.txt --index-strategy unsafe-best-match
+    uv pip install --system -r requirements/build.txt
 
 #################### vLLM installation IMAGE ####################
 
@@ -281,10 +284,11 @@ ADD . /vllm-workspace/
 # This timeout (in seconds) is necessary when installing some dependencies via uv since it's likely to time out
 # Reference: https://github.com/astral-sh/uv/pull/1694
 ENV UV_HTTP_TIMEOUT=500
+ENV UV_INDEX_STRATEGY="unsafe-best-match"
 
 # install development dependencies (for testing)
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv pip install --system -r requirements/dev.txt --index-strategy unsafe-best-match
+    uv pip install --system -r requirements/dev.txt
 
 # install development dependencies (for testing)
 RUN --mount=type=cache,target=/root/.cache/uv \

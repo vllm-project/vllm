@@ -139,4 +139,5 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=bind,from=vllm-build,src=/workspace/vllm/dist,target=dist \
     uv pip install dist/*.whl
 
-ENTRYPOINT ["python3", "-m", "vllm.entrypoints.openai.api_server"]
+# https://github.com/vllm-project/vllm/issues/11327
+ENTRYPOINT ["python3", "-m", "vllm.entrypoints.openai.api_server", "--dtype", "float32", "--block-size", "16"]
