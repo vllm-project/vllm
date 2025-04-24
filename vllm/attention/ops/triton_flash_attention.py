@@ -693,28 +693,28 @@ def attn_fwd(
     SM_SCALE: tl.constexpr,
     L,
     Out,
-    stride_qz,
-    stride_qh,
-    stride_qm,
-    stride_qk,
-    stride_kz,
-    stride_kh,
-    stride_kn,
-    stride_kk,
-    stride_vz,
-    stride_vh,
-    stride_vk,
-    stride_vn,
-    stride_oz,
-    stride_oh,
-    stride_om,
-    stride_on,
-    stride_bz,
-    stride_bh,
-    stride_bm,
-    stride_bn,
-    stride_az,
-    stride_ah,
+    stride_qz: tl.int64,
+    stride_qh: tl.int64,
+    stride_qm: tl.int64,
+    stride_qk: tl.int64,
+    stride_kz: tl.int64,
+    stride_kh: tl.int64,
+    stride_kn: tl.int64,
+    stride_kk: tl.int64,
+    stride_vz: tl.int64,
+    stride_vh: tl.int64,
+    stride_vk: tl.int64,
+    stride_vn: tl.int64,
+    stride_oz: tl.int64,
+    stride_oh: tl.int64,
+    stride_om: tl.int64,
+    stride_on: tl.int64,
+    stride_bz: tl.int64,
+    stride_bh: tl.int64,
+    stride_bm: tl.int64,
+    stride_bn: tl.int64,
+    stride_az: tl.int64,
+    stride_ah: tl.int64,
     q_descale_ptr,
     k_descale_ptr,
     p_scale_ptr,
@@ -780,19 +780,21 @@ def attn_fwd(
         if IS_PERSISTENT:
             # tile id basically tells us the Q block we are handling
             # at which batch sample are we
-            off_z = tile_id // num_tiles_per_sample
+            off_z: tl.int64 = tile_id // num_tiles_per_sample
             # at which head are we inside the sample
-            off_h_q = tile_id % num_tiles_per_sample // num_tiles_per_head
+            off_h_q: tl.int64 = (tile_id % num_tiles_per_sample //
+                                 num_tiles_per_head)
             # at which tile are we inside the head
-            start_m = tile_id % num_tiles_per_sample % num_tiles_per_head
+            start_m: tl.int64 = (tile_id % num_tiles_per_sample %
+                                 num_tiles_per_head)
         else:
-            start_m = tl.program_id(0)
-            off_h_q = tl.program_id(1)
-            off_z = tl.program_id(2)
+            start_m: tl.int64 = tl.program_id(0)
+            off_h_q: tl.int64 = tl.program_id(1)
+            off_z: tl.int64 = tl.program_id(2)
 
-        offs_m = start_m * BLOCK_M + tl.arange(0, BLOCK_M)
-        offs_n = tl.arange(0, BLOCK_N)
-        offs_d = tl.arange(0, BLOCK_DMODEL)
+        offs_m = start_m * BLOCK_M + tl.arange(0, BLOCK_M).to(tl.int64)
+        offs_n = tl.arange(0, BLOCK_N).to(tl.int64)
+        offs_d = tl.arange(0, BLOCK_DMODEL).to(tl.int64)
 
         # as we can't have return statements inside while loop in Triton
         continue_condition = True
