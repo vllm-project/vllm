@@ -35,10 +35,10 @@ from vllm.transformers_utils.configs import (ChatGLMConfig, Cohere2Config,
                                              InternVLChatConfig, JAISConfig,
                                              KimiVLConfig, MedusaConfig,
                                              MiniMaxText01Config,
-                                             MiniMaxVL01Config, MllamaConfig,
-                                             MLPSpeculatorConfig, MPTConfig,
-                                             NemotronConfig, NVLM_D_Config,
-                                             Olmo2Config, RWConfig,
+                                             MiniMaxVL01Config,
+                                             MllamaConfig, MLPSpeculatorConfig,
+                                             MPTConfig, NemotronConfig,
+                                             NVLM_D_Config, RWConfig,
                                              SkyworkR1VChatConfig, SolarConfig,
                                              Telechat2Config, UltravoxConfig)
 # yapf: enable
@@ -79,7 +79,6 @@ _CONFIG_REGISTRY: Dict[str, Type[PretrainedConfig]] = {
     "minimax_vl_01": MiniMaxVL01Config,
     "nemotron": NemotronConfig,
     "NVLM_D": NVLM_D_Config,
-    "olmo2": Olmo2Config,
     "solar": SolarConfig,
     "skywork_chat": SkyworkR1VChatConfig,
     "telechat": Telechat2Config,
@@ -655,6 +654,11 @@ def load_params_config(model: Union[str, Path], revision: Optional[str],
     config_file_name = "params.json"
 
     config_dict = get_hf_file_to_dict(config_file_name, model, revision)
+    if config_dict is None:
+        raise ValueError(
+            f"Failed to load mistral '{config_file_name}' config for model "
+            f"{model}. Please check if the model is a mistral-format model "
+            f"and if the config file exists.")
     assert isinstance(config_dict, dict)
 
     config_mapping = {
@@ -693,6 +697,9 @@ def load_params_config(model: Union[str, Path], revision: Optional[str],
                 "quant_method": "fp8",
                 "activation_scheme": "static"
             }
+        elif quantization.get("quant_method") == "compressed-tensors":
+            # Pass through the quantization config to compressed-tensors
+            quantization_config = quantization
         else:
             raise ValueError(
                 f"Found unknown quantization='{quantization}' in config")
@@ -710,6 +717,7 @@ def load_params_config(model: Union[str, Path], revision: Optional[str],
 
     if config_type == "multimodal":
         multimodal_config = config_dict.pop("vision_encoder")
+        quantization_config = config_dict.get("quantization_config", {})
 
         config_dict = {
             "text_config": config_dict,
@@ -717,6 +725,8 @@ def load_params_config(model: Union[str, Path], revision: Optional[str],
         }
         config_dict["architectures"] = ["PixtralForConditionalGeneration"]
         config_dict["model_type"] = "pixtral"
+        if quantization_config:
+            config_dict["quantization_config"] = quantization_config
 
     config_dict.update(kwargs)
 

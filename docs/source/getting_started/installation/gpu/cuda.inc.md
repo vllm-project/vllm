@@ -153,7 +153,7 @@ git clone https://github.com/vllm-project/vllm.git
 cd vllm
 python use_existing_torch.py
 pip install -r requirements/build.txt
-pip install -e . --no-build-isolation
+pip install --no-build-isolation -e .
 ```
 
 ##### Use the local cutlass for compilation

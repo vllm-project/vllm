@@ -75,9 +75,11 @@ if TYPE_CHECKING:
     VLLM_DISABLED_KERNELS: list[str] = []
     VLLM_USE_V1: bool = True
     VLLM_ROCM_USE_AITER: bool = False
+    VLLM_ROCM_USE_AITER_PAGED_ATTN: bool = False
     VLLM_ROCM_USE_AITER_LINEAR: bool = True
     VLLM_ROCM_USE_AITER_MOE: bool = True
     VLLM_ROCM_USE_AITER_RMSNORM: bool = True
+    VLLM_ROCM_USE_AITER_MLA: bool = True
     VLLM_ROCM_USE_SKINNY_GEMM: bool = True
     VLLM_ROCM_FP8_PADDING: bool = True
     VLLM_ROCM_MOE_PADDING: bool = True
@@ -96,6 +98,7 @@ if TYPE_CHECKING:
     VLLM_RAY_BUNDLE_INDICES: str = ""
     VLLM_CUDART_SO_PATH: Optional[str] = None
     VLLM_USE_HPU_CONTIGUOUS_CACHE_FETCH: bool = True
+    VLLM_HPU_USE_DELAYED_SAMPLING: bool = False
     VLLM_DP_RANK: int = 0
     VLLM_DP_RANK_LOCAL: int = -1
     VLLM_DP_SIZE: int = 1
@@ -533,6 +536,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     lambda: (os.getenv("VLLM_ROCM_USE_AITER", "False").lower() in
              ("true", "1")),
 
+    # Whether to use aiter paged attention.
+    # By default is disabled.
+    "VLLM_ROCM_USE_AITER_PAGED_ATTN":
+    lambda: (os.getenv("VLLM_ROCM_USE_AITER_PAGED_ATTN", "False").lower() in
+             ("true", "1")),
+
     # use aiter linear op if aiter ops are enabled
     # The following list of related ops
     # - scaled_mm (per-tensor / rowwise)
@@ -551,6 +560,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     lambda: (os.getenv("VLLM_ROCM_USE_AITER_RMSNORM", "True").lower() in
              ("true", "1")),
 
+    # Whether to use aiter mla ops.
+    # By default is enabled.
+    "VLLM_ROCM_USE_AITER_MLA":
+    lambda: (os.getenv("VLLM_ROCM_USE_AITER_MLA", "True").lower() in
+             ("true", "1")),
     # use rocm skinny gemms
     "VLLM_ROCM_USE_SKINNY_GEMM":
     lambda: (os.getenv("VLLM_ROCM_USE_SKINNY_GEMM", "True").lower() in
@@ -635,6 +649,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # contiguous cache fetch will be used.
     "VLLM_USE_HPU_CONTIGUOUS_CACHE_FETCH":
     lambda: os.environ.get("VLLM_CONTIGUOUS_PA", "true").lower() in
+    ("1", "true"),
+
+    # Use delayed sampling for HPU to reduce host cpu overhead
+    # between each step.
+    "VLLM_HPU_USE_DELAYED_SAMPLING":
+    lambda: os.environ.get("VLLM_DELAYED_SAMPLING", "false").lower() in
     ("1", "true"),
 
     # Rank of the process in the data parallel setting
@@ -774,6 +794,7 @@ def compute_hash() -> str:
         if key in environment_variables:
             factorize(key)
 
-    hash_str = hashlib.md5(str(factors).encode()).hexdigest()
+    hash_str = hashlib.md5(str(factors).encode(),
+                           usedforsecurity=False).hexdigest()
 
     return hash_str

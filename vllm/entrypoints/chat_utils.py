@@ -27,10 +27,11 @@ from openai.types.chat import (ChatCompletionMessageToolCallParam,
                                ChatCompletionToolMessageParam)
 from openai.types.chat.chat_completion_content_part_input_audio_param import (
     InputAudio)
+from pydantic import TypeAdapter
 # yapf: enable
-# pydantic needs the TypedDict from typing_extensions
 from transformers import (PreTrainedTokenizer, PreTrainedTokenizerFast,
                           ProcessorMixin)
+# pydantic needs the TypedDict from typing_extensions
 from typing_extensions import Required, TypeAlias, TypedDict
 
 from vllm.config import ModelConfig
@@ -879,12 +880,13 @@ def _get_full_multimodal_text_prompt(placeholder_counts: dict[str, int],
 
 # No need to validate using Pydantic again
 _TextParser = partial(cast, ChatCompletionContentPartTextParam)
-_ImageParser = partial(cast, ChatCompletionContentPartImageParam)
 _ImageEmbedsParser = partial(cast, ChatCompletionContentPartImageEmbedsParam)
-_AudioParser = partial(cast, ChatCompletionContentPartAudioParam)
 _InputAudioParser = partial(cast, ChatCompletionContentPartInputAudioParam)
 _RefusalParser = partial(cast, ChatCompletionContentPartRefusalParam)
-_VideoParser = partial(cast, ChatCompletionContentPartVideoParam)
+# Need to validate url objects
+_ImageParser = TypeAdapter(ChatCompletionContentPartImageParam).validate_python
+_AudioParser = TypeAdapter(ChatCompletionContentPartAudioParam).validate_python
+_VideoParser = TypeAdapter(ChatCompletionContentPartVideoParam).validate_python
 
 _ContentPart: TypeAlias = Union[str, dict[str, str], InputAudio]
 
@@ -1095,7 +1097,11 @@ def _parse_chat_message_content(
         if role == 'assistant':
             parsed_msg = _AssistantParser(message)
 
-            if "tool_calls" in parsed_msg:
+            # The 'tool_calls' is not None check ensures compatibility.
+            # It's needed only if downstream code doesn't strictly
+            # follow the OpenAI spec.
+            if ("tool_calls" in parsed_msg
+                and parsed_msg["tool_calls"] is not None):
                 result_msg["tool_calls"] = list(parsed_msg["tool_calls"])
         elif role == "tool":
             parsed_msg = _ToolParser(message)
