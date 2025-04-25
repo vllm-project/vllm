@@ -122,7 +122,7 @@ def set_forward_context(attn_metadata: Any,
                     attn_metadata.num_decode_tokens
             else:
                 # for v1 attention backends
-                batchsize = attn_metadata.num_input_tokens
+                batchsize = num_tokens
             # we use synchronous scheduling right now,
             # adding a sync point here should not affect
             # scheduling of the next batch
