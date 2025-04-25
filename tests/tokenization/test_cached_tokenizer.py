@@ -33,6 +33,8 @@ def _check_consistency(target: AnyTokenizer, expected: AnyTokenizer):
     assert target.all_special_tokens == expected.all_special_tokens
     assert (target.all_special_tokens_extended ==
             expected.all_special_tokens_extended)
+    assert target.get_vocab() == expected.get_vocab()
+    assert len(target) == len(expected)
 
     # Other attributes
     assert getattr(target, "padding_side",
