@@ -17,7 +17,7 @@ from dataclasses import (MISSING, dataclass, field, fields, is_dataclass,
 from importlib.util import find_spec
 from pathlib import Path
 from typing import (TYPE_CHECKING, Any, Callable, ClassVar, Literal, Optional,
-                    Protocol, TypeVar, Union, get_args)
+                    Protocol, TypeVar, Union, cast, get_args)
 
 import torch
 from pydantic import BaseModel, Field, PrivateAttr
@@ -643,7 +643,7 @@ class ModelConfig:
         return self.registry.model_has_inner_state(self.architectures)
 
     def _verify_tokenizer_mode(self) -> None:
-        tokenizer_mode = self.tokenizer_mode.lower()
+        tokenizer_mode = cast(TokenizerMode, self.tokenizer_mode.lower())
         if tokenizer_mode not in get_args(TokenizerMode):
             raise ValueError(
                 f"Unknown tokenizer mode: {self.tokenizer_mode}. Must be "
@@ -763,7 +763,8 @@ class ModelConfig:
             "gptq_bitblas"
         ]
         if self.quantization is not None:
-            self.quantization = self.quantization.lower()
+            self.quantization = cast(QuantizationMethods,
+                                     self.quantization.lower())
 
         # Parse quantization method from the HF model config, if available.
         quant_cfg = self._parse_quant_hf_config()
@@ -1240,7 +1241,7 @@ class ModelConfig:
 
     @property
     def runner_type(self) -> RunnerType:
-        return _TASK_RUNNER[self.task]
+        return _TASK_RUNNER[cast(_ResolvedTask, self.task)]
 
     @property
     def is_v1_compatible(self) -> bool:
