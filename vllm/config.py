@@ -418,6 +418,9 @@ class ModelConfig:
         assert_hashable(str_factors)
         return hashlib.sha256(str(factors).encode()).hexdigest()
 
+    def __hash__(self) -> int:
+        return int(self.compute_hash(), 16)
+
     def __post_init__(self) -> None:
         self.model = maybe_model_redirect(self.model)
         # The tokenizer is consistent with the model by default.
