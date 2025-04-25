@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from collections.abc import Mapping, Set
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from typing import Any, Literal, Optional
 
 import pytest
@@ -18,12 +18,13 @@ class _HfExamplesInfo:
     """Extra models to use for testing this architecture."""
 
     arch: Optional[str] = None
-    """The architecture class name.
-    This is set in `HfExampleModels.__init__`."""
+    """The architecture class name."""
 
     @property
     def tiny(self) -> str:
         """The tiny model to use for testing with this architecture."""
+        if self.arch is None:
+            raise ValueError("Architecture name is not set.")
         return f"hf-tiny-model-private/tiny-random-{self.arch}"
 
     tokenizer: Optional[str] = None
@@ -417,15 +418,17 @@ _EXAMPLE_MODELS = {
     **_TRANSFORMERS_MODELS,
 }
 
+# Add arch here so it doesn't have to be duplicated in the definitions above
+_EXAMPLE_MODELS = {
+    k: _HfExamplesInfo(arch=k, **asdict(v)) for k, v in _EXAMPLE_MODELS.items()
+}
+
 
 class HfExampleModels:
     def __init__(self, hf_models: Mapping[str, _HfExamplesInfo]) -> None:
         super().__init__()
 
         self.hf_models = hf_models
-        for arch, hf_model in hf_models.items():
-            if hf_model.arch is None:
-                self.hf_models[arch].arch = arch
 
     def get_supported_archs(self) -> Set[str]:
         return self.hf_models.keys()
