@@ -8,7 +8,7 @@ import vllm.lora.ops.xla_ops.pallas  # noqa # pylint: disable=unused-import
 N_TOKENS = [16, 1024, 4096]
 HIDDEN_SIZES = [1024, 2048, 4096]
 
-DTYPES = [torch.float16]
+DTYPES = [torch.bfloat16]
 NUM_LORA = [1, 4, 16]
 RANKS = [32, 256, 512]
 
