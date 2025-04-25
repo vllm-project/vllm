@@ -1,11 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import base64
-from typing import Final, Literal, Optional, Union, override
+from typing import Final, Literal, Optional, Union
 
 import numpy as np
 from fastapi import Request
-from typing_extensions import assert_never
+from typing_extensions import assert_never, override
 
 from vllm.config import ModelConfig
 from vllm.engine.protocol import EngineClient
@@ -73,7 +73,11 @@ class OpenAIServingEmbedding(OpenAIServing):
         See https://platform.openai.com/docs/api-reference/embeddings/create
         for the API specification. This API mimics the OpenAI Embedding API.
         """
-        return await self.handle(request, raw_request)
+        response = await self.handle(request, raw_request)
+        if isinstance(response, (EmbeddingResponse, ErrorResponse)):
+            return response
+
+        return self.create_error_response("Unexpected response type")
 
     @override
     def _validate_request(self, ctx: ServeContext) -> Optional[ErrorResponse]:
@@ -102,7 +106,7 @@ class OpenAIServingEmbedding(OpenAIServing):
 
             tokenizer = await self.engine_client.get_tokenizer(ctx.lora_request
                                                                )
-            
+
             if ctx.prompt_adapter_request is not None:
                 raise NotImplementedError("Prompt adapter is not supported "
                                           "for embedding models")

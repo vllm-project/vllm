@@ -1,10 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from http import HTTPStatus
-from typing import Optional, Union, override
+from typing import Optional, Union
 
 import numpy as np
 from fastapi import Request
+from typing_extensions import override
 
 from vllm.config import ModelConfig
 from vllm.engine.protocol import EngineClient
@@ -45,7 +46,11 @@ class ServingClassification(OpenAIServing):
         request: ClassificationRequest,
         raw_request: Optional[Request] = None,
     ) -> Union[ClassificationResponse, ErrorResponse]:
-        return await self.handle(request, raw_request)
+        response = await self.handle(request, raw_request)
+        if isinstance(response, (ClassificationResponse, ErrorResponse)):
+            return response
+
+        return self.create_error_response("Unexpected response type")
 
     @override
     async def _preprocess(self, ctx: ServeContext):
