@@ -8,7 +8,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from transformers import (BatchFeature, Phi4MultimodalVisionConfig, Phi4MultimodalAudioConfig, Phi4MultimodalConfig,
-                          SequenceFeatureExtractor, SiglipVisionConfig)
+                          Phi4MultimodalFeatureExtractor, Phi4MultimodalImageProcessorFast)
 from transformers import Phi4MultimodalProcessor as Phi4MMProcessor
 from transformers.models.phi4_multimodal.modeling_phi4_multimodal import (
     Phi4MultimodalAudioConvModule, 
@@ -520,7 +520,7 @@ class Phi4MMAudioEmbedding(nn.Module):
         audio_encoder_hidden_states = self.encoder(audio_input_features, audio_attention_mask)
         audio_embeds = audio_projection(audio_encoder_hidden_states)
 
-        audio_embeds = [audio_embeds[i, : audio_embed_sizes[i], :] for i in range(len(audio_embed_sizes))]
+        # audio_embeds = [audio_embeds[i, : audio_embed_sizes[i], :] for i in range(len(audio_embed_sizes))]
 
         return audio_embeds
     
@@ -631,6 +631,9 @@ def cat_with_pad(tensors, dim, padding_value=0):
 
 class Phi4MMProcessingInfo(BaseProcessingInfo):
 
+    def get_hf_config(self) -> Phi4MultimodalConfig:
+        return self.ctx.get_hf_config(Phi4MultimodalConfig)
+
     def get_hf_processor(
         self,
         *,
@@ -650,17 +653,22 @@ class Phi4MMProcessingInfo(BaseProcessingInfo):
     def audio_tokens(self) -> list[str]:
         return [f"<|audio_{i+1}|>" for i in range(100)]
 
+    def get_feature_extractor(self) -> Phi4MultimodalFeatureExtractor:
+        return self.get_hf_processor().audio_processor
+    
+    def get_image_processor(
+        self,
+        processor: Optional[Phi4MMProcessor] = None,
+    ) -> Phi4MultimodalImageProcessorFast:
+        if processor is None:
+            processor = self.get_hf_processor()
+        return processor.image_processor
+
     def get_dynamic_hd(
         self,
         processor: Optional[Phi4MMProcessor] = None,
     ) -> int:
-        if processor is None:
-            processor = self.get_hf_processor()
-        image_processor = processor.image_processor
-        return image_processor.dynamic_hd
-
-    def get_feature_extractor(self) -> SequenceFeatureExtractor:
-        return self.get_hf_processor().audio_processor
+        return self.get_image_processor(processor).dynamic_hd
 
     def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
         return {"audio": None, "image": None}
@@ -685,13 +693,12 @@ class Phi4MMProcessingInfo(BaseProcessingInfo):
             target_ratios = sorted(target_ratios, key=lambda x: x[0] * x[1])
 
             # find the closest aspect ratio to the target
-            image_processor = self.get_hf_processor().image_processor
+            image_processor = self.get_image_processor()
             target_aspect_ratio = image_processor.find_closest_aspect_ratio(
                 aspect_ratio,
                 target_ratios,
                 orig_width,
                 orig_height,
-                image_size,
             )
 
             # calculate the target width and height
@@ -791,24 +798,20 @@ class Phi4MMProcessingInfo(BaseProcessingInfo):
         processor: Optional[Phi4MMProcessor] = None,
     ) -> int:
         hf_config = self.get_hf_config()
-        vision_encoder_name = hf_config.img_processor
-        if vision_encoder_name is None:
-            vision_encoder_name = SIGLIP_NAME
-        prepro_config = VISION_ENCODER_TO_PROCESSING_CONFIG[
-            vision_encoder_name]
-        vit_image_size = prepro_config['vit_image_size']
-        vit_patch_size = prepro_config['vit_patch_size']
-        token_compression_factor = prepro_config['token_compression_factor']
+        vision_config = hf_config.vision_config
+        vit_image_size = vision_config.image_size
+        vit_patch_size = vision_config.patch_size
 
         dynamic_hd_size = self.get_dynamic_hd(processor=processor)
 
+        # we use default `token_compression_factor=2`,
+        # since it's not in HF vision config.
         image_num_tokens = self._compute_num_image_tokens(
             image_width,
             image_height,
             dynamic_hd_size=dynamic_hd_size,
             vit_image_size=vit_image_size,
             vit_patch_size=vit_patch_size,
-            token_compression_factor=token_compression_factor,
         )
 
         return image_num_tokens
@@ -817,13 +820,7 @@ class Phi4MMProcessingInfo(BaseProcessingInfo):
         self,
         processor: Optional[Phi4MMProcessor] = None,
     ) -> ImageSize:
-        hf_config = self.get_hf_config()
-        vision_encoder_name = hf_config.img_processor
-        if vision_encoder_name is None:
-            vision_encoder_name = SIGLIP_NAME
-        prepro_config = VISION_ENCODER_TO_PROCESSING_CONFIG[
-            vision_encoder_name]
-        vit_image_size = prepro_config['vit_image_size']
+        vit_image_size = self.get_hf_config().vision_config.image_size
 
         max_side = vit_image_size * self.get_dynamic_hd(processor=processor)
         return ImageSize(height=max_side, width=vit_image_size)
@@ -1164,9 +1161,9 @@ class Phi4MultimodalForCausalLM(nn.Module, SupportsLoRA, SupportsMultiModal):
         # (e.g. multiple examples) and the second dim is the multi-audio dim
         # (e.g. multiple audios in the same example)
 
-        dtype = next(self.embed_tokens_extend.parameters()).dtype
+        dtype = next(self.audio_embed.parameters()).dtype
         audio_embeds = [
-            self.embed_tokens_extend(
+            self.audio_embed(
                 features.to(dtype),
                 audio_projection_mode=audio_projection_mode,
             ) for features in audio_features
@@ -1258,11 +1255,11 @@ class Phi4MultimodalForCausalLM(nn.Module, SupportsLoRA, SupportsMultiModal):
         if image_input["type"] == "image_embeds":
             image_embeds = image_input["image_embeds"].type(self.visual.dtype)
         else:
-            dtype = next(self.vision_encoder.parameters()).dtype
+            dtype = next(self.image_embed.parameters()).dtype
             pixel_values = image_input['data'].to(dtype)
             image_sizes = image_input['image_sizes']
             image_attention_mask = image_input['image_attention_mask']
-            image_embeds = self.vision_encoder(pixel_values, image_sizes,
+            image_embeds = self.image_embed(pixel_values, image_sizes,
                                                image_attention_mask)
         return image_embeds
 
