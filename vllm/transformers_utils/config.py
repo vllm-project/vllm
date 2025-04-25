@@ -760,19 +760,22 @@ def get_hf_text_config(config: PretrainedConfig):
     """Get the "sub" config relevant to llm for multi modal models.
     No op for pure text models.
     """
-    if hasattr(config, "text_config"):
-        # The code operates under the assumption that text_config should have
-        # `num_attention_heads` (among others). Assert here to fail early
-        # if transformers config doesn't align with this assumption.
-        assert hasattr(config.text_config, "num_attention_heads")
-        return config.text_config
-    elif hasattr(config, "thinker_config"):
+    # This block should be unnecessary after https://github.com/huggingface/transformers/pull/37517
+    if hasattr(config, "thinker_config"):
         # TODO(suyang.fy): Refactor code.
         #  For Qwen2.5-Omni, change hf_text_config to
         #  thinker_config.text_config.
         return config.thinker_config.text_config
-    else:
-        return config
+
+    text_config = config.get_text_config()
+
+    if text_config is not config:
+        # The code operates under the assumption that text_config should have
+        # `num_attention_heads` (among others). Assert here to fail early
+        # if transformers config doesn't align with this assumption.
+        assert hasattr(text_config, "num_attention_heads")
+
+    return text_config
 
 
 def try_get_generation_config(
