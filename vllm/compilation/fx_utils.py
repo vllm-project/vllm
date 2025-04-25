@@ -16,7 +16,7 @@ def is_func(node: fx.Node, target) -> bool:
 def find_specified_fn_maybe(nodes: Iterable[fx.Node],
                             op: OpOverload) -> Optional[fx.Node]:
     for node in nodes:
-        if node.target == op:  # noqa
+        if node.target == op:
             return node
     return None
 

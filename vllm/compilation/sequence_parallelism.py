@@ -27,8 +27,19 @@ class AllReduceRMSNormPattern:
 
 class EmbeddingAllReduceRMSNormPattern(AllReduceRMSNormPattern):
 
-    def __init__(self, epsilon: float, dtype: torch.dtype, device: str):
-        super().__init__(epsilon, dtype, device)
+    def get_inputs(self):
+        arg2_1 = torch.empty([16, 4], device=self.device, dtype=self.dtype)
+        mul_6 = torch.tensor([[3, 7, 1, 4, 9, 2, 5, 0]],
+                             device=self.device,
+                             dtype=torch.long)
+        unsqueeze = torch.rand([1, 8, 1], device=self.device, \
+            dtype=self.dtype) > 0.5
+        full_default = torch.zeros([1, 8, 4], device=self.device, \
+            dtype=self.dtype)
+        permute = torch.empty([1, 8, 4], device=self.device, dtype=self.dtype)
+        arg3_1 = torch.empty([4], device=self.device, dtype=self.dtype)
+
+        return [arg2_1, mul_6, unsqueeze, full_default, permute, arg3_1]
 
     def register(self, pm_pass: PatternMatcherPass):
 
@@ -88,29 +99,25 @@ class EmbeddingAllReduceRMSNormPattern(AllReduceRMSNormPattern):
 
             return all_gather, reduce_scatter
 
-        def get_inputs():
-            arg2_1 = torch.rand([16, 4], device=self.device, dtype=self.dtype)
-            mul_6 = torch.tensor([[3, 7, 1, 4, 9, 2, 5, 0]],
-                                 device=self.device,
-                                 dtype=torch.long)
-            unsqueeze = torch.rand([1, 8, 1], device=self.device, \
-                dtype=self.dtype) > 0.5
-            full_default = torch.zeros([1, 8, 4], device=self.device, \
-                dtype=self.dtype)
-            permute = torch.rand([1, 8, 4],
-                                 device=self.device,
-                                 dtype=self.dtype)
-            arg3_1 = torch.rand([4], device=self.device, dtype=self.dtype)
-            return [arg2_1, mul_6, unsqueeze, full_default, permute, arg3_1]
-
-        pm.register_replacement(pattern, replacement, get_inputs(),
+        pm.register_replacement(pattern, replacement, self.get_inputs(),
                                 pm.fwd_only, pm_pass)
 
 
 class MiddleAllReduceRMSNormPattern(AllReduceRMSNormPattern):
 
-    def __init__(self, epsilon: float, dtype: torch.dtype, device: str):
-        super().__init__(epsilon, dtype, device)
+    def get_inputs(self):
+        mm_1 = torch.empty([4, 4], device=self.device, dtype=self.dtype)
+
+        residual = torch.empty([4, 4], device=self.device, dtype=self.dtype)
+        rms_norm_weights = torch.empty([4, 4],
+                                       device=self.device,
+                                       dtype=self.dtype)
+
+        return [
+            residual,
+            mm_1,
+            rms_norm_weights,
+        ]
 
     def register(self, pm_pass: PatternMatcherPass):
 
@@ -157,30 +164,25 @@ class MiddleAllReduceRMSNormPattern(AllReduceRMSNormPattern):
                 group_name=tp.unique_name)
             return all_gather, rmsnorm[2]
 
-        def get_inputs():
-            mm_1 = torch.empty([4, 4], device=self.device, dtype=self.dtype)
-
-            residual = torch.empty([4, 4],
-                                   device=self.device,
-                                   dtype=self.dtype)
-            rms_norm_weights = torch.empty([4, 4],
-                                           device=self.device,
-                                           dtype=self.dtype)
-
-            return [
-                residual,
-                mm_1,
-                rms_norm_weights,
-            ]
-
-        pm.register_replacement(pattern, replacement, get_inputs(),
+        pm.register_replacement(pattern, replacement, self.get_inputs(),
                                 pm.fwd_only, pm_pass)
 
 
 class LastAllReduceRMSNormPattern(AllReduceRMSNormPattern):
 
-    def __init__(self, epsilon: float, dtype: torch.dtype, device: str):
-        super().__init__(epsilon, dtype, device)
+    def get_inputs(self):
+        mm_1 = torch.empty([4, 4], device=self.device, dtype=self.dtype)
+
+        residual = torch.empty([4, 4], device=self.device, dtype=self.dtype)
+        rms_norm_weights = torch.empty([4, 4],
+                                       device=self.device,
+                                       dtype=self.dtype)
+
+        return [
+            residual,
+            mm_1,
+            rms_norm_weights,
+        ]
 
     def register(self, pm_pass: PatternMatcherPass):
 
@@ -228,23 +230,7 @@ class LastAllReduceRMSNormPattern(AllReduceRMSNormPattern):
 
             return normalized
 
-        def get_inputs():
-            mm_1 = torch.empty([4, 4], device=self.device, dtype=self.dtype)
-
-            residual = torch.empty([4, 4],
-                                   device=self.device,
-                                   dtype=self.dtype)
-            rms_norm_weights = torch.empty([4, 4],
-                                           device=self.device,
-                                           dtype=self.dtype)
-
-            return [
-                residual,
-                mm_1,
-                rms_norm_weights,
-            ]
-
-        pm.register_replacement(pattern, replacement, get_inputs(),
+        pm.register_replacement(pattern, replacement, self.get_inputs(),
                                 pm.fwd_only, pm_pass)
 
 
