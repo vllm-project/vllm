@@ -2,7 +2,6 @@
 
 import asyncio
 import json
-import traceback
 from abc import ABC, abstractmethod
 from collections import defaultdict, deque
 from collections.abc import Awaitable, Iterable
@@ -1215,7 +1214,9 @@ def apply_hf_chat_template(
 
         # Log and report any library-related exceptions for further
         # investigation.
-        logger.exception(traceback.format_exc())
+        logger.exception(
+            "An error occurred while loading and utilizing third-party"
+            "libraries.")
         raise ValueError from e
 
 def apply_mistral_chat_template(
@@ -1251,5 +1252,7 @@ def apply_mistral_chat_template(
 
         # Log and report any library-related exceptions for further
         # investigation.
-        logger.exception(traceback.format_exc())
+        logger.exception(
+            "An error occurred while loading and utilizing third-party"
+            "libraries.")
         raise ValueError from e
