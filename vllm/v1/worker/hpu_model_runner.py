@@ -689,7 +689,6 @@ class HPUModelRunner:
         self._tokenizer = init_tokenizer_from_configs(
             model_config=vllm_config.model_config,
             scheduler_config=vllm_config.scheduler_config,
-            parallel_config=vllm_config.parallel_config,
             lora_config=vllm_config.lora_config).tokenizer
 
     def get_kv_cache_spec(self) -> dict[str, KVCacheSpec]:
