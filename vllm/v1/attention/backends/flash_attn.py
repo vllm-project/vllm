@@ -14,7 +14,7 @@ from vllm.attention.ops.merge_attn_states import merge_attn_states
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.utils import cdiv
-from vllm.v1.kv_cache_interface import KVCacheSpec
+from vllm.v1.kv_cache_interface import AttentionSpec
 from vllm.v1.worker.block_table import BlockTable
 from vllm.vllm_flash_attn.fa_utils import (flash_attn_supports_fp8,
                                            get_flash_attn_version)
@@ -280,8 +280,8 @@ def make_local_attention_virtual_batches(
 
 class FlashAttentionMetadataBuilder:
 
-    def __init__(self, runner: "GPUModelRunner", kv_cache_spec: KVCacheSpec,
-                 persistent_block_table: BlockTable):
+    def __init__(self, runner: "GPUModelRunner", kv_cache_spec: AttentionSpec,
+                 block_table: BlockTable):
         model_config = runner.model_config
 
         self.runner = runner
@@ -293,7 +293,7 @@ class FlashAttentionMetadataBuilder:
         self.headdim = model_config.get_head_size()
         self.page_size = kv_cache_spec.block_size
         self.kv_cache_spec = kv_cache_spec
-        self.persistent_block_table = persistent_block_table
+        self.block_table = block_table
 
     def reorder_batch(self, input_batch: "InputBatch",
                       scheduler_output: "SchedulerOutput") -> bool:
@@ -307,7 +307,7 @@ class FlashAttentionMetadataBuilder:
                                                  non_blocking=True)
         seq_lens_cpu = self.runner.seq_lens_cpu[:num_reqs]
         seq_lens = seq_lens_cpu.to(self.runner.device, non_blocking=True)
-        block_table = self.persistent_block_table
+        block_table = self.block_table
         block_table_tensor = block_table.get_device_tensor()[:num_reqs]
         slot_mapping = block_table.slot_mapping_cpu[:num_actual_tokens].to(
             self.runner.device, non_blocking=True).long()
@@ -333,7 +333,7 @@ class FlashAttentionMetadataBuilder:
         local_attn_metadata = None
         if self.runner.attention_chunk_size is not None:
             seqlens_q_local_np, virt_q_cu_seqlens_np, virt_k_seqlens_np, \
-                virt_block_table = make_local_attention_virtual_batches(
+                virt_block_table_tensor = make_local_attention_virtual_batches(
                     self.runner.attention_chunk_size,
                     self.runner.query_start_loc_np[:num_reqs + 1],
                     self.runner.seq_lens_np[:num_reqs],
@@ -357,14 +357,13 @@ class FlashAttentionMetadataBuilder:
             local_attn_metadata = FlashAttentionMetadata.LocalAttentionMetadata(
                 local_query_start_loc=local_query_start_loc,
                 local_seqused_k=local_seqused_k,
-                local_block_table=virt_block_table,
+                local_block_table=virt_block_table_tensor,
                 local_max_query_len=local_max_query_len,
                 local_max_seq_len=local_max_seq_len,
                 local_scheduler_metadata=local_scheduler_metadata,
             )
 
-        # use_cascade = common_prefix_len > 0
-        use_cascade = False
+        use_cascade = common_prefix_len > 0
 
         if use_cascade:
             cu_prefix_query_lens = torch.tensor([0, num_actual_tokens],

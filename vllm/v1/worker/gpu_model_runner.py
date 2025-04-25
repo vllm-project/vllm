@@ -1754,8 +1754,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 kv_cache_spec.dtype,
                 kv_cache_spec.block_size,
                 self.model_config.is_attention_free,
-                use_mla=(isinstance(kv_cache_spec, AttentionSpec)
-                         and kv_cache_spec.use_mla),
+                use_mla=kv_cache_spec.use_mla,
             )
             if attn_backend_i is None:
                 error_msg = (
