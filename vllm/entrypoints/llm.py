@@ -519,11 +519,9 @@ class LLM:
             prompts: A list of prompts. Each prompt can be a string or a list
                 of token IDs.
             params: The beam search parameters.
-
-        TODO: how does beam search work together with length penalty, frequency
-        penalty, and stopping criteria, etc.?
         """
-
+        # TODO: how does beam search work together with length penalty,
+        # frequency, penalty, and stopping criteria, etc.?
         beam_width = params.beam_width
         max_tokens = params.max_tokens
         temperature = params.temperature
