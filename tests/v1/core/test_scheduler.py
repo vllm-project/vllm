@@ -6,7 +6,7 @@ import pytest
 import torch
 
 from vllm.config import (CacheConfig, KVTransferConfig, ModelConfig,
-                         SchedulerConfig, VllmConfig)
+                         SchedulerConfig, SpeculativeConfig, VllmConfig)
 from vllm.multimodal.inputs import MultiModalKwargs, PlaceholderRange
 from vllm.sampling_params import SamplingParams
 from vllm.v1.core.sched.output import SchedulerOutput
@@ -31,6 +31,7 @@ def create_scheduler(
     num_blocks: int = 10000,
     block_size: int = 16,
     max_model_len: Optional[int] = None,
+    num_speculative_tokens: Optional[int] = None,
 ) -> Scheduler:
     '''Create scheduler under test.
 
@@ -81,11 +82,17 @@ def create_scheduler(
         kv_connector_extra_config={"shared_storage_path": "local_storage"},
     ) if use_kv_connector else None
 
+    speculative_config: Optional[SpeculativeConfig] = None
+    if num_speculative_tokens is not None:
+        speculative_config = SpeculativeConfig(
+            model="ngram", num_speculative_tokens=num_speculative_tokens)
+
     vllm_config = VllmConfig(
         scheduler_config=scheduler_config,
         model_config=model_config,
         cache_config=cache_config,
         kv_transfer_config=kv_transfer_config,
+        speculative_config=speculative_config,
     )
     kv_cache_config = KVCacheConfig(
         num_blocks=num_blocks,  # A large number of blocks to hold all requests
@@ -429,7 +436,7 @@ def test_schedule_concurrent_partial_requests(enable_prefix_caching: bool):
 
 def test_stop_via_update_from_output():
     """Test stopping behavior through update_from_output"""
-    scheduler = create_scheduler()
+    scheduler = create_scheduler(num_speculative_tokens=1)
 
     # Test case 1: Stop on EOS token
     requests = create_requests(num_requests=2, max_tokens=10)
@@ -437,7 +444,6 @@ def test_stop_via_update_from_output():
         req.num_computed_tokens = req.num_tokens
         scheduler.requests[req.request_id] = req
         scheduler.running.append(req)
-        scheduler.scheduled_req_ids.add(req.request_id)
 
     scheduler_output = SchedulerOutput(scheduled_new_reqs=[],
                                        scheduled_cached_reqs=[],
@@ -481,7 +487,7 @@ def test_stop_via_update_from_output():
     assert list(requests[1].output_token_ids) == [10, 11]
 
     # Test case 2: Stop on custom stop token
-    scheduler = create_scheduler()
+    scheduler = create_scheduler(num_speculative_tokens=2)
     requests = create_requests(num_requests=2,
                                max_tokens=10,
                                stop_token_ids=[42, 43])
@@ -489,7 +495,6 @@ def test_stop_via_update_from_output():
         req.num_computed_tokens = req.num_tokens
         scheduler.requests[req.request_id] = req
         scheduler.running.append(req)
-        scheduler.scheduled_req_ids.add(req.request_id)
 
     scheduler_output = SchedulerOutput(scheduled_new_reqs=[],
                                        scheduled_cached_reqs=[],
@@ -533,13 +538,12 @@ def test_stop_via_update_from_output():
     assert list(requests[1].output_token_ids) == [13, 14]
 
     # Test case 3: Stop on max tokens
-    scheduler = create_scheduler()
+    scheduler = create_scheduler(num_speculative_tokens=2)
     requests = create_requests(num_requests=2, max_tokens=2)
     for req in requests:
         req.num_computed_tokens = req.num_tokens
         scheduler.requests[req.request_id] = req
         scheduler.running.append(req)
-        scheduler.scheduled_req_ids.add(req.request_id)
 
     scheduler_output = SchedulerOutput(scheduled_new_reqs=[],
                                        scheduled_cached_reqs=[],
@@ -583,13 +587,12 @@ def test_stop_via_update_from_output():
     assert list(requests[1].output_token_ids) == [13]
 
     # Test case 4: Ignore EOS flag
-    scheduler = create_scheduler()
+    scheduler = create_scheduler(num_speculative_tokens=2)
     requests = create_requests(num_requests=1, max_tokens=10)
     requests[0].sampling_params.ignore_eos = True
     requests[0].num_computed_tokens = requests[0].num_tokens
     scheduler.requests[requests[0].request_id] = requests[0]
     scheduler.running.append(requests[0])
-    scheduler.scheduled_req_ids.add(requests[0].request_id)
 
     scheduler_output = SchedulerOutput(
         scheduled_new_reqs=[],
@@ -686,13 +689,14 @@ def test_schedule_concurrent_batches(enable_prefix_caching: Optional[bool],
 @pytest.mark.parametrize(
     "spec_tokens,output_tokens,expected",
     [
-        ([[1, 2, 3]], [[1, 2, 3, 4]], (3, 3)),  # perfect match
-        ([[1, 2, 3]], [[1, 5]], (3, 1)),  # early mismatch
-        ([[1, 2], [3]], [[1, 2, 5], [3, 4]], (3, 3)),  # multiple sequences
-        ([[1]], [[1, 2]], (1, 1)),  # single token sequence
-        ([[]], [[5]], (0, 0)),  # empty sequence
+        ([[1, 2, 3]], [[1, 2, 3, 4]], (1, 3, 3, [1, 1, 1])),  # perfect match
+        ([[1, 2, 3]], [[1, 5]], (1, 3, 1, [1, 0, 0])),  # early mismatch
+        ([[1, 2], [3]], [[1, 2, 5], [3, 4]],
+         (2, 3, 3, [2, 1])),  # multiple sequences
+        ([[1]], [[1, 2]], (1, 1, 1, [1])),  # single token sequence
+        ([[]], [[5]], (0, 0, 0, [0])),  # empty sequence
         ([[1, 2, 3], [4, 5, 6]], [[1, 2, 7], [4, 8]],
-         (6, 3)),  # multiple mismatches
+         (2, 6, 3, [2, 1, 0])),  # multiple mismatches
     ])
 def test_schedule_spec_decoding_stats(spec_tokens, output_tokens, expected):
     """Test scheduling behavior with speculative decoding.
@@ -701,7 +705,8 @@ def test_schedule_spec_decoding_stats(spec_tokens, output_tokens, expected):
     1. Speculated tokens get scheduled correctly
     2. Spec decoding stats properly count number of draft and accepted tokens
     """
-    scheduler = create_scheduler()
+    num_spec_tokens = max(1, max(len(t) for t in spec_tokens))
+    scheduler = create_scheduler(num_speculative_tokens=num_spec_tokens)
     requests = create_requests(num_requests=len(spec_tokens), num_tokens=1)
     req_ids = []
     req_to_index = {}
@@ -774,8 +779,10 @@ def test_schedule_spec_decoding_stats(spec_tokens, output_tokens, expected):
     else:
         assert scheduler_stats.spec_decoding_stats is not None
         stats = scheduler_stats.spec_decoding_stats
-        assert stats.num_draft_tokens == expected[0]
-        assert stats.num_accepted_tokens == expected[1]
+        assert stats.num_drafts == expected[0]
+        assert stats.num_draft_tokens == expected[1]
+        assert stats.num_accepted_tokens == expected[2]
+        assert stats.num_accepted_tokens_per_pos == expected[3]
 
 
 def _assert_right_scheduler_output(

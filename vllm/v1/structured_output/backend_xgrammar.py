@@ -35,9 +35,7 @@ class XgrammarBackend(StructuredOutputBackend):
         tokenizer_group = init_tokenizer_from_configs(
             model_config=vllm_config.model_config,
             scheduler_config=vllm_config.scheduler_config,
-            parallel_config=vllm_config.parallel_config,
             lora_config=vllm_config.lora_config)  # type: ignore[arg-type]
-        tokenizer_group.ping()
 
         self.disable_any_whitespace = False
         backend_options = \
@@ -125,6 +123,9 @@ class XgrammarBackend(StructuredOutputBackend):
     def allocate_token_bitmask(self, max_num_seqs: int):
         return xgr.allocate_token_bitmask(max_num_seqs, self.vocab_size)
 
+    def destroy(self):
+        del self.compiler
+
 
 @dataclass
 class XgrammarGrammar(StructuredOutputGrammar):
@@ -177,15 +178,8 @@ def has_xgrammar_unsupported_json_features(schema: dict[str, Any]) -> bool:
         if not isinstance(obj, dict):
             return False
 
-        # Check for pattern restrictions
-        if "pattern" in obj:
-            return True
-
         # Check for numeric ranges
-        if obj.get("type") in ("integer", "number") and any(
-                key in obj
-                for key in ("minimum", "maximum", "exclusiveMinimum",
-                            "exclusiveMaximum", "multipleOf")):
+        if obj.get("type") in ("integer", "number") and ("multipleOf" in obj):
             return True
 
         # Check for array unsupported keywords

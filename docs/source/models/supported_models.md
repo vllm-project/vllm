@@ -1082,7 +1082,7 @@ See [this page](#generative-models) for more information on how to use generativ
 
 :::{important}
 Pan-and-scan image pre-processing is currently supported on V0 (but not V1).
-You can enable it by passing `--mm-processor-kwargs '{"do_pan_and_scan": True}'`.
+You can enable it by passing `--mm-processor-kwargs '{"do_pan_and_scan": true}'`.
 :::
 
 :::{warning}
@@ -1097,7 +1097,7 @@ V0 correctly implements the model's attention pattern:
 
 V1 currently uses a simplified attention pattern:
 - Uses causal attention for all tokens, including image tokens
-- Generates reasonable outputs but does not match the original model's attention for text + image inputs, especially when `{"do_pan_and_scan": True}`
+- Generates reasonable outputs but does not match the original model's attention for text + image inputs, especially when `{"do_pan_and_scan": true}`
 - Will be updated in the future to support the correct behavior
 
 This limitation exists because the model's mixed attention pattern (bidirectional for images, causal otherwise) is not yet supported by vLLM's attention backends.
@@ -1109,6 +1109,10 @@ This limitation exists because the model's mixed attention pattern (bidirectiona
 
 :::{note}
 To use `TIGER-Lab/Mantis-8B-siglip-llama3`, you have to pass `--hf_overrides '{"architectures": ["MantisForConditionalGeneration"]}'` when running vLLM.
+:::
+
+:::{warning}
+For improved output quality of `AllenAI/Molmo-7B-D-0924` (especially in object localization tasks), we recommend using the pinned dependency versions listed in <gh-file:requirements/molmo.txt> (including `vllm==0.7.0`). These versions match the environment that achieved consistent results on both A10 and L40 GPUs.
 :::
 
 :::{note}
@@ -1125,7 +1129,7 @@ To use Qwen2.5-Omni, you have to install Hugging Face Transformers library from 
 `pip install git+https://github.com/huggingface/transformers.git`.
 
 Read audio from video pre-processing is currently supported on V0 (but not V1), because overlapping modalities is not yet supported in V1.
-`--mm-processor-kwargs '{"use_audio_in_video": True}'`.
+`--mm-processor-kwargs '{"use_audio_in_video": true}'`.
 :::
 
 ### Pooling Models
