@@ -73,7 +73,7 @@ from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
 # yapf: enable
 from vllm.entrypoints.openai.serving_chat import OpenAIServingChat
 from vllm.entrypoints.openai.serving_classification import (
-    OpenAIServingClassification)
+    ServingClassification)
 from vllm.entrypoints.openai.serving_completion import OpenAIServingCompletion
 from vllm.entrypoints.openai.serving_embedding import OpenAIServingEmbedding
 from vllm.entrypoints.openai.serving_engine import OpenAIServing
@@ -376,7 +376,7 @@ def score(request: Request) -> Optional[ServingScores]:
     return request.app.state.openai_serving_scores
 
 
-def classify(request: Request) -> Optional[OpenAIServingClassification]:
+def classify(request: Request) -> Optional[ServingClassification]:
     return request.app.state.openai_serving_classification
 
 
@@ -1029,7 +1029,7 @@ async def init_app_state(
         state.openai_serving_models,
         request_logger=request_logger) if model_config.task in (
             "score", "embed", "pooling") else None
-    state.openai_serving_classification = OpenAIServingClassification(
+    state.openai_serving_classification = ServingClassification(
         engine_client,
         model_config,
         state.openai_serving_models,

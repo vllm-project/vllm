@@ -1,10 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
-import asyncio
 import base64
-import time
-from collections.abc import AsyncGenerator
-from typing import Final, Literal, Optional, Union, cast
+from typing import Final, Literal, Optional, Union, override
 
 import numpy as np
 from fastapi import Request
@@ -19,13 +16,12 @@ from vllm.entrypoints.openai.protocol import (EmbeddingChatRequest,
                                               EmbeddingResponse,
                                               EmbeddingResponseData,
                                               ErrorResponse, UsageInfo)
-from vllm.entrypoints.openai.serving_engine import OpenAIServing
+from vllm.entrypoints.openai.serving_engine import (AnyResponse, OpenAIServing,
+                                                    ServeContext)
 from vllm.entrypoints.openai.serving_models import OpenAIServingModels
 from vllm.entrypoints.utils import _validate_truncation_size
 from vllm.logger import init_logger
-from vllm.outputs import (EmbeddingOutput, EmbeddingRequestOutput,
-                          PoolingRequestOutput)
-from vllm.utils import merge_async_iterators
+from vllm.outputs import EmbeddingOutput, EmbeddingRequestOutput
 
 logger = init_logger(__name__)
 
@@ -46,6 +42,7 @@ def _get_embedding(
 
 
 class OpenAIServingEmbedding(OpenAIServing):
+    _id_prefix = "embd"
 
     def __init__(
         self,
@@ -76,149 +73,86 @@ class OpenAIServingEmbedding(OpenAIServing):
         See https://platform.openai.com/docs/api-reference/embeddings/create
         for the API specification. This API mimics the OpenAI Embedding API.
         """
-        error_check_ret = await self._check_model(request)
-        if error_check_ret is not None:
-            return error_check_ret
+        return await self.handle(request, raw_request)
 
-        encoding_format = request.encoding_format
+    @override
+    def _validate_request(self, ctx: ServeContext) -> Optional[ErrorResponse]:
+        if error := super()._validate_request(ctx):
+            return error
 
-        model_name = self._get_model_name(request.model)
-        request_id = f"embd-{self._base_request_id(raw_request)}"
-        created_time = int(time.time())
+        ctx.truncate_prompt_tokens = ctx.request.truncate_prompt_tokens
 
-        truncate_prompt_tokens = request.truncate_prompt_tokens
-
-        pooling_params = request.to_pooling_params()
+        pooling_params = ctx.request.to_pooling_params()
 
         try:
             pooling_params.verify(self.model_config)
         except ValueError as e:
             return self.create_error_response(str(e))
 
+    @override
+    async def _preprocess(
+            self, ctx: ServeContext) -> Union[AnyResponse, ErrorResponse]:
         try:
             truncate_prompt_tokens = _validate_truncation_size(
-                self.max_model_len, truncate_prompt_tokens)
+                self.max_model_len, ctx.truncate_prompt_tokens)
             (
-                lora_request,
-                prompt_adapter_request,
-            ) = self._maybe_get_adapters(request)
+                ctx.lora_request,
+                ctx.prompt_adapter_request,
+            ) = self._maybe_get_adapters(ctx.request)
 
-            tokenizer = await self.engine_client.get_tokenizer(lora_request)
-
-            if prompt_adapter_request is not None:
+            tokenizer = await self.engine_client.get_tokenizer(ctx.lora_request
+                                                               )
+            
+            if ctx.prompt_adapter_request is not None:
                 raise NotImplementedError("Prompt adapter is not supported "
                                           "for embedding models")
 
-            if isinstance(request, EmbeddingChatRequest):
+            if isinstance(ctx.request, EmbeddingChatRequest):
                 (
                     _,
-                    request_prompts,
-                    engine_prompts,
+                    ctx.request_prompts,
+                    ctx.engine_prompts,
                 ) = await self._preprocess_chat(
-                    request,
+                    ctx.request,
                     tokenizer,
-                    request.messages,
-                    chat_template=request.chat_template or self.chat_template,
+                    ctx.request.messages,
+                    chat_template=ctx.request.chat_template
+                    or self.chat_template,
                     chat_template_content_format=self.
                     chat_template_content_format,
                     # In embedding requests, we are not generating tokens,
                     # so there is no need to append extra tokens to the input
                     add_generation_prompt=False,
                     continue_final_message=False,
-                    truncate_prompt_tokens=truncate_prompt_tokens,
-                    add_special_tokens=request.add_special_tokens,
+                    truncate_prompt_tokens=ctx.truncate_prompt_tokens,
+                    add_special_tokens=ctx.request.add_special_tokens,
                 )
             else:
-                (request_prompts,
-                 engine_prompts) = await self._preprocess_completion(
-                     request,
+                (ctx.request_prompts,
+                 ctx.engine_prompts) = await self._preprocess_completion(
+                     ctx.request,
                      tokenizer,
-                     request.input,
-                     truncate_prompt_tokens=truncate_prompt_tokens,
-                     add_special_tokens=request.add_special_tokens,
+                     ctx.request.input,
+                     truncate_prompt_tokens=ctx.truncate_prompt_tokens,
+                     add_special_tokens=ctx.request.add_special_tokens,
                  )
         except (ValueError, TypeError) as e:
             logger.exception("Error in preprocessing prompt inputs")
             return self.create_error_response(str(e))
 
-        # Schedule the request and get the result generator.
-        generators: list[AsyncGenerator[PoolingRequestOutput, None]] = []
-        try:
-            for i, engine_prompt in enumerate(engine_prompts):
-                request_id_item = f"{request_id}-{i}"
-
-                self._log_inputs(request_id_item,
-                                 request_prompts[i],
-                                 params=pooling_params,
-                                 lora_request=lora_request,
-                                 prompt_adapter_request=prompt_adapter_request)
-
-                trace_headers = (None if raw_request is None else await
-                                 self._get_trace_headers(raw_request.headers))
-
-                generator = self.engine_client.encode(
-                    engine_prompt,
-                    pooling_params,
-                    request_id_item,
-                    lora_request=lora_request,
-                    trace_headers=trace_headers,
-                    priority=request.priority,
-                )
-
-                generators.append(generator)
-        except ValueError as e:
-            # TODO: Use a vllm-specific Validation Error
-            return self.create_error_response(str(e))
-
-        result_generator = merge_async_iterators(*generators)
-
-        num_prompts = len(engine_prompts)
-
-        # Non-streaming response
-        final_res_batch: list[Optional[PoolingRequestOutput]]
-        final_res_batch = [None] * num_prompts
-        try:
-            async for i, res in result_generator:
-                final_res_batch[i] = res
-
-            assert all(final_res is not None for final_res in final_res_batch)
-
-            final_res_batch_checked = cast(list[PoolingRequestOutput],
-                                           final_res_batch)
-
-            response = self.request_output_to_embedding_response(
-                final_res_batch_checked,
-                request_id,
-                created_time,
-                model_name,
-                encoding_format,
-            )
-        except asyncio.CancelledError:
-            return self.create_error_response("Client disconnected")
-        except ValueError as e:
-            # TODO: Use a vllm-specific Validation Error
-            return self.create_error_response(str(e))
-
-        return response
-
-    def request_output_to_embedding_response(
-        self,
-        final_res_batch: list[PoolingRequestOutput],
-        request_id: str,
-        created_time: int,
-        model_name: str,
-        encoding_format: Literal["float", "base64"],
-    ) -> EmbeddingResponse:
+    @override
+    def _build_response(
+            self, ctx: ServeContext) -> Union[AnyResponse, ErrorResponse]:
         items: list[EmbeddingResponseData] = []
         num_prompt_tokens = 0
 
-        for idx, final_res in enumerate(final_res_batch):
+        for idx, final_res in enumerate(ctx.final_res_batch):
             embedding_res = EmbeddingRequestOutput.from_base(final_res)
 
             item = EmbeddingResponseData(
                 index=idx,
                 embedding=_get_embedding(embedding_res.outputs,
-                                         encoding_format),
+                                         ctx.encoding_format),
             )
             prompt_token_ids = final_res.prompt_token_ids
 
@@ -231,9 +165,9 @@ class OpenAIServingEmbedding(OpenAIServing):
         )
 
         return EmbeddingResponse(
-            id=request_id,
-            created=created_time,
-            model=model_name,
+            id=ctx.request_id,
+            created=ctx.created_time,
+            model=ctx.model_name,
             data=items,
             usage=usage,
         )

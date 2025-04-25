@@ -1,10 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import json
-from collections.abc import Iterable, Iterator, Mapping, Sequence
+import time
+from abc import abstractmethod
+from collections.abc import (AsyncGenerator, Iterable, Iterator, Mapping,
+                             Sequence)
 from concurrent.futures.thread import ThreadPoolExecutor
+from dataclasses import dataclass, field
 from http import HTTPStatus
-from typing import Annotated, Any, Callable, Optional, TypedDict, Union
+from typing import (Annotated, Any, Callable, Literal, Optional, TypedDict,
+                    Union, cast)
 
 from fastapi import Request
 from pydantic import Field
@@ -24,16 +29,25 @@ from vllm.entrypoints.chat_utils import (ChatCompletionMessageParam,
                                          resolve_chat_template_content_format)
 from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
+                                              ChatCompletionResponse,
                                               ClassificationRequest,
+                                              ClassificationResponse,
                                               CompletionRequest,
+                                              CompletionResponse,
                                               DetokenizeRequest,
                                               EmbeddingChatRequest,
                                               EmbeddingCompletionRequest,
-                                              ErrorResponse, RerankRequest,
-                                              ScoreRequest,
+                                              EmbeddingRequest,
+                                              EmbeddingResponse, ErrorResponse,
+                                              PoolingRequest, PoolingResponse,
+                                              RerankRequest, ScoreRequest,
+                                              ScoreResponse,
                                               TokenizeChatRequest,
                                               TokenizeCompletionRequest,
-                                              TranscriptionRequest)
+                                              TokenizeRequest,
+                                              TokenizeResponse,
+                                              TranscriptionRequest,
+                                              TranscriptionResponse)
 from vllm.entrypoints.openai.serving_models import OpenAIServingModels
 from vllm.entrypoints.openai.tool_parsers import ToolParser
 # yapf: enable
@@ -41,6 +55,7 @@ from vllm.inputs import TokensPrompt
 from vllm.inputs.parse import parse_and_batch_prompt
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
+from vllm.outputs import PoolingRequestOutput, RequestOutput
 from vllm.pooling_params import PoolingParams
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import BeamSearchParams, SamplingParams
@@ -48,7 +63,8 @@ from vllm.sequence import Logprob, PromptLogprobs
 from vllm.tracing import (contains_trace_headers, extract_trace_headers,
                           log_tracing_disabled_warning)
 from vllm.transformers_utils.tokenizer import AnyTokenizer, MistralTokenizer
-from vllm.utils import is_list_of, make_async, random_uuid
+from vllm.utils import (is_list_of, make_async, merge_async_iterators,
+                        random_uuid)
 
 logger = init_logger(__name__)
 
@@ -60,7 +76,13 @@ ChatLikeRequest = Union[ChatCompletionRequest, EmbeddingChatRequest,
                         TokenizeChatRequest]
 
 AnyRequest = Union[CompletionLikeRequest, ChatLikeRequest,
-                   TranscriptionRequest]
+                   TranscriptionRequest, PoolingRequest, EmbeddingRequest,
+                   ClassificationRequest, TokenizeRequest]
+
+AnyRequestOutput = Union[PoolingRequestOutput, RequestOutput]
+
+AnyResponse = Union[PoolingResponse, CompletionResponse, EmbeddingResponse,
+                    ScoreResponse, TokenizeResponse, TranscriptionResponse]
 
 
 class TextTokensPrompt(TypedDict):
@@ -70,8 +92,40 @@ class TextTokensPrompt(TypedDict):
 
 RequestPrompt = Union[list[int], str, TextTokensPrompt]
 
+ServingHandlerResponse = Union[
+    CompletionResponse,
+    ChatCompletionResponse,
+    ScoreResponse,
+    EmbeddingResponse,
+    ClassificationResponse,
+    PoolingResponse,
+    ErrorResponse,
+]
+
+
+@dataclass
+class ServeContext:
+    request: AnyRequest
+    raw_request: Optional[Request]
+    encoding_format: Literal["float", "base64"]
+    model_name: str = ""
+    request_id: str = ""
+    created_time: int = 0
+    truncate_prompt_tokens: Optional[Annotated[int, Field(ge=1)]] = None
+    lora_request: Optional[LoRARequest] = None
+    prompt_adapter_request: Optional[PromptAdapterRequest] = None
+    tokenizer: Optional[AnyTokenizer] = None
+    request_prompts: Optional[Sequence[RequestPrompt]] = field(
+        default_factory=list)
+    engine_prompts: Optional[list[TokensPrompt]] = field(default_factory=list)
+    result_generator: list[Optional[AsyncGenerator]] = field(
+        default_factory=list)
+    final_res_batch: list[Optional[PoolingRequestOutput]] = field(
+        default_factory=list)
+
 
 class OpenAIServing:
+    _id_prefix: str = ""
 
     def __init__(
         self,
@@ -100,6 +154,126 @@ class OpenAIServing:
         self._tokenize_prompt_input_or_inputs_async = make_async(
             self._tokenize_prompt_input_or_inputs,
             executor=self._tokenizer_executor)
+
+    async def handle(
+        self, request: AnyRequest, raw_request: Optional[Request]
+    ) -> AsyncGenerator[ServingHandlerResponse, None]:
+        ctx = ServeContext(
+            request=request,
+            raw_request=raw_request,
+            encoding_format=getattr(request, "encoding_format", "float"),
+        )
+
+        if error := await self._check_model(request):
+            return error
+        if error := self._validate_request(ctx):
+            return error
+
+        ctx.model_name = self._get_model_name(request.model)
+        ctx.request_id = (
+            f"{self._id_prefix}-{self._base_request_id(raw_request)}")
+        ctx.created_time = int(time.time())
+
+        preprocess_ret = await self._preprocess(ctx)
+        if isinstance(preprocess_ret, ErrorResponse):
+            return preprocess_ret
+
+        generators_ret = await self._prepare_generators(ctx)
+        if isinstance(generators_ret, ErrorResponse):
+            return generators_ret
+
+        collect_ret = await self._collect_batch(ctx)
+        if isinstance(collect_ret, ErrorResponse):
+            return collect_ret
+
+        return self._build_response(ctx)
+
+    def _pre_run(self) -> Union[BaseException, None]:
+        # If the engine is dead, raise the engine's DEAD_ERROR.
+        # This is required for the streaming case, where we return a
+        # success status before we actually start generating text :).
+        if self.engine_client.errored:
+            raise self.engine_client.dead_error
+        return None
+
+    def _validate_request(self, ctx: ServeContext) -> Optional[ErrorResponse]:
+        truncate_prompt_tokens = ctx.request.truncate_prompt_tokens
+
+        if truncate_prompt_tokens is not None:
+            if truncate_prompt_tokens <= self.max_model_len:
+                ctx.truncate_prompt_tokens = truncate_prompt_tokens
+            else:
+                return self.create_error_response(
+                    "truncate_prompt_tokens value is "
+                    "greater than max_model_len."
+                    " Please, select a smaller truncation size.")
+        return None
+
+    @abstractmethod
+    async def _preprocess(
+            self, ctx: ServeContext) -> Union[AnyResponse, ErrorResponse]:
+        ...
+
+    @abstractmethod
+    def _build_response(
+            self, ctx: ServeContext) -> Union[AnyResponse, ErrorResponse]:
+        ...
+
+    async def _prepare_generators(self, ctx: ServeContext) -> None:
+        # Schedule the request and get the result generator.
+        generators: list[AsyncGenerator[AnyRequestOutput], None] = []
+
+        try:
+            trace_headers = (None if ctx.raw_request is None else await
+                             self._get_trace_headers(ctx.raw_request.headers))
+
+            pooling_params = ctx.request.to_pooling_params()
+
+            for i, engine_prompt in enumerate(ctx.engine_prompts):
+                request_id_item = f"{ctx.request_id}-{i}"
+
+                self._log_inputs(
+                    request_id_item,
+                    ctx.request_prompts[i],
+                    params=pooling_params,
+                    lora_request=ctx.lora_request,
+                    prompt_adapter_request=ctx.prompt_adapter_request)
+
+                generator = self.engine_client.encode(
+                    engine_prompt,
+                    pooling_params,
+                    request_id_item,
+                    lora_request=ctx.lora_request,
+                    trace_headers=trace_headers,
+                    priority=ctx.request.priority,
+                )
+
+                generators.append(generator)
+
+            ctx.result_generator = merge_async_iterators(*generators)
+
+        except Exception as e:
+            # TODO: Use a vllm-specific Validation Error
+            return self.create_error_response(str(e))
+
+    async def _collect_batch(self,
+                             ctx: ServeContext) -> Optional[ErrorResponse]:
+        try:
+            num_prompts = len(ctx.engine_prompts)
+            final_res_batch: list[Optional[AnyRequestOutput, None]]
+            final_res_batch = [None] * num_prompts
+
+            async for i, res in ctx.result_generator:
+                final_res_batch[i] = res
+
+            if not all(final_res is not None for final_res in final_res_batch):
+                return self.create_error_response(
+                    "Failed to generate results for all prompts")
+
+            ctx.final_res_batch = cast(list[AnyRequestOutput], final_res_batch)
+
+        except Exception as e:
+            return self.create_error_response(str(e))
 
     def create_error_response(
             self,
