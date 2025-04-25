@@ -38,6 +38,10 @@ class MistralToolCall(ToolCall):
         # https://github.com/mistralai/mistral-common/blob/21ee9f6cee3441e9bb1e6ed2d10173f90bd9b94b/src/mistral_common/protocol/instruct/validator.py#L299
         return "".join(choices(ALPHANUMERIC, k=9))
 
+    @staticmethod
+    def is_valid_id(id: str) -> bool:
+        return id.isalnum() and len(id) == 9
+
 
 @ToolParserManager.register_module("mistral")
 class MistralToolParser(ToolParser):
