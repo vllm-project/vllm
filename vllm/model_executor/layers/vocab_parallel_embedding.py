@@ -12,7 +12,7 @@ from vllm.distributed import (divide, get_tensor_model_parallel_rank,
                               tensor_model_parallel_all_reduce)
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig, QuantizeMethodBase, method_has_implemented_embedding)
-from vllm.model_executor.layers.tuned_gemm import tgemm
+from vllm.model_executor.layers.utils import dispatch_unquantized_gemm
 from vllm.model_executor.parameter import BasevLLMParameter
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
@@ -41,7 +41,7 @@ class UnquantizedEmbeddingMethod(QuantizeMethodBase):
               layer: torch.nn.Module,
               x: torch.Tensor,
               bias: Optional[torch.Tensor] = None) -> torch.Tensor:
-        return tgemm.mm(x, layer.weight, bias)
+        return dispatch_unquantized_gemm()(x, layer.weight, bias)
 
     def embedding(self, layer: torch.nn.Module,
                   input_: torch.Tensor) -> torch.Tensor:
@@ -136,7 +136,7 @@ class VocabParallelEmbeddingShardIndices:
         assert self.num_added_elements <= self.num_added_elements_padded
 
 
-#@torch.compile(dynamic=True, backend=current_platform.simple_compile_backend)
+@torch.compile(dynamic=True, backend=current_platform.simple_compile_backend)
 def get_masked_input_and_mask(
         input_: torch.Tensor, org_vocab_start_index: int,
         org_vocab_end_index: int, num_org_vocab_padding: int,
@@ -236,7 +236,7 @@ class VocabParallelEmbedding(torch.nn.Module):
         # If we are making an embedding layer, then our quantization linear
         # method must implement the embedding operation. If we are another
         # layer type like ParallelLMHead, this is not important.
-        is_embedding_layer = type(self.__class__) is VocabParallelEmbedding
+        is_embedding_layer = type(self) is VocabParallelEmbedding
         quant_method_implements_embedding = method_has_implemented_embedding(
             type(quant_method))
         if is_embedding_layer and not quant_method_implements_embedding:

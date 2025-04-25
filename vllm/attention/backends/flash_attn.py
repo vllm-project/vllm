@@ -326,7 +326,7 @@ class FlashAttentionMetadata(AttentionMetadata):
             assert self.use_cuda_graph
 
         if turn_prefills_into_decodes:
-            # When Mutli-Step is enabled with Chunked-Prefill, prefills and
+            # When Multi-Step is enabled with Chunked-Prefill, prefills and
             # decodes are scheduled together. In the first step, all the
             # prefills turn into decodes. This update reflects that
             # conversion.
@@ -617,10 +617,15 @@ class FlashAttentionImpl(AttentionImpl):
         blocksparse_params: Optional[Dict[str, Any]] = None,
         logits_soft_cap: Optional[float] = None,
         attn_type: str = AttentionType.DECODER,
+        use_irope: bool = False,
     ) -> None:
         if blocksparse_params is not None:
             raise ValueError(
                 "FlashAttention does not support block-sparse attention.")
+        if use_irope:
+            logger.warning(
+                "Using irope in V0 is not supported yet, it will fall back "
+                "to global attention for long context.")
         self.num_heads = num_heads
         self.head_size = head_size
         self.scale = float(scale)

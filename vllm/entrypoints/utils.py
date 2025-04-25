@@ -2,10 +2,15 @@
 
 import asyncio
 import functools
+import os
 
 from fastapi import Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from starlette.background import BackgroundTask, BackgroundTasks
+
+from vllm.logger import init_logger
+
+logger = init_logger(__name__)
 
 
 async def listen_for_disconnect(request: Request) -> None:
@@ -68,13 +73,20 @@ def decrement_server_load(request: Request):
 def load_aware_call(func):
 
     @functools.wraps(func)
-    async def wrapper(*args, raw_request: Request, **kwargs):
+    async def wrapper(*args, **kwargs):
+        raw_request = kwargs.get("raw_request",
+                                 args[1] if len(args) > 1 else None)
+
+        if raw_request is None:
+            raise ValueError(
+                "raw_request required when server load tracking is enabled")
+
         if not raw_request.app.state.enable_server_load_tracking:
-            return await func(*args, raw_request=raw_request, **kwargs)
+            return await func(*args, **kwargs)
 
         raw_request.app.state.server_load_metrics += 1
         try:
-            response = await func(*args, raw_request=raw_request, **kwargs)
+            response = await func(*args, **kwargs)
         except Exception:
             raw_request.app.state.server_load_metrics -= 1
             raise
@@ -101,3 +113,24 @@ def load_aware_call(func):
         return response
 
     return wrapper
+
+
+def cli_env_setup():
+    # The safest multiprocessing method is `spawn`, as the default `fork` method
+    # is not compatible with some accelerators. The default method will be
+    # changing in future versions of Python, so we should use it explicitly when
+    # possible.
+    #
+    # We only set it here in the CLI entrypoint, because changing to `spawn`
+    # could break some existing code using vLLM as a library. `spawn` will cause
+    # unexpected behavior if the code is not protected by
+    # `if __name__ == "__main__":`.
+    #
+    # References:
+    # - https://docs.python.org/3/library/multiprocessing.html#contexts-and-start-methods
+    # - https://pytorch.org/docs/stable/notes/multiprocessing.html#cuda-in-multiprocessing
+    # - https://pytorch.org/docs/stable/multiprocessing.html#sharing-cuda-tensors
+    # - https://docs.habana.ai/en/latest/PyTorch/Getting_Started_with_PyTorch_and_Gaudi/Getting_Started_with_PyTorch.html?highlight=multiprocessing#torch-multiprocessing-for-dataloaders
+    if "VLLM_WORKER_MULTIPROC_METHOD" not in os.environ:
+        logger.debug("Setting VLLM_WORKER_MULTIPROC_METHOD to 'spawn'")
+        os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"

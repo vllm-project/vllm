@@ -17,6 +17,51 @@ from vllm.v1.metrics.stats import (IterationStats, LoRARequestStates,
                                    RequestStateStats)
 
 
+class RequestOutputCollector:
+    """
+    Collects streamed RequestOutputs per individual request,
+    for hand-off to the consuming asyncio generate task.
+
+    When streaming deltas, RequestOutputs are merged if the
+    producer gets ahead of the consumer.
+    """
+
+    def __init__(self, output_kind: RequestOutputKind):
+        self.aggregate = output_kind == RequestOutputKind.DELTA
+        self.output: Optional[Union[RequestOutput, Exception]] = None
+        self.ready = asyncio.Event()
+
+    def put(self, output: Union[RequestOutput, Exception]) -> None:
+        """Non-blocking put operation."""
+        if self.output is None or isinstance(output, Exception):
+            self.output = output
+            self.ready.set()
+        elif isinstance(self.output, RequestOutput):
+            # This ensures that request outputs with different request indexes
+            # (if n > 1) do not override each other.
+            self.output.add(output, aggregate=self.aggregate)
+
+    async def get(self) -> RequestOutput:
+        """Get operation blocks on put event."""
+        while (output := self.output) is None:
+            await self.ready.wait()
+        self.output = None
+        self.ready.clear()
+        if isinstance(output, Exception):
+            raise output
+        return output
+
+    def get_nowait(self) -> Optional[RequestOutput]:
+        """Non-blocking get operation."""
+        output = self.output
+        if output is not None:
+            self.output = None
+            self.ready.clear()
+        if isinstance(output, Exception):
+            raise output
+        return output
+
+
 @dataclass
 class OutputProcessorOutput:
 
@@ -39,7 +84,7 @@ class RequestState:
         detokenizer: IncrementalDetokenizer,
         max_tokens_param: Optional[int],
         arrival_time: float,
-        queue: Optional[asyncio.Queue[RequestOutput]],
+        queue: Optional[RequestOutputCollector],
         log_stats: bool,
     ):
         self.request_id = request_id
@@ -66,7 +111,7 @@ class RequestState:
         request: EngineCoreRequest,
         parent_req: Optional[ParentRequest],
         request_index: int,
-        queue: Optional[asyncio.Queue[RequestOutput]],
+        queue: Optional[RequestOutputCollector],
         log_stats: bool,
     ) -> "RequestState":
         if not request.sampling_params.detokenize:
@@ -195,6 +240,13 @@ class OutputProcessor:
     def has_unfinished_requests(self) -> bool:
         return len(self.request_states) > 0
 
+    def propagate_error(self, e: Exception):
+        """Propagate error to all generate() tasks."""
+
+        for _, state in self.request_states.items():
+            assert state.queue is not None
+            state.queue.put(e)
+
     def abort_requests(
         self,
         request_ids: Iterable[str],
@@ -217,7 +269,7 @@ class OutputProcessor:
         request: EngineCoreRequest,
         parent_req: Optional[ParentRequest] = None,
         request_index: int = 0,
-        queue: Optional[asyncio.Queue[RequestOutput]] = None,
+        queue: Optional[RequestOutputCollector] = None,
     ) -> None:
         request_id = request.request_id
         if request_id in self.request_states:
@@ -288,7 +340,7 @@ class OutputProcessor:
             # 2) Detokenize the token ids into text and perform stop checks.
             stop_string = req_state.detokenizer.update(
                 new_token_ids, finish_reason == FinishReason.STOP)
-            if stop_string and finish_reason != FinishReason.STOP:
+            if stop_string:
                 finish_reason = FinishReason.STOP
                 stop_reason = stop_string
 
@@ -300,7 +352,7 @@ class OutputProcessor:
                     new_token_ids, finish_reason, stop_reason):
                 if req_state.queue is not None:
                     # AsyncLLM: put into queue for handling by generate().
-                    req_state.queue.put_nowait(request_output)
+                    req_state.queue.put(request_output)
                 else:
                     # LLMEngine: return list of RequestOutputs.
                     request_outputs.append(request_output)

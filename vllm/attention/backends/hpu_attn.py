@@ -108,8 +108,13 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
         blocksparse_params: Optional[Dict[str, Any]] = None,
         max_seq_len: int = 4096,
         attn_type: str = AttentionType.DECODER,
+        use_irope: bool = False,
     ) -> None:
         super(AttentionImpl, self).__init__()
+        if use_irope:
+            logger.warning_once(
+                "Using irope in HPU is not supported yet, it will fall back "
+                "to global attention for long context.")
         self.kv_cache_dtype = kv_cache_dtype
         self.num_heads = num_heads
         self.head_size = head_size
@@ -144,14 +149,14 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
                 self.fused_scaled_dot_product_attention = ModuleFusedSDPA(
                     FusedSDPA)
             except ImportError:
-                logger().warning("Could not import HPU FusedSDPA kernel. "
-                                 "vLLM will use native implementation.")
+                logger.warning("Could not import HPU FusedSDPA kernel. "
+                               "vLLM will use native implementation.")
 
-        suppored_head_sizes = HPUPagedAttention.get_supported_head_sizes()
-        if head_size not in suppored_head_sizes:
+        supported_head_sizes = HPUPagedAttention.get_supported_head_sizes()
+        if head_size not in supported_head_sizes:
             raise ValueError(
                 f"Head size {head_size} is not supported by PagedAttention. "
-                f"Supported head sizes are: {suppored_head_sizes}.")
+                f"Supported head sizes are: {supported_head_sizes}.")
 
         if attn_type != AttentionType.DECODER:
             raise NotImplementedError("Encoder self-attention and "

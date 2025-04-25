@@ -12,7 +12,7 @@ The pre-built image includes:
 
 - ROCm™ 6.3.1
 - HipblasLT 0.13
-- vLLM 0.7.3
+- vLLM 0.8.3
 - PyTorch 2.7dev (nightly)
 
 ## Pull latest Docker Image
@@ -26,6 +26,9 @@ Pull the most recent validated docker image with `docker pull rocm/vllm-dev:main
 - Detokenizer disablement
 - Torch.compile support
 
+## Known Issues and Workarounds
+- Mem fault encountered when running the model meta 405 fp8. To workaround this issue, set PYTORCH_TUNABLEOP_ENABLED=0
+
 ## Performance Results
 
 The data in the following tables is a reference point to help users validate observed performance. It should not be considered as the peak performance that can be delivered by AMD Instinct™ MI300X accelerator with vLLM. See the MLPerf section in this document for information about MLPerf 4.1 inference results. The performance numbers above were collected using the steps below.
@@ -37,14 +40,14 @@ The table below shows performance data where a local inference client is fed req
 
 | Model | Precision | TP Size | Input | Output | Num Prompts | Max Num Seqs | Throughput (tokens/s) |
 |-------|-----------|---------|-------|--------|-------------|--------------|-----------------------|
-| Llama 3.1 70B (amd/Llama-3.1-70B-Instruct-FP8-KV) | FP8 | 8 | 128 | 2048 | 3200 | 3200 | 15684.7  |
-|       |           |         | 128   | 4096   | 1500        | 1500         | 11761.5               |
-|       |           |         | 500   | 2000   | 2000        | 2000         | 12895.9               |
-|       |           |         | 2048  | 2048   | 1500        | 1500         | 8380.7                |
-| Llama 3.1 405B (amd/Llama-3.1-405B-Instruct-FP8-KV) | FP8 | 8 | 128 | 2048 | 1500 | 1500 | 4218.6 |
-|       |           |         | 128   | 4096   | 1500        | 1500         | 3326.2                |
-|       |           |         | 500   | 2000   | 2000        | 2000         | 3113.4                |
-|       |           |         | 2048  | 2048   | 500         | 500          | 2112.1                |
+| Llama 3.1 70B (amd/Llama-3.1-70B-Instruct-FP8-KV) | FP8 | 8 | 128 | 2048 | 3200 | 3200 | 16364.9  |
+|       |           |         | 128   | 4096   | 1500        | 1500         | 12171.0               |
+|       |           |         | 500   | 2000   | 2000        | 2000         | 13290.4               |
+|       |           |         | 2048  | 2048   | 1500        | 1500         | 8216.5                |
+| Llama 3.1 405B (amd/Llama-3.1-405B-Instruct-FP8-KV) | FP8 | 8 | 128 | 2048 | 1500 | 1500 | 4331.6 |
+|       |           |         | 128   | 4096   | 1500        | 1500         | 3409.9                |
+|       |           |         | 500   | 2000   | 2000        | 2000         | 3184.0                |
+|       |           |         | 2048  | 2048   | 500         | 500          | 2154.3                |
 
 *TP stands for Tensor Parallelism.*
 
@@ -54,38 +57,38 @@ The table below shows latency measurement, which typically involves assessing th
 
 | Model | Precision | TP Size | Batch Size | Input | Output | MI300X Latency (sec) |
 |-------|-----------|----------|------------|--------|---------|-------------------|
-| Llama 3.1 70B (amd/Llama-3.1-70B-Instruct-FP8-KV) | FP8 | 8 | 1 | 128 | 2048 | 17.662 |
-| | | | 2 | 128 | 2048 | 18.768 |
-| | | | 4 | 128 | 2048 | 19.282 |
-| | | | 8 | 128 | 2048 | 20.943  |
-| | | | 16 | 128 | 2048 | 23.388 |
-| | | | 32 | 128 | 2048 | 26.272 |
-| | | | 64 | 128 | 2048 | 34.514 |
-| | | | 128 | 128 | 2048 | 50.134 |
-| | | | 1 | 2048 | 2048 | 17.891 |
-| | | | 2 | 2048 | 2048 | 19.064 |
-| | | | 4 | 2048 | 2048 | 19.819 |
-| | | | 8 | 2048 | 2048 | 21.925 |
-| | | | 16 | 2048 | 2048 | 25.118 |
-| | | | 32 | 2048 | 2048 | 29.640 |
-| | | | 64 | 2048 | 2048 | 41.029 |
-| | | | 128 | 2048 | 2048 | 63.717 |
-| Llama 3.1 405B (amd/Llama-3.1-70B-Instruct-FP8-KV) | FP8 | 8 | 1 | 128 | 2048 | 46.779 |
-| | | | 2 | 128 | 2048 | 47.136 |
-| | | | 4 | 128 | 2048 | 49.045 |
-| | | | 8 | 128 | 2048 | 53.145 |
-| | | | 16 | 128 | 2048 | 55.720 |
-| | | | 32 | 128 | 2048 | 64.996 |
-| | | | 64 | 128 | 2048 | 81.950 |
-| | | | 128 | 128 | 2048 | 114.799 |
-| | | | 1 | 2048 | 2048 | 47.448 |
-| | | | 2 | 2048 | 2048 | 47.764 |
-| | | | 4 | 2048 | 2048 | 51.338 |
-| | | | 8 | 2048 | 2048 | 56.915 |
-| | | | 16 | 2048 | 2048 | 61.934 |
-| | | | 32 | 2048 | 2048 | 76.136 |
-| | | | 64 | 2048 | 2048 | 104.868 |
-| | | | 128 | 2048 | 2048 | 159.555 |
+| Llama 3.1 70B (amd/Llama-3.1-70B-Instruct-FP8-KV) | FP8 | 8 | 1 | 128 | 2048 | 17.411 |
+| | | | 2 | 128 | 2048 | 18.750 |
+| | | | 4 | 128 | 2048 | 19.059 |
+| | | | 8 | 128 | 2048 | 20.857  |
+| | | | 16 | 128 | 2048 | 22.670 |
+| | | | 32 | 128 | 2048 | 25.495 |
+| | | | 64 | 128 | 2048 | 34.187 |
+| | | | 128 | 128 | 2048 | 48.754 |
+| | | | 1 | 2048 | 2048 | 17.699 |
+| | | | 2 | 2048 | 2048 | 18.919 |
+| | | | 4 | 2048 | 2048 | 19.220 |
+| | | | 8 | 2048 | 2048 | 21.545 |
+| | | | 16 | 2048 | 2048 | 24.329 |
+| | | | 32 | 2048 | 2048 | 29.461 |
+| | | | 64 | 2048 | 2048 | 40.148 |
+| | | | 128 | 2048 | 2048 | 61.382 |
+| Llama 3.1 405B (amd/Llama-3.1-70B-Instruct-FP8-KV) | FP8 | 8 | 1 | 128 | 2048 | 46.601 |
+| | | | 2 | 128 | 2048 | 46.947 |
+| | | | 4 | 128 | 2048 | 48.971 |
+| | | | 8 | 128 | 2048 | 53.021 |
+| | | | 16 | 128 | 2048 | 55.836 |
+| | | | 32 | 128 | 2048 | 64.947 |
+| | | | 64 | 128 | 2048 | 81.408 |
+| | | | 128 | 128 | 2048 | 115.296 |
+| | | | 1 | 2048 | 2048 | 46.998 |
+| | | | 2 | 2048 | 2048 | 47.619 |
+| | | | 4 | 2048 | 2048 | 51.086 |
+| | | | 8 | 2048 | 2048 | 55.706 |
+| | | | 16 | 2048 | 2048 | 61.049 |
+| | | | 32 | 2048 | 2048 | 75.842 |
+| | | | 64 | 2048 | 2048 | 103.074 |
+| | | | 128 | 2048 | 2048 | 157.705 |
 
 *TP stands for Tensor Parallelism.*
 
@@ -489,8 +492,8 @@ To reproduce the release docker:
 ```bash
     git clone https://github.com/ROCm/vllm.git
     cd vllm
-    git checkout 51641aaa70d4dfb0ea1f3674b47a7d85f718847c
-    docker build -f Dockerfile.rocm -t <your_tag> --build-arg USE_CYTHON=1 .
+    git checkout b8498bc4a1c2aae1e25cfc780db0eadbc4716c67
+    docker build -f docker/Dockerfile.rocm -t <your_tag> --build-arg USE_CYTHON=1 .
 ```
 
 ### Building AITER Image
@@ -501,10 +504,14 @@ Use AITER release candidate branch instead:
     git clone https://github.com/ROCm/vllm.git
     cd vllm
     git checkout aiter_integration_final
-    docker build -f Dockerfile.rocm -t <your_tag> --build-arg USE_CYTHON=1 .
+    docker build -f docker/Dockerfile.rocm -t <your_tag> --build-arg USE_CYTHON=1 .
 ```
 
 ## Changelog
+
+20250410_aiter:
+- 2-stage MoE
+- MLA from AITER
 
 20250325_aiter:
 - Improved DeepSeek-V3/R1 performance

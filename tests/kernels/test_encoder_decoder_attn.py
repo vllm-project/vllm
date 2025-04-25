@@ -33,10 +33,7 @@ def use_v0_only(monkeypatch):
 
 
 # List of support backends for encoder/decoder models
-LIST_ENC_DEC_SUPPORTED_BACKENDS = ([
-    _Backend.XFORMERS, _Backend.FLASH_ATTN
-] if not current_platform.is_rocm() else [_Backend.ROCM_FLASH])
-
+LIST_ENC_DEC_SUPPORTED_BACKENDS = [_Backend.XFORMERS, _Backend.FLASH_ATTN]
 HEAD_SIZES = [64, 256]
 
 NUM_HEADS = [1, 16]
@@ -878,6 +875,8 @@ def test_encoder_only(
                                     attn_backend.name)
 
 
+@pytest.mark.skipif(current_platform.is_rocm(),
+                    reason=STR_NOT_IMPL_ENC_DEC_ROCM_HIP)
 @pytest.mark.parametrize("num_heads", NUM_HEADS)
 @pytest.mark.parametrize("head_size", HEAD_SIZES)
 @pytest.mark.parametrize("attn_backend", LIST_ENC_DEC_SUPPORTED_BACKENDS)

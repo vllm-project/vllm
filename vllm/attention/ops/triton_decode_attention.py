@@ -39,11 +39,12 @@ is_hip_ = current_platform.is_rocm()
 
 logger = logging.getLogger(__name__)
 
-# TODO: Remove this when triton>=3.2.0. This issue will not affect performance
-# and accuracy.
-logger.warning(
-    "The following error message 'operation scheduled before its operands' "
-    "can be ignored.")
+# Only print the following warnings when triton version < 3.2.0.
+# The issue won't affect performance or accuracy.
+if triton.__version__ < '3.2.0':
+    logger.warning(
+        "The following error message 'operation scheduled before its operands' "
+        "can be ignored.")
 
 
 @triton.jit
@@ -179,6 +180,7 @@ def _decode_att_m_fwd(
     logit_cap,
 ):
     BLOCK = 64 if not is_hip_ else 8
+
     NUM_KV_SPLITS = num_kv_splits
     Lk = k_buffer.shape[-1]
     Lv = v_buffer.shape[-1]
@@ -422,7 +424,7 @@ def _decode_grouped_att_m_fwd(
     extra_kargs = {}
     num_stages = 2
     if is_hip_:
-        # https://rocm.docs.amd.com/en/docs-6.2.0/how-to/llm-fine-tuning-optimization/optimizing-triton-kernel.html
+        # https://rocm.docs.amd.com/en/latest/how-to/rocm-for-ai/inference-optimization/workload.html#mi300x-triton-kernel-performance-optimization
         # https://github.com/triton-lang/triton/blob/main/third_party/amd/backend/compiler.py
         extra_kargs = {
             "waves_per_eu": 1,

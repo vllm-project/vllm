@@ -2,7 +2,7 @@
 
 from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Optional, Type
+from typing import TYPE_CHECKING, Any, Optional, Type, Union
 
 import torch
 
@@ -13,15 +13,14 @@ from vllm.attention.backends.mla.common import (MLACommonBackend,
                                                 MLACommonMetadata,
                                                 MLACommonMetadataBuilder,
                                                 MLACommonState)
-from vllm.attention.backends.utils import (PAD_SLOT_ID, compute_slot_mapping,
+from vllm.attention.backends.utils import (compute_slot_mapping,
                                            compute_slot_mapping_start_idx,
                                            is_block_tables_empty)
-from vllm.attention.ops.rocm_aiter_mla_decode_attn import aiter_mla_decode_fwd
-from vllm.attention.ops.triton_merge_attn_states import merge_attn_states
+from vllm.attention.ops.rocm_aiter_mla import (aiter_mla_decode_fwd,
+                                               get_aiter_mla_metadata)
 
 if TYPE_CHECKING:
-    from vllm.worker.model_runner import (ModelInputForGPUBuilder,
-                                          ModelInputForGPUWithSamplingMetadata)
+    from vllm.worker.model_runner import ModelInputForGPUBuilder
 
 
 def is_aiter_mla_enabled() -> bool:
@@ -33,7 +32,7 @@ class AiterMLABackend(MLACommonBackend):
 
     @staticmethod
     def get_name() -> str:
-        return "AITER_MLA"
+        return "ROCM_AITER_MLA"
 
     @staticmethod
     def get_impl_cls() -> Type["AiterMLAImpl"]:
@@ -76,6 +75,7 @@ class AiterMLAMetadata(MLACommonMetadata):
                 .paged_kv_last_page_lens = self.paged_kv_last_page_lens
             prefill_metadata.block_table_bound = self.block_table_bound
 
+            # update the cache
             self._cached_prefill_metadata = self.__class__(
                 **prefill_metadata.__dict__)
 
@@ -94,33 +94,24 @@ class AiterMLAMetadata(MLACommonMetadata):
                 .paged_kv_last_page_lens = self.paged_kv_last_page_lens
             decode_metadata.block_table_bound = self.block_table_bound
 
+            # update the cache
             self._cached_decode_metadata = self.__class__(
                 **decode_metadata.__dict__)
 
         return self._cached_decode_metadata
 
-    def advance_step(self,
-                     model_input: "ModelInputForGPUWithSamplingMetadata",
-                     sampled_token_ids: Optional[torch.Tensor],
-                     block_size: int,
-                     num_seqs: int,
-                     num_queries: int,
-                     turn_prefills_into_decodes: bool = False):
-        """
-        Update metadata in-place to advance one decode step.
-        """
-        self.advance_step_assertions(
-            num_seqs=num_seqs,
-            num_queries=num_queries,
-            turn_prefills_into_decodes=turn_prefills_into_decodes)
+    def _ops_advance_step(self, num_seqs: int, num_queries: int,
+                          block_size: int, input_tokens: torch.Tensor,
+                          sampled_token_ids: torch.Tensor,
+                          input_positions: torch.Tensor) -> None:
 
         ops.advance_step_flashinfer(
             num_seqs=num_seqs,
             num_queries=num_queries,
             block_size=block_size,
-            input_tokens=model_input.input_tokens,
+            input_tokens=input_tokens,
             sampled_token_ids=sampled_token_ids,
-            input_positions=model_input.input_positions,
+            input_positions=input_positions,
             seq_lens=self.seq_lens_tensor,
             slot_mapping=self.slot_mapping,
             block_tables=self.block_tables,
@@ -131,9 +122,12 @@ class AiterMLAMetadata(MLACommonMetadata):
 
 
 class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
+    BLOCK_TABLE_EXTENDER: list[list[int]] = [[]]
 
     def __init__(self, input_builder: "ModelInputForGPUBuilder"):
         super().__init__(input_builder)
+        assert self.runner.model_config.max_model_len == 32768,\
+                "AITER MLA requires max model len to be set to 32768"
         assert self.block_size == 1, "AITER MLA requires only block size 1."
 
     def prepare(self):
@@ -222,15 +216,6 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
             last_page_len = self.block_size
         self.paged_kv_last_page_lens.append(last_page_len)
 
-    def get_block_tables_with_captured_graph(self, cuda_graph_pad_size: int,
-                                             num_seqs: int) -> torch.Tensor:
-        self.slot_mapping.extend([PAD_SLOT_ID] * cuda_graph_pad_size)
-        self.block_tables.extend([[]] * cuda_graph_pad_size)
-        block_tables = self._get_graph_runner_block_tables(
-            num_seqs, self.block_tables)
-
-        return block_tables
-
     def build(self, seq_lens: list[int], query_lens: list[int],
               cuda_graph_pad_size: int, batch_size: int) -> AiterMLAMetadata:
         metadata = super().build(seq_lens, query_lens, cuda_graph_pad_size,
@@ -280,13 +265,15 @@ class AiterMLAState(MLACommonState[AiterMLAMetadata]):
 
     @contextmanager
     def graph_capture(self, max_batch_size: int):
-        self._paged_kv_indices_tensor = torch.from_numpy(
-            self.runner.paged_kv_indices).to(device=self.runner.device)
-        self._paged_kv_indptr_tensor = torch.zeros(max_batch_size + 1,
-                                                   dtype=torch.int32,
-                                                   device=self.runner.device)
-        self._paged_kv_last_page_lens_tensor = torch.full(
-            (max_batch_size, ), self.runner.block_size, dtype=torch.int32)
+        kv_indices, kv_indptr, last_page_lens = get_aiter_mla_metadata(
+            max_batch_size=max_batch_size,
+            block_size=self.runner.block_size,
+            max_block_per_batch=self.runner.get_max_block_per_batch(),
+            device=self.runner.device)
+        self._paged_kv_indices_tensor = kv_indices
+        self._paged_kv_indptr_tensor = kv_indptr
+        self._paged_kv_last_page_lens_tensor = last_page_lens
+
         with super().graph_capture(max_batch_size):
             yield
 
@@ -367,8 +354,6 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
                          alibi_slopes, sliding_window, kv_cache_dtype,
                          blocksparse_params, logits_soft_cap, attn_type,
                          **mla_args)
-        assert is_aiter_mla_enabled(
-        ), "Aiter MLA is initialized without being enabled properly."
 
         unsupported_features = [
             alibi_slopes, sliding_window, blocksparse_params, logits_soft_cap
@@ -382,138 +367,20 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
         from aiter import flash_attn_varlen_func
         self.flash_attn_varlen_func = flash_attn_varlen_func
 
-    def _compute_prefill_context(
-        self,
-        q: torch.Tensor,
-        kv_c_and_k_pe_cache: torch.Tensor,
-        attn_metadata: AiterMLAMetadata,
-    ):
-        prefill_metadata = attn_metadata.prefill_metadata
-        assert prefill_metadata is not None
-        assert prefill_metadata.context_chunk_seq_tot is not None
-        assert prefill_metadata.context_chunk_cu_seq_lens is not None
-        assert prefill_metadata.context_chunk_starts is not None
-        assert prefill_metadata.context_chunk_max_seq_lens is not None
-        assert prefill_metadata.context_lens_tensor is not None
-
-        output = None
-        iters = len(prefill_metadata.context_chunk_seq_tot)
-
-        # Fetch from attn_metadata directly, since it late bound by
-        # MLAAttentionState, grabbing it directly `attn_metadata` can avoid
-        # any weirdness around prefill_metadata caching
-        assert attn_metadata.context_chunk_workspace is not None
-        workspace = attn_metadata.context_chunk_workspace
-
-        for i in range(iters):
-            toks = prefill_metadata.context_chunk_seq_tot[i]
-
-            ops.gather_cache(
-                src_cache=kv_c_and_k_pe_cache,
-                dst=workspace,
-                block_table=prefill_metadata.block_tables,
-                cu_seq_lens=prefill_metadata.context_chunk_cu_seq_lens[i],
-                batch_size=prefill_metadata.num_prefills,
-                seq_starts=prefill_metadata.context_chunk_starts[i],
-            )
-
-            kv_c_normed = workspace[:toks]\
-                [..., :self.kv_lora_rank]
-            k_pe = workspace[:toks]\
-                [..., self.kv_lora_rank:].unsqueeze(1)
-
-            kv_nope = self.kv_b_proj(kv_c_normed)[0].view( \
-                -1, self.num_heads, self.qk_nope_head_dim + self.v_head_dim)
-            k_nope, v = kv_nope\
-                .split([self.qk_nope_head_dim, self.v_head_dim], dim=-1)
-
-            k = torch.cat((k_nope, k_pe.expand((*k_nope.shape[:-1], -1))),
-                          dim=-1)
-
-            attn_output, attn_softmax_lse = self.flash_attn_varlen_func(
-                q=q,
-                k=k,
-                v=v,
-                cu_seqlens_q=prefill_metadata.query_start_loc,
-                cu_seqlens_k=prefill_metadata.context_chunk_cu_seq_lens[i],
-                max_seqlen_q=prefill_metadata.max_query_len,
-                max_seqlen_k=prefill_metadata.context_chunk_max_seq_lens[i],
-                softmax_scale=self.scale,
-                causal=False,  # Context is unmasked
-                return_lse=True,
-            )
-
-            if output is None:
-                output = attn_output
-                output_lse = attn_softmax_lse
-            else:
-                output_tmp = torch.empty_like(output)
-                output_lse_tmp = torch.empty_like(output_lse)
-                merge_attn_states(
-                    output=output_tmp,
-                    output_lse=output_lse_tmp,
-                    prefix_output=output,
-                    prefix_lse=output_lse,
-                    suffix_output=attn_output,
-                    suffix_lse=attn_softmax_lse,
-                )
-                output = output_tmp
-                output_lse = output_lse_tmp
-
-        return output, output_lse
-
-    def _forward_prefill(
-        self,
-        q: torch.Tensor,
-        kv_c_normed: torch.Tensor,
-        k_pe: torch.Tensor,
-        kv_c_and_k_pe_cache: torch.Tensor,
-        attn_metadata: MLACommonMetadata,
-    ) -> torch.Tensor:
-
-        prefill_metadata = attn_metadata.prefill_metadata
-        assert prefill_metadata is not None
-
-        has_context = prefill_metadata.context_lens_tensor is not None \
-            and prefill_metadata.max_context_len > 0
-
-        kv_nope = self.kv_b_proj(kv_c_normed)[0].view(\
-            -1, self.num_heads, self.qk_nope_head_dim + self.v_head_dim)
-        k_nope, v = kv_nope\
-            .split([self.qk_nope_head_dim, self.v_head_dim], dim=-1)
-
-        k = torch.cat((k_nope, k_pe.expand((*k_nope.shape[:-1], -1))), dim=-1)
-
+    def _flash_attn_varlen_diff_headdims(
+            self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor,
+            softmax_scale: float, return_softmax_lse: bool,
+            **kwargs) -> Union[tuple[torch.Tensor, ...], torch.Tensor]:
         output = self.flash_attn_varlen_func(
             q=q,
             k=k,
             v=v,
-            cu_seqlens_q=prefill_metadata.query_start_loc,
-            cu_seqlens_k=prefill_metadata.query_start_loc,
-            max_seqlen_q=prefill_metadata.max_prefill_seq_len,
-            max_seqlen_k=prefill_metadata.max_prefill_seq_len,
-            softmax_scale=self.scale,
-            causal=True,
-            return_lse=has_context,
+            softmax_scale=softmax_scale,
+            return_lse=return_softmax_lse,
+            **kwargs,
         )
 
-        if has_context:
-            suffix_output, suffix_lse = output
-            context_output, context_lse = self._compute_prefill_context( \
-                q, kv_c_and_k_pe_cache, attn_metadata)
-
-            output = torch.empty_like(suffix_output)
-            merge_attn_states(
-                output=output,
-                prefix_output=context_output,
-                prefix_lse=context_lse,
-                suffix_output=suffix_output,
-                suffix_lse=suffix_lse,
-            )
-
-        output = output.reshape(-1, self.num_heads * v.shape[-1])
-
-        return self.o_proj(output)[0]
+        return output
 
     def _forward_decode(
         self,
@@ -535,7 +402,6 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
                         dtype=q.dtype,
                         device=q.device)
 
-        # Add a head dim of 1
         kv_buffer = kv_c_and_k_pe_cache.unsqueeze(2)
 
         aiter_mla_decode_fwd(q, kv_buffer, o, self.scale,

@@ -16,8 +16,7 @@ from vllm.attention import AttentionBackend, AttentionMetadata, AttentionType
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.platforms.interface import _Backend
 from vllm.utils import (STR_BACKEND_ENV_VAR, STR_FLASH_ATTN_VAL,
-                        STR_ROCM_FLASH_ATTN_VAL, STR_XFORMERS_ATTN_VAL,
-                        make_tensor_with_pad)
+                        STR_XFORMERS_ATTN_VAL, make_tensor_with_pad)
 
 # For now, disable "test_aot_dispatch_dynamic" since there are some
 # bugs related to this test in PyTorch 2.4.
@@ -529,12 +528,6 @@ def make_backend(backend_name: str) -> AttentionBackend:
         # NOTE: xFormers backend cannot be imported for CPU and AMD GPUs.
         from vllm.attention.backends.xformers import XFormersBackend
         return XFormersBackend()
-
-    elif backend_name == STR_ROCM_FLASH_ATTN_VAL:
-        from vllm.attention.backends.rocm_flash_attn import (  # noqa: F401
-            ROCmFlashAttentionBackend)
-        return ROCmFlashAttentionBackend
-
     elif backend_name == STR_FLASH_ATTN_VAL:
         from vllm.attention.backends.flash_attn import FlashAttentionBackend
         return FlashAttentionBackend()
