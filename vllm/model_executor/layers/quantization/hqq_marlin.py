@@ -141,7 +141,9 @@ class HQQweightParameter(PackedvLLMParameter):
                                   loaded_weight.shape[1])
         super().load_merged_column_weight(loaded_weight, **kwargs)
 
-    def load_row_parallel_weight(self, loaded_weight: torch.Tensor):
+    def load_row_parallel_weight(self,
+                                 loaded_weight: torch.Tensor,
+                                 use_presharded_weights: bool = False):
         loaded_weight = self.unpack_4bit_u8(loaded_weight)
         loaded_weight = loaded_weight.reshape(self.output_shape,
                                               -1).transpose(1, 0)
@@ -168,7 +170,9 @@ class HQQZeroScaleParameter(GroupQuantScaleParameter):
         loaded_weight = loaded_weight.reshape(-1, self.shape[1])
         super().load_merged_column_weight(loaded_weight, **kwargs)
 
-    def load_row_parallel_weight(self, loaded_weight: torch.Tensor):
+    def load_row_parallel_weight(self,
+                                 loaded_weight: torch.Tensor,
+                                 use_presharded_weights: bool = False):
         loaded_weight = loaded_weight.reshape(self.shape[0], -1)
         super().load_row_parallel_weight(loaded_weight)
 
