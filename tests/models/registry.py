@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from collections.abc import Mapping, Set
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass, field
 from typing import Any, Literal, Optional
 
 import pytest
@@ -16,16 +16,6 @@ class _HfExamplesInfo:
 
     extras: Mapping[str, str] = field(default_factory=dict)
     """Extra models to use for testing this architecture."""
-
-    arch: Optional[str] = None
-    """The architecture class name."""
-
-    @property
-    def tiny(self) -> str:
-        """The tiny model to use for testing with this architecture."""
-        if self.arch is None:
-            raise ValueError("Architecture name is not set.")
-        return f"hf-internal-testing/tiny-random-{self.arch}"
 
     tokenizer: Optional[str] = None
     """Set the tokenizer to load for this architecture."""
@@ -416,11 +406,6 @@ _EXAMPLE_MODELS = {
     **_MULTIMODAL_EXAMPLE_MODELS,
     **_SPECULATIVE_DECODING_EXAMPLE_MODELS,
     **_TRANSFORMERS_MODELS,
-}
-
-# Add arch here so it doesn't have to be duplicated in the definitions above
-_EXAMPLE_MODELS = {
-    k: _HfExamplesInfo(arch=k, **asdict(v)) for k, v in _EXAMPLE_MODELS.items()
 }
 
 

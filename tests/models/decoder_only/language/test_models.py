@@ -90,8 +90,7 @@ def test_models(hf_runner, vllm_runner, example_prompts, model_arch: str,
                 dtype: str, max_tokens: int, num_logprobs: int,
                 use_rocm_aiter: bool, monkeypatch) -> None:
 
-    model_info = HF_EXAMPLE_MODELS.get_hf_info(model_arch)
-    model = model_info.tiny
+    model = HF_EXAMPLE_MODELS.get_hf_info(model_arch).default
 
     if model in REQUIRES_V0:
         monkeypatch.setenv("VLLM_USE_V1", "0")
