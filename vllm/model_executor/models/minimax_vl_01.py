@@ -2,14 +2,15 @@
 
 from abc import abstractmethod
 from collections.abc import Iterable, Mapping, Sequence
-from functools import cached_property
 from typing import (Final, Literal, Optional, Protocol, Set, Tuple, TypedDict,
                     TypeVar, Union, cast)
 
 import numpy as np
 import torch
 import torch.nn as nn
+from packaging.version import Version
 from transformers import BatchFeature, CLIPVisionConfig, PretrainedConfig
+from transformers import __version__ as TRANSFORMERS_VERSION
 from transformers.image_processing_utils import select_best_resolution
 
 from vllm.config import VllmConfig
@@ -19,7 +20,7 @@ from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
+from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalDataDict
 from vllm.multimodal.inputs import MultiModalFieldConfig, MultiModalKwargs
@@ -307,17 +308,28 @@ class MiniMaxVL01MultiModalProcessor(
             mm_data=mm_data,
             mm_kwargs=mm_kwargs,
         )
+
         pixel_values = processed_outputs.get("pixel_values")
-        image_sizes = processed_outputs.get("image_sizes")
+        if pixel_values is not None:
+            if Version(TRANSFORMERS_VERSION) <= Version("4.48.3"):
+                images = mm_data["images"]
+                assert isinstance(images, list)
 
-        if pixel_values is not None and isinstance(
-                pixel_values, list) and len(pixel_values) > 0:
-            first_item = pixel_values[0]
-            processed_outputs["pixel_values"] = [first_item]
+                assert (isinstance(pixel_values, list)
+                        and len(pixel_values) == 1)
+                assert (isinstance(pixel_values[0], list)
+                        and len(pixel_values[0]) == len(images))
 
-        if pixel_values is not None and image_sizes is not None and isinstance(
-                image_sizes, torch.Tensor) and image_sizes.dim() > 0:
-            processed_outputs["image_sizes"] = image_sizes[:1]
+                processed_outputs["pixel_values"] = pixel_values[0]
+            else:
+                image_sizes = processed_outputs["image_sizes"]
+                assert len(pixel_values) == len(image_sizes)
+
+                processed_outputs["pixel_values"] = [
+                    p[:, :h, :w]
+                    for p, (h, w) in zip(pixel_values, image_sizes)
+                ]
+
         return processed_outputs
 
     def _get_mm_fields_config(
@@ -327,7 +339,6 @@ class MiniMaxVL01MultiModalProcessor(
     ) -> Mapping[str, MultiModalFieldConfig]:
         return {
             "pixel_values": MultiModalFieldConfig.batched("image"),
-            "image_sizes": MultiModalFieldConfig.batched("image"),
             "image_embeds": MultiModalFieldConfig.batched("image"),
         }
 
@@ -441,13 +452,6 @@ class MiniMaxVL01ForConditionalGeneration(nn.Module, SupportsMultiModal,
 
         self.make_empty_intermediate_tensors = (
             self.language_model.make_empty_intermediate_tensors)
-
-    @cached_property
-    def sampler(self):
-        if hasattr(self.language_model, "sampler"):
-            return self.language_model.sampler
-
-        return get_sampler()
 
     def get_input_embeddings(
         self,
