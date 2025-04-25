@@ -448,13 +448,12 @@ class EngineArgs:
                                  **model_kwargs["config_format"])
         # This one is a special case because it can bool
         # or str. TODO: Handle this in get_kwargs
-        model_group.add_argument(
-            "--hf-token",
-            type=str,
-            nargs="?",
-            const=True,
-            default=model_kwargs["config_format"]["default"],
-            help=model_kwargs["config_format"]["help"])
+        model_group.add_argument("--hf-token",
+                                 type=str,
+                                 nargs="?",
+                                 const=True,
+                                 default=model_kwargs["hf_token"]["default"],
+                                 help=model_kwargs["hf_token"]["help"])
         model_group.add_argument("--hf-overrides",
                                  **model_kwargs["hf_overrides"])
         model_group.add_argument("--mm-processor-kwargs",
