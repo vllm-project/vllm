@@ -16,7 +16,6 @@
 # limitations under the License.
 import re
 from collections.abc import Iterable, Mapping, Sequence
-from functools import cached_property
 from typing import Any, List, Literal, Optional, Set, Tuple, TypedDict, Union
 
 import torch
@@ -27,7 +26,6 @@ from transformers import (BatchFeature, CLIPVisionConfig, PretrainedConfig,
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding)
 from vllm.model_executor.sampling_metadata import SamplingMetadata
@@ -555,13 +553,6 @@ class Phi3VForCausalLM(nn.Module, SupportsMultiModal, SupportsPP,
         self.make_empty_intermediate_tensors = (
             self.language_model.make_empty_intermediate_tensors)
 
-    @cached_property
-    def sampler(self):
-        if hasattr(self.language_model, "sampler"):
-            return self.language_model.sampler
-
-        return get_sampler()
-
     def _validate_image_sizes(self, data: torch.Tensor) -> torch.Tensor:
         expected_dims = (2, )
 
@@ -715,13 +706,6 @@ class Phi3VForCausalLM(nn.Module, SupportsMultiModal, SupportsPP,
     ) -> Optional[torch.Tensor]:
         return self.language_model.compute_logits(hidden_states,
                                                   sampling_metadata)
-
-    def sample(
-        self,
-        logits: torch.Tensor,
-        sampling_metadata: SamplingMetadata,
-    ) -> Optional[SamplerOutput]:
-        return self.language_model.sample(logits, sampling_metadata)
 
     def load_weights(self, weights: Iterable[Tuple[str,
                                                    torch.Tensor]]) -> Set[str]:
