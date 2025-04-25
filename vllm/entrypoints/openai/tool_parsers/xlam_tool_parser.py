@@ -50,14 +50,10 @@ class xLAMToolParser(ToolParser):
             Tuple of (content, potential_tool_calls_json)
         """
         # Check for thinking tag
-        print("=" * 100)
-        print(model_output)
-        print("=" * 100)
         thinking_match = re.search(self.thinking_tag_pattern, model_output)
         if thinking_match:
-            content = model_output[:thinking_match.start()].strip()
-            if "<think>" in content:
-                content = content.split("<think>")[-1].strip()
+            content = model_output[:thinking_match.start() +
+                                   len("</think>")].strip()
             thinking_content = thinking_match.group(1).strip()
 
             # Try to parse the thinking content as JSON

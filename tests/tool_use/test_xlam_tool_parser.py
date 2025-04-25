@@ -83,7 +83,7 @@ def test_extract_tool_calls_no_tools(xlam_tool_parser):
                                                        "unit": "fahrenheit"
                                                    })))
             ],
-            "I'll help you with that."),
+            "<think>I'll help you with that.</think>"),
         (
             '''I'll help you with that.\n```json\n[{"name": "get_current_weather", "arguments": {"city": "Dallas", "state": "TX", "unit": "fahrenheit"}}]\n```''',  # noqa: E501
             [
