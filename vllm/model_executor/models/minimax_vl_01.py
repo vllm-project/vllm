@@ -3,16 +3,17 @@
 from abc import abstractmethod
 from collections.abc import Iterable, Mapping, Sequence
 from functools import cached_property
-from typing import Final, Optional, Protocol, Set, Tuple, TypeVar, Union
+from typing import (Final, Literal, Optional, Protocol, Set, Tuple, TypedDict,
+                    TypeVar, Union, cast)
 
 import numpy as np
 import torch
 import torch.nn as nn
-from transformers import (BatchFeature, CLIPVisionConfig, PixtralVisionConfig,
-                          PretrainedConfig, SiglipVisionConfig)
+from transformers import BatchFeature, CLIPVisionConfig, PretrainedConfig
 from transformers.image_processing_utils import select_best_resolution
 
 from vllm.config import VllmConfig
+from vllm.jsontree import json_map_leaves
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
@@ -35,11 +36,31 @@ from .clip import CLIPVisionModel
 from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsPP
 from .pixtral import PixtralHFVisionModel
 from .siglip import SiglipVisionModel
-from .utils import (AutoWeightsLoader, init_vllm_registered_model,
+from .utils import (AutoWeightsLoader, flatten_bn, init_vllm_registered_model,
                     maybe_prefix, merge_multimodal_embeddings)
 from .vision import get_vision_encoder_info
 
 logger = init_logger(__name__)
+
+
+class MiniMaxVL01ImagePixelInputs(TypedDict):
+    type: Literal["pixel_values"]
+    pixel_values: torch.Tensor
+    """
+    Shape: `(batch_size * num_images, num_channels, height, width)`
+
+    Note that `height` or `width` may be different per batch and image,
+    in which case the data is passed as a list instead of a batched tensor.
+    """
+
+
+class MiniMaxVL01ImageEmbeddingInputs(TypedDict):
+    type: Literal["image_embeds"]
+    data: torch.Tensor
+    """Shape: `(batch_size * num_images, image_feature_size, hidden_size)`
+
+    `hidden_size` must match the hidden size of language model backbone.
+    """
 
 
 def image_size_to_num_patches(image_size, grid_pinpoints, patch_size: int):
@@ -154,7 +175,7 @@ class MiniMaxVL01DummyInputsBuilder(BaseDummyInputsBuilder[_I]):
         num_images = mm_counts.get("image", 0)
         processor = self.info.get_hf_processor()
         image_token = processor.image_token
-        return "image:" + image_token * num_images
+        return image_token * num_images
 
     def get_dummy_mm_data(
         self,
@@ -307,6 +328,7 @@ class MiniMaxVL01MultiModalProcessor(
         return {
             "pixel_values": MultiModalFieldConfig.batched("image"),
             "image_sizes": MultiModalFieldConfig.batched("image"),
+            "image_embeds": MultiModalFieldConfig.batched("image"),
         }
 
 
@@ -358,22 +380,6 @@ def init_vision_tower_for_MiniMaxVL01(
 
     if isinstance(vision_config, CLIPVisionConfig):
         return CLIPVisionModel(
-            vision_config,
-            quant_config=quant_config,
-            num_hidden_layers_override=num_hidden_layers,
-            require_post_norm=require_post_norm,
-            prefix=prefix,
-        )
-    elif isinstance(vision_config, SiglipVisionConfig):
-        return SiglipVisionModel(
-            vision_config,
-            quant_config=quant_config,
-            num_hidden_layers_override=num_hidden_layers,
-            require_post_norm=require_post_norm,
-            prefix=prefix,
-        )
-    elif isinstance(vision_config, PixtralVisionConfig):
-        return PixtralHFVisionModel(
             vision_config,
             quant_config=quant_config,
             num_hidden_layers_override=num_hidden_layers,
@@ -513,6 +519,105 @@ class MiniMaxVL01ForConditionalGeneration(nn.Module, SupportsMultiModal,
                                     device=image_features.device)
         return image_features, feature_lens
 
+    def _select_image_features(self, image_features: torch.Tensor, *,
+                               strategy: str) -> torch.Tensor:
+        if strategy == "default":
+            return image_features[:, 1:]
+        elif strategy == "full":
+            return image_features
+
+        raise ValueError(f"Unexpected select feature strategy: {strategy}")
+
+    def _image_pixels_to_features(
+        self,
+        vision_tower: Union[CLIPVisionModel],
+        pixel_values: Union[torch.Tensor, list[torch.Tensor]],
+    ) -> Union[torch.Tensor, tuple[torch.Tensor, ...]]:
+        # NOTE: we skip the step to select the vision feature layer since
+        # this is already done inside the vision tower
+        image_features = vision_tower(pixel_values)
+
+        def select_features(leaf: torch.Tensor):
+            return self._select_image_features(
+                leaf,
+                strategy=self.config.vision_feature_select_strategy,
+            )
+
+        return cast(
+            Union[torch.Tensor, tuple[torch.Tensor, ...]],
+            json_map_leaves(select_features, image_features),
+        )
+
+    def _process_image_pixels(
+        self,
+        inputs: Union[MiniMaxVL01ImagePixelInputs],
+    ) -> Union[torch.Tensor, tuple[torch.Tensor, ...]]:
+        assert self.vision_tower is not None
+
+        pixel_values = inputs["pixel_values"]
+
+        return self._image_pixels_to_features(self.vision_tower, pixel_values)
+
+    def _process_image_input(
+        self,
+        image_input: MiniMaxVL01ImagePixelInputs,
+    ) -> Union[torch.Tensor, tuple[torch.Tensor, ...]]:
+        if image_input["type"] == "image_embeds":
+            return image_input["data"]
+
+        assert self.vision_tower is not None
+        image_features = self._process_image_pixels(image_input)
+
+        if isinstance(image_features, torch.Tensor):
+            return self.multi_modal_projector(image_features)
+
+        feature_sizes = [
+            image_feature.shape[0] for image_feature in image_features
+        ]
+
+        image_embeds = self.multi_modal_projector(torch.cat(image_features))
+        image_embeds = torch.split(image_embeds, feature_sizes)
+        return image_embeds
+
+    def _parse_and_validate_image_input(
+            self, **kwargs: object) -> Optional[MiniMaxVL01ImagePixelInputs]:
+        pixel_values = kwargs.pop("pixel_values", None)
+        image_embeds = kwargs.pop("image_embeds", None)
+
+        if pixel_values is None and image_embeds is None:
+            return None
+
+        if pixel_values is not None:
+            if not isinstance(pixel_values, (torch.Tensor, list)):
+                raise ValueError("Incorrect type of pixel values. "
+                                 f"Got type: {type(pixel_values)}")
+
+            return MiniMaxVL01ImagePixelInputs(
+                type="pixel_values",
+                pixel_values=self._validate_pixel_values(
+                    flatten_bn(pixel_values, concat=True)),
+            )
+
+        if image_embeds is not None:
+            if not isinstance(image_embeds, (torch.Tensor, list)):
+                raise ValueError("Incorrect type of image embeddings. "
+                                 f"Got type: {type(image_embeds)}")
+
+            return MiniMaxVL01ImageEmbeddingInputs(
+                type="image_embeds",
+                data=flatten_bn(image_embeds, concat=True),
+            )
+
+        raise AssertionError("This line should be unreachable.")
+
+    def get_multimodal_embeddings(
+            self, **kwargs: object) -> Optional[MultiModalEmbeddings]:
+        image_input = self._parse_and_validate_image_input(**kwargs)
+        if image_input is None:
+            return None
+
+        return self._process_image_input(image_input)
+
     def _process_vision_features(
         self,
         pixel_values: torch.Tensor,
@@ -582,13 +687,14 @@ class MiniMaxVL01ForConditionalGeneration(nn.Module, SupportsMultiModal,
         image_sizes = kwargs.pop("image_sizes", None)
         attention_mask = kwargs.pop("attention_mask", None)
         position_ids = kwargs.pop("position_ids", None)
-        kv_caches = kwargs.pop("kv_caches", None)
         if inputs_embeds is None:
             # 1. Extract the input embeddings
             for_inputs_embeds_ids = input_ids.clone()
             for_inputs_embeds_ids[(
                 input_ids == self.config.image_token_index)] = 0
-            inputs_embeds = self.get_input_embeddings(for_inputs_embeds_ids)
+            vision_embeddings = self.get_multimodal_embeddings(**kwargs)
+            inputs_embeds = self.get_input_embeddings(for_inputs_embeds_ids,
+                                                      vision_embeddings)
 
             # 2. Merge text and images
             has_valid_shape = isinstance(input_ids, torch.Tensor) and len(
@@ -616,7 +722,6 @@ class MiniMaxVL01ForConditionalGeneration(nn.Module, SupportsMultiModal,
             input_ids=input_ids,
             positions=positions,
             intermediate_tensors=intermediate_tensors,
-            kv_caches=kv_caches,
             attention_mask=attention_mask,
             position_ids=position_ids,
             inputs_embeds=inputs_embeds,
