@@ -44,7 +44,7 @@ There are no pre-built wheels for this device, so you must either use the pre-bu
 
 You can provision Cloud TPUs using the [Cloud TPU API](https://cloud.google.com/tpu/docs/reference/rest)
 or the [queued resources](https://cloud.google.com/tpu/docs/queued-resources)
-API. This section shows how to create TPUs using the queued resource API. For
+API (preferred). This section shows how to create TPUs using the queued resource API. For
 more information about using the Cloud TPU API, see [Create a Cloud TPU using the Create Node API](https://cloud.google.com/tpu/docs/managing-tpus-tpu-vm#create-node-api).
 Queued resources enable you to request Cloud TPU resources in a queued manner.
 When you request queued resources, the request is added to a queue maintained by
