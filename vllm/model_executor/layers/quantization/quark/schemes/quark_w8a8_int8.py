@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
-from typing import Callable, List, Optional, Set, Tuple, Any
+from typing import Callable, List, Optional, Set, Tuple
 
 import torch
 
@@ -23,7 +23,7 @@ class QuarkW8A8Int8(QuarkScheme):
                  qscheme: str, 
                  is_static_input_scheme: Optional[bool],
                  input_symmetric: Optional[bool],
-                 online_rot_method: Optional[Tuple[Callable[...,Any], ...]]):
+                 online_rot_method):
         self.qscheme = qscheme
         self.is_static_input_scheme = is_static_input_scheme
         self.input_symmetric = input_symmetric
