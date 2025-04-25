@@ -203,8 +203,12 @@ TokenizerMode = Literal["auto", "slow", "mistral", "custom"]
 ModelDType = Literal["auto", "half", "float16", "bfloat16", "float", "float32"]
 
 
+# This class was not always a dataclass, meaning that it used to have the
+# default object.__hash__ method. This hashable behaviour is used in
+# vllm/multimodal/registry.py. Since dataclasses are not hashable by default,
+# we need to set unsafe_hash=True to keep the same behaviour.
 @config
-@dataclass
+@dataclass(unsafe_hash=True)
 class ModelConfig:
     """Configuration for the model."""
 
@@ -417,9 +421,6 @@ class ModelConfig:
         str_factors = str(factors)
         assert_hashable(str_factors)
         return hashlib.sha256(str(factors).encode()).hexdigest()
-
-    def __hash__(self) -> int:
-        return int(self.compute_hash(), 16)
 
     def __post_init__(self) -> None:
         self.model = maybe_model_redirect(self.model)
