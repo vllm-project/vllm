@@ -22,7 +22,7 @@
 """Inference-only Qwen2.5-Omni model (thinker part)."""
 
 from copy import copy
-from functools import cached_property, partial
+from functools import partial
 from typing import (Any, Dict, Iterable, List, Mapping, Optional, Sequence,
                     Set, Tuple, Union)
 
@@ -40,7 +40,6 @@ from transformers.models.whisper import WhisperFeatureExtractor
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.model_executor.layers.rotary_embedding import MRotaryEmbedding
-from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.models.qwen2_5_vl import (
     Qwen2_5_VisionTransformer, Qwen2_5_VLImageEmbeddingInputs,
     Qwen2_5_VLImageInputs, Qwen2_5_VLImagePixelInputs,
@@ -790,13 +789,6 @@ class Qwen2_5OmniThinkerForConditionalGeneration(
         self.make_empty_intermediate_tensors = (
             self.language_model.make_empty_intermediate_tensors)
 
-    @cached_property
-    def sampler(self):
-        if hasattr(self.language_model, "sampler"):
-            return self.language_model.sampler
-
-        return get_sampler()
-
     def _parse_and_validate_multimodal_inputs(self, **kwargs: object) -> dict:
         mm_input_by_modality = {}
 
@@ -936,13 +928,6 @@ class Qwen2_5OmniThinkerForConditionalGeneration(
     ) -> Optional[torch.Tensor]:
         return self.language_model.compute_logits(hidden_states,
                                                   sampling_metadata)
-
-    def sample(
-        self,
-        logits: torch.Tensor,
-        sampling_metadata: SamplingMetadata,
-    ) -> Optional[SamplerOutput]:
-        return self.language_model.sample(logits, sampling_metadata)
 
     def load_weights(self, weights: Iterable[Tuple[str,
                                                    torch.Tensor]]) -> Set[str]:
