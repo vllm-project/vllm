@@ -1433,11 +1433,13 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
             self.warmup_scenario(batch_size, seq_len, is_prompt, kv_caches)
 
     def warmup_graphs(self,
-                      batch_size,
-                      seq_len,
+                      strategy,
+                      buckets,
                       is_prompt,
-                      is_pt_profiler_run=False,
-                      is_lora_profile_run=False) -> None:
+                      kv_caches,
+                      available_mem,
+                      starting_mem=0,
+                      total_batch_seq=0.001):
         total_mem = starting_mem
         idx = 0
         phase = f'Graph/{"Prompt" if is_prompt else "Decode"}'
