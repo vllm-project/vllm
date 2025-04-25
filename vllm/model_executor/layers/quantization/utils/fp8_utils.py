@@ -58,13 +58,15 @@ def apply_w8a8_block_fp8_linear(
             shape_supported_by_cutlass = False
     if cutlass_block_fp8_supported and shape_supported_by_cutlass:
         rows, cols = input_2d.shape
+        # Blackwell GPUs (SM100) require row dimensions to be multiple of 4 for
+        # optimal tensor core usage. Can be removed when targeting platforms
+        # without this constraint.
         should_pad = current_platform.has_device_capability(
             100) and rows % 4 != 0
         if should_pad:
-            padding = torch.zeros((4 - (rows % 4), cols),
-                                  dtype=input_2d.dtype,
-                                  device=input_2d.device)
-            input_2d = torch.cat([input_2d, padding], dim=0).contiguous()
+            input_2d = torch.nn.functional.pad(
+                input_2d, (0, 0, 0, 4 - (rows % 4)), value=0
+            ).contiguous()
 
         q_input, x_scale = per_token_group_quant_fp8(input_2d,
                                                      block_size[1],
