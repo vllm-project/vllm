@@ -46,8 +46,8 @@ logger = init_logger(__name__)
 # For dummy input only
 @dataclass
 class MaxImageTokenMeta:
-    width: int = 64
-    height: int = 64
+    width: int = 1024
+    height: int = 1024
 
 
 class MiniMaxVL01ImagePixelInputs(TypedDict):
