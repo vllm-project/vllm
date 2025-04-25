@@ -724,14 +724,9 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
                     "Bias support in LoRA is not enabled in HPU yet."
                 assert not self.lora_config.fully_sharded_loras, \
                     "Fully sharded LoRAs is not enabled in HPU yet."
-                # It's necessary to distinguish between the
-                # max_position_embeddings of VLMs and LLMs.
-                if hasattr(self.model.config, "max_position_embeddings"):
-                    max_pos_embeddings = (
-                        self.model.config.max_position_embeddings)
-                else:
-                    max_pos_embeddings = (
-                        self.model.config.text_config.max_position_embeddings)
+
+                # Use get_text_config() in case of multimodal models
+                text_config = self.model_config.hf_config.get_text_config()
 
                 self.lora_manager = LRUCacheWorkerLoRAManager(
                     self.scheduler_config.max_num_seqs,
@@ -741,7 +736,8 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
                     self.device,
                     self.model.embedding_modules,
                     self.model.embedding_padding_modules,
-                    max_position_embeddings=max_pos_embeddings,
+                    max_position_embeddings=text_config.
+                    max_position_embeddings,
                 )
                 self.model = self.lora_manager.create_lora_manager(self.model)
 

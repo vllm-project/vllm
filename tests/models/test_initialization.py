@@ -24,10 +24,7 @@ def test_can_initialize(model_arch):
     def hf_overrides(hf_config: PretrainedConfig) -> PretrainedConfig:
         hf_config.update(model_info.hf_overrides)
 
-        if hasattr(hf_config, "text_config"):
-            text_config: PretrainedConfig = hf_config.text_config
-        else:
-            text_config = hf_config
+        text_config = hf_config.get_text_config()
 
         text_config.update({
             "num_layers": 1,
