@@ -167,8 +167,7 @@ class InductorAdaptor(CompilerInterface):
         compiler_config: Dict[str, Any],
         runtime_shape: Optional[int] = None
     ) -> Tuple[Optional[Callable], Optional[Any]]:
-        from torch._inductor import config
-        current_config = config.get_config_copy()
+        current_config = {}
         from torch._inductor.compile_fx import compile_fx
 
         # disable remote cache
@@ -289,6 +288,19 @@ class InductorAdaptor(CompilerInterface):
 
             # Dynamo metrics context, see method for more details.
             stack.enter_context(self.metrics_context())
+
+            # Disable remote caching. When these are on, on remote cache-hit,
+            # the monkey-patched functions never actually get called.
+            # vLLM today assumes and requires the monkey-patched functions to
+            # get hit.
+            # TODO(zou3519): we're going to replace this all with
+            # standalone_compile sometime.
+            if is_torch_equal_or_newer("2.6"):
+                stack.enter_context(
+                    torch._inductor.config.patch(fx_graph_remote_cache=False))
+                stack.enter_context(
+                    torch._functorch.config.patch(
+                        enable_remote_autograd_cache=False))
 
             compiled_graph = compile_fx(
                 graph,

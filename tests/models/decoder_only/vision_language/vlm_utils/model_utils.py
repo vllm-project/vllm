@@ -68,6 +68,17 @@ def qwen2_vllm_to_hf_output(
     return output_ids, hf_output_str, out_logprobs
 
 
+def kimiv_vl_vllm_to_hf_output(
+        vllm_output: RunnerOutput,
+        model: str) -> tuple[list[int], str, Optional[SampleLogprobs]]:
+    """Sanitize vllm output [kimi_vl models] to be comparable with hf output."""
+    output_ids, output_str, out_logprobs = vllm_output
+
+    hf_output_str = output_str + "<|im_end|>[EOS]"
+
+    return output_ids, hf_output_str, out_logprobs
+
+
 def llava_image_vllm_to_hf_output(vllm_output: RunnerOutput,
                                   model: str) -> RunnerOutput:
     config = AutoConfig.from_pretrained(model)

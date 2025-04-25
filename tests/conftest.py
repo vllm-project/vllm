@@ -23,18 +23,17 @@ from tests.models.utils import (TokensTextLogprobs,
 from vllm import LLM, SamplingParams
 from vllm.assets.image import ImageAsset
 from vllm.assets.video import VideoAsset
-from vllm.config import TaskOption, TokenizerPoolConfig, _get_and_verify_dtype
+from vllm.config import TaskOption, _get_and_verify_dtype
 from vllm.connections import global_http_connection
 from vllm.distributed import (cleanup_dist_env_and_memory,
                               init_distributed_environment,
                               initialize_model_parallel)
 from vllm.inputs import (ExplicitEncoderDecoderPrompt, TextPrompt,
-                         TokensPrompt, to_enc_dec_tuple_list,
-                         zip_enc_dec_prompts)
+                         to_enc_dec_tuple_list, zip_enc_dec_prompts)
 from vllm.logger import init_logger
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import BeamSearchParams
-from vllm.utils import cuda_device_count_stateless, is_list_of
+from vllm.utils import cuda_device_count_stateless
 
 logger = init_logger(__name__)
 
@@ -469,12 +468,19 @@ class HfRunner:
         prompts: list[str],
         beam_width: int,
         max_tokens: int,
+        images: Optional[PromptImageInput] = None,
+        videos: Optional[PromptVideoInput] = None,
+        audios: Optional[PromptAudioInput] = None,
     ) -> list[tuple[list[list[int]], list[str]]]:
         outputs = self.generate(prompts,
                                 do_sample=False,
                                 max_new_tokens=max_tokens,
                                 num_beams=beam_width,
-                                num_return_sequences=beam_width)
+                                num_return_sequences=beam_width,
+                                images=images,
+                                videos=videos,
+                                audios=audios)
+
         for i in range(len(outputs)):
             output_ids, output_str = outputs[i]
             for j in range(len(output_ids)):
@@ -525,7 +531,10 @@ class HfRunner:
         for _, hidden_state in enumerate(hidden_states):
             last_hidden_states = hidden_state[-1][0]
             logits = torch.matmul(
-                last_hidden_states.to(output_embeddings.weight.device),
+                last_hidden_states.to(
+                    device=output_embeddings.weight.device,
+                    dtype=output_embeddings.weight.dtype,
+                ),
                 output_embeddings.weight.t(),
             )
             if getattr(output_embeddings, "bias", None) is not None:
@@ -919,6 +928,7 @@ class VllmRunner:
         max_tokens: int,
         num_logprobs: int,
         num_prompt_logprobs: Optional[int] = None,
+        skip_special_tokens: bool = True,
     ) -> Union[list[TokensTextLogprobs],
                list[TokensTextLogprobsPromptLogprobs]]:
         greedy_logprobs_params = SamplingParams(
@@ -926,6 +936,7 @@ class VllmRunner:
             max_tokens=max_tokens,
             logprobs=num_logprobs,
             prompt_logprobs=(num_prompt_logprobs),
+            skip_special_tokens=skip_special_tokens,
         )
         '''
         Greedy logprobs generation for vLLM encoder/decoder models
@@ -936,18 +947,20 @@ class VllmRunner:
 
     def generate_beam_search(
         self,
-        prompts: Union[list[str], list[list[int]]],
+        prompts: list[str],
         beam_width: int,
         max_tokens: int,
+        images: Optional[PromptImageInput] = None,
+        videos: Optional[PromptVideoInput] = None,
+        audios: Optional[PromptAudioInput] = None,
     ) -> list[tuple[list[list[int]], list[str]]]:
-        if is_list_of(prompts, str, check="all"):
-            prompts = [TextPrompt(prompt=prompt) for prompt in prompts]
-        else:
-            prompts = [
-                TokensPrompt(prompt_token_ids=tokens) for tokens in prompts
-            ]
+        inputs = self.get_inputs(prompts,
+                                 images=images,
+                                 videos=videos,
+                                 audios=audios)
+
         outputs = self.model.beam_search(
-            prompts,
+            inputs,
             BeamSearchParams(beam_width=beam_width, max_tokens=max_tokens))
         returned_outputs = []
         for output in outputs:
@@ -998,20 +1011,6 @@ class VllmRunner:
 @pytest.fixture(scope="session")
 def vllm_runner():
     return VllmRunner
-
-
-def get_tokenizer_pool_config(tokenizer_group_type):
-    if tokenizer_group_type is None:
-        return None
-    if tokenizer_group_type == "ray":
-        return TokenizerPoolConfig(pool_size=1,
-                                   pool_type="ray",
-                                   extra_config={})
-    if isinstance(tokenizer_group_type, type):
-        return TokenizerPoolConfig(pool_size=1,
-                                   pool_type=tokenizer_group_type,
-                                   extra_config={})
-    raise ValueError(f"Unknown tokenizer_group_type: {tokenizer_group_type}")
 
 
 @pytest.fixture()

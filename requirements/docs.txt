@@ -7,6 +7,7 @@ sphinx-togglebutton==0.3.2
 myst-parser==3.0.1
 msgspec
 cloudpickle
+commonmark # Required by sphinx-argparse when using :markdownhelp:
 
 # packages to install to build the documentation
 cachetools
@@ -18,6 +19,7 @@ transformers
 mistral_common >= 1.5.4
 aiohttp
 starlette
+scipy
 openai # Required by docs/source/serving/openai_compatible_server.md's vllm.entrypoints.openai.cli_args
 fastapi # Required by docs/source/serving/openai_compatible_server.md's vllm.entrypoints.openai.cli_args
 partial-json-parser # Required by docs/source/serving/openai_compatible_server.md's vllm.entrypoints.openai.cli_args
