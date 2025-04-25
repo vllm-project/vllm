@@ -38,7 +38,6 @@ from vllm.model_executor.layers.linear import (ColumnParallelLinear,
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
-from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
@@ -46,7 +45,7 @@ from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
 
 from .interfaces import SupportsPP
-from .utils import (is_pp_missing_parameter,
+from .utils import (AutoWeightsLoader, is_pp_missing_parameter,
                     make_empty_intermediate_tensors_factory, make_layers,
                     maybe_prefix)
 
@@ -221,7 +220,7 @@ class PersimmonModel(nn.Module):
         quant_config = vllm_config.quant_config
 
         self.vocab_size = config.vocab_size
-
+        self.config = config
         self.embed_tokens = VocabParallelEmbedding(config.vocab_size,
                                                    config.hidden_size)
         self.start_layer, self.end_layer, self.layers = make_layers(
@@ -260,6 +259,38 @@ class PersimmonModel(nn.Module):
         hidden_states = self.final_layernorm(hidden_states)
         return hidden_states
 
+    def load_weights(self, weights: Iterable[Tuple[str,
+                                                   torch.Tensor]]) -> Set[str]:
+        params_dict = dict(self.named_parameters(remove_duplicate=False))
+        loaded_params: Set[str] = set()
+        for name, loaded_weight in weights:
+            if is_pp_missing_parameter(name, self):
+                continue
+            param = params_dict[name]
+
+            if "query_key_value" in name:
+                # copy from vllm/model_executor/models/bloom.py
+                # NOTE: Persimmon's fused QKV's output_dim has the shape of
+                # (num_heads * 3 * head_size), while the
+                # required shape is (3 * num_heads * head_size).
+                # Thus, we need weight conversion.
+                output_dim = getattr(param, "output_dim", None)
+                num_heads = self.config.num_attention_heads
+                if output_dim is not None:
+                    loaded_weight_shape = loaded_weight.shape
+                    loaded_weight = loaded_weight.view(
+                        loaded_weight_shape[:output_dim] + (num_heads, 3, -1) +
+                        loaded_weight_shape[output_dim + 1:])
+                    loaded_weight = loaded_weight.transpose(
+                        output_dim, output_dim + 1)
+                    loaded_weight = loaded_weight.reshape(loaded_weight_shape)
+
+            weight_loader = getattr(param, "weight_loader",
+                                    default_weight_loader)
+            weight_loader(param, loaded_weight)
+            loaded_params.add(name)
+        return loaded_params
+
 
 class PersimmonForCausalLM(nn.Module, SupportsPP):
 
@@ -274,7 +305,6 @@ class PersimmonForCausalLM(nn.Module, SupportsPP):
                                       config.hidden_size,
                                       bias=False)
         self.logits_processor = LogitsProcessor(config.vocab_size)
-        self.sampler = get_sampler()
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors)
 
@@ -305,49 +335,7 @@ class PersimmonForCausalLM(nn.Module, SupportsPP):
                                        sampling_metadata)
         return logits
 
-    def sample(
-        self,
-        logits: torch.Tensor,
-        sampling_metadata: SamplingMetadata,
-    ) -> Optional[SamplerOutput]:
-        next_tokens = self.sampler(logits, sampling_metadata)
-        return next_tokens
-
     def load_weights(self, weights: Iterable[Tuple[str,
                                                    torch.Tensor]]) -> Set[str]:
-        params_dict = dict(self.named_parameters(remove_duplicate=False))
-        loaded_params: Set[str] = set()
-        for name, loaded_weight in weights:
-            if "rotary_emb.inv_freq" in name:
-                continue
-            if ("rotary_emb.cos_cached" in name
-                    or "rotary_emb.sin_cached" in name):
-                # Models trained using ColossalAI may include these tensors in
-                # the checkpoint. Skip them.
-                continue
-            if is_pp_missing_parameter(name, self):
-                continue
-            param = params_dict[name]
-
-            if "query_key_value" in name:
-                # copy from vllm/model_executor/models/bloom.py
-                # NOTE: Persimmon's fused QKV's output_dim has the shape of
-                # (num_heads * 3 * head_size), while the
-                # required shape is (3 * num_heads * head_size).
-                # Thus, we need weight conversion.
-                output_dim = getattr(param, "output_dim", None)
-                num_heads = self.config.num_attention_heads
-                if output_dim is not None:
-                    loaded_weight_shape = loaded_weight.shape
-                    loaded_weight = loaded_weight.view(
-                        loaded_weight_shape[:output_dim] + (num_heads, 3, -1) +
-                        loaded_weight_shape[output_dim + 1:])
-                    loaded_weight = loaded_weight.transpose(
-                        output_dim, output_dim + 1)
-                    loaded_weight = loaded_weight.reshape(loaded_weight_shape)
-
-            weight_loader = getattr(param, "weight_loader",
-                                    default_weight_loader)
-            weight_loader(param, loaded_weight)
-            loaded_params.add(name)
-        return loaded_params
+        loader = AutoWeightsLoader(self)
+        return loader.load_weights(weights)

@@ -12,7 +12,7 @@ from vllm.logger import init_logger
 from vllm.v1.core.kv_cache_utils import PrefixCachingMetrics
 from vllm.v1.engine import FinishReason
 from vllm.v1.metrics.stats import IterationStats, SchedulerStats
-from vllm.v1.spec_decode.metrics import SpecDecodingMetrics
+from vllm.v1.spec_decode.metrics import SpecDecodingLogging, SpecDecodingProm
 
 logger = init_logger(__name__)
 
@@ -39,7 +39,9 @@ class LoggingStatLogger(StatLoggerBase):
         # Prefix cache metrics. This cannot be reset.
         # TODO: Make the interval configurable.
         self.prefix_caching_metrics = PrefixCachingMetrics()
-        self.spec_decoding_metrics = SpecDecodingMetrics()
+        self.spec_decoding_logging = SpecDecodingLogging()
+        self.last_prompt_throughput: float = 0.0
+        self.last_generation_throughput: float = 0.0
 
     def _reset(self, now):
         self.last_log_time = now
@@ -68,7 +70,7 @@ class LoggingStatLogger(StatLoggerBase):
         self.prefix_caching_metrics.observe(scheduler_stats.prefix_cache_stats)
 
         if scheduler_stats.spec_decoding_stats is not None:
-            self.spec_decoding_metrics.observe(
+            self.spec_decoding_logging.observe(
                 scheduler_stats.spec_decoding_stats)
 
         self.last_scheduler_stats = scheduler_stats
@@ -83,8 +85,17 @@ class LoggingStatLogger(StatLoggerBase):
 
         scheduler_stats = self.last_scheduler_stats
 
+        log_fn = logger.info
+        if not any(
+            (prompt_throughput, generation_throughput,
+             self.last_prompt_throughput, self.last_generation_throughput)):
+            # Avoid log noise on an idle production system
+            log_fn = logger.debug
+        self.last_generation_throughput = generation_throughput
+        self.last_prompt_throughput = prompt_throughput
+
         # Format and print output.
-        logger.info(
+        log_fn(
             "Engine %03d: "
             "Avg prompt throughput: %.1f tokens/s, "
             "Avg generation throughput: %.1f tokens/s, "
@@ -101,7 +112,7 @@ class LoggingStatLogger(StatLoggerBase):
         )
 
         if scheduler_stats.spec_decoding_stats is not None:
-            self.spec_decoding_metrics.log()
+            self.spec_decoding_logging.log(log_fn=log_fn)
 
 
 class PrometheusStatLogger(StatLoggerBase):
@@ -121,6 +132,9 @@ class PrometheusStatLogger(StatLoggerBase):
         ]
 
         max_model_len = vllm_config.model_config.max_model_len
+
+        self.spec_decoding_prom = SpecDecodingProm(
+            vllm_config.speculative_config, labelnames, labelvalues)
 
         #
         # Scheduler state
@@ -239,7 +253,8 @@ class PrometheusStatLogger(StatLoggerBase):
                 documentation="Histogram of time to first token in seconds.",
                 buckets=[
                     0.001, 0.005, 0.01, 0.02, 0.04, 0.06, 0.08, 0.1, 0.25, 0.5,
-                    0.75, 1.0, 2.5, 5.0, 7.5, 10.0
+                    0.75, 1.0, 2.5, 5.0, 7.5, 10.0, 20.0, 40.0, 80.0, 160.0,
+                    640.0, 2560.0
                 ],
                 labelnames=labelnames).labels(*labelvalues)
 
@@ -249,13 +264,13 @@ class PrometheusStatLogger(StatLoggerBase):
                 documentation="Histogram of time per output token in seconds.",
                 buckets=[
                     0.01, 0.025, 0.05, 0.075, 0.1, 0.15, 0.2, 0.3, 0.4, 0.5,
-                    0.75, 1.0, 2.5
+                    0.75, 1.0, 2.5, 5.0, 7.5, 10.0, 20.0, 40.0, 80.0
                 ],
                 labelnames=labelnames).labels(*labelvalues)
 
         request_latency_buckets = [
             0.3, 0.5, 0.8, 1.0, 1.5, 2.0, 2.5, 5.0, 10.0, 15.0, 20.0, 30.0,
-            40.0, 50.0, 60.0
+            40.0, 50.0, 60.0, 120.0, 240.0, 480.0, 960.0, 1920.0, 7680.0
         ]
         self.histogram_e2e_time_request = \
             prometheus_client.Histogram(
@@ -312,24 +327,6 @@ class PrometheusStatLogger(StatLoggerBase):
                     ])
 
         #
-        # Speculative Decoding metrics
-        # The acceptance rate can be calculated using a PromQL query:
-        #
-        #   rate(vllm:spec_decode_num_accepted_tokens_total[$interval]) /
-        #   rate(vllm:spec_decode_num_draft_tokens_total[$interval])
-        #
-        self.counter_spec_decode_num_draft_tokens = \
-            prometheus_client.Counter(
-                name="vllm:spec_decode_num_draft_tokens_total",
-                documentation="Number of draft tokens.",
-                labelnames=labelnames).labels(*labelvalues)
-        self.counter_spec_decode_num_accepted_tokens = \
-            prometheus_client.Counter(
-                name="vllm:spec_decode_num_accepted_tokens_total",
-                documentation="Number of accepted tokens.",
-                labelnames=labelnames).labels(*labelvalues)
-
-        #
         # Cache config info metric
         #
         self.log_metrics_info("cache_config", vllm_config.cache_config)
@@ -366,10 +363,8 @@ class PrometheusStatLogger(StatLoggerBase):
             scheduler_stats.prefix_cache_stats.hits)
 
         if scheduler_stats.spec_decoding_stats is not None:
-            self.counter_spec_decode_num_draft_tokens.inc(
-                scheduler_stats.spec_decoding_stats.num_draft_tokens)
-            self.counter_spec_decode_num_accepted_tokens.inc(
-                scheduler_stats.spec_decoding_stats.num_accepted_tokens)
+            self.spec_decoding_prom.observe(
+                scheduler_stats.spec_decoding_stats)
 
         if iteration_stats is None:
             return

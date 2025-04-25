@@ -14,6 +14,9 @@ from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
 from vllm.attention.backends.utils import CommonAttentionState
 from vllm.attention.ops.paged_attn import (PagedAttention,
                                            PagedAttentionMetadata)
+from vllm.logger import init_logger
+
+logger = init_logger(__name__)
 
 _PARTITION_SIZE = 512
 
@@ -119,7 +122,12 @@ class IpexAttnBackendImpl(AttentionImpl[IpexAttnMetadata]):
         blocksparse_params: Optional[Dict[str, Any]] = None,
         logits_soft_cap: Optional[float] = None,
         attn_type: str = AttentionType.DECODER,
+        use_irope: bool = False,
     ) -> None:
+        if use_irope:
+            logger.warning_once(
+                "Using irope in Ipex is not supported yet, it will fall"
+                " back to global attention for long context.")
         if blocksparse_params is not None:
             raise ValueError(
                 "IPEX backend does not support block-sparse attention.")
@@ -212,8 +220,8 @@ class IpexAttnBackendImpl(AttentionImpl[IpexAttnMetadata]):
                 value_cache,
                 attn_metadata.slot_mapping.flatten(),
                 self.kv_cache_dtype,
-                layer._k_scale,
-                layer._v_scale,
+                layer._k_scale_float,
+                layer._v_scale_float,
             )
 
         if attn_metadata.is_prompt:
@@ -298,8 +306,8 @@ class IpexAttnBackendImpl(AttentionImpl[IpexAttnMetadata]):
                     max_seq_len,
                     self.alibi_slopes,
                     self.kv_cache_dtype,
-                    layer._k_scale,
-                    layer._v_scale,
+                    layer._k_scale_float,
+                    layer._v_scale_float,
                 )
             else:
                 # Run PagedAttention V2.
@@ -331,8 +339,8 @@ class IpexAttnBackendImpl(AttentionImpl[IpexAttnMetadata]):
                     max_seq_len,
                     self.alibi_slopes,
                     self.kv_cache_dtype,
-                    layer._k_scale,
-                    layer._v_scale,
+                    layer._k_scale_float,
+                    layer._v_scale_float,
                 )
 
             # Reshape the output tensor.

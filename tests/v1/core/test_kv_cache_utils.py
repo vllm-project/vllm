@@ -3,14 +3,17 @@
 import pytest
 import torch
 
-from vllm.multimodal.inputs import MultiModalKwargs
+from vllm.config import ModelConfig, SchedulerConfig, VllmConfig
+from vllm.multimodal.inputs import MultiModalKwargs, PlaceholderRange
 from vllm.sampling_params import SamplingParams
-from vllm.utils import sha256
+from vllm.utils import GiB_bytes, sha256
+from vllm.v1.core.kv_cache_manager import KVCacheManager
 # disable yapf here as it formats differently than isort such that both fail
 # yapf: disable
 from vllm.v1.core.kv_cache_utils import (NONE_HASH, BlockHashType,
                                          FreeKVCacheBlockQueue, KVCacheBlock,
                                          PrefixCachingMetrics,
+                                         estimate_max_model_len,
                                          generate_block_hash_extra_keys,
                                          hash_block_tokens,
                                          hash_request_tokens,
@@ -44,6 +47,18 @@ def make_request(request_id,
         arrival_time=0,
         lora_request=None,
     )
+
+
+def new_kv_cache_spec(block_size=16,
+                      num_kv_heads=2,
+                      head_size=64,
+                      dtype=torch.float32,
+                      use_mla=False):
+    return FullAttentionSpec(block_size=block_size,
+                             num_kv_heads=num_kv_heads,
+                             head_size=head_size,
+                             dtype=dtype,
+                             use_mla=use_mla)
 
 
 def test_none_hash():
@@ -158,13 +173,10 @@ def test_generate_block_hash_extra_keys():
     request = make_request(
         request_id=0,
         prompt_token_ids=[_ for _ in range(20)],
-        mm_positions=[{
-            "offset": 0,
-            "length": 5
-        }, {
-            "offset": 10,
-            "length": 5
-        }],
+        mm_positions=[
+            PlaceholderRange(offset=0, length=5),
+            PlaceholderRange(offset=10, length=5),
+        ],
         mm_hashes=["hash1", "hash2"],
     )
 
@@ -222,13 +234,10 @@ def test_hash_request_tokens(hash_fn):
     request = make_request(
         request_id=0,
         prompt_token_ids=[_ for _ in range(6)],
-        mm_positions=[{
-            "offset": 0,
-            "length": 3
-        }, {
-            "offset": 3,
-            "length": 3
-        }],
+        mm_positions=[
+            PlaceholderRange(offset=0, length=3),
+            PlaceholderRange(offset=3, length=3),
+        ],
         mm_hashes=["hash1", "hash2"],
     )
 
@@ -253,25 +262,19 @@ def test_hash_tokens_different_mm_input(hash_fn):
     request1 = make_request(
         request_id=0,
         prompt_token_ids=[_ for _ in range(6)],
-        mm_positions=[{
-            "offset": 0,
-            "length": 3
-        }, {
-            "offset": 3,
-            "length": 3
-        }],
+        mm_positions=[
+            PlaceholderRange(offset=0, length=3),
+            PlaceholderRange(offset=3, length=3),
+        ],
         mm_hashes=["hash1", "hash2"],
     )
     request2 = make_request(
         request_id=1,
         prompt_token_ids=[_ for _ in range(6)],
-        mm_positions=[{
-            "offset": 0,
-            "length": 3
-        }, {
-            "offset": 3,
-            "length": 3
-        }],
+        mm_positions=[
+            PlaceholderRange(offset=0, length=3),
+            PlaceholderRange(offset=3, length=3),
+        ],
         mm_hashes=["hash3", "hash2"],
     )
     block_size = 3
@@ -337,18 +340,6 @@ def test_metrics():
 
 
 def test_unify_kv_cache_configs():
-
-    def new_kv_cache_spec(block_size=16,
-                          num_kv_heads=2,
-                          head_size=64,
-                          dtype=torch.float32,
-                          use_mla=False):
-        return FullAttentionSpec(block_size=block_size,
-                                 num_kv_heads=num_kv_heads,
-                                 head_size=head_size,
-                                 dtype=dtype,
-                                 use_mla=use_mla)
-
     same_kv_cache_config = [
         KVCacheConfig(
             num_blocks=10,
@@ -438,3 +429,99 @@ def test_unify_kv_cache_configs():
     ]
     with pytest.raises(AssertionError):
         unify_kv_cache_configs(diff_kv_cache_config)
+
+
+@pytest.mark.parametrize(
+    ("model_id", "max_model_len", "want_estimated_max_len"), [
+        ("Qwen/Qwen1.5-7B", 16385, 16384),
+        ("Qwen/Qwen1.5-7B", 16383, 16383),
+    ])
+def test_estimate_max_model_len(model_id, max_model_len,
+                                want_estimated_max_len):
+    # Create a VllmConfig
+    model_config = ModelConfig(
+        model_id,
+        task="generate",
+        tokenizer=model_id,
+        tokenizer_mode="auto",
+        trust_remote_code=False,
+        seed=0,
+        dtype="float16",
+        max_model_len=max_model_len,
+    )
+    scheduler_config = SchedulerConfig(max_num_batched_tokens=32768)
+
+    vllm_config = VllmConfig(
+        model_config=model_config,
+        scheduler_config=scheduler_config,
+    )
+
+    # Create KV cache specs
+    kv_cache_spec = {}
+    for i in range(32):
+        layer_name = f"layer_{i}"
+        kv_cache_spec[layer_name] = FullAttentionSpec(
+            block_size=16,
+            num_kv_heads=32,
+            head_size=128,
+            dtype=torch.float16,
+            use_mla=False,
+        )
+    # Estimate the maximum model length, 16384 model_len need 8GB
+    estimated_max_len = estimate_max_model_len(vllm_config, kv_cache_spec,
+                                               8 * GiB_bytes)
+    assert estimated_max_len == want_estimated_max_len
+
+
+def test_allocate_with_lookahead():
+    """Verify that lookahead tokens correctly affect block allocation"""
+    block_size = 4
+    config = KVCacheConfig(
+        num_blocks=10,
+        tensors={
+            "layer1": KVCacheTensor(100),
+        },
+        kv_cache_groups=[
+            KVCacheGroupSpec(["layer1"],
+                             new_kv_cache_spec(block_size=block_size)),
+        ],
+    )
+
+    request = make_request(
+        request_id=0,
+        prompt_token_ids=[],
+        mm_positions=None,
+        mm_hashes=None,
+    )
+
+    # Test case 1: Requires additional lookahead tokens
+    kv_cache_manager = KVCacheManager(kv_cache_config=config,
+                                      max_model_len=100)
+    blocks = kv_cache_manager.allocate_slots(
+        request,
+        num_tokens=3,
+        num_lookahead_tokens=2,  # Total required: 3+2=5 tokens
+    )
+    assert len(blocks) == 2  # ceil(5/4)=2 blocks
+
+    # Test case 2: With precomputed blocks
+    kv_cache_manager = KVCacheManager(kv_cache_config=config,
+                                      max_model_len=100)
+    # required_blocks = ceil((3 + 2) /4) = 2
+    blocks = kv_cache_manager.allocate_slots(
+        request,
+        num_tokens=3,
+        num_lookahead_tokens=2,
+    )
+    assert len(blocks) == 2
+
+    # Test case 3: With precomputed blocks
+    # required_blocks = ceil((3 + 4) / 4) = 2
+    kv_cache_manager = KVCacheManager(kv_cache_config=config,
+                                      max_model_len=100)
+    blocks = kv_cache_manager.allocate_slots(
+        request,
+        num_tokens=3,
+        num_lookahead_tokens=4,
+    )
+    assert len(blocks) == 2

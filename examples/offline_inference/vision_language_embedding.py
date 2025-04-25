@@ -63,6 +63,7 @@ def run_e5_v(query: Query) -> ModelRequestData:
         model="royokong/e5-v",
         task="embed",
         max_model_len=4096,
+        limit_mm_per_prompt={"image": 1},
     )
 
     return ModelRequestData(
@@ -93,6 +94,7 @@ def run_vlm2vec(query: Query) -> ModelRequestData:
         task="embed",
         trust_remote_code=True,
         mm_processor_kwargs={"num_crops": 4},
+        limit_mm_per_prompt={"image": 1},
     )
 
     return ModelRequestData(
@@ -131,6 +133,11 @@ def run_encode(model: str, modality: QueryModality, seed: Optional[int]):
     query = get_query(modality)
     req_data = model_example_map[model](query)
 
+    # Disable other modalities to save memory
+    default_limits = {"image": 0, "video": 0, "audio": 0}
+    req_data.engine_args.limit_mm_per_prompt = default_limits | dict(
+        req_data.engine_args.limit_mm_per_prompt or {})
+
     engine_args = asdict(req_data.engine_args) | {"seed": seed}
     llm = LLM(**engine_args)
 
@@ -143,12 +150,10 @@ def run_encode(model: str, modality: QueryModality, seed: Optional[int]):
         "multi_modal_data": mm_data,
     })
 
+    print("-" * 50)
     for output in outputs:
         print(output.outputs.embedding)
-
-
-def main(args: Namespace):
-    run_encode(args.model_name, args.modality, args.seed)
+        print("-" * 50)
 
 
 model_example_map = {
@@ -156,7 +161,8 @@ model_example_map = {
     "vlm2vec": run_vlm2vec,
 }
 
-if __name__ == "__main__":
+
+def parse_args():
     parser = FlexibleArgumentParser(
         description='Demo on using vLLM for offline inference with '
         'vision language models for multimodal embedding')
@@ -175,6 +181,13 @@ if __name__ == "__main__":
                         type=int,
                         default=None,
                         help="Set the seed when initializing `vllm.LLM`.")
+    return parser.parse_args()
 
-    args = parser.parse_args()
+
+def main(args: Namespace):
+    run_encode(args.model_name, args.modality, args.seed)
+
+
+if __name__ == "__main__":
+    args = parse_args()
     main(args)
