@@ -2338,7 +2338,6 @@ class SpeculativeConfig:
                     code_revision=self.code_revision,
                     tokenizer_revision=self.target_model_config.
                     tokenizer_revision,
-                    max_model_len=None,
                     spec_target_max_model_len=self.target_model_config.
                     max_model_len,
                     quantization=self.quantization,
