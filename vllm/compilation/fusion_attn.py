@@ -104,12 +104,25 @@ class AttentionStaticQuantPattern:
 
             def extra_check(match):
                 print(match)
+                # TODO copy custom check from current code
                 return False
+
+            def wrap_trace_fn(process_fx, trace_fn):
+
+                def wrapped(*args, **kwargs):
+                    return process_fx(trace_fn(*args, **kwargs))
+
+                return wrapped
+
+            def process(gm: torch.fx.GraphModule):
+                from torch._inductor.fx_passes.post_grad import view_to_reshape
+                view_to_reshape(gm)
+                return gm
 
             pm.register_replacement(pattern,
                                     replacement,
                                     inputs,
-                                    pm.fwd_only,
+                                    wrap_trace_fn(process, pm.fwd_only),
                                     pm_pass,
                                     extra_check=extra_check)
             # extra_check=lambda m: record_match())
