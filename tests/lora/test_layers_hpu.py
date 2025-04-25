@@ -980,7 +980,8 @@ def test_column_parallel_packed(dist_init, num_loras, repeats, fully_shard,
             linear = MergedColumnParallelLinear(4096, [4096] * repeats,
                                                 bias=False,
                                                 params_dtype=torch.bfloat16)
-            linear.weight.data = torch.rand_like(linear.weight.data)
+            linear.weight.data = torch.rand_like(linear.weight.data,
+                                                 device=device)
             lora_linear = (MergedColumnParallelLinearWithLoRA(linear)
                            if not fully_shard else
                            MergedColumnParallelLinearWithShardedLoRA(linear))
@@ -990,7 +991,8 @@ def test_column_parallel_packed(dist_init, num_loras, repeats, fully_shard,
                                        32,
                                        bias=False,
                                        params_dtype=torch.bfloat16)
-            linear.weight.data = torch.rand_like(linear.weight.data)
+            linear.weight.data = torch.rand_like(linear.weight.data,
+                                                 device=device)
             lora_linear = (MergedQKVParallelLinearWithLora(linear)
                            if not fully_shard else
                            MergedQKVParallelLinearWithShardedLora(linear))
@@ -1000,7 +1002,8 @@ def test_column_parallel_packed(dist_init, num_loras, repeats, fully_shard,
                                        32,
                                        bias=False,
                                        params_dtype=torch.bfloat16)
-            linear.weight.data = torch.rand_like(linear.weight.data)
+            linear.weight.data = torch.rand_like(linear.weight.data,
+                                                 device=device)
             lora_linear = QKVParallelLinearWithLora(
                 linear
             ) if not fully_shard else QKVParallelLinearWithShardedLora(linear)
@@ -1048,7 +1051,7 @@ def test_column_parallel_packed(dist_init, num_loras, repeats, fully_shard,
             indices_list = [
                 id_to_index.index(value) for value in index_mapping
             ]
-            indices = torch.tensor(indices_list)
+            indices = torch.tensor(indices_list, device=device)
             mask = createLoraMask(indices, len(inputs), 1, max_loras, 8,
                                   torch.bfloat16)
             LoraMask.setLoraMask(mask)
