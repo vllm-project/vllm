@@ -353,15 +353,13 @@ class EngineArgs:
                         field_type = get_type_from_union(field_type, tuple)
                     dtypes = get_args(field_type)
                     dtype = dtypes[0]
+                    nargs = "+" if Ellipsis in dtypes else len(dtypes)
                     assert all(
                         d is dtype for d in dtypes if d is not Ellipsis
                     ), ("All non-Ellipsis tuple elements must be of the same "
                         f"type. Got {dtypes}.")
                     kwargs[name]["type"] = dtype
-                elif can_be_type(field_type, list):
-                    if is_type_in_union(field_type, list):
-                        field_type = get_type_from_union(field_type, list)
-                    dtypes = get_args(field_type)
+                    kwargs[name]["nargs"] = nargs
                     assert len(dtypes) == 1, (
                         "List type must have exactly one type. Got "
                         f"{field_type} with types {dtypes}")
