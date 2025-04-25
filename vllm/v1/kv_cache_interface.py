@@ -73,7 +73,10 @@ class AttentionSpec(KVCacheSpec):
 
 @dataclass
 class FullAttentionSpec(AttentionSpec):
-    # TODO: add note
+    # Some layers may be regarded as full attention layers in KV cache manager (
+    # blocks are allocated for all tokens), while computed as sliding window
+    # attention. In this case, we use FullAttentionSpec and record the
+    # sliding window size.
     sliding_window: Optional[int] = None
 
     @property
