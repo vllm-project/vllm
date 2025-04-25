@@ -713,7 +713,7 @@ def main(args: argparse.Namespace):
         ))
 
     # Save config and results to json
-    if args.save_result:
+    if args.save_result or args.append_result:
         result_json: dict[str, Any] = {}
 
         # Setup
@@ -734,6 +734,14 @@ def main(args: argparse.Namespace):
                     raise ValueError(
                         "Invalid metadata format. Please use KEY=VALUE format."
                     )
+        # Traffic
+        result_json["request_rate"] = (args.request_rate if args.request_rate
+                                       < float("inf") else "inf")
+        result_json["burstiness"] = args.burstiness
+        result_json["max_concurrency"] = args.max_concurrency
+
+        # Merge with benchmark result
+        result_json = {**result_json, **benchmark_result}
 
         if not args.save_detailed:
             # Remove fields with too many data points
@@ -744,15 +752,6 @@ def main(args: argparse.Namespace):
                 if field in result_json:
                     del result_json[field]
 
-        # Traffic
-        result_json["request_rate"] = (args.request_rate if args.request_rate
-                                       < float("inf") else "inf")
-        result_json["burstiness"] = args.burstiness
-        result_json["max_concurrency"] = args.max_concurrency
-
-        # Merge with benchmark result
-        result_json = {**result_json, **benchmark_result}
-
         # Save to file
         base_model_id = model_id.split("/")[-1]
         max_concurrency_str = (f"-concurrency{args.max_concurrency}"
@@ -762,7 +761,12 @@ def main(args: argparse.Namespace):
             file_name = args.result_filename
         if args.result_dir:
             file_name = os.path.join(args.result_dir, file_name)
-        with open(file_name, "w", encoding='utf-8') as outfile:
+        with open(file_name,
+                  mode="a+" if args.append_result else "w",
+                  encoding='utf-8') as outfile:
+            # Append a newline.
+            if args.append_result and outfile.tell() != 0:
+                outfile.write("\n")
             json.dump(result_json, outfile)
         save_to_pytorch_benchmark_format(args, result_json, file_name)
 
@@ -893,6 +897,11 @@ if __name__ == "__main__":
         action="store_true",
         help="When saving the results, whether to include per request "
         "information such as response, error, ttfs, tpots, etc.",
+    )
+    parser.add_argument(
+        "--append-result",
+        action="store_true",
+        help="Append the benchmark result to the existing json file.",
     )
     parser.add_argument(
         "--metadata",
