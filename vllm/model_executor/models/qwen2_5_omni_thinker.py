@@ -271,10 +271,18 @@ class Qwen2_5OmniThinkerDummyInputsBuilder(
                                    num_videos=num_videos),
         }
 
+        hf_processor_mm_kwargs = {
+            'videos_kwargs': {
+                'min_pixels' : None,
+                'max_pixels' : None,
+            }
+        }
+
         inputs = ProcessorInputs(
             prompt_text=(audio_token * num_audios + image_token * num_images +
                          video_token * num_videos),
             mm_data=mm_data,
+            hf_processor_mm_kwargs=hf_processor_mm_kwargs
         )
         return inputs
 
