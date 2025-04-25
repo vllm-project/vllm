@@ -161,6 +161,9 @@ class ResponseFormat(OpenAIBaseModel):
     json_schema: Optional[JsonSchemaResponseFormat] = None
 
 
+AnyResponseFormat = Union[ResponseFormat, StructuralTagResponseFormat]
+
+
 class StreamOptions(OpenAIBaseModel):
     include_usage: Optional[bool] = True
     continuous_usage_stats: Optional[bool] = False
@@ -243,8 +246,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
     max_completion_tokens: Optional[int] = None
     n: Optional[int] = 1
     presence_penalty: Optional[float] = 0.0
-    response_format: Optional[Union[ResponseFormat,
-                                    StructuralTagResponseFormat]] = None
+    response_format: Optional[AnyResponseFormat] = None
     seed: Optional[int] = Field(None, ge=_LONG_INFO.min, le=_LONG_INFO.max)
     stop: Optional[Union[str, list[str]]] = Field(default_factory=list)
     stream: Optional[bool] = False
@@ -770,15 +772,14 @@ class CompletionRequest(OpenAIBaseModel):
             "If true (the default), special tokens (e.g. BOS) will be added to "
             "the prompt."),
     )
-    response_format: Optional[Union[
-        ResponseFormat, StructuralTagResponseFormat]] = Field(
-            default=None,
-            description=
-            ("Similar to chat completion, this parameter specifies the format "
-             "of output. Only {'type': 'json_object'}, {'type': 'json_schema'}"
-             ", {'type': 'structural_tag'}, or {'type': 'text' } is supported."
-             ),
-        )
+    response_format: Optional[AnyResponseFormat] = Field(
+        default=None,
+        description=(
+            "Similar to chat completion, this parameter specifies the format "
+            "of output. Only {'type': 'json_object'}, {'type': 'json_schema'}"
+            ", {'type': 'structural_tag'}, or {'type': 'text' } is supported."
+        ),
+    )
     guided_json: Optional[Union[str, dict, BaseModel]] = Field(
         default=None,
         description="If specified, the output will follow the JSON schema.",
