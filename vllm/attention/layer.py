@@ -90,6 +90,7 @@ class Attention(nn.Module):
         # FlashAttn doesn't support quantizing the kv-cache only
         # but requires q to be quantized as well.
         self._q_scale = torch.tensor(1.0, dtype=torch.float32)
+        self._prob_scale = torch.tensor(1.0, dtype=torch.float32)
 
         # We also keep the float32 versions of k/v_scale for attention
         # backends that don't support tensors (Flashinfer)
