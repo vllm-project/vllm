@@ -8,13 +8,15 @@ Run `python3 ray_serve_deepseek.py` to deploy the model.
 """
 
 from ray import serve
-from ray.serve.llm import LLMConfig, LLMRouter, LLMServer
+from ray.serve.llm import LLMConfig, build_openai_app
 
 llm_config = LLMConfig(
     model_loading_config=dict(
         model_id="deepseek",
-        # Change to model download path
-        model_source="/path/to/the/model",
+        # Since DeepSeek model is huge, it is recommended to pre-download
+        # the model to local disk, say /path/to/the/model and specify:
+        # model_source="/path/to/the/model"
+        model_source="deepseek-ai/DeepSeek-R1",
     ),
     deployment_config=dict(autoscaling_config=dict(
         min_replicas=1,
@@ -22,7 +24,9 @@ llm_config = LLMConfig(
     )),
     # Change to the accelerator type of the node
     accelerator_type="H100",
-    runtime_env=dict(env_vars=dict(VLLM_USE_V1="1")),
+    runtime_env={"env_vars": {
+        "VLLM_USE_V1": "1"
+    }},
     # Customize engine arguments as needed (e.g. vLLM engine kwargs)
     engine_kwargs=dict(
         tensor_parallel_size=8,
@@ -38,7 +42,5 @@ llm_config = LLMConfig(
 )
 
 # Deploy the application
-deployment = LLMServer.as_deployment(
-    llm_config.get_serve_options(name_prefix="vLLM:")).bind(llm_config)
-llm_app = LLMRouter.as_deployment().bind([deployment])
+llm_app = build_openai_app({"llm_configs": [llm_config]})
 serve.run(llm_app)
