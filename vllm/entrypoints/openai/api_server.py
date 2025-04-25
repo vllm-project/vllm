@@ -779,7 +779,16 @@ async def invocations(raw_request: Request):
     """
     For SageMaker, routes requests to other handlers based on model `task`.
     """
-    body = await raw_request.json()
+    try:
+        body = await raw_request.json()
+    except Exception as e:
+        logger.error("Error in parsing request body: %s", str(e))
+        return JSONResponse(
+            content=ErrorResponse(
+                message=str(e),
+                type="RequestBodyError",
+                code=HTTPStatus.UNPROCESSABLE_ENTITY).model_dump(),
+            status_code=HTTPStatus.UNPROCESSABLE_ENTITY)
     task = raw_request.app.state.task
 
     if task not in TASK_HANDLERS:
