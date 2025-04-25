@@ -8,37 +8,41 @@ Run `python3 ray_serve_deepseek.py` to deploy the model.
 """
 
 from ray import serve
-from ray.serve.llm import LLMConfig, LLMRouter, LLMServer
+from ray.serve.llm import LLMConfig, build_openai_app
 
 llm_config = LLMConfig(
-    model_loading_config=dict(
-        model_id="deepseek",
-        # Change to model download path
-        model_source="/path/to/the/model",
-    ),
-    deployment_config=dict(autoscaling_config=dict(
-        min_replicas=1,
-        max_replicas=1,
-    )),
+    model_loading_config={
+        "model_id": "deepseek",
+        # Since DeepSeek model is huge, it is recommended to pre-download
+        # the model to local disk, say /path/to/the/model and specify:
+        # model_source="/path/to/the/model"
+        "model_source": "deepseek-ai/DeepSeek-R1",
+    },
+    deployment_config={
+        "autoscaling_config": {
+            "min_replicas": 1,
+            "max_replicas": 1,
+        }
+    },
     # Change to the accelerator type of the node
     accelerator_type="H100",
-    runtime_env=dict(env_vars=dict(VLLM_USE_V1="1")),
+    runtime_env={"env_vars": {
+        "VLLM_USE_V1": "1"
+    }},
     # Customize engine arguments as needed (e.g. vLLM engine kwargs)
-    engine_kwargs=dict(
-        tensor_parallel_size=8,
-        pipeline_parallel_size=2,
-        gpu_memory_utilization=0.92,
-        dtype="auto",
-        max_num_seqs=40,
-        max_model_len=16384,
-        enable_chunked_prefill=True,
-        enable_prefix_caching=True,
-        trust_remote_code=True,
-    ),
+    engine_kwargs={
+        "tensor_parallel_size": 8,
+        "pipeline_parallel_size": 2,
+        "gpu_memory_utilization": 0.92,
+        "dtype": "auto",
+        "max_num_seqs": 40,
+        "max_model_len": 16384,
+        "enable_chunked_prefill": True,
+        "enable_prefix_caching": True,
+        "trust_remote_code": True,
+    },
 )
 
 # Deploy the application
-deployment = LLMServer.as_deployment(
-    llm_config.get_serve_options(name_prefix="vLLM:")).bind(llm_config)
-llm_app = LLMRouter.as_deployment().bind([deployment])
+llm_app = build_openai_app({"llm_configs": [llm_config]})
 serve.run(llm_app)
