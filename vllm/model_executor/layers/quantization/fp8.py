@@ -578,6 +578,9 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             expand_weights, is_rocm_aiter_2stage_moe_enabled,
             is_rocm_aiter_moe_enabled, shuffle_weights)
 
+        self.rocm_aiter_moe_enabled = is_rocm_aiter_moe_enabled()
+        self.rocm_aiter_2stage_moe_enabled = is_rocm_aiter_2stage_moe_enabled()
+
         # TODO (rob): refactor block quant into separate class.
         if self.block_quant:
             assert self.quant_config.activation_scheme == "dynamic"
@@ -603,7 +606,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             layer.w2_weight = Parameter(w2_weight, requires_grad=False)
             layer.w2_weight_scale_inv = Parameter(w2_weight_scale_inv,
                                                   requires_grad=False)
-            if is_rocm_aiter_moe_enabled():
+            if self.rocm_aiter_moe_enabled:
                 # reshaping weights is required for aiter moe kernel.
                 shuffled_w13, shuffled_w2 = shuffle_weights(
                     layer.w13_weight.data,
@@ -654,7 +657,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                                                   requires_grad=False)
             layer.w2_weight = torch.nn.Parameter(w2_weight,
                                                  requires_grad=False)
-            if is_rocm_aiter_moe_enabled():
+            if self.rocm_aiter_moe_enabled:
                 # reshaping weights is required for aiter moe kernel.
                 w13_scales, w2_scales = expand_weights(
                     layer.w13_weight_scale.data,
@@ -668,7 +671,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                     w2_scales.contiguous(), requires_grad=False)
 
                 layout = (32,
-                          32) if is_rocm_aiter_2stage_moe_enabled() else (16,
+                          32) if self.rocm_aiter_2stage_moe_enabled else (16,
                                                                           16)
                 shuffled_w13, shuffled_w2 = shuffle_weights(layer.w13_weight,
                                                             layer.w2_weight,
@@ -745,7 +748,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                             dq_weight, max_w13_scales[expert_id])
                     start += shard_size
 
-            if is_rocm_aiter_moe_enabled():
+            if self.rocm_aiter_moe_enabled:
                 # reshaping weights is required for aiter moe kernel.
                 expansion_dims = [
                     layer.w13_weight.shape[1], layer.w2_weight.shape[1]
@@ -758,7 +761,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                     w2_scales.contiguous(), requires_grad=False)
 
                 layout = (32,
-                          32) if is_rocm_aiter_2stage_moe_enabled() else (16,
+                          32) if self.rocm_aiter_2stage_moe_enabled else (16,
                                                                           16)
                 shuffled_w13, shuffled_w2 = shuffle_weights(layer.w13_weight,
                                                             layer.w2_weight,
@@ -792,6 +795,8 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         activation: str = "silu",
     ) -> torch.Tensor:
         from vllm.model_executor.layers.fused_moe import fused_experts
+        from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
+            rocm_aiter_fused_experts)
 
         topk_weights, topk_ids = FusedMoE.select_experts(
             hidden_states=x,
@@ -806,6 +811,28 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             e_score_correction_bias=e_score_correction_bias,
         )
 
+        if self.rocm_aiter_moe_enabled:
+            return rocm_aiter_fused_experts(
+                x,
+                layer.w13_weight,
+                layer.w2_weight,
+                topk_weights=topk_weights,
+                topk_ids=topk_ids,
+                inplace=True,
+                activation=activation,
+                use_fp8_w8a8=True,
+                global_num_experts=global_num_experts,
+                apply_router_weight_on_input=apply_router_weight_on_input,
+                expert_map=expert_map,
+                w1_scale=(layer.w13_weight_scale_inv
+                          if self.block_quant else layer.w13_weight_scale),
+                w2_scale=(layer.w2_weight_scale_inv
+                          if self.block_quant else layer.w2_weight_scale),
+                a1_scale=layer.w13_input_scale,
+                a2_scale=layer.w2_input_scale,
+                block_shape=self.quant_config.weight_block_size,
+                use_ck_moe_2stages=self.rocm_aiter_2stage_moe_enabled,
+            )
         return fused_experts(
             x,
             layer.w13_weight,
