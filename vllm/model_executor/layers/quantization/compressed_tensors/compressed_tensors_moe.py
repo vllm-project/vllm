@@ -304,9 +304,9 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
             e_score_correction_bias=e_score_correction_bias)
 
         return self.fused_experts_func(
-            x,
-            layer.w13_weight,
-            layer.w2_weight,
+            hidden_states=x,
+            w1=layer.w13_weight,
+            w2=layer.w2_weight,
             topk_weights=topk_weights,
             topk_ids=topk_ids,
             inplace=True,
