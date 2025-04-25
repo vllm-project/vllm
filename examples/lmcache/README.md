@@ -9,7 +9,7 @@ This example demonstrates how to run LMCache with disaggregated prefill using NI
 ### Prerequisites
 
 - Install [LMCache](https://github.com/ai-dynamo/lmcache)
-- Install [NIXL](https://github.com/ai-dynamo/nixl) 
+- Install [NIXL](https://github.com/ai-dynamo/nixl)
 - At least 2 GPUs
 - Valid Hugging Face token (HF_TOKEN) for Llama 3.1 8B Instruct.
 
@@ -54,5 +54,3 @@ The `kv_cache_sharing_lmcache_v1.py` example demonstrates how to share KV caches
 ## 4. Disaggregated Prefill in vLLM v0
 
 The `disaggregated_prefill_lmcache_v0.py` provides an example of how to run disaggregated prefill in vLLM v0.
-
-
