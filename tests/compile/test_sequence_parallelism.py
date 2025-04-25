@@ -4,8 +4,10 @@ import pytest
 import torch
 
 import vllm.envs as envs
-from vllm.compilation.fx_utils import (find_specified_fn,
-                                       find_specified_fn_maybe)
+from vllm.compilation.fix_functionalization import FixFunctionalizationPass
+from vllm.compilation.fx_utils import (find_auto_fn, find_auto_fn_maybe,
+                                       find_specified_fn,
+                                       find_specified_fn_maybe, is_func)
 from vllm.compilation.sequence_parallelism import SequenceParallelismPass
 from vllm.config import (CompilationConfig, DeviceConfig, ModelConfig,
                          VllmConfig)
@@ -27,6 +29,8 @@ OPS_IN_MODEL_AFTER = [
     torch.ops.vllm.reduce_scatter.default,
     torch.ops.vllm.all_gather.default,
 ]
+
+OPS_IN_MODEL = [torch.ops._C.fused_add_rms_norm.default]
 
 prompts = [
     "Hello, my name is",
@@ -139,23 +143,23 @@ def sequence_parallelism_pass_on_test_model(local_rank: int, world_size: int,
                                            seed=42)
 
     sequence_parallelism_pass = SequenceParallelismPass(vllm_config)
-    backend = TestBackend(sequence_parallelism_pass)
+    backend_no_func = TestBackend(sequence_parallelism_pass)
+    func_pass = FixFunctionalizationPass(vllm_config)
+    backend_func = TestBackend(sequence_parallelism_pass, func_pass)
 
     model = TestModel(hidden_size, hidden_size * 2)
     hidden_states = torch.randn((batch_size * seq_len, hidden_size),
                                 dtype=dtype)
     residual = torch.randn((batch_size * seq_len, hidden_size), dtype=dtype)
 
-    compiled_model = torch.compile(model, backend=backend)
-    compiled_model(hidden_states, residual)
+    compiled_model_no_func = torch.compile(model, backend=backend_no_func)
+    compiled_model_no_func(hidden_states, residual)
+    compiled_model_func = torch.compile(model, backend=backend_func)
+    compiled_model_func(hidden_states, residual)
 
     # Check substitution worked
-    pre_nodes = backend.graph_pre_pass.nodes
-    post_nodes = backend.graph_post_pass.nodes
-    print(f"before {backend.graph_pre_pass}")
-    print(f"after {backend.graph_post_pass}")
-
-    # c = find_specified_fn_maybe(pre_nodes, torch.ops.vllm.all_reduce.default)
+    pre_nodes = backend_no_func.graph_pre_pass.nodes
+    post_nodes = backend_no_func.graph_post_pass.nodes
 
     # In pre-nodes, all reduce should be there,
     # reduce scatter and all gather should not
@@ -170,3 +174,17 @@ def sequence_parallelism_pass_on_test_model(local_rank: int, world_size: int,
         find_specified_fn(post_nodes, op)
     for op in OPS_IN_MODEL_BEFORE:
         assert find_specified_fn_maybe(post_nodes, op) is None
+
+    # check if the functionalization pass is applied
+    for op in OPS_IN_MODEL:
+        find_auto_fn(backend_no_func.graph_post_pass.nodes, op)
+        assert find_auto_fn_maybe(backend_func.graph_post_pass.nodes,
+                                  op) is None  # noqa: E501
+
+    # make sure the ops were all de-functionalized
+    found = dict()
+    for node in backend_func.graph_post_pass.nodes:
+        for op in OPS_IN_MODEL:
+            if is_func(node, op):
+                found[op] = True
+    assert all(found[op] for op in OPS_IN_MODEL)
