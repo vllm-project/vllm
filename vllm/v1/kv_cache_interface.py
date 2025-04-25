@@ -1,16 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import Optional
 
 import torch
 
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.utils import cdiv, get_dtype_size
-
-if TYPE_CHECKING:
-    pass
 
 logger = init_logger(__name__)
 
@@ -77,7 +74,7 @@ class AttentionSpec(KVCacheSpec):
 @dataclass
 class FullAttentionSpec(AttentionSpec):
     # TODO: add note
-    compute_as_sliding_window: bool = False
+    sliding_window: Optional[int] = None
 
     @property
     def type_id(self) -> str:
