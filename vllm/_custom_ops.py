@@ -397,7 +397,7 @@ def awq_gemm(input: torch.Tensor,
     if envs.VLLM_USE_TRITON_AWQ:
         from vllm.model_executor.layers.quantization.awq_triton import (
             awq_gemm_triton)
-        return awq_gemm_triton(input, qweight, scales, qzeros, split_k_iters, dtype)
+        return awq_gemm_triton(input, qweight, scales, qzeros, split_k_iters)
     return torch.ops._C.awq_gemm(input, qweight, scales, qzeros, split_k_iters, dtype)
 
 
