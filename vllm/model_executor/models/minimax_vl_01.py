@@ -9,9 +9,7 @@ from typing import (Final, Literal, Optional, Protocol, Set, Tuple, TypedDict,
 import numpy as np
 import torch
 import torch.nn as nn
-from packaging.version import Version
 from transformers import BatchFeature, CLIPVisionConfig, PretrainedConfig
-from transformers import __version__ as TRANSFORMERS_VERSION
 from transformers.image_processing_utils import select_best_resolution
 
 from vllm.config import VllmConfig
@@ -48,8 +46,8 @@ logger = init_logger(__name__)
 # For dummy input only
 @dataclass
 class MaxImageTokenMeta:
-    width: int = 1024
-    height: int = 1024
+    width: int = 64
+    height: int = 64
 
 
 class MiniMaxVL01ImagePixelInputs(TypedDict):
@@ -317,27 +315,15 @@ class MiniMaxVL01MultiModalProcessor(
 
         pixel_values = processed_outputs.get("pixel_values")
         if pixel_values is not None:
-            if Version(TRANSFORMERS_VERSION) <= Version("4.48.3"):
-                images = mm_data["images"]
-                assert isinstance(images, list)
+            image_sizes = processed_outputs["image_sizes"]
+            min_len = min(len(pixel_values), len(image_sizes))
+            pixel_values = pixel_values[:min_len]
+            image_sizes = image_sizes[:min_len]
+            assert len(pixel_values) == len(image_sizes)
 
-                assert (isinstance(pixel_values, list)
-                        and len(pixel_values) == 1)
-                assert (isinstance(pixel_values[0], list)
-                        and len(pixel_values[0]) == len(images))
-
-                processed_outputs["pixel_values"] = pixel_values[0]
-            else:
-                image_sizes = processed_outputs["image_sizes"]
-                min_len = min(len(pixel_values), len(image_sizes))
-                pixel_values = pixel_values[:min_len]
-                image_sizes = image_sizes[:min_len]
-                assert len(pixel_values) == len(image_sizes)
-
-                processed_outputs["pixel_values"] = [
-                    p[:, :h, :w]
-                    for p, (h, w) in zip(pixel_values, image_sizes)
-                ]
+            processed_outputs["pixel_values"] = [
+                p[:, :h, :w] for p, (h, w) in zip(pixel_values, image_sizes)
+            ]
 
         return processed_outputs
 
