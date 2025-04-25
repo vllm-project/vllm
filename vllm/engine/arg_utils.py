@@ -48,7 +48,8 @@ TypeHint = Union[type[Any], object]
 TypeHintT = Union[type[T], object]
 
 
-def optional_type(return_type: Callable[[str], T]) -> Optional[T]:
+def optional_type(
+        return_type: Callable[[str], T]) -> Callable[[str], Optional[T]]:
 
     def _optional_type(val: str) -> Optional[T]:
         if val == "" or val == "None":
