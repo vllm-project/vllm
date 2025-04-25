@@ -32,6 +32,7 @@ from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, DeviceMemoryProfiler,
                         GiB_bytes, LazyLoader, cdiv, check_use_alibi,
                         is_pin_memory_available)
 from vllm.v1.attention.backends.flash_attn import FlashAttentionMetadata
+from vllm.v1.attention.backends.utils import CommonAttentionMetadata
 from vllm.v1.core.encoder_cache_manager import compute_encoder_budget
 from vllm.v1.kv_cache_interface import (AttentionSpec, FullAttentionSpec,
                                         KVCacheConfig, KVCacheNewTensor,
@@ -568,6 +569,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # Copy the tensors to the GPU.
         self.input_ids[:total_num_scheduled_tokens].copy_(
             self.input_ids_cpu[:total_num_scheduled_tokens], non_blocking=True)
+        query_start_loc = self.query_start_loc_cpu[:num_reqs + 1].to(
+            self.device, non_blocking=True)
+        seq_lens = self.seq_lens_cpu[:num_reqs].to(self.device,
+                                                   non_blocking=True)
+        common_attn_metadata = CommonAttentionMetadata(
+            query_start_loc=query_start_loc, seq_lens=seq_lens)
         if self.uses_mrope:
             # Only relevant for models using M-RoPE (e.g, Qwen2-VL)
             self.mrope_positions[:, :total_num_scheduled_tokens].copy_(
@@ -602,7 +609,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     num_reqs=num_reqs,
                     num_actual_tokens=total_num_scheduled_tokens,
                     max_query_len=max_num_scheduled_tokens,
-                    common_prefix_len=common_prefix_len))
+                    common_prefix_len=common_prefix_len,
+                    common_attn_metadata=common_attn_metadata))
             for layer_name in kv_cache_group_spec.layer_names:
                 attn_metadata[layer_name] = attn_metadata_i
 
@@ -615,7 +623,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # We will ignore the sampled tokens from the partial requests.
             # TODO: Support prompt logprobs.
             # TODO: confirm which attn_metadata should be used
-            logits_indices = attn_metadata_i.query_start_loc[1:] - 1
+            logits_indices = query_start_loc[1:] - 1
             spec_decode_metadata = None
         else:
             # Get the number of draft tokens for each request.
@@ -1043,7 +1051,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             num_input_tokens = num_scheduled_tokens
 
         for kv_cache_group_spec in self.kv_cache_config.kv_cache_groups:
-            # TODO: notes for use layer_names[0]
+            # TODO: merge https://github.com/vllm-project/vllm/pull/17193
             layer_name = kv_cache_group_spec.layer_names[0]
             attn_metadata[layer_name].num_input_tokens = num_input_tokens
 
@@ -1230,7 +1238,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             next_token_ids = torch.tensor(next_token_ids,
                                           dtype=torch.int32,
                                           device=self.device)
-
+            eagle_attn_metadata = attn_metadata[self.drafter.attn_layer_name]
             if spec_decode_metadata is None:
                 # input_ids can be None for multimodal models.
                 # We need to slice token_ids, positions, and hidden_states
@@ -1240,8 +1248,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 target_positions = positions[:num_scheduled_tokens]
                 target_hidden_states = hidden_states[:num_scheduled_tokens]
                 # TODO: confirm which attn_metadata should be used
-                target_slot_mapping = attn_metadata.slot_mapping
-                cu_num_tokens = attn_metadata.query_start_loc
+                target_slot_mapping = eagle_attn_metadata.slot_mapping
+                cu_num_tokens = eagle_attn_metadata.query_start_loc
             else:
                 # TODO(woosuk): Refactor this.
                 num_draft_tokens = spec_decode_metadata.num_draft_tokens
@@ -1256,14 +1264,15 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 )
                 # TODO: confirm which attn_metadata should be used
                 cu_num_tokens, token_indices = self.drafter.prepare_inputs(
-                    attn_metadata.query_start_loc,
+                    eagle_attn_metadata.query_start_loc,
                     num_rejected_tokens,
                 )
                 target_token_ids = self.input_ids[token_indices]
                 target_positions = positions[token_indices]
                 target_hidden_states = hidden_states[token_indices]
                 # TODO: confirm which attn_metadata should be used
-                target_slot_mapping = attn_metadata.slot_mapping[token_indices]
+                target_slot_mapping = eagle_attn_metadata.slot_mapping[
+                    token_indices]
 
             draft_token_ids = self.drafter.propose(
                 target_token_ids=target_token_ids,
@@ -1273,7 +1282,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 next_token_ids=next_token_ids,
                 cu_num_tokens=cu_num_tokens,
                 # TODO: confirm which attn_metadata should be used
-                block_table=attn_metadata.block_table,
+                block_table=eagle_attn_metadata.block_table,
                 sampling_metadata=sampling_metadata,
             )
             spec_token_ids = draft_token_ids.tolist()

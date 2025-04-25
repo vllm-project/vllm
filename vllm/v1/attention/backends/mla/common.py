@@ -204,6 +204,7 @@ from vllm.model_executor.layers.linear import (ColumnParallelLinear,
 from vllm.model_executor.layers.rotary_embedding import RotaryEmbedding
 from vllm.platforms import current_platform
 from vllm.utils import cdiv, round_down
+from vllm.v1.attention.backends.utils import CommonAttentionMetadata
 from vllm.v1.kv_cache_interface import AttentionSpec
 from vllm.v1.worker.block_table import BlockTable
 from vllm.vllm_flash_attn.fa_utils import get_flash_attn_version
@@ -460,7 +461,8 @@ class MLACommonMetadataBuilder(Generic[M]):
         )
 
     def build(self, num_reqs: int, num_actual_tokens: int, max_query_len: int,
-              common_prefix_len: int) -> M:
+              common_prefix_len: int,
+              common_attn_metadata: CommonAttentionMetadata) -> M:
         assert self._num_decodes + self._num_prefills == num_reqs
 
         # Note(simon): be careful about the CPU <> GPU memory movement in this
@@ -468,16 +470,14 @@ class MLACommonMetadataBuilder(Generic[M]):
         # it blocks on all previous kernels.
         device = self.runner.device
         block_table_tensor = (self.block_table.get_device_tensor()[:num_reqs])
-        query_start_loc = self.runner.query_start_loc_cpu[:num_reqs + 1].to(
-            device, non_blocking=True)
         slot_mapping = (
             self.block_table.slot_mapping_cpu[:num_actual_tokens].to(
                 device, non_blocking=True).long())
         input_positions = self.runner.positions_cpu[:num_actual_tokens].to(
             device, non_blocking=True).long()
 
-        seq_lens_cpu = self.runner.seq_lens_cpu[:num_reqs]
-        seq_lens = seq_lens_cpu.to(device, non_blocking=True)
+        seq_lens = common_attn_metadata.seq_lens
+        query_start_loc = common_attn_metadata.query_start_loc
 
         prefill_metadata = None
         if self._num_prefills > 0:

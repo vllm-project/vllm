@@ -224,6 +224,8 @@ class EagleProposer:
             self.model = EagleLlamaForCausalLM(
                 model_config=draft_model_config,
                 start_layer_id=target_layer_num).to(target_device)
+            # TODO: implement it
+            self.attn_layer_name = "TODO"
 
         self.model.load_weights(
             loader.get_all_weights(

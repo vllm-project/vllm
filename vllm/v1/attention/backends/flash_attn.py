@@ -14,6 +14,7 @@ from vllm.attention.ops.merge_attn_states import merge_attn_states
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.utils import cdiv
+from vllm.v1.attention.backends.utils import CommonAttentionMetadata
 from vllm.v1.kv_cache_interface import AttentionSpec
 from vllm.v1.worker.block_table import BlockTable
 from vllm.vllm_flash_attn.fa_utils import (flash_attn_supports_fp8,
@@ -300,13 +301,11 @@ class FlashAttentionMetadataBuilder:
         return False
 
     def build(self, num_reqs: int, num_actual_tokens: int, max_query_len: int,
-              common_prefix_len: int):
+              common_prefix_len: int,
+              common_attn_metadata: CommonAttentionMetadata):
         max_seq_len = self.runner.seq_lens_np[:num_reqs].max()
-        query_start_loc_cpu = self.runner.query_start_loc_cpu[:num_reqs + 1]
-        query_start_loc = query_start_loc_cpu.to(self.runner.device,
-                                                 non_blocking=True)
-        seq_lens_cpu = self.runner.seq_lens_cpu[:num_reqs]
-        seq_lens = seq_lens_cpu.to(self.runner.device, non_blocking=True)
+        seq_lens = common_attn_metadata.seq_lens
+        query_start_loc = common_attn_metadata.query_start_loc
         block_table = self.block_table
         block_table_tensor = block_table.get_device_tensor()[:num_reqs]
         slot_mapping = block_table.slot_mapping_cpu[:num_actual_tokens].to(

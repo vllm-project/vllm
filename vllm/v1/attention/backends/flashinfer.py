@@ -17,6 +17,7 @@ from vllm.attention.layer import Attention
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.v1.attention.backends.flash_attn import use_cascade_attention
+from vllm.v1.attention.backends.utils import CommonAttentionMetadata
 from vllm.v1.kv_cache_interface import AttentionSpec
 from vllm.v1.worker.block_table import BlockTable
 
@@ -403,16 +404,15 @@ class FlashInferMetadataBuilder:
                 )
 
     def build(self, num_reqs: int, num_actual_tokens: int, max_query_len: int,
-              common_prefix_len: int):
+              common_prefix_len: int,
+              common_attn_metadata: CommonAttentionMetadata):
         assert self._num_decodes + self._num_prefills == num_reqs
         assert (self._num_decode_tokens +
                 self._num_prefill_tokens == num_actual_tokens)
         page_size = self.kv_cache_spec.block_size
         device = self.runner.device
-        qo_indptr = self.runner.query_start_loc_cpu[:num_reqs + 1].to(
-            self.runner.device, non_blocking=True)
-        seq_lens = self.runner.seq_lens_cpu[:num_reqs].to(self.runner.device,
-                                                          non_blocking=True)
+        qo_indptr = common_attn_metadata.query_start_loc
+        seq_lens = common_attn_metadata.seq_lens
         block_table_tensor = (self.block_table.get_device_tensor()[:num_reqs])
         slot_mapping = self.block_table.slot_mapping_cpu[:num_actual_tokens].to(
             self.runner.device, non_blocking=True).long()
