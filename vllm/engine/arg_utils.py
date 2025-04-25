@@ -319,28 +319,26 @@ class EngineArgs:
                 # Initialise the kwargs dictionary for the field
                 kwargs[name] = {"default": default, "help": help}
 
-                # Get the type of the field
-                field_type = field.type
-                optional = is_optional(field.type)
-                # It it's optional, retrieve the contained type
+                # Get the type of the field. If it's optional,
+                # retrieve the contained type
+                type_hint: TypeHint = field.type
+                optional = is_optional(type_hint)
                 if optional:
-                    field_type = get_args(field_type)[:-1]
-                    if len(field_type) > 1:
-                        field_type = Union[field_type]
-                    else:
-                        field_type = field_type[0]
+                    args = get_args(type_hint)
+                    args = [arg for arg in args if arg is not type(None)]
+                    type_hint = Union[*args] if len(args) > 1 else args[0]
 
                 # Set type, action and choices for the field depending on the
                 # type of the field
-                if can_be_type(field_type, bool):
+                if can_be_type(type_hint, bool):
                     # Creates --no-<name> and --<name> flags
                     kwargs[name]["action"] = argparse.BooleanOptionalAction
                     kwargs[name]["type"] = bool
-                elif can_be_type(field_type, Literal):
+                elif can_be_type(type_hint, Literal):
                     # Creates choices from Literal arguments
-                    if is_type_in_union(field_type, Literal):
-                        field_type = get_type_from_union(field_type, Literal)
-                    choices = get_args(field_type)
+                    if is_type_in_union(type_hint, Literal):
+                        type_hint = get_type_from_union(type_hint, Literal)
+                    choices = get_args(type_hint)
                     kwargs[name]["choices"] = choices
                     choice_type = type(choices[0])
                     assert all(type(c) is choice_type for c in choices), (
@@ -348,10 +346,10 @@ class EngineArgs:
                         f"Got {choices} with types {[type(c) for c in choices]}"
                     )
                     kwargs[name]["type"] = choice_type
-                elif can_be_type(field_type, tuple):
-                    if is_type_in_union(field_type, tuple):
-                        field_type = get_type_from_union(field_type, tuple)
-                    dtypes = get_args(field_type)
+                elif can_be_type(type_hint, tuple):
+                    if is_type_in_union(type_hint, tuple):
+                        type_hint = get_type_from_union(type_hint, tuple)
+                    dtypes = get_args(type_hint)
                     dtype = dtypes[0]
                     nargs = "+" if Ellipsis in dtypes else len(dtypes)
                     assert all(
@@ -360,26 +358,30 @@ class EngineArgs:
                         f"type. Got {dtypes}.")
                     kwargs[name]["type"] = dtype
                     kwargs[name]["nargs"] = nargs
+                elif can_be_type(type_hint, list):
+                    if is_type_in_union(type_hint, list):
+                        type_hint = get_type_from_union(type_hint, list)
+                    dtypes = get_args(type_hint)
                     assert len(dtypes) == 1, (
                         "List type must have exactly one type. Got "
-                        f"{field_type} with types {dtypes}")
+                        f"{type_hint} with types {dtypes}")
                     kwargs[name]["type"] = dtypes[0]
                     kwargs[name]["nargs"] = "+"
-                elif can_be_type(field_type, int):
+                elif can_be_type(type_hint, int):
                     kwargs[name]["type"] = int
                     # Some int fields can use human-readable int
                     if name in {"max_model_len"}:
                         kwargs[name]["type"] = human_readable_int
-                elif can_be_type(field_type, float):
+                elif can_be_type(type_hint, float):
                     kwargs[name]["type"] = float
-                elif can_be_type(field_type, dict):
+                elif can_be_type(type_hint, dict):
                     kwargs[name]["type"] = optional_dict
-                elif (can_be_type(field_type, str)
-                      or is_custom_type(field_type)):
+                elif (can_be_type(type_hint, str)
+                      or is_custom_type(type_hint)):
                     kwargs[name]["type"] = str
                 else:
                     raise ValueError(
-                        f"Unsupported type {field.type} for argument {name}. ")
+                        f"Unsupported type {type_hint} for argument {name}. ")
 
                 # Wrap valid types in optional_type if the field is optional
                 if optional and kwargs[name]["type"] in {
