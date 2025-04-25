@@ -281,7 +281,7 @@ class QuarkConfig(QuantizationConfig):
             return QuarkW8A8Int8(qscheme=weight_qscheme,
                                 is_static_input_scheme=True,
                                 input_symmetric=input_config.get("symmetric"),
-                                online_rotation_method=online_rotation_method)
+                                online_rot_method=online_rotation_method)
 
         raise NotImplementedError("No quark compatible scheme was found. "
                                 f"Weight config: {weight_config}, "
