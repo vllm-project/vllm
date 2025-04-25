@@ -11,10 +11,6 @@ def unsupported_string_schemas():
     return [
         {
             "type": "string",
-            "pattern": "^[a-zA-Z]+$"
-        },
-        {
-            "type": "string",
             "format": "email"
         },
     ]
@@ -25,22 +21,6 @@ def unsupported_integer_schemas():
     return [
         {
             "type": "integer",
-            "minimum": 0
-        },
-        {
-            "type": "integer",
-            "maximum": 120
-        },
-        {
-            "type": "integer",
-            "exclusiveMinimum": 120
-        },
-        {
-            "type": "integer",
-            "exclusiveMaximum": 120
-        },
-        {
-            "type": "integer",
             "multipleOf": 120
         },
     ]
@@ -49,22 +29,6 @@ def unsupported_integer_schemas():
 @pytest.fixture
 def unsupported_number_schemas():
     return [
-        {
-            "type": "number",
-            "minimum": 0
-        },
-        {
-            "type": "number",
-            "maximum": 120
-        },
-        {
-            "type": "number",
-            "exclusiveMinimum": 120
-        },
-        {
-            "type": "number",
-            "exclusiveMaximum": 120
-        },
         {
             "type": "number",
             "multipleOf": 120
@@ -156,13 +120,28 @@ def supported_schema():
                 "type": "string",
                 "enum": ["sedan", "suv", "truck"]
             },
+            "car_brand": {
+                "type": "string",
+                "pattern": "^[a-zA-Z]+$"
+            },
             "short_description": {
                 "type": "string",
                 "maxLength": 50
             },
+            "mileage": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 1000000
+            },
+            "model_year": {
+                "type": "integer",
+                "exclusiveMinimum": 1900,
+                "exclusiveMaximum": 2100
+            },
             "long_description": {
                 "type": "string",
-                "minLength": 50
+                "minLength": 50,
+                "maxLength": 2000
             },
             "address": {
                 "type": "object",
