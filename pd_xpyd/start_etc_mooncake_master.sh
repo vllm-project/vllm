@@ -1,4 +1,4 @@
-export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib
+
 
 pkill -f mooncake_master
 pkill -f etcd

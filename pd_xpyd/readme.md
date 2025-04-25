@@ -1,20 +1,27 @@
-Note: this doc didn't cover mla data parallel!!!
+# Mooncake Installation and Prefill/Decode Disaggregation Usage Guide
+> **Note**: This document does not cover MLA data parallel setup.
 
-# setup docker and install mooncake
+## Mooncake Installation
 
-Please refer Chaojun's https://github.com/chaojun-zhang/vllm/blob/c9154592820bf1375a030e46e0334b83ac36287b/pd_distributed/setup.md 
-
-0. make sure proxy works in intel env!
-1. install mooncake [link](#https://github.com/kvcache-ai/Mooncake/?tab=readme-ov-file#-quick-start)
-
+### Install via pip
+```bash
+apt install etcd -y
+pip3 install mooncake-transfer-engine==0.3.0b3
 ```
-apt install git wget curl net-tools sudo iputils-ping etcd  -y
 
-git clone https://github.com/kvcache-ai/Mooncake.git
+### Install from Source
+```bash
+# Install required packages
+apt install git wget curl net-tools sudo iputils-ping etcd -y
+
+# Clone the Mooncake repository
+git clone https://github.com/kvcache-ai/Mooncake.git -b v0.3.0-beta
 cd Mooncake
 
+# Install dependencies
 bash dependencies.sh
 
+# Build and install Mooncake
 mkdir build
 cd build
 cmake ..
@@ -22,7 +29,7 @@ make -j
 make install
 ```
 
-# How to Run
+## Prefill/Decode Disaggregation Usage
 
 0. prepare and modify mooncake.json
 
@@ -45,9 +52,6 @@ mooncake_master -enable_gc true -port 50001
 refer `start_prefill.sh`, `start_decode.sh`
 nencessary env/paras are:
 ```
-# some mooncake components will install to here
-export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib
-
 MOONCAKE_CONFIG_PATH=./pd_xpyd/mooncake.json
 
 # for prefill

@@ -65,7 +65,7 @@ class MooncakeStore(KVLookupBufferBase):
     ):
 
         try:
-            from mooncake_vllm_adaptor import MooncakeDistributedStore
+            from mooncake.store import MooncakeDistributedStore
         except ImportError as e:
             raise ImportError(
                 "Please install mooncake by following the instructions at "

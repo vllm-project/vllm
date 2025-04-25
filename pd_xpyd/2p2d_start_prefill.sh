@@ -7,9 +7,7 @@ source ./pd_xpyd/pd_env.sh
 source ./pd_xpyd/start_etc_mooncake_master.sh
 
 export VLLM_EP_SIZE=16
-
-export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib
-export MOONCAKE_CONFIG_PATH=./pd_xpyd/2p2d_mooncake_p.json 
+export MOONCAKE_CONFIG_PATH=./pd_xpyd/2p2d_mooncake_p.json
 
 model_path=/mnt/disk2/hf_models/DeepSeek-R1-BF16-w8afp8-static-no-ste-G2/
 
