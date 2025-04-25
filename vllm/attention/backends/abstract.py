@@ -235,8 +235,8 @@ class AttentionLayer(Protocol):
     _q_scale: torch.Tensor
     _k_scale: torch.Tensor
     _v_scale: torch.Tensor
-    _k_scale_float: torch.Tensor
-    _v_scale_float: torch.Tensor
+    _k_scale_float: float
+    _v_scale_float: float
     _prob_scale: torch.Tensor
 
     def forward(
