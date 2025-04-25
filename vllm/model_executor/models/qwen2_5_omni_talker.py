@@ -61,6 +61,8 @@ class Qwen2_5OmniTalkerForConditionalGeneration(nn.Module, SupportsMultiModal,
 
         if hasattr(config, "talker_config"):
             self.config = config.talker_config
+            vllm_config.model_config.hf_text_config = \
+                    vllm_config.model_config.hf_config.talker_config
         else:
             self.config = config
 
