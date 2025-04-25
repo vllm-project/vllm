@@ -38,7 +38,7 @@ ensure_python_library_installed() {
         if [ "$1" == "nixl" ]; then
             echo "$1 is not installed. Please refer to https://github.com/ai-dynamo/nixl for installation."
         else
-            echo "$1 is not installed. Please install it via `pip install $1`."
+            echo "$1 is not installed. Please install it via pip install $1."
         fi
         exit 1
     else

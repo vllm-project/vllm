@@ -15,7 +15,9 @@ This example demonstrates how to run LMCache with disaggregated prefill using NI
 
 ### Usage
 
-Navigate to the `disagg_prefill` directory and run:
+Run
+`cd disagg_prefill_lmcache_v1`
+to get into `disagg_prefill_lmcache_v1` folder, and then run
 
 ```bash
 bash disagg_example_nixl.sh
@@ -26,13 +28,13 @@ to run disaggregated prefill and benchmark the performance.
 ### Components
 
 #### Server Scripts
-- `disagg_prefill/disagg_vllm_launcher.sh` - Launches individual vLLM servers for prefill/decode, and also launches the proxy server.
-- `disagg_prefill/disagg_proxy_server.py` - FastAPI proxy server that coordinates between prefiller and decoder
-- `disagg_prefill/disagg_example_nixl.sh` - Main script to run the example
+- `disagg_prefill_lmcache_v1/disagg_vllm_launcher.sh` - Launches individual vLLM servers for prefill/decode, and also launches the proxy server.
+- `disagg_prefill_lmcache_v1/disagg_proxy_server.py` - FastAPI proxy server that coordinates between prefiller and decoder
+- `disagg_prefill_lmcache_v1/disagg_example_nixl.sh` - Main script to run the example
 
 #### Configuration
-- `disagg_prefill/configs/lmcache-prefiller-config.yaml` - Configuration for prefiller server
-- `disagg_prefill/configs/lmcache-decoder-config.yaml` - Configuration for decoder server
+- `disagg_prefill_lmcache_v1/configs/lmcache-prefiller-config.yaml` - Configuration for prefiller server
+- `disagg_prefill_lmcache_v1/configs/lmcache-decoder-config.yaml` - Configuration for decoder server
 
 #### Log Files
 The main script generates several log files:
@@ -51,6 +53,6 @@ The `kv_cache_sharing_lmcache_v1.py` example demonstrates how to share KV caches
 
 ## 4. Disaggregated Prefill in vLLM v0
 
-The `disaggregated_prefill_lmcache.py` provides an example of how to run disaggregated prefill in vLLM v0.
+The `disaggregated_prefill_lmcache_v0.py` provides an example of how to run disaggregated prefill in vLLM v0.
 
 
