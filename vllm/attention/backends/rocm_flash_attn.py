@@ -890,14 +890,6 @@ class ROCmFlashAttentionImpl(AttentionImpl):
                 decode_meta.max_decode_seq_len, self.sliding_window,
                 self.kv_cache_dtype, self.alibi_slopes)
 
-            # PagedAttention does not support fused quant, manually quantize
-            if output_scale is None:
-                out_pa = output[num_prefill_tokens:]
-            else:
-                # TODO(luka) fix dtype
-                out_pa = torch.empty_like(output[num_prefill_tokens:],
-                                          dtype=torch.bfloat16)
-
             if use_custom:
                 max_seq_len = (decode_meta.max_decode_seq_len if self.attn_type
                                != AttentionType.ENCODER_DECODER else
@@ -909,19 +901,19 @@ class ROCmFlashAttentionImpl(AttentionImpl):
                 assert _PARTITION_SIZE_ROCM % block_size == 0
                 tmp_output = torch.empty(
                     size=(num_seqs, num_heads, max_num_partitions, head_size),
-                    dtype=out_pa.dtype,
-                    device=out_pa.device,
+                    dtype=query.dtype,
+                    device=output.device,
                 )
                 exp_sums = torch.empty(
                     size=(num_seqs, num_heads, max_num_partitions),
                     dtype=torch.float32,
-                    device=out_pa.device,
+                    device=output.device,
                 )
                 max_logits = torch.empty_like(exp_sums)
 
                 query_start_loc = None
                 ops.paged_attention_rocm(
-                    out_pa,
+                    output[num_prefill_tokens:],
                     exp_sums,
                     max_logits,
                     tmp_output,
@@ -943,8 +935,16 @@ class ROCmFlashAttentionImpl(AttentionImpl):
                     self.kv_cache_dtype,
                     layer._k_scale,
                     layer._v_scale,
+                    output_scale,
                 )
             else:
+                # PagedAttention does not support fused quant, manually quantize
+                if output_scale is None:
+                    out_pa = output[num_prefill_tokens:]
+                else:
+                    out_pa = torch.empty_like(output[num_prefill_tokens:],
+                                              dtype=query.dtype)
+
                 out_pa[:] = paged_attn.forward_decode(
                     decode_query,
                     key_cache,
@@ -966,12 +966,13 @@ class ROCmFlashAttentionImpl(AttentionImpl):
                     layer._v_scale,
                 )
 
-            # Manually perform quantization
-            if output_scale is not None:
-                out_uq = out_pa.view(-1, self.num_heads * self.head_size)
-                out_q = output.view(-1, self.num_heads * self.head_size)
-                out_q[num_prefill_tokens:] = ops.scaled_fp8_quant(
-                    out_uq, output_scale)[0]
+                # Manually perform quantization
+                if output_scale is not None:
+                    out_uq = out_pa.view(-1, self.num_heads * self.head_size)
+                    out_q = output.view(-1, self.num_heads * self.head_size)
+                    ops.scaled_fp8_quant(out_uq,
+                                         output_scale,
+                                         output=out_q[num_prefill_tokens:])
 
         # Reshape the output tensor.
         return output.view(-1, self.num_heads * self.head_size)
