@@ -28,20 +28,16 @@ class LoRAModelRunnerMixin:
                         scheduler_config: SchedulerConfig,
                         lora_config: LoRAConfig, device: str) -> nn.Module:
 
-        assert supports_lora(
-            model), f"{model.__class__.__name__} does not support LoRA yet."
+        if not supports_lora(model):
+            raise ValueError(
+                f"{model.__class__.__name__} does not support LoRA yet.")
 
         if supports_multimodal(model):
             logger.warning("Regarding multimodal models, vLLM currently "
                            "only supports adding LoRA to language model.")
 
-        # It's necessary to distinguish between the max_position_embeddings
-        # of VLMs and LLMs.
-        if hasattr(model.config, "max_position_embeddings"):
-            max_pos_embeddings = model.config.max_position_embeddings
-        else:
-            max_pos_embeddings = (
-                model.config.text_config.max_position_embeddings)
+        # Use get_text_config() in case of multimodal models
+        text_config = model_config.hf_config.get_text_config()
 
         # Add LoRA Manager to the Model Runner
         self.lora_manager = LRUCacheWorkerLoRAManager(
@@ -52,7 +48,7 @@ class LoRAModelRunnerMixin:
             device,
             model.embedding_modules,
             model.embedding_padding_modules,
-            max_position_embeddings=max_pos_embeddings,
+            max_position_embeddings=text_config.max_position_embeddings,
         )
         return self.lora_manager.create_lora_manager(model)
 
