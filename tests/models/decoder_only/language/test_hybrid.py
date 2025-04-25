@@ -10,8 +10,7 @@ from ...utils import check_logprobs_close, check_outputs_equal
 
 # This test is for the hybrid models
 MODELS = [
-    # Bamba at Fp32 is too big for the CI (L4 GPU).
-    # "ibm-ai-platform/Bamba-9B",
+    "ibm-ai-platform/Bamba-9B",
     "ai21labs/Jamba-tiny-dev",
     "pfnet/plamo-2-1b",
     "Zyphra/Zamba2-1.2B-instruct",
