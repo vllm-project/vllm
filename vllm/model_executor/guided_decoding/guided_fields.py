@@ -31,12 +31,11 @@ class GuidedDecodingRequest:
 
     def __post_init__(self):
         """Validate that some fields are mutually exclusive."""
-        guide_count = sum([
-            self.guided_json is not None, self.guided_regex is not None,
-            self.guided_choice is not None, self.guided_grammar is not None,
-            self.guided_json_object is not None, self.structural_tag
-            is not None
-        ])
+        guide_count = sum(x is not None
+                          for x in (self.guided_json, self.guided_regex,
+                                    self.guided_choice, self.guided_grammar,
+                                    self.guided_json_object,
+                                    self.structural_tag))
         if guide_count > 1:
             raise ValueError(
                 "You can only use one kind of guided decoding but multiple are "
