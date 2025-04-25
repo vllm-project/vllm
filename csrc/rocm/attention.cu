@@ -1635,9 +1635,9 @@ void paged_attention_custom_launcher(
   const float* k_scale_ptr = reinterpret_cast<const float*>(k_scale.data_ptr());
   const float* v_scale_ptr = reinterpret_cast<const float*>(v_scale.data_ptr());
   // NOTE: fp8_out_scale is optional.
-  const float* fp8_out_scale_ptr =
+  const auto fp8_out_scale_ptr =
       fp8_out_scale
-          ? reinterpret_cast<const float*>(fp8_out_scale.value().data_ptr())
+          ? static_cast<const float*>(fp8_out_scale.value().data_ptr())
           : nullptr;
   OUTT* out_ptr = reinterpret_cast<OUTT*>(out.data_ptr());
 
