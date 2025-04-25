@@ -753,12 +753,6 @@ class EngineArgs:
         )
         device_group.add_argument("--device", **device_kwargs["device"])
 
-        parser.add_argument('--num-scheduler-steps',
-                            type=int,
-                            default=1,
-                            help=('Maximum number of forward steps per '
-                                  'scheduler call.'))
-
         # Speculative arguments
         speculative_group = parser.add_argument_group(
             title="SpeculativeConfig",
@@ -779,13 +773,6 @@ class EngineArgs:
             help="The pattern(s) to ignore when loading the model."
             "Default to `original/**/*` to avoid repeated loading of llama's "
             "checkpoints.")
-        parser.add_argument(
-            '--preemption-mode',
-            type=str,
-            default=None,
-            help='If \'recompute\', the engine performs preemption by '
-            'recomputing; If \'swap\', the engine performs preemption by '
-            'block swapping.')
 
         parser.add_argument(
             "--served-model-name",
@@ -865,14 +852,18 @@ class EngineArgs:
                                      **scheduler_kwargs["num_lookahead_slots"])
         scheduler_group.add_argument('--scheduler-delay-factor',
                                      **scheduler_kwargs["delay_factor"])
-        scheduler_group.add_argument(
-            '--enable-chunked-prefill',
-            **scheduler_kwargs["enable_chunked_prefill"])
+        scheduler_group.add_argument('--preemption-mode',
+                                     **scheduler_kwargs["preemption_mode"])
+        scheduler_group.add_argument('--num-scheduler-steps',
+                                     **scheduler_kwargs["num_scheduler_steps"])
         scheduler_group.add_argument(
             '--multi-step-stream-outputs',
             **scheduler_kwargs["multi_step_stream_outputs"])
         scheduler_group.add_argument('--scheduling-policy',
                                      **scheduler_kwargs["policy"])
+        scheduler_group.add_argument(
+            '--enable-chunked-prefill',
+            **scheduler_kwargs["enable_chunked_prefill"])
         scheduler_group.add_argument(
             "--disable-chunked-mm-input",
             **scheduler_kwargs["disable_chunked_mm_input"])
