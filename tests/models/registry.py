@@ -25,7 +25,7 @@ class _HfExamplesInfo:
         """The tiny model to use for testing with this architecture."""
         if self.arch is None:
             raise ValueError("Architecture name is not set.")
-        return f"hf-tiny-model-private/tiny-random-{self.arch}"
+        return f"hf-internal-testing/tiny-random-{self.arch}"
 
     tokenizer: Optional[str] = None
     """Set the tokenizer to load for this architecture."""
