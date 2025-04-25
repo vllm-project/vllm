@@ -810,7 +810,7 @@ class MTBenchDataset(HuggingFaceDataset):
             prompt=tokenizer.apply_chat_template([{
                 "role": "user",
                 "content": prompt
-            }], tokenize=False)
+            }], add_generation_prompt=True, tokenize=False)
 
             prompt_len = len(tokenizer(prompt).input_ids)
             sampled_requests.append(
