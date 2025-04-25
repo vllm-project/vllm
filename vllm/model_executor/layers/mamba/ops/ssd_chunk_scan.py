@@ -5,8 +5,6 @@
 
 # ruff: noqa: E501,SIM102
 
-import math
-
 import torch
 import triton
 import triton.language as tl
@@ -442,40 +440,6 @@ def _chunk_scan_fwd_kernel(
              (offs_out_n[None, :] < hdim))
 
 
-def _seq_idx_to_chunk_indices_offsets(seq_idx, chunk_size: int):
-
-    # convert seq_idx to chunk indices and offsets
-    # - derive the cu_seqlens
-    _, cu_seqlens = torch.where(seq_idx.diff())
-    cu_seqlens += 1
-
-    # outputs will have length expansion of chunks that do not divide
-    # chunk_size
-    N = math.ceil(seq_idx.shape[-1] / chunk_size) + (cu_seqlens % chunk_size
-                                                     > 0).sum()
-    chunk_indices = torch.arange(N, dtype=torch.int, device=seq_idx.device)
-    chunk_offsets = torch.zeros((N, ), dtype=torch.int, device=seq_idx.device)
-
-    cu_seqlens = cu_seqlens.tolist() + [seq_idx.shape[-1]]
-    p = 0  # num of insertions
-    for s, e in zip(cu_seqlens[:-1], cu_seqlens[1:]):
-
-        # if does not divide chunk_size, then there is one chunk insertion
-        p += (s % chunk_size > 0)
-
-        # get the dimensions
-        # - the + 1 for _e is to shift the boundary by one chunk
-        # - this shifting is not needed if chunk_size divides e
-        _s, _e = s // chunk_size + p, e // chunk_size + p + (e % chunk_size
-                                                             > 0)
-
-        # adjust inidces and offsets
-        chunk_indices[_s:_e] -= p
-        chunk_offsets[_s] = s % chunk_size
-
-    return chunk_indices, chunk_offsets
-
-
 def _chunk_scan_fwd(
     cb,
     x,
@@ -486,6 +450,8 @@ def _chunk_scan_fwd(
     D=None,
     z=None,
     seq_idx=None,
+    chunk_indices=None,
+    chunk_offsets=None,
     initial_states=None,
 ):
     batch, seqlen, nheads, headdim = x.shape
@@ -502,7 +468,6 @@ def _chunk_scan_fwd(
     assert dA_cumsum.shape == (batch, nheads, nchunks, chunk_size)
     assert states.shape == (batch, nchunks, nheads, headdim, dstate)
 
-    chunk_indices, chunk_offsets = None, None
     if seq_idx is not None:
         assert seq_idx.shape == (batch, seqlen)
 
@@ -510,15 +475,19 @@ def _chunk_scan_fwd(
             # with initial states, we need to take care of how
             # seq_idx crosses the boundaries
             assert batch == 1, "chunk scan only supports initial states with batch 1"
-            assert initial_states.shape == (seq_idx[0].max() + 1, nheads,
-                                            headdim, dstate)
 
             if initial_states.shape[0] == 1:
                 # no in this case no point to use initial states
                 initial_states = None
             else:
-                chunk_indices, chunk_offsets = _seq_idx_to_chunk_indices_offsets(
-                    seq_idx, chunk_size)
+                assert chunk_indices is not None and chunk_offsets is not None, \
+                    (
+                        "chunk_indices and chunk_offsets should have been set"
+                    )
+        else:
+            chunk_indices, chunk_offsets = None, None
+    else:
+        chunk_indices, chunk_offsets = None, None
 
     # Allocates output.
     out = torch.empty(batch,

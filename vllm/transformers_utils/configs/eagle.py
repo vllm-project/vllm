@@ -5,6 +5,7 @@ from typing import Optional, Union
 
 from transformers import AutoConfig, PretrainedConfig
 
+import vllm.envs as envs
 from vllm.transformers_utils.configs.deepseek_vl2 import DeepseekV2Config
 
 
@@ -41,8 +42,10 @@ class EAGLEConfig(PretrainedConfig):
             self.truncated_vocab_size = self.model.vocab_size if \
                 truncated_vocab_size is None else truncated_vocab_size
 
-        if "architectures" not in kwargs:
+        if not envs.VLLM_USE_V1:
             kwargs["architectures"] = ["EAGLEModel"]
+        else:
+            kwargs["architectures"] = ["EagleLlamaForCausalLM"]
 
         super().__init__(**kwargs)
 
