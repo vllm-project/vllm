@@ -8,7 +8,8 @@ from vllm.distributed import (divide, get_tensor_model_parallel_rank,
 from torch import nn
 import torch
 
-register_FHT = {1024: torch.ops._rocm_C.fast_hadamard_transform, 512: torch.ops._rocm_C.fast_hadamard_transform}
+register_FHT = {1024: torch.ops._rocm_C.fast_hadamard_transform, 
+                512: torch.ops._rocm_C.fast_hadamard_transform}
 
 hadamard_sizes={28:torch.FloatTensor([
     [
@@ -126,31 +127,36 @@ hadamard_sizes={28:torch.FloatTensor([
 class HadamardTransform(nn.Module):
     def __init__(self, layer: RowParallelLinear):
         super().__init__()
+        msg="cannot initialize hadamard transform"
         if hasattr(layer,"weight"):
             weight = getattr(layer,"weight")
             if hasattr(weight,"device"):
                 self._device=getattr(weight,"device")
             else:
-                raise ValueError("cannot initialize hadamard transform: corresponding layer has no device")
+                raise ValueError(f"{msg}: corresponding layer has no device")
             if hasattr(weight,"dtype"):
                 self._dtype=getattr(weight,"dtype")
             else:
-                raise ValueError("cannot initialize hadamamrd trnasform: corresponding layer has no dtype")
+                raise ValueError(f"{msg}: corresponding layer has no dtype")
         else:
-            raise ValueError("cannot initialize hadamard transform: corresponding layer has not yet been initialized")
+            raise ValueError(f"{msg}: corresponding layer has not"
+                             f" yet been initialized")
         self.partition_input_size=layer.input_size_per_partition
         self.actual_input_size=layer.input_size
 
 def matrix_multiply_via_linear(A,X,m,n):
     """
-    - m,n are the dimensions of matrix X, and it is assumed that matrix A input dim = m
+    - m,n are the dimensions of matrix X, and it is 
+    assumed that matrix A input dim = m
 
     - perform the hadamard multiply
         - reshape for matrix multiply
             - `tensor.reshape(-1,hadamard_k.input_size_per_partition,n)`
-        - transpose along last two dimensions (we get (\*,n,input_size_per_partition)), then make it contiguous
+        - transpose along last two dimensions 
+        (we get (\*,n,input_size_per_partition)), then make it contiguous
         - call the row parallel linear layer forward pass
-        - reshape the output to the original shape (is transpose needed of the last dimension?) - output is like:
+        - reshape the output to the original shape 
+        (is transpose needed of the last dimension?) - output is like:
             og^T
             og^T
             ...
@@ -181,7 +187,10 @@ def matrix_multiply_via_linear(A,X,m,n):
     return X
 
 class QuaRotR4(HadamardTransform):
-    def __init__(self, layer: RowParallelLinear, size_FHT = None, size_k = None):
+    def __init__(self, 
+                 layer: RowParallelLinear, 
+                 size_FHT = None, 
+                 size_k = None):
         super().__init__(layer)
 
         """
@@ -199,15 +208,18 @@ class QuaRotR4(HadamardTransform):
                 raise ValueError(f"No matching size_k for size_FHT={size_FHT}")
         elif size_k is None and size_FHT is None:
             import itertools
-            for s_FHT,s_k in itertools.product(register_FHT.keys(),hadamard_sizes.keys()):
+            for s_FHT,s_k in itertools.product(register_FHT.keys(),
+                                               hadamard_sizes.keys()):
                 if s_FHT*s_k==self.actual_input_size:
                     size_FHT,size_k=s_FHT,s_k
                     break
             else:
-                raise ValueError(f"No matching size_k and size_FHT found for input size {self.actual_input_size}")
+                raise ValueError(f"No matching size_k and size_FHT found"
+                                 f" for input size {self.actual_input_size}")
         else:
             if size_k*size_FHT != self.actual_input_size:
-                raise ValueError(f"size_k={size_k} and size_FHT={size_FHT} do not match {self.actual_input_size}")
+                raise ValueError(f"size_k={size_k} and size_FHT={size_FHT}"
+                                 f" do not match {self.actual_input_size}")
 
 
         hadamard_k=hadamard_sizes[size_k].to(self._device).bfloat16()
@@ -228,7 +240,8 @@ class QuaRotR4(HadamardTransform):
 
         """
         - perform FHT - "preprocess the input before the hadamard multiply"
-            - reshape the input tensor to groups of 512 for the 8B, 1024 for the 70B:
+            - reshape the input tensor to groups of 512 for the 8B, 
+            1024 for the 70B:
                 - `tensor.reshape(-1, n)`
         - feed it into the appropriate FHT kernel
         """
@@ -244,10 +257,16 @@ class QuaRotR4(HadamardTransform):
         """
 
         if get_tensor_model_parallel_world_size()==1:
-            X=X.view(-1,self.hadamard_k.input_size_per_partition,self.chunk_size)
+            X=X.view(-1,
+                     self.hadamard_k.input_size_per_partition,
+                     self.chunk_size)
             X=self.hadamard_k.weight@X
         else:
-            X=matrix_multiply_via_linear(A=self.hadamard_k,X=X,m=self.hadamard_k.input_size_per_partition,n=self.chunk_size)
+            m=self.hadamard_k.input_size_per_partition
+            X=matrix_multiply_via_linear(A=self.hadamard_k,
+                                         X=X,
+                                         m=m,
+                                         n=self.chunk_size)
 
         X=X.view(og_shape)
 

@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
-from typing import Callable, List, Optional, Set
+from typing import Callable, List, Optional, Set, Tuple, Any
 
 import torch
 
@@ -19,12 +19,15 @@ logger = init_logger(__name__)
 class QuarkW8A8Int8(QuarkScheme):
     _kernel_backends_being_used: Set[str] = set()
 
-    def __init__(self, qscheme: str, is_static_input_scheme: Optional[bool],
-            input_symmetric: Optional[bool], online_rotation_method: Optional[Callable]):
+    def __init__(self, 
+                 qscheme: str, 
+                 is_static_input_scheme: Optional[bool],
+                 input_symmetric: Optional[bool],
+                 online_rot_method: Optional[Tuple[Callable[...,Any], ...]]):
         self.qscheme = qscheme
         self.is_static_input_scheme = is_static_input_scheme
         self.input_symmetric = input_symmetric
-        self.online_rotation_method = online_rotation_method
+        self.online_rotation_method = online_rot_method
 
     @classmethod
     def get_min_capability(cls) -> int:
