@@ -2154,7 +2154,7 @@ class SpeculativeConfig:
     according to the log probability settings in SamplingParams."""
 
     # Draft model configuration
-    quantization: Optional[str] = None
+    quantization: Optional[QuantizationMethods] = None
     """Quantization method that was used to quantize the draft model weights.
     If `None`, we assume the model weights are not quantized. Note that it only
     takes effect when using the draft model-based speculative method."""
