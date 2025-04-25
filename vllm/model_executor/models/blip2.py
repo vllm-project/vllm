@@ -365,6 +365,7 @@ class Blip2QFormerModel(nn.Module):
         *,
         quant_config: Optional[QuantizationConfig],
         cache_config: Optional[CacheConfig],
+        prefix: str = "",
     ) -> None:
         super().__init__()
 

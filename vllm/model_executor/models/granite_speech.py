@@ -201,8 +201,9 @@ class GraniteSpeechEncoderProjector(nn.Module):
     def __init__(
         self,
         config: PretrainedConfig,
-        quant_config: Optional[QuantizationConfig],
         cache_config: CacheConfig,
+        quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = "",
     ):
         super().__init__()
         self.hidden_size = config.projector_config.hidden_size
@@ -221,6 +222,7 @@ class GraniteSpeechEncoderProjector(nn.Module):
             config.projector_config,
             quant_config=quant_config,
             cache_config=cache_config,
+            prefix=f"{prefix}.qformer",
         )
         self.linear = nn.Linear(config.projector_config.hidden_size,
                                 config.text_config.hidden_size)
@@ -234,12 +236,11 @@ class GraniteSpeechEncoderProjector(nn.Module):
         hidden_states = hidden_states.view(batch_size * nblocks,
                                            self.window_size, dim)
 
-        query_output = self.qformer(
+        last_hidden_state = self.qformer(
             query_embeds=self.query.data,
             encoder_hidden_states=hidden_states,
         )
 
-        last_hidden_state = query_output
         query_proj = self.linear(
             last_hidden_state.view(
                 batch_size,
@@ -253,20 +254,26 @@ class GraniteSpeechEncoderProjector(nn.Module):
 class GraniteSpeechConformerFeedForward(nn.Module):
     """Feedforward module for conformer encoder blocks."""
 
-    def __init__(self, config: PretrainedConfig):
+    def __init__(self,
+                 config: PretrainedConfig,
+                 quant_config: Optional[QuantizationConfig] = None,
+                 prefix: str = ""):
         super().__init__()
         self.pre_norm = nn.LayerNorm(config.hidden_dim)
 
-        # TODO - pass quant config / prefix through
         self.up_proj = ColumnParallelLinear(
             input_size=config.hidden_dim,
             output_size=config.hidden_dim * config.feedforward_mult,
+            quant_config=quant_config,
+            prefix=f"{prefix}.up_proj",
         )
         self.silu = nn.SiLU()
 
         self.down_proj = RowParallelLinear(
             input_size=config.hidden_dim * config.feedforward_mult,
             output_size=config.hidden_dim,
+            quant_config=quant_config,
+            prefix=f"{prefix}.down_proj",
         )
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
@@ -283,7 +290,7 @@ class GraniteSpeechConformerAttention(nn.Module):
     for more details.
     """
 
-    def __init__(self, config: PretrainedConfig):
+    def __init__(self, config: PretrainedConfig, prefix: str = ""):
         super().__init__()
 
         inner_dim = config.dim_head * config.num_heads
@@ -316,6 +323,8 @@ class GraniteSpeechConformerAttention(nn.Module):
             hidden_states = torch.nn.functional.pad(
                 hidden_states, (0, 0, 0, self.context_size - remainder))
 
+        # NOTE: would be nice to try to use qkvparallellinear
+        # here for this block attention implementation if possible
         query_states = self.to_q(hidden_states)
         key_states, value_states = self.to_kv(hidden_states).chunk(2, dim=-1)
 
@@ -360,7 +369,11 @@ class GraniteSpeechConformerAttention(nn.Module):
 class GraniteSpeechConformerDepthWiseConv1d(nn.Module):
     """Wrapper for padded 1D pointwise convolution."""
 
-    def __init__(self, chan_in: int, chan_out: int, kernel_size: int):
+    def __init__(self,
+                 chan_in: int,
+                 chan_out: int,
+                 kernel_size: int,
+                 prefix: str = ""):
         super().__init__()
         # Padding for the 1D conv is symmetric or close (i.e., offset by one).
         pad = kernel_size // 2
@@ -383,7 +396,7 @@ class GraniteSpeechConformerConvModule(nn.Module):
     convolutional layers.
     """
 
-    def __init__(self, config: PretrainedConfig):
+    def __init__(self, config: PretrainedConfig, prefix: str = ""):
         super().__init__()
         inner_dim = config.hidden_dim * config.conv_expansion_factor
 
@@ -394,6 +407,7 @@ class GraniteSpeechConformerConvModule(nn.Module):
             inner_dim,
             inner_dim,
             kernel_size=config.conv_kernel_size,
+            prefix=f"{prefix}.depth_conv",
         )
         self.silu = nn.SiLU()
         self.batch_norm = nn.BatchNorm1d(inner_dim)
@@ -413,12 +427,16 @@ class GraniteSpeechConformerBlock(nn.Module):
     """Conformer block, consisting largely of linear layers,
     attention, and convolutional layers."""
 
-    def __init__(self, config: PretrainedConfig):
+    def __init__(self, config: PretrainedConfig, prefix: str = ""):
         super().__init__()
-        self.ff1 = GraniteSpeechConformerFeedForward(config)
-        self.attn = GraniteSpeechConformerAttention(config)
-        self.conv = GraniteSpeechConformerConvModule(config)
-        self.ff2 = GraniteSpeechConformerFeedForward(config)
+        self.ff1 = GraniteSpeechConformerFeedForward(config,
+                                                     prefix=f"{prefix}.ff1")
+        self.attn = GraniteSpeechConformerAttention(config,
+                                                    prefix=f"{prefix}.attn")
+        self.conv = GraniteSpeechConformerConvModule(config,
+                                                     prefix=f"{prefix}.conv")
+        self.ff2 = GraniteSpeechConformerFeedForward(config,
+                                                     prefix=f"{prefix}.ff2")
         self.post_norm = nn.LayerNorm(config.hidden_dim)
 
     def forward(self, hidden_states: torch.Tensor,
@@ -434,7 +452,10 @@ class GraniteSpeechConformerBlock(nn.Module):
 
 class GraniteSpeechCTCEncoder(nn.Module):
 
-    def __init__(self, config: PretrainedConfig):
+    def __init__(self,
+                 config: PretrainedConfig,
+                 prefix: str,
+                 quant_config: Optional[QuantizationConfig] = None):
         super().__init__()
         self.config = config
 
@@ -449,20 +470,26 @@ class GraniteSpeechCTCEncoder(nn.Module):
                                       config.hidden_dim,
                                       bias=True)
         self.layers = nn.ModuleList([
-            GraniteSpeechConformerBlock(config)
-            for _ in range(config.num_layers)
+            GraniteSpeechConformerBlock(
+                config,
+                prefix=f"{prefix}.layers.{idx}",
+            ) for idx in range(config.num_layers)
         ])
 
         self.out = ColumnParallelLinear(
             input_size=config.hidden_dim,
             output_size=config.output_dim,
             bias=True,
+            quant_config=quant_config,
+            prefix=f"{prefix}.out",
         )
 
         self.out_mid = RowParallelLinear(
             input_size=config.output_dim,
             output_size=config.hidden_dim,
             bias=True,
+            quant_config=quant_config,
+            prefix=f"{prefix}.out_mid",
         )
         self.softmax = nn.Softmax(dim=-1)
         self.num_layers = config.num_layers
@@ -505,7 +532,7 @@ class GraniteSpeechForConditionalGeneration(
         ],
     }
 
-    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str):
         super().__init__()
         config = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
@@ -523,11 +550,16 @@ class GraniteSpeechForConditionalGeneration(
             prefix=maybe_prefix(prefix, "language_model"),
         )
 
-        self.encoder = GraniteSpeechCTCEncoder(config=config.encoder_config)
+        self.encoder = GraniteSpeechCTCEncoder(
+            config=config.encoder_config,
+            quant_config=quant_config,
+            prefix=f"{prefix}.encoder",
+        )
         self.projector = GraniteSpeechEncoderProjector(
             config=config,
             quant_config=quant_config,
             cache_config=cache_config,
+            prefix=f"{prefix}.projector",
         )
 
         self.make_empty_intermediate_tensors = (
