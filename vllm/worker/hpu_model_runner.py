@@ -41,7 +41,7 @@ from vllm.lora.request import LoRARequest
 from vllm.lora.worker_manager import LRUCacheWorkerLoRAManager
 from vllm.model_executor import SamplingMetadata
 from vllm.model_executor.layers.layernorm import RMSNorm
-from vllm.model_executor.layers.sampler import SamplerOutput
+from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding)
 from vllm.model_executor.model_loader import get_model
@@ -316,6 +316,7 @@ class HpuModelAdapter:
 
     def __init__(self, model, vllm_config):
         self.model = model
+        self.sampler = get_sampler()
         self.prefill_use_fusedsdpa = os.getenv('VLLM_PROMPT_USE_FUSEDSDPA',
                                                '0').lower() in ['1', 'true']
         self.vllm_config = vllm_config
@@ -454,7 +455,7 @@ class HpuModelAdapter:
         return self.model.compute_logits(*args, **kwargs)
 
     def sample(self, *args, **kwargs):
-        return self.model.sample(*args, **kwargs)
+        return self.sampler(*args, **kwargs)
 
 
 class PreparePromptMetadata(NamedTuple):
@@ -2167,7 +2168,7 @@ class HPUModelRunner(HPUModelRunnerBase[ModelInputForHPUWithSamplingMetadata]):
                 # in case of multi-step scheduling
                 # we only want to pythonize in the last step
                 sampling_metadata.skip_sampler_cpu_output = True
-                self.model.model.sampler.include_gpu_probs_tensor = True
+                self.model.sampler.include_gpu_probs_tensor = True
             cache_orig_output_tokens_len: List[Dict] = []
 
             def try_revert_dummy_output_tokens():
