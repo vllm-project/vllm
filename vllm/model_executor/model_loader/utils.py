@@ -30,15 +30,6 @@ def set_default_torch_dtype(dtype: torch.dtype):
     torch.set_default_dtype(old_dtype)
 
 
-def is_transformers_impl_compatible(
-        arch: str,
-        module: Optional["transformers.PreTrainedModel"] = None) -> bool:
-    mod = module or getattr(transformers, arch, None)
-    if mod is None:
-        return False
-    return mod.is_backend_compatible()
-
-
 def resolve_transformers_arch(model_config: ModelConfig,
                               architectures: list[str]):
     for i, arch in enumerate(architectures):
@@ -55,20 +46,32 @@ def resolve_transformers_arch(model_config: ModelConfig,
         #     "AutoModelFor<Task>": "<your-repo-name>--<config-name>",
         # },
         auto_modules = {
-            name: get_class_from_dynamic_module(module, model_config.model)
+            name:
+            get_class_from_dynamic_module(module,
+                                          model_config.model,
+                                          revision=model_config.revision)
             for name, module in sorted(auto_map.items(), key=lambda x: x[0])
         }
-        custom_model_module = auto_modules.get("AutoModel")
+        model_module = getattr(transformers, arch, None)
+        if model_module is None:
+            if "AutoModel" not in auto_map:
+                raise ValueError(
+                    f"Cannot find model module. '{arch}' is not a registered "
+                    "model in the Transformers library (only relevant if the "
+                    "model is meant to be in Transformers) and 'AutoModel' is "
+                    "not present in the model config's 'auto_map' (relevant "
+                    "if the model is custom).")
+            model_module = auto_modules["AutoModel"]
         # TODO(Isotr0py): Further clean up these raises.
         # perhaps handled them in _ModelRegistry._raise_for_unsupported?
         if model_config.model_impl == ModelImpl.TRANSFORMERS:
-            if not is_transformers_impl_compatible(arch, custom_model_module):
+            if not model_module.is_backend_compatible():
                 raise ValueError(
                     f"The Transformers implementation of {arch} is not "
                     "compatible with vLLM.")
             architectures[i] = "TransformersForCausalLM"
         if model_config.model_impl == ModelImpl.AUTO:
-            if not is_transformers_impl_compatible(arch, custom_model_module):
+            if not model_module.is_backend_compatible():
                 raise ValueError(
                     f"{arch} has no vLLM implementation and the Transformers "
                     "implementation is not compatible with vLLM. Try setting "
@@ -97,10 +100,10 @@ def get_model_architecture(
         architectures = ["QuantMixtralForCausalLM"]
 
     vllm_supported_archs = ModelRegistry.get_supported_archs()
-    is_vllm_supported = any(arch in vllm_supported_archs
-                            for arch in architectures)
-    if (not is_vllm_supported
-            or model_config.model_impl == ModelImpl.TRANSFORMERS):
+    vllm_not_supported = not any(arch in vllm_supported_archs
+                                 for arch in architectures)
+    if (model_config.model_impl == ModelImpl.TRANSFORMERS or
+            model_config.model_impl != ModelImpl.VLLM and vllm_not_supported):
         architectures = resolve_transformers_arch(model_config, architectures)
 
     model_cls, arch = ModelRegistry.resolve_model_cls(architectures)

@@ -16,6 +16,7 @@ class ServerConfig(TypedDict, total=False):
     system_prompt: Optional[str]
     supports_parallel: Optional[bool]
     supports_rocm: Optional[bool]
+    extended: Optional[bool]  # tests do not run in CI automatically
 
 
 def patch_system_prompt(messages: list[dict[str, Any]],
@@ -81,6 +82,35 @@ CONFIGS: dict[str, ServerConfig] = {
         ],
         "supports_parallel":
         False,
+    },
+    "llama4": {
+        "model":
+        "meta-llama/Llama-4-Scout-17B-16E-Instruct",
+        "arguments": [
+            "--enforce-eager", "--no-enable-prefix-caching",
+            "--tool-call-parser", "pythonic", "--chat-template",
+            str(VLLM_PATH /
+                "examples/tool_chat_template_llama4_pythonic.jinja"), "-tp",
+            "4"
+        ],
+        "supports_parallel":
+        False,
+        "extended":
+        True
+    },
+    "llama4_json": {
+        "model":
+        "meta-llama/Llama-4-Scout-17B-16E-Instruct",
+        "arguments": [
+            "--enforce-eager", "--no-enable-prefix-caching", "-tp", "4",
+            "--distributed-executor-backend", "mp", "--tool-call-parser",
+            "llama4_json", "--chat-template",
+            str(VLLM_PATH / "examples/tool_chat_template_llama4_json.jinja")
+        ],
+        "supports_parallel":
+        True,
+        "extended":
+        True
     },
     "mistral": {
         "model":

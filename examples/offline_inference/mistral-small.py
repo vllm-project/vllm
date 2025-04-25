@@ -16,11 +16,11 @@ from vllm.sampling_params import SamplingParams
 # # Mistral format
 # vllm serve mistralai/Mistral-Small-3.1-24B-Instruct-2503 \
 #   --tokenizer-mode mistral --config-format mistral --load-format mistral \
-#   --limit-mm-per-prompt 'image=4' --max-model-len 16384
+#   --limit-mm-per-prompt '{"image":4}' --max-model-len 16384
 #
 # # HF format
 # vllm serve mistralai/Mistral-Small-3.1-24B-Instruct-2503 \
-#   --limit-mm-per-prompt 'image=4' --max-model-len 16384
+#   --limit-mm-per-prompt '{"image":4}' --max-model-len 16384
 # ```
 #
 # - Client:
@@ -62,6 +62,7 @@ def run_simple_demo(args: argparse.Namespace):
         tokenizer_mode="mistral" if args.format == "mistral" else "auto",
         config_format="mistral" if args.format == "mistral" else "auto",
         load_format="mistral" if args.format == "mistral" else "auto",
+        limit_mm_per_prompt={"image": 1},
         max_model_len=4096,
         max_num_seqs=2,
         tensor_parallel_size=2,
@@ -90,8 +91,9 @@ def run_simple_demo(args: argparse.Namespace):
         },
     ]
     outputs = llm.chat(messages, sampling_params=sampling_params)
-
+    print("-" * 50)
     print(outputs[0].outputs[0].text)
+    print("-" * 50)
 
 
 def run_advanced_demo(args: argparse.Namespace):
@@ -162,10 +164,12 @@ def run_advanced_demo(args: argparse.Namespace):
     ]
 
     outputs = llm.chat(messages=messages, sampling_params=sampling_params)
+    print("-" * 50)
     print(outputs[0].outputs[0].text)
+    print("-" * 50)
 
 
-def main():
+def parse_args():
     parser = argparse.ArgumentParser(
         description="Run a demo in simple or advanced mode.")
 
@@ -184,8 +188,11 @@ def main():
         '--disable-mm-preprocessor-cache',
         action='store_true',
         help='If True, disables caching of multi-modal preprocessor/mapper.')
+    return parser.parse_args()
 
-    args = parser.parse_args()
+
+def main():
+    args = parse_args()
 
     if args.mode == "simple":
         print("Running simple demo...")

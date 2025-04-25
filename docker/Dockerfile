@@ -162,6 +162,9 @@ ENV UV_HTTP_TIMEOUT=500
 COPY requirements/lint.txt requirements/lint.txt
 COPY requirements/test.txt requirements/test.txt
 COPY requirements/dev.txt requirements/dev.txt
+# Workaround for #17068
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv pip install --system mamba-ssm==2.2.4 --no-build-isolation
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip install --system -r requirements/dev.txt
 #################### DEV IMAGE ####################
@@ -240,6 +243,8 @@ if [ "$TARGETPLATFORM" != "linux/arm64" ]; then \
     uv pip install --system https://github.com/flashinfer-ai/flashinfer/releases/download/v0.2.1.post2/flashinfer_python-0.2.1.post2+cu124torch2.6-cp38-abi3-linux_x86_64.whl ; \
 fi
 COPY examples examples
+COPY benchmarks benchmarks
+COPY ./vllm/collect_env.py .
 
 # Although we build Flashinfer with AOT mode, there's still
 # some issues w.r.t. JIT compilation. Therefore we need to
@@ -263,6 +268,9 @@ ADD . /vllm-workspace/
 ENV UV_HTTP_TIMEOUT=500
 
 # install development dependencies (for testing)
+# Workaround for #17068
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv pip install --system mamba-ssm==2.2.4 --no-build-isolation
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip install --system -r requirements/dev.txt
 

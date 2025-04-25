@@ -11,7 +11,6 @@ repos:
   hooks:
   - id: yapf
     args: [--in-place, --verbose]
-    additional_dependencies: [toml] # TODO: Remove when yapf is upgraded
 - repo: https://github.com/astral-sh/ruff-pre-commit
   rev: v0.9.3
   hooks:
@@ -114,6 +113,12 @@ repos:
       - 'git ls-files | grep " " && echo "Filenames should not contain spaces!" && exit 1 || exit 0'
     language: system
     always_run: true
+    pass_filenames: false
+  - id: update-dockerfile-graph
+    name: Update Dockerfile dependency graph
+    entry: tools/update-dockerfile-graph.sh
+    language: script
+    files: ^docker/Dockerfile$
     pass_filenames: false
   # Keep `suggestion` last
   - id: suggestion

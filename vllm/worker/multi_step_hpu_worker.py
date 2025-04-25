@@ -1,4 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
+
+###############################################################################
+# Copyright (C) 2025 Habana Labs, Ltd. an Intel Company
+###############################################################################
+
 import dataclasses
 from typing import Dict, Optional, Tuple
 

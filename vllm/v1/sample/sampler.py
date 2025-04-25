@@ -235,9 +235,19 @@ class Sampler(nn.Module):
         # TODO(houseroad): this implementation is extremely inefficient.
         # One idea is implement this as a PyTorch C++ op, and we may
         # even optimize the logit_bias layout.
+
+        # Get vocabulary size from logits
+        vocab_size = logits.shape[-1]
+
         for i, logit_bias in enumerate(sampling_metadata.logit_bias):
             if logit_bias:
                 for token_id, bias in logit_bias.items():
+                    # Check token_id bounds to ensure within vocabulary
+                    if token_id < 0 or token_id >= vocab_size:
+                        raise ValueError(
+                            f"token_id {token_id} in logit_bias contains "
+                            f"out-of-vocab token id. Vocabulary size: "
+                            f"{vocab_size}")
                     logits[i, token_id] += bias
         return logits
 

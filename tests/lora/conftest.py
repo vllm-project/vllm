@@ -267,3 +267,15 @@ def run_with_both_engines_lora(request, monkeypatch):
         monkeypatch.setenv('VLLM_USE_V1', '0')
 
     yield
+
+
+@pytest.fixture
+def reset_default_device():
+    """
+    Some tests, such as `test_punica_ops.py`, explicitly set the 
+    default device, which can affect subsequent tests. Adding this fixture 
+    helps avoid this problem.
+    """
+    original_device = torch.get_default_device()
+    yield
+    torch.set_default_device(original_device)
