@@ -93,18 +93,16 @@ def test_batching(
 
 @pytest.mark.parametrize("model", [SSM_MODELS[0], HYBRID_MODELS[0]])
 @pytest.mark.parametrize("max_tokens", [32])
+@pytest.mark.parametrize("num_logprobs", [5])
 @pytest.mark.parametrize("chunked_prefill_token_size", [1, 4, 16])
 def test_chunked_prefill(
     vllm_runner,
     example_prompts,
     model: str,
     max_tokens: int,
+    num_logprobs: int,
     chunked_prefill_token_size: int,
 ) -> None:
-    """
-    Checks exact match decode between huggingface model and vllm runner with
-    chunked prefill.
-    """
     max_num_seqs = chunked_prefill_token_size
     max_num_batched_tokens = chunked_prefill_token_size
 
@@ -112,16 +110,16 @@ def test_chunked_prefill(
                      enable_chunked_prefill=True,
                      max_num_batched_tokens=max_num_batched_tokens,
                      max_num_seqs=max_num_seqs) as vllm_model:
-        chunked = vllm_model.generate_greedy(example_prompts,
-                                             max_tokens=max_tokens)
+        chunked = vllm_model.generate_greedy_logprobs(example_prompts,
+                                                      max_tokens, num_logprobs)
 
     with vllm_runner(model,
                      enable_chunked_prefill=False,
                      max_num_seqs=max_num_seqs) as vllm_model:
-        non_chunked = vllm_model.generate_greedy(example_prompts,
-                                                 max_tokens=max_tokens)
+        non_chunked = vllm_model.generate_greedy_logprobs(
+            example_prompts, max_tokens, num_logprobs)
 
-    check_outputs_equal(
+    check_logprobs_close(
         outputs_0_lst=chunked,
         outputs_1_lst=non_chunked,
         name_0="chunked",
