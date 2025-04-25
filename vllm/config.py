@@ -321,7 +321,7 @@ class ModelConfig:
     for multimodal models."""
     use_async_output_proc: bool = True
     """Whether to use async output processor."""
-    config_format: ConfigFormat = ConfigFormat.AUTO
+    config_format: ConfigFormat = ConfigFormat.AUTO.value
     """The format of the model config to load:\n
     - "auto" will try to load the config in hf format if available else it
     will try to load in mistral format.\n
@@ -376,7 +376,7 @@ class ModelConfig:
     When specified via CLI, the argument must be a valid JSON string."""
     enable_sleep_mode: bool = False
     """Enable sleep mode for the engine (only cuda platform is supported)."""
-    model_impl: Union[str, ModelImpl] = ModelImpl.AUTO
+    model_impl: Union[str, ModelImpl] = ModelImpl.AUTO.value
     """Which implementation of the model to use:\n
     - "auto" will try to use the vLLM implementation, if it exists, and fall
     back to the Transformers implementation if no vLLM implementation is
