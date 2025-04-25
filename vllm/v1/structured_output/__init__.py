@@ -95,6 +95,10 @@ class StructuredOutputManager:
                     speculative_config.num_speculative_tokens
             else:
                 max_num_spec_tokens = 0
+
+            # Allocate a bitmask for each token needing to be checked:
+            # one for each speculative position, and one more for the
+            # bonus token / non-speculative token.
             self._grammar_bitmask = \
                 self.backend.allocate_token_bitmask(
                     max_batch_size * (1 + max_num_spec_tokens))
