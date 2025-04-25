@@ -17,6 +17,15 @@ class _HfExamplesInfo:
     extras: Mapping[str, str] = field(default_factory=dict)
     """Extra models to use for testing this architecture."""
 
+    arch: Optional[str] = None
+    """The architecture class name.
+    This is set in `HfExampleModels.__init__`."""
+
+    @property
+    def tiny(self) -> str:
+        """The tiny model to use for testing with this architecture."""
+        return f"hf-tiny-model-private/tiny-random-{self.arch}"
+
     tokenizer: Optional[str] = None
     """Set the tokenizer to load for this architecture."""
 
@@ -414,6 +423,9 @@ class HfExampleModels:
         super().__init__()
 
         self.hf_models = hf_models
+        for arch, hf_model in hf_models.items():
+            if hf_model.arch is None:
+                self.hf_models[arch].arch = arch
 
     def get_supported_archs(self) -> Set[str]:
         return self.hf_models.keys()
