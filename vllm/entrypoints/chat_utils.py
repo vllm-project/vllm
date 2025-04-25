@@ -1215,8 +1215,7 @@ def apply_hf_chat_template(
         # Log and report any library-related exceptions for further
         # investigation.
         logger.exception(
-            "An error occurred while loading and utilizing third-party"
-            "libraries.")
+            "An error occurred in `transformers` while applying chat template")
         raise ValueError from e
 
 def apply_mistral_chat_template(
@@ -1255,6 +1254,5 @@ def apply_mistral_chat_template(
         # Log and report any library-related exceptions for further
         # investigation.
         logger.exception(
-            "An error occurred while loading and utilizing third-party"
-            "libraries.")
+            "An error occurred in `mistral_common` while applying chat template")
         raise ValueError from e
