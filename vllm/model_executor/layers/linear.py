@@ -1275,9 +1275,7 @@ class RowParallelLinear(LinearBase):
             assert loaded_weight.numel() == 1
             loaded_weight = loaded_weight.reshape(1)
 
-        param.load_row_parallel_weight(
-            loaded_weight=loaded_weight,
-            use_presharded_weights=self.use_presharded_weights)
+        param.load_row_parallel_weight(loaded_weight=loaded_weight, )
 
     def forward(
         self, input_
