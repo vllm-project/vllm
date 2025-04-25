@@ -464,61 +464,6 @@ class MiniMaxVL01ForConditionalGeneration(nn.Module, SupportsMultiModal,
             )
         return inputs_embeds
 
-    def pack_image_features(self,
-                            image_features,
-                            image_sizes,
-                            image_newline=None):
-        new_image_features = []
-        feature_lens = []
-        for image_idx, image_feature in enumerate(image_features):
-            if image_feature.shape[0] > 1:
-                base_image_feature = image_feature[0]
-                image_feature = image_feature[1:]
-                height = width = (self.config.vision_config.image_size //
-                                  self.config.vision_config.patch_size)
-                if height * width != base_image_feature.shape[0]:
-                    raise ValueError("The number of patches is not " +
-                                     "consistent with the image size.")
-                num_patch_height, num_patch_width = get_anyres_image_grid_shape(
-                    image_sizes[image_idx],
-                    self.config.image_grid_pinpoints,
-                    self.config.vision_config.image_size,
-                )
-                image_feature = image_feature.view(num_patch_height,
-                                                   num_patch_width, height,
-                                                   width, -1)
-                image_feature = image_feature.permute(4, 0, 2, 1,
-                                                      3).contiguous()
-                image_feature = image_feature.flatten(1, 2).flatten(2, 3)
-                image_feature = unpad_image(image_feature,
-                                            image_sizes[image_idx])
-                if image_newline is not None:
-                    image_feature = torch.cat(
-                        (
-                            image_feature,
-                            image_newline[:, None, None].expand(
-                                *image_feature.shape[:-1], 1).to(
-                                    image_feature.dtype),
-                        ),
-                        dim=-1,
-                    )
-                image_feature = image_feature.flatten(1, 2).transpose(0, 1)
-                image_feature = torch.cat((base_image_feature, image_feature),
-                                          dim=0)
-            else:
-                image_feature = image_feature[0]
-                if image_newline is not None:
-                    image_feature = torch.cat(
-                        (image_feature, image_newline[None].to(image_feature)),
-                        dim=0)
-            new_image_features.append(image_feature)
-            feature_lens.append(image_feature.size(0))
-        image_features = torch.cat(new_image_features, dim=0)
-        feature_lens = torch.tensor(feature_lens,
-                                    dtype=torch.long,
-                                    device=image_features.device)
-        return image_features, feature_lens
-
     def _select_image_features(self, image_features: torch.Tensor, *,
                                strategy: str) -> torch.Tensor:
         if strategy == "default":
@@ -631,63 +576,6 @@ class MiniMaxVL01ForConditionalGeneration(nn.Module, SupportsMultiModal,
 
         return self._process_image_input(image_input)
 
-    def _process_vision_features(
-        self,
-        pixel_values: torch.Tensor,
-        image_sizes: Optional[list],
-        inputs_embeds: torch.Tensor,
-        input_ids: torch.Tensor,
-    ) -> torch.Tensor:
-        vision_feature_select_strategy = (
-            self.config.vision_feature_select_strategy)
-
-        if image_sizes is not None:
-            image_num_patches = [
-                image_size_to_num_patches(
-                    image_size=imsize,
-                    grid_pinpoints=self.config.image_grid_pinpoints,
-                    patch_size=self.config.vision_config.image_size,
-                ) for imsize in image_sizes
-            ]
-
-        image_features = self.vision_tower(pixel_values,
-                                           output_hidden_states=True)
-        selected_image_feature = image_features.hidden_states[
-            self.vision_feature_layer]
-
-        selected_image_feature = torch.chunk(selected_image_feature,
-                                             len(pixel_values),
-                                             dim=1)
-        selected_image_feature = torch.cat(selected_image_feature, dim=0)
-
-        if vision_feature_select_strategy == "default":
-            selected_image_feature = selected_image_feature[:, 1:]
-        elif vision_feature_select_strategy == "full":
-            selected_image_feature = selected_image_feature
-
-        image_features = self.multi_modal_projector(selected_image_feature)
-
-        if image_sizes is not None:
-            image_features = torch.split(image_features,
-                                         image_num_patches,
-                                         dim=0)
-            image_features, feature_lens = self.pack_image_features(
-                image_features,
-                image_sizes,
-                image_newline=self.image_newline,
-            )
-
-        inputs_embeds = inputs_embeds.to(image_features.dtype)
-        special_image_mask = ((input_ids == self.config.image_token_index
-                               ).unsqueeze(-1).expand_as(inputs_embeds).to(
-                                   inputs_embeds.device))
-        image_features = image_features.to(inputs_embeds.device,
-                                           inputs_embeds.dtype)
-        inputs_embeds = inputs_embeds.masked_scatter(special_image_mask,
-                                                     image_features)
-
-        return inputs_embeds
-
     def forward(
         self,
         input_ids: torch.Tensor,
@@ -696,25 +584,19 @@ class MiniMaxVL01ForConditionalGeneration(nn.Module, SupportsMultiModal,
         inputs_embeds: Optional[torch.Tensor] = None,
         **kwargs: object,
     ) -> Union[torch.Tensor, IntermediateTensors]:
-        attention_mask = kwargs.pop("attention_mask", None)
-        position_ids = kwargs.pop("position_ids", None)
-        if inputs_embeds is None:
-            # 1. Extract the input embeddings
-            for_inputs_embeds_ids = input_ids.clone()
-            for_inputs_embeds_ids[(
-                input_ids == self.config.image_token_index)] = 0
-            vision_embeddings = self.get_multimodal_embeddings(**kwargs)
-            inputs_embeds = self.get_input_embeddings(for_inputs_embeds_ids,
-                                                      vision_embeddings)
 
-        hidden_states = self.language_model.model(
-            input_ids=input_ids,
-            positions=positions,
-            intermediate_tensors=intermediate_tensors,
-            attention_mask=attention_mask,
-            position_ids=position_ids,
-            inputs_embeds=inputs_embeds,
-        )
+        if intermediate_tensors is not None:
+            inputs_embeds = None
+        elif inputs_embeds is None:
+            vision_embeddings = self.get_multimodal_embeddings(**kwargs)
+            inputs_embeds = self.get_input_embeddings(input_ids,
+                                                      vision_embeddings)
+            input_ids = None
+
+        hidden_states = self.language_model.model(input_ids,
+                                                  positions,
+                                                  intermediate_tensors,
+                                                  inputs_embeds=inputs_embeds)
 
         return hidden_states
 
