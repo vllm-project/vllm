@@ -76,33 +76,6 @@ def _get_padding_size(orig_width: int, orig_height: int, target_height: int,
     return padding_height, padding_width
 
 
-def get_navit_vision_model(layer_idx: int = -1, **kwargs):
-    vision_config = {
-        "hidden_size": 1152,
-        "image_size": 448,
-        "intermediate_size": 4304,
-        "model_type": "siglip_vision_model",
-        "num_attention_heads": 16,
-        "num_hidden_layers": 27,
-        "patch_size": 14,
-    }
-
-    model_config = SiglipVisionConfig(**vision_config, **kwargs)
-    if layer_idx < 0:
-        num_hidden_layers = model_config.num_hidden_layers \
-            + layer_idx + 1
-    else:
-        num_hidden_layers = layer_idx + 1
-
-    vision_model = Idefics2VisionTransformer(
-        config=model_config,
-        require_post_norm=False,
-        num_hidden_layers_override=num_hidden_layers,
-    )
-
-    return vision_model
-
-
 class Phi4MMProjector(nn.Module):
     def __init__(self, input_size: int, hidden_size: int):
         super().__init__()
@@ -133,7 +106,14 @@ class Phi4MMImageEmbedding(nn.Module):
             n_patches += 1
         self.num_img_tokens = (n_patches // 2) ** 2
 
-        self.img_processor = get_navit_vision_model(layer_idx=self.layer_idx)
+        num_hidden_layers = (
+            config.vision_config.num_hidden_layers + self.layer_idx + 1
+            if self.layer_idx < 0
+            else self.layer_idx + 1
+        )
+        self.img_processor = Idefics2VisionTransformer(config.vision_config, 
+                                                       require_post_norm=False,
+                                                       num_hidden_layers_override=num_hidden_layers)
         self.image_token_compression = nn.AvgPool2d(kernel_size=2, stride=2)
         self.img_projection = Phi4MMProjector(self.image_dim_out, config.hidden_size)
         self.global_img_feature_extensor = nn.Parameter(torch.zeros([1, 1, self.image_dim_out]))
