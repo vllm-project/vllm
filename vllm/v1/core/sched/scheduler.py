@@ -126,7 +126,7 @@ class Scheduler(SchedulerInterface):
         self.num_spec_tokens = self.num_lookahead_tokens = 0
         if speculative_config:
             self.num_spec_tokens = speculative_config.num_speculative_tokens
-            if speculative_config.method == "eagle":
+            if speculative_config.method in ("eagle", "eagle3"):
                 self.num_lookahead_tokens = self.num_spec_tokens
 
     def schedule(self) -> SchedulerOutput:
