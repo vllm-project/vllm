@@ -325,7 +325,7 @@ class EngineArgs:
                 optional = is_optional(type_hint)
                 if optional:
                     args = get_args(type_hint)
-                    args = [arg for arg in args if arg is not type(None)]
+                    args = tuple(arg for arg in args if arg is not type(None))
                     type_hint = Union[*args] if len(args) > 1 else args[0]
 
                 # Set type, action and choices for the field depending on the
