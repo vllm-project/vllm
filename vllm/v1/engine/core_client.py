@@ -565,14 +565,13 @@ class SyncMPClient(MPClient):
         msg = (self.core_engine.identity, request_type.value,
                *self.encoder.encode(request))
 
-        if len(msg) > 3:
-            tracker = self.input_socket.send_multipart(msg,
-                                                       copy=False,
-                                                       track=True)
-            self.add_pending_message(tracker, request)
-        else:
-            # No auxiliary buffers => no zero-copy buffers in request.
+        if len(msg) <= 3:
+            # No auxiliary buffers => no tensor backing buffers in request.
             self.input_socket.send_multipart(msg, copy=False)
+            return
+
+        tracker = self.input_socket.send_multipart(msg, copy=False, track=True)
+        self.add_pending_message(tracker, request)
 
     def call_utility(self, method: str, *args) -> Any:
         call_id = uuid.uuid1().int >> 64
@@ -741,15 +740,13 @@ class AsyncMPClient(MPClient):
         self.ensure_alive()
         self.free_pending_messages()
 
-        message = (engine.identity, ) + message
-        if not objects or len(message) <= 3:
-            # No auxiliary buffers => no zero-copy buffers in request.
-            return self.input_socket.send_multipart(message, copy=False)
+        msg = (engine.identity, ) + message
+        if not objects or len(msg) <= 3:
+            # No auxiliary buffers => no tensor backing buffers in request.
+            return self.input_socket.send_multipart(msg, copy=False)
 
-        future: asyncio.Future[
-            zmq.MessageTracker] = self.input_socket.send_multipart(message,
-                                                                   copy=False,
-                                                                   track=True)
+        future: asyncio.Future[zmq.MessageTracker]
+        future = self.input_socket.send_multipart(msg, copy=False, track=True)
 
         def add_pending(f: asyncio.Future[zmq.MessageTracker]):
             with contextlib.suppress(BaseException):
