@@ -614,7 +614,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # from these partial requests, we do so for simplicity.
             # We will ignore the sampled tokens from the partial requests.
             # TODO: Support prompt logprobs.
-            # TODO: add note for attn_metadata_i
+            # TODO: confirm which attn_metadata should be used
             logits_indices = attn_metadata_i.query_start_loc[1:] - 1
             spec_decode_metadata = None
         else:
@@ -1239,6 +1239,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 target_token_ids = self.input_ids[:num_scheduled_tokens]
                 target_positions = positions[:num_scheduled_tokens]
                 target_hidden_states = hidden_states[:num_scheduled_tokens]
+                # TODO: confirm which attn_metadata should be used
                 target_slot_mapping = attn_metadata.slot_mapping
                 cu_num_tokens = attn_metadata.query_start_loc
             else:
@@ -1253,6 +1254,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     dtype=torch.int32,
                     device=self.device,
                 )
+                # TODO: confirm which attn_metadata should be used
                 cu_num_tokens, token_indices = self.drafter.prepare_inputs(
                     attn_metadata.query_start_loc,
                     num_rejected_tokens,
@@ -1260,6 +1262,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 target_token_ids = self.input_ids[token_indices]
                 target_positions = positions[token_indices]
                 target_hidden_states = hidden_states[token_indices]
+                # TODO: confirm which attn_metadata should be used
                 target_slot_mapping = attn_metadata.slot_mapping[token_indices]
 
             draft_token_ids = self.drafter.propose(
@@ -1269,6 +1272,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 target_slot_mapping=target_slot_mapping,
                 next_token_ids=next_token_ids,
                 cu_num_tokens=cu_num_tokens,
+                # TODO: confirm which attn_metadata should be used
                 block_table=attn_metadata.block_table,
                 sampling_metadata=sampling_metadata,
             )
