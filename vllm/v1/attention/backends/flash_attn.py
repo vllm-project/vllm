@@ -304,8 +304,8 @@ class FlashAttentionMetadataBuilder:
               common_prefix_len: int,
               common_attn_metadata: CommonAttentionMetadata):
         max_seq_len = self.runner.seq_lens_np[:num_reqs].max()
-        seq_lens = common_attn_metadata.seq_lens
         query_start_loc = common_attn_metadata.query_start_loc
+        seq_lens = common_attn_metadata.seq_lens
         block_table = self.block_table
         block_table_tensor = block_table.get_device_tensor()[:num_reqs]
         slot_mapping = block_table.slot_mapping_cpu[:num_actual_tokens].to(

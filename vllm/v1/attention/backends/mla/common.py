@@ -470,6 +470,7 @@ class MLACommonMetadataBuilder(Generic[M]):
         # it blocks on all previous kernels.
         device = self.runner.device
         block_table_tensor = (self.block_table.get_device_tensor()[:num_reqs])
+        query_start_loc = common_attn_metadata.query_start_loc
         slot_mapping = (
             self.block_table.slot_mapping_cpu[:num_actual_tokens].to(
                 device, non_blocking=True).long())
@@ -477,7 +478,6 @@ class MLACommonMetadataBuilder(Generic[M]):
             device, non_blocking=True).long()
 
         seq_lens = common_attn_metadata.seq_lens
-        query_start_loc = common_attn_metadata.query_start_loc
 
         prefill_metadata = None
         if self._num_prefills > 0:
