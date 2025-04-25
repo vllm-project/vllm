@@ -220,8 +220,8 @@ def test_models_preemption_recompute(
 @pytest.mark.parametrize("model", MODELS)
 def test_fail_upon_inc_requests_and_finished_requests_lt_available_blocks(
     vllm_runner,
-    model: str,
     example_prompts,
+    model: str,
 ) -> None:
     # This test is for verifying that the hybrid inner state management doesn't
     # collapse in case where the number of incoming requests and
@@ -240,8 +240,8 @@ def test_fail_upon_inc_requests_and_finished_requests_lt_available_blocks(
 @pytest.mark.parametrize("model", MODELS)
 def test_state_cleanup(
     vllm_runner,
-    model: str,
     example_prompts,
+    model: str,
 ) -> None:
     # This test is for verifying that the Hybrid state is cleaned up between
     # steps, If its not cleaned, an error would be expected.
@@ -257,8 +257,8 @@ def test_state_cleanup(
 @pytest.mark.parametrize("model", MODELS)
 def test_multistep(
     vllm_runner,
-    model: str,
     example_prompts,
+    model: str,
 ) -> None:
     # This test is verifying that multistep works correctly
     #on mamba-like models
@@ -269,8 +269,12 @@ def test_multistep(
 
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("max_tokens", [64])
-def test_multistep_correctness(vllm_runner, model: str, max_tokens: int,
-                               example_prompts) -> None:
+def test_multistep_correctness(
+    vllm_runner,
+    example_prompts,
+    model: str,
+    max_tokens: int,
+) -> None:
     with vllm_runner(model, num_scheduler_steps=8,
                      max_num_seqs=MAX_NUM_SEQS) as vllm_model:
         vllm_outputs_multistep = vllm_model.generate_greedy(
@@ -293,8 +297,11 @@ def test_multistep_correctness(vllm_runner, model: str, max_tokens: int,
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("max_tokens", [64])
 def test_hybrid_distributed_produces_identical_generation(
-        vllm_runner, model: str, max_tokens: int, example_prompts) -> None:
-
+    vllm_runner,
+    example_prompts,
+    model: str,
+    max_tokens: int,
+) -> None:
     with vllm_runner(model, tensor_parallel_size=2,
                      max_num_seqs=MAX_NUM_SEQS) as vllm_model:
         vllm_outputs_tp_2 = vllm_model.generate_greedy(example_prompts,
