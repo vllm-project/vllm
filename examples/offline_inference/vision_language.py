@@ -842,7 +842,7 @@ def run_phi4_multimodal(questions: list[str], modality: str) -> ModelRequestData
     # we have to manually specify the path of the lora weights.
     vision_lora_path = os.path.join(model_path, "vision-lora")
     prompts = [
-        f"<|user|><|image_1|>{question}<|end|><|assistant|>"
+        f"<|user|><|image|>{question}<|end|><|assistant|>"
         for question in questions
     ]
     engine_args = EngineArgs(
