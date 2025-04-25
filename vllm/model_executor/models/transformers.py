@@ -310,10 +310,6 @@ class TransformersModel(nn.Module):
         with torch.device("meta"):
             self.model: PreTrainedModel = AutoModel.from_config(...)
         ```
-
-        This means that:
-        - `type(module)` is a class from `transformers`
-        - This class is constructed using a `PretrainedConfig`
         """
         for name, param in module.named_parameters(recurse=False):
             if param.device == torch.device("meta"):
