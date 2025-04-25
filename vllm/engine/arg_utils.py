@@ -238,7 +238,7 @@ class EngineArgs:
 
     override_neuron_config: dict[str, Any] = \
         get_field(ModelConfig, "override_neuron_config")
-    override_pooler_config: Optional[PoolerConfig] = \
+    override_pooler_config: Optional[Union[dict, PoolerConfig]] = \
         ModelConfig.override_pooler_config
     compilation_config: Optional[CompilationConfig] = None
     worker_cls: str = ParallelConfig.worker_cls
