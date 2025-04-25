@@ -127,7 +127,7 @@ class EngineArgs:
     allowed_local_media_path: str = ModelConfig.allowed_local_media_path
     download_dir: Optional[str] = LoadConfig.download_dir
     load_format: str = LoadConfig.load_format
-    config_format: ConfigFormat = ModelConfig.config_format
+    config_format: str = ModelConfig.config_format
     dtype: ModelDType = ModelConfig.dtype
     kv_cache_dtype: CacheDType = CacheConfig.cache_dtype
     seed: Optional[int] = ModelConfig.seed
