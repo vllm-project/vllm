@@ -60,7 +60,7 @@ class GraniteReasoningParser(ReasoningParser):
 
         Args:
             model_output (str): Output of the model to be parsed.
-            request (ChatCompletionReqest): Request being processed.
+            request (ChatCompletionRequest): Request being processed.
 
         Returns:
             tuple[Optional[str], Optional[str]]: Tuple pair containing the

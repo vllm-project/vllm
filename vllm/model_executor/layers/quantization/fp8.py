@@ -140,6 +140,11 @@ class Fp8Config(QuantizationConfig):
             return name.replace(".k_proj.output_scale", ".attn.k_scale")
         if name.endswith(".output_scale") and ".v_proj" in name:
             return name.replace(".v_proj.output_scale", ".attn.v_scale")
+        if name.endswith(".output_scale") and ".q_proj" in name:
+            return name.replace(".q_proj.output_scale", ".attn.q_scale")
+        if name.endswith("self_attn.prob_output_scale"):
+            return name.replace(".prob_output_scale", ".attn.prob_scale")
+        # If no matches, return None
         return None
 
 
@@ -575,8 +580,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
     def process_weights_after_loading(self, layer: Module) -> None:
         # Lazy import to avoid importing triton too early.
         from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
-            expand_weights, is_rocm_aiter_block_scaled_moe_enabled,
-            is_rocm_aiter_moe_enabled, shuffle_weights)
+            expand_weights, is_rocm_aiter_moe_enabled, shuffle_weights)
 
         # TODO (rob): refactor block quant into separate class.
         if self.block_quant:
@@ -603,7 +607,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             layer.w2_weight = Parameter(w2_weight, requires_grad=False)
             layer.w2_weight_scale_inv = Parameter(w2_weight_scale_inv,
                                                   requires_grad=False)
-            if is_rocm_aiter_block_scaled_moe_enabled():
+            if is_rocm_aiter_moe_enabled():
                 # reshaping weights is required for aiter moe kernel.
                 shuffled_w13, shuffled_w2 = shuffle_weights(
                     layer.w13_weight.data, layer.w2_weight.data)

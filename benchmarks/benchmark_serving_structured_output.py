@@ -11,7 +11,7 @@ On the client side, run:
         --model <your_model> \
         --dataset json \
         --structured-output-ratio 1.0 \
-        --structured-output-backend xgrammar \
+        --structured-output-backend auto \
         --request-rate 10 \
         --num-prompts 1000
 
@@ -51,7 +51,7 @@ try:
 except ImportError:
     from argparse import ArgumentParser as FlexibleArgumentParser
 
-from vllm.v1.structured_output.utils import (
+from vllm.v1.structured_output.backend_xgrammar import (
     has_xgrammar_unsupported_json_features)
 
 MILLISECONDS_TO_SECONDS_CONVERSION = 1000
@@ -130,10 +130,11 @@ def sample_requests(tokenizer: PreTrainedTokenizerBase,
                         "description":
                         "An unique optional field to avoid cached schemas"
                     }
+        else:
+            json_schemas = [schema] * args.num_prompts
 
         def gen_prompt(index: int):
-            schema = json_schemas[index % len(json_schemas)]
-            return f"Generate an example of a user profile given the following schema: {json.dumps(schema)}"  # noqa: E501
+            return f"Generate an example of a user profile given the following schema: {json.dumps(get_schema(index))}"  # noqa: E501
 
         def get_schema(index: int):
             return json_schemas[index % len(json_schemas)]
@@ -149,17 +150,17 @@ def sample_requests(tokenizer: PreTrainedTokenizerBase,
 
     elif args.dataset == "grammar":
         schema = """
-            ?start: select_statement
+        root ::= select_statement
 
-            ?select_statement: "SELECT " column_list " FROM " table_name
+        select_statement ::= "SELECT " column " from " table " where " condition
 
-            ?column_list: column_name ("," column_name)*
+        column ::= "col_1 " | "col_2 "
 
-            ?table_name: identifier
+        table ::= "table_1 " | "table_2 "
 
-            ?column_name: identifier
+        condition ::= column "= " number
 
-            ?identifier: /[a-zA-Z_][a-zA-Z0-9_]*/
+        number ::= "1 " | "2 "
         """
         prompt = "Generate an SQL query to show the 'username' \
             and 'email' from the 'users' table."
@@ -963,7 +964,7 @@ if __name__ == "__main__":
         "--percentile-metrics",
         type=str,
         default="ttft,tpot,itl",
-        help="Comma-seperated list of selected metrics to report percentils. "
+        help="Comma-separated list of selected metrics to report percentils. "
         "This argument specifies the metrics to report percentiles. "
         "Allowed metric names are \"ttft\", \"tpot\", \"itl\", \"e2el\". "
         "Default value is \"ttft,tpot,itl\".")
@@ -971,7 +972,7 @@ if __name__ == "__main__":
         "--metric-percentiles",
         type=str,
         default="99",
-        help="Comma-seperated list of percentiles for selected metrics. "
+        help="Comma-separated list of percentiles for selected metrics. "
         "To report 25-th, 50-th, and 75-th percentiles, use \"25,50,75\". "
         "Default value is \"99\". "
         "Use \"--percentile-metrics\" to select metrics.",
@@ -996,12 +997,14 @@ if __name__ == "__main__":
                         type=float,
                         default=1.0,
                         help="Ratio of Structured Outputs requests")
-    parser.add_argument(
-        "--structured-output-backend",
-        type=str,
-        choices=["outlines", "lm-format-enforcer", "xgrammar", "guidance"],
-        default="xgrammar",
-        help="Backend to use for structured outputs")
+    parser.add_argument("--structured-output-backend",
+                        type=str,
+                        choices=[
+                            "outlines", "lm-format-enforcer", "xgrammar",
+                            "guidance", "auto"
+                        ],
+                        default="auto",
+                        help="Backend to use for structured outputs")
 
     args = parser.parse_args()
     main(args)

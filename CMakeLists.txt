@@ -230,6 +230,7 @@ set(VLLM_EXT_SRC
   "csrc/cache_kernels.cu"
   "csrc/attention/paged_attention_v1.cu"
   "csrc/attention/paged_attention_v2.cu"
+  "csrc/attention/merge_attn_states.cu"
   "csrc/pos_encoding_kernels.cu"
   "csrc/activation_kernels.cu"
   "csrc/layernorm_kernels.cu"
@@ -608,21 +609,51 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
   list(APPEND VLLM_MOE_EXT_SRC "${VLLM_MOE_WNA16_SRC}")
   cuda_archs_loose_intersection(MARLIN_MOE_ARCHS "8.0;8.6;8.7;8.9;9.0;10.0;10.1;12.0" "${CUDA_ARCHS}")
   if (MARLIN_MOE_ARCHS)
-    set(MARLIN_MOE_SRC
-        "csrc/moe/marlin_kernels/marlin_moe_kernel.h"
-        "csrc/moe/marlin_kernels/marlin_moe_kernel_ku4b8.h"
-        "csrc/moe/marlin_kernels/marlin_moe_kernel_ku4b8.cu"
-        "csrc/moe/marlin_kernels/marlin_moe_kernel_ku8b128.h"
-        "csrc/moe/marlin_kernels/marlin_moe_kernel_ku8b128.cu"
-        "csrc/moe/marlin_kernels/marlin_moe_kernel_ku4.h"
-        "csrc/moe/marlin_kernels/marlin_moe_kernel_ku4.cu"
-        "csrc/moe/marlin_moe_ops.cu")
 
+    #
+    # For the Marlin MOE kernels we automatically generate sources for various
+    # preselected input type pairs and schedules.
+    # Generate sources:
+    set(MOE_MARLIN_GEN_SCRIPT
+      ${CMAKE_CURRENT_SOURCE_DIR}/csrc/moe/marlin_moe_wna16/generate_kernels.py)
+    file(MD5 ${MOE_MARLIN_GEN_SCRIPT} MOE_MARLIN_GEN_SCRIPT_HASH)
+
+    message(STATUS "Marlin MOE generation script hash: ${MOE_MARLIN_GEN_SCRIPT_HASH}")
+    message(STATUS "Last run Marlin MOE generate script hash: $CACHE{MOE_MARLIN_GEN_SCRIPT_HASH}")
+
+    if (NOT DEFINED CACHE{MOE_MARLIN_GEN_SCRIPT_HASH}
+        OR NOT $CACHE{MOE_MARLIN_GEN_SCRIPT_HASH} STREQUAL ${MOE_MARLIN_GEN_SCRIPT_HASH})
+      execute_process(
+        COMMAND ${CMAKE_COMMAND} -E env
+        PYTHONPATH=${CMAKE_CURRENT_SOURCE_DIR}/csrc/cutlass_extensions/:${CUTLASS_DIR}/python/:${VLLM_PYTHON_PATH}:$PYTHONPATH
+          ${Python_EXECUTABLE} ${MOE_MARLIN_GEN_SCRIPT}
+        RESULT_VARIABLE moe_marlin_generation_result
+        OUTPUT_VARIABLE moe_marlin_generation_output
+        OUTPUT_FILE ${CMAKE_CURRENT_BINARY_DIR}/moe_marlin_generation.log
+        ERROR_FILE ${CMAKE_CURRENT_BINARY_DIR}/moe_marlin_generation.log
+      )
+
+      if (NOT moe_marlin_generation_result EQUAL 0)
+        message(FATAL_ERROR "Marlin MOE generation failed."
+                            " Result: \"${moe_marlin_generation_result}\""
+                            "\nCheck the log for details: "
+                            "${CMAKE_CURRENT_BINARY_DIR}/moe_marlin_generation.log")
+      else()
+        set(MOE_MARLIN_GEN_SCRIPT_HASH ${MOE_MARLIN_GEN_SCRIPT_HASH}
+            CACHE STRING "Last run Marlin MOE generate script hash" FORCE)
+        message(STATUS "Marlin MOE generation completed successfully.")
+      endif()
+    else()
+      message(STATUS "Marlin MOE generation script has not changed, skipping generation.")
+    endif()
+
+    file(GLOB MOE_WNAA16_MARLIN_SRC "csrc/moe/marlin_moe_wna16/*.cu")
     set_gencode_flags_for_srcs(
-      SRCS "${MARLIN_MOE_SRC}"
+      SRCS "${MOE_WNAA16_MARLIN_SRC}"
       CUDA_ARCHS "${MARLIN_MOE_ARCHS}")
 
-    list(APPEND VLLM_MOE_EXT_SRC "${MARLIN_MOE_SRC}")
+    list(APPEND VLLM_MOE_EXT_SRC ${MOE_WNAA16_MARLIN_SRC})
+
     message(STATUS "Building Marlin MOE kernels for archs: ${MARLIN_MOE_ARCHS}")
   else()
     message(STATUS "Not building Marlin MOE kernels as no compatible archs found"
@@ -647,6 +678,7 @@ if(VLLM_GPU_LANG STREQUAL "HIP")
   #
   set(VLLM_ROCM_EXT_SRC
     "csrc/rocm/torch_bindings.cpp"
+    "csrc/rocm/skinny_gemms.cu"
     "csrc/rocm/attention.cu")
 
   define_gpu_extension_target(
