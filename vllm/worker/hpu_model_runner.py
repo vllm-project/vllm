@@ -633,9 +633,9 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
         batch_size_padded = self.bucketing_ctx.get_padded_batch_size(
             real_batch_size, is_prompt)
         batch_size_padding = batch_size_padded - real_batch_size
- 
+
         seq_group_metadata_list = seq_group_metadata_list.copy()
- 
+
         if batch_size_padding > 0:
             dummy_seq_group_metadata = self.create_dummy_seq_group_metadata(
                 0, 0, is_prompt)
@@ -1555,8 +1555,7 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
                     and not decode_captured_all \
                         and prompt_captured_all:
                     mem_post_decode, _, _ = self.warmup_graphs(
-                        decode_strategy,
-                        self.bucketing_ctx.decode_buckets,
+                        decode_strategy, self.bucketing_ctx.decode_buckets,
                         False, kv_caches,
                         graph_free_mem - mem_post_prompt - mem_post_decode,
                         mem_post_decode, decode_batch_seq)
