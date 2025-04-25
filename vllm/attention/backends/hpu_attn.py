@@ -4,7 +4,6 @@
 # Copyright (C) 2024 Habana Labs, Ltd. an Intel Company
 ###############################################################################
 
-import os
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple, Type
 
@@ -231,14 +230,14 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
                 attn_bias.add_(position_bias)
 
             out = ops.prompt_attention(
-                    impl=self.prefill_impl,
-                    query=query.view(query_shape),
-                    key=key.view(kv_shape),
-                    value=value.view(kv_shape),
-                    is_causal=True,
-                    attn_bias=attn_bias,
-                    valid_seq_lengths=attn_metadata.seq_lens_tensor,
-                    **self.common_attention_args())
+                impl=self.prefill_impl,
+                query=query.view(query_shape),
+                key=key.view(kv_shape),
+                value=value.view(kv_shape),
+                is_causal=True,
+                attn_bias=attn_bias,
+                valid_seq_lengths=attn_metadata.seq_lens_tensor,
+                **self.common_attention_args())
             output = out.reshape(batch_size, seq_len, hidden_size)
         else:
             # Decoding run.

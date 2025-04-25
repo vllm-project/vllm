@@ -11,11 +11,9 @@ import functools
 import gc
 import itertools
 import math
-import operator
 import os
 import time
 from array import array
-from dataclasses import dataclass, field
 from enum import IntEnum
 from typing import (TYPE_CHECKING, Any, Callable, Dict, List, NamedTuple,
                     Optional, Set, Tuple, Type, TypeVar, Union)
@@ -517,8 +515,7 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
                                                  self.max_num_prefill_seqs,
                                                  self.block_size,
                                                  self.max_num_batched_tokens,
-                                                 False,
-                                                 self.max_model_len)
+                                                 False, self.max_model_len)
         self.graphed_buckets: Set[Any] = set()
         self._set_gc_threshold()
         self.use_contiguous_pa = envs.VLLM_USE_HPU_CONTIGUOUS_CACHE_FETCH
@@ -632,19 +629,19 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
         logger.info(msg)
 
     def _add_dummy_seq(self, seq_group_metadata_list, is_prompt):
-         real_batch_size = len(seq_group_metadata_list)
-         batch_size_padded = self.bucketing_ctx.get_padded_batch_size(
-             real_batch_size, is_prompt)
-         batch_size_padding = batch_size_padded - real_batch_size
+        real_batch_size = len(seq_group_metadata_list)
+        batch_size_padded = self.bucketing_ctx.get_padded_batch_size(
+            real_batch_size, is_prompt)
+        batch_size_padding = batch_size_padded - real_batch_size
  
-         seq_group_metadata_list = seq_group_metadata_list.copy()
+        seq_group_metadata_list = seq_group_metadata_list.copy()
  
-         if batch_size_padding > 0:
-             dummy_seq_group_metadata = self.create_dummy_seq_group_metadata(
-                 0, 0, is_prompt)
-             seq_group_metadata_list.extend(dummy_seq_group_metadata
-                                            for _ in range(batch_size_padding))
-         return seq_group_metadata_list, real_batch_size, batch_size_padded
+        if batch_size_padding > 0:
+            dummy_seq_group_metadata = self.create_dummy_seq_group_metadata(
+                0, 0, is_prompt)
+            seq_group_metadata_list.extend(dummy_seq_group_metadata
+                                           for _ in range(batch_size_padding))
+        return seq_group_metadata_list, real_batch_size, batch_size_padded
 
     def _maybe_wrap_in_hpu_graph(self, *args, **kwargs):
         return htorch.hpu.wrap_in_hpu_graph(
@@ -1040,7 +1037,7 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
         self.profiler.start('internal', base_event_name)
 
         seq_group_metadata_list, real_batch_size, batch_size_padded = (
-             self._add_dummy_seq(seq_group_metadata_list, is_prompt))
+            self._add_dummy_seq(seq_group_metadata_list, is_prompt))
 
         prefill_reqs = []
         decode_reqs = []
@@ -1243,7 +1240,8 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
         _, max_seq_len = self.bucketing_ctx.get_max_prompt_shape()
         max_batch_size = min(self.max_num_seqs,
                              self.max_num_batched_tokens // max_seq_len)
-        self.warmup_scenario(max_batch_size, max_seq_len, True, kv_caches, False, True)
+        self.warmup_scenario(max_batch_size, max_seq_len, True, kv_caches,
+                             False, True)
         return
 
     def warmup_scenario(self,
@@ -1460,7 +1458,8 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
             graphs = graph == 't'
             if graphs:
                 self.graphed_buckets.add((int(bs), int(seq_len), is_prompt))
-            self.warmup_scenario(int(bs), int(seq_len), is_prompt, kv_caches, True)
+            self.warmup_scenario(int(bs), int(seq_len), is_prompt, kv_caches,
+                                 True)
             raise AssertionError("Finished profiling")
         if not htorch.utils.internal.is_lazy() and not self.enforce_eager:
             cache_size_limit = 1 + 3 * (
@@ -1499,8 +1498,8 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
             self.warmup_all_buckets(self.bucketing_ctx.prompt_buckets, True,
                                     kv_caches)
             print("bb")
-            self.warmup_all_buckets(self.bucketing_ctx.decode_buckets,
-                                    False, kv_caches)
+            self.warmup_all_buckets(self.bucketing_ctx.decode_buckets, False,
+                                    kv_caches)
 
             if not self.enforce_eager and htorch.utils.internal.is_lazy():
                 assert self.mem_margin is not None, \
@@ -1544,8 +1543,8 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
                         and not prompt_captured_all and decode_captured_all):
                     mem_post_prompt, _, prompt_captured_all = (
                         self.warmup_graphs(
-                            prompt_strategy,
-                            self.bucketing_ctx.prompt_buckets, True, kv_caches,
+                            prompt_strategy, self.bucketing_ctx.prompt_buckets,
+                            True, kv_caches,
                             graph_free_mem - mem_post_prompt - mem_post_decode,
                             mem_post_prompt, prompt_batch_seq))
 
@@ -1557,16 +1556,15 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
                         and prompt_captured_all:
                     mem_post_decode, _, _ = self.warmup_graphs(
                         decode_strategy,
-                        self.bucketing_ctx.decode_buckets, False, kv_caches,
+                        self.bucketing_ctx.decode_buckets,
+                        False, kv_caches,
                         graph_free_mem - mem_post_prompt - mem_post_decode,
                         mem_post_decode, decode_batch_seq)
 
                 self.log_graph_warmup_summary(
-                    self.bucketing_ctx.prompt_buckets, True,
-                    mem_post_prompt)
+                    self.bucketing_ctx.prompt_buckets, True, mem_post_prompt)
                 self.log_graph_warmup_summary(
-                    self.bucketing_ctx.decode_buckets, False,
-                    mem_post_decode)
+                    self.bucketing_ctx.decode_buckets, False, mem_post_decode)
 
         end_time = time.perf_counter()
         end_mem = HabanaMemoryProfiler.current_device_memory_usage()
