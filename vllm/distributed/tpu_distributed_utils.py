@@ -44,11 +44,13 @@ def shard_model(model: torch.nn.Module, mesh: "xs.Mesh") -> None:
         mesh: An XLA SPMD mesh object used for sharding
     """
 
-    def _process_module(module, parent=None, name=None):
+    def _process_module(module, name=None, parent=None):
         for module_type, wrapping_func in MODULE_TYPE_TO_WRAPPING_FUNC.items():
             if isinstance(module, module_type):
                 wrapped_module = wrapping_func(module, mesh)
 
+                assert parent is not None and name is not None, (
+                    "Top Level module is not expected to be wrapped.")
                 if parent is not None and name is not None:
                     setattr(parent, name, wrapped_module)
 
@@ -56,6 +58,6 @@ def shard_model(model: torch.nn.Module, mesh: "xs.Mesh") -> None:
                 break
 
         for child_name, child_module in list(module.named_children()):
-            _process_module(child_module, module, child_name)
+            _process_module(child_module, child_name, module)
 
     _process_module(model)
