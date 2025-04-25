@@ -602,7 +602,7 @@ async def benchmark(
             f"are correctly specified. Error: {test_output.error}")
     else:
         print("Initial test run completed. Starting main benchmark run...")
-
+    time.sleep(5)
     if lora_modules:
         # For each input request, choose a LoRA module at random.
         lora_modules = iter(
@@ -623,6 +623,7 @@ async def benchmark(
         profile_output = await request_func(request_func_input=profile_input)
         if profile_output.success:
             print("Profiler started")
+        time.sleep(5)
 
     if burstiness == 1.0:
         distribution = "Poisson process"
