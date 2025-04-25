@@ -217,7 +217,7 @@ class ModelConfig:
     task, even if the same model can be used for multiple tasks. When the model
     only supports one task, "auto" can be used to select it; otherwise, you
     must specify explicitly which task to use."""
-    tokenizer: Optional[str] = None
+    tokenizer: str = None  # type: ignore
     """Name or path of the Hugging Face tokenizer to use. If unspecified, model
     name or path will be used."""
     tokenizer_mode: TokenizerMode = "auto"
@@ -417,6 +417,11 @@ class ModelConfig:
 
     def __post_init__(self) -> None:
         self.model = maybe_model_redirect(self.model)
+        # The tokenizer is consistent with the model by default.
+        if self.tokenizer is None:
+            self.tokenizer = self.model
+        if self.tokenizer_revision is None:
+            self.tokenizer_revision = self.revision
         self.tokenizer = maybe_model_redirect(self.tokenizer)
 
         if isinstance(self.hf_config_path, str):
@@ -455,10 +460,6 @@ class ModelConfig:
                 "module was not found. See "
                 "https://github.com/vllm-project/vllm/blob/main/docker/Dockerfile "  # noqa: E501
                 "for instructions on how to install it.")
-
-        # The tokenizer version is consistent with the model version by default.
-        if self.tokenizer_revision is None:
-            self.tokenizer_revision = self.revision
 
         from vllm.platforms import current_platform
 

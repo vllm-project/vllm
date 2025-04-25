@@ -8,7 +8,7 @@ import re
 import threading
 from dataclasses import MISSING, dataclass, fields
 from typing import (Any, Callable, Dict, List, Literal, Optional, Type,
-                    TypeVar, Union, cast, get_args, get_origin)
+                    TypeVar, Union, get_args, get_origin)
 
 import torch
 from typing_extensions import TypeIs
@@ -260,9 +260,6 @@ class EngineArgs:
     use_tqdm_on_load: bool = LoadConfig.use_tqdm_on_load
 
     def __post_init__(self):
-        if not self.tokenizer:
-            self.tokenizer = self.model
-
         # support `EngineArgs(compilation_config={...})`
         # without having to manually construct a
         # CompilationConfig object
@@ -828,8 +825,7 @@ class EngineArgs:
             model=self.model,
             hf_config_path=self.hf_config_path,
             task=self.task,
-            # We know this is not None because we set it in __post_init__
-            tokenizer=cast(str, self.tokenizer),
+            tokenizer=self.tokenizer,
             tokenizer_mode=self.tokenizer_mode,
             trust_remote_code=self.trust_remote_code,
             allowed_local_media_path=self.allowed_local_media_path,
