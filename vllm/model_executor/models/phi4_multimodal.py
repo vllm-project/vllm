@@ -860,29 +860,6 @@ class Phi4MMProcessingInfo(BaseProcessingInfo):
         # Return time frames (T)
         return num_frames
 
-    def _compute_audio_embed_size(self, audio_frames: int) -> int:
-        """
-        Compute the audio embedding size based on the audio frames and
-        compression rate.
-        """
-        hf_config = self.get_hf_config()
-        compression_rate = hf_config.embd_layer['audio_embd_layer'][
-            'compression_rate']
-        # NOTE: this is a hard-coded value but might be configurable
-        # in the future
-        qformer_compression_rate = 1
-        integer = audio_frames // compression_rate
-        remainder = audio_frames % compression_rate
-
-        result = integer if remainder == 0 else integer + 1
-
-        integer = result // qformer_compression_rate
-        remainder = result % qformer_compression_rate
-        # qformer compression
-        result = integer if remainder == 0 else integer + 1
-
-        return result
-
 
 class Phi4MMDummyInputsBuilder(BaseDummyInputsBuilder[Phi4MMProcessingInfo]):
 
@@ -986,6 +963,7 @@ class Phi4MMMultiModalProcessor(BaseMultiModalProcessor[Phi4MMProcessingInfo]):
         audio_tokens: list[str] = self.info.audio_tokens  # type: ignore
         feature_extractor = self.info.get_feature_extractor()
         hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
+        audio_processor = self.info.get_feature_extractor()
 
         def get_image_replacement_phi4mm(item_idx: int):
             images = mm_items.get_items(
@@ -1011,7 +989,7 @@ class Phi4MMMultiModalProcessor(BaseMultiModalProcessor[Phi4MMProcessingInfo]):
             audio_len = audios.get_audio_length(item_idx)
             audio_frames = self.info.get_audio_num_frames(
                 audio_len, feature_extractor.sampling_rate)
-            audio_embed_size = self.info._compute_audio_embed_size(
+            audio_embed_size = audio_processor._compute_audio_embed_size(
                 audio_frames)
 
             audio_tokens = [_AUDIO_PLACEHOLDER_TOKEN_ID] * audio_embed_size
