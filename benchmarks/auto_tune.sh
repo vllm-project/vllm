@@ -1,44 +1,47 @@
 #!/bin/bash
 
-# pre-requisite:
-# 1. run in your conda env
-# 2. if the model is customized, already copy model config into hg model's.
+# This script aims to tune the best server parameter combinations to maximize throughput for given requirement. 
+# The current server parameter combination is  max_num_seqs and max_num_batched_tokens
+# It also supports additional requirement: e2e latency and prefix cache. 
+
+# For example: 
+# 1. Given input_len=1800, output_len=20, what's the best max_num_seqs and max_num_batched_tokens to get highest throughput?
+# 2. If we have latency requirement to be lower than 500ms, what's the best server parameter?
+# 3. If we want to reach 60% prefix cache, what's the best server parameter? 
+
+# Pre-requisite:
+# 1. Checkout to your branch, activate conda env, install torch/ xla corresponding to your branch.
+# 2. If the model is customized, replace the MODEL's config with the customized config.
 # 3. set variables
-# 4. set --download-dir in server command if you use mounted disk 
+#   BASE: your directory for vllm repo
+#   MODEL: the model served by vllm
+#   DOWNLOAD_DIR: directory to download and load model weights.
+#   INPUT_LEN: request input len
+#   OUTPUT_LEN: request output len
+#   MIN_CACHE_HIT: prefix cache rate
+#   MAX_LATENCY_ALLOWED_MS: (e2e) latency requirement. If there's no latency requirement, set it to a large number like 1000000000
+# 4. Run the script, it might take a long time, you can use tmux to avoid the script stop if disconnection happens.
+# 5. The final result will be saved in RESULT file. 
 
-TAG="test"
-BASE="/mnt/disk/persist"
-DOWNLOAD_DIR="/mnt/disk/persist/models"
-LOG_FOLDER="$BASE/auto-benchmark/$TAG"
-RESULT="$LOG_FOLDER/result.txt"
-
+TAG=$(date +"%Y_%m_%d_%H_%M")
+BASE=""
 MODEL="meta-llama/Llama-3.1-8B-Instruct"
-# DOWNLOAD_DIR="$BASE/models"
+DOWNLOAD_DIR=""
 INPUT_LEN=4000
 OUTPUT_LEN=16
 MIN_CACHE_HIT=60
-MAX_LATENCY_ALLOWED_MS=500  # if there's no requirement, set it to a large number like 1000000000
+MAX_LATENCY_ALLOWED_MS=500
+
+LOG_FOLDER="$BASE/auto-benchmark/$TAG"
+RESULT="$LOG_FOLDER/result.txt"
 
 echo "result file$ $RESULT"
 echo "model: $MODEL"
 echo
 
-#
-# create a log folder
-#
 rm -rf $LOG_FOLDER
 mkdir -p $LOG_FOLDER
 
-
-
-# #
-# # activate vllm env
-# #
-# source ~/miniconda3/bin/activate vllm
-
-# #
-# # vllm folder, branch and hash
-# #
 cd "$BASE/vllm"
 # create sonnet-4x.txt so that we can sample 2048 tokens for input
 echo "" > benchmarks/sonnet_4x.txt
@@ -47,23 +50,11 @@ do
 cat benchmarks/sonnet.txt >> benchmarks/sonnet_4x.txt
 done
 
-# pip install pandas
-# pip install datasets
-
-# git checkout main
-# git reset --hard
-# git pull
-
-# echo "pip uninstall torch torch-xla -y"
-# pip uninstall torch torch-xla -y
-# echo "pip install -r requirements/tpu.txt"
-# pip install -r requirements/tpu.txt
+pip install datasets
 
 current_hash=$(git rev-parse HEAD)
 echo "hash:$current_hash" >> "$RESULT"
 echo "current_hash: $current_hash"
-
-
 
 best_throughput=0
 best_max_num_seqs=0
@@ -113,16 +104,13 @@ run_benchmark() {
         sleep 10
         return 1
     fi
-    #
-    # run test
-    #
     
     echo "run benchmark test..."
     echo
     meet_latency_requirement=0
     # get a basic qps by using request-rate inf
     bm_log="$LOG_FOLDER/bm_log_${max_num_seqs}_${max_num_batched_tokens}_requestrate_inf.txt"
-    prefix_len=$(( calc = INPUT_LEN * MIN_CACHE_HIT / 100, calc > 200 ? calc : 200 ))
+    prefix_len=$(( INPUT_LEN * MIN_CACHE_HIT / 100 ))
     python benchmarks/benchmark_serving.py \
         --backend vllm \
         --model $MODEL  \
@@ -139,12 +127,10 @@ run_benchmark() {
         --sonnet-prefix-len $prefix_len \
         --port 8004 > "$bm_log"
     through_put=$(grep "Request throughput (req/s):" "$bm_log" | sed 's/[^0-9.]//g')
-    e2el=$(grep "Mean E2EL (ms):" "$bm_log" | awk '{print $NF}')
+    e2el=$(grep "P99 E2EL (ms):" "$bm_log" | awk '{print $NF}')
     goodput=$(grep "Request goodput (req/s):" "$bm_log" | sed 's/[^0-9.]//g')
-    # echo "[Debug]max_num_seqs: $max_num_seqs, max_num_batched_tokens: $max_num_batched_tokens, request_rate: inf, e2el: $e2el, through put: $through_put, goodput: $goodput"
 
     if (( $(echo "$e2el <= $MAX_LATENCY_ALLOWED_MS" | bc -l) )); then
-        # echo "[Debug]max_num_seqs: $max_num_seqs, max_num_batched_tokens: $max_num_batched_tokens, request_rate: inf, e2el: $e2el, through put: $through_put, goodput: $goodput"
         meet_latency_requirement=1
     fi
 
@@ -172,12 +158,9 @@ run_benchmark() {
                 --sonnet-prefix-len $prefix_len \
                 --port 8004 > "$bm_log"
             through_put=$(grep "Request throughput (req/s):" "$bm_log" | sed 's/[^0-9.]//g')
-            e2el=$(grep "Mean E2EL (ms):" "$bm_log" | awk '{print $NF}')
+            e2el=$(grep "P99 E2EL (ms):" "$bm_log" | awk '{print $NF}')
             goodput=$(grep "Request goodput (req/s):" "$bm_log" | sed 's/[^0-9.]//g')
-            # echo "[Debug]max_num_seqs: $max_num_seqs, max_num_batched_tokens: $max_num_batched_tokens, request_rate: $request_rate, e2el: $e2el, through put: $through_put, goodput: $goodput"
             if (( $(echo "$e2el <= $MAX_LATENCY_ALLOWED_MS" | bc -l) )); then
-                # echo "[Debug]max_num_seqs: $max_num_seqs, max_num_batched_tokens: $max_num_batched_tokens, request_rate: $request_rate, e2el: $e2el, through put: $through_put, goodput: $goodput"
-                # echo "[Debug]meet latency requirement"
                 meet_latency_requirement=1
                 break
             fi
@@ -210,8 +193,6 @@ run_benchmark() {
     return 0
 }
 
-# run_benchmark 128 512
-# exit
 
 num_seqs_list="128 256"
 num_batched_tokens_list="512 1024 2048 4096"
