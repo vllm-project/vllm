@@ -214,6 +214,7 @@ _MULTIMODAL_MODELS = {
 _SPECULATIVE_DECODING_MODELS = {
     "EAGLEModel": ("eagle", "EAGLE"),
     "EagleLlamaForCausalLM": ("llama_eagle", "EagleLlamaForCausalLM"),
+    "Eagle3LlamaForCausalLM": ("llama_eagle3", "Eagle3LlamaForCausalLM"),
     "DeepSeekMTPModel": ("deepseek_mtp", "DeepSeekMTP"),
     "MedusaModel": ("medusa", "Medusa"),
     "MLPSpeculatorPreTrainedModel": ("mlp_speculator", "MLPSpeculator"),
