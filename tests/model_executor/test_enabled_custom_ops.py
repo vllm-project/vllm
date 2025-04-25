@@ -11,6 +11,8 @@ from vllm.model_executor.layers.fused_moe.fused_moe import (
     dispatch_fused_experts_func, dispatch_topk_func,
     torch_vllm_inplace_fused_experts, torch_vllm_outplace_fused_experts,
     vllm_topk_softmax)
+from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
+    is_rocm_aiter_moe_enabled)
 from vllm.model_executor.layers.layernorm import (
     RMSNorm, dispatch_cuda_rmsnorm_func, fused_add_rms_norm, rms_norm,
     rocm_aiter_fused_add_rms_norm, rocm_aiter_rms_norm)
@@ -100,11 +102,10 @@ def test_enabled_ops_invalid(env: str):
 def test_topk_dispatch(use_rocm_aiter: str, monkeypatch):
     monkeypatch.setenv("VLLM_ROCM_USE_AITER", use_rocm_aiter)
     topk_func = dispatch_topk_func()
-
+    is_rocm_aiter_moe_enabled.cache_clear()
     if current_platform.is_rocm() and int(use_rocm_aiter):
         from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
             rocm_aiter_topk_softmax)
-
         assert topk_func == rocm_aiter_topk_softmax
     else:
         assert topk_func == vllm_topk_softmax
@@ -116,11 +117,11 @@ def test_fused_experts_dispatch(use_rocm_aiter: str, inplace: bool,
                                 monkeypatch):
 
     monkeypatch.setenv("VLLM_ROCM_USE_AITER", use_rocm_aiter)
+    is_rocm_aiter_moe_enabled.cache_clear()
     fused_experts_func = dispatch_fused_experts_func(inplace)
     if current_platform.is_rocm() and int(use_rocm_aiter):
         from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
             rocm_aiter_fused_experts)
-
         assert fused_experts_func == rocm_aiter_fused_experts
     elif inplace:
         assert fused_experts_func == torch_vllm_inplace_fused_experts
