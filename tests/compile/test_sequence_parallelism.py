@@ -1,111 +1,172 @@
 # SPDX-License-Identifier: Apache-2.0
 
-import os
-import tempfile
-from pathlib import Path
-
+import pytest
 import torch
 
-from vllm import LLM, SamplingParams
-from vllm.config import CompilationConfig
+import vllm.envs as envs
+from vllm.compilation.fx_utils import (find_specified_fn,
+                                       find_specified_fn_maybe)
+from vllm.compilation.sequence_parallelism import SequenceParallelismPass
+from vllm.config import (CompilationConfig, DeviceConfig, ModelConfig,
+                         VllmConfig)
+from vllm.distributed import tensor_model_parallel_all_reduce
+from vllm.distributed.parallel_state import (init_distributed_environment,
+                                             initialize_model_parallel)
+from vllm.model_executor.layers.layernorm import RMSNorm
+from vllm.platforms import current_platform
+from vllm.utils import update_environment_variables
 
-from ..utils import create_new_process_for_each_test, multi_gpu_test
+from ..utils import multi_gpu_test
+from .backend import TestBackend
 
-ALL_REDUCE_OP = "torch.ops.vllm.all_reduce.default"
-ALL_GATHER_OP = "torch.ops.vllm.all_gather.default"
-REDUCE_SCATTER_OP = "torch.ops.vllm.reduce_scatter.default"
+OPS_IN_MODEL_BEFORE = [
+    torch.ops.vllm.all_reduce.default,
+]
+
+OPS_IN_MODEL_AFTER = [
+    torch.ops.vllm.reduce_scatter.default,
+    torch.ops.vllm.all_gather.default,
+]
+
+prompts = [
+    "Hello, my name is",
+    "The president of the United States is",
+    "The capital of France is",
+    "The future of AI is",
+]
 
 
-def count_comm_ops(graph_path):
-    all_reduce_cnt = 0
-    all_gather_cnt = 0
-    reduce_scatter_cnt = 0
-    try:
-        with open(graph_path) as f:
-            for line in f:
-                if ALL_REDUCE_OP in line:
-                    all_reduce_cnt += 1
-                if ALL_GATHER_OP in line:
-                    all_gather_cnt += 1
-                if REDUCE_SCATTER_OP in line:
-                    reduce_scatter_cnt += 1
-    except FileNotFoundError:
-        print(f"Error: File '{graph_path}' not found.")
-    except Exception as e:
-        print(f"Error: {e}")
-    return all_reduce_cnt, all_gather_cnt, reduce_scatter_cnt
+class TestModel(torch.nn.Module):
+
+    def __init__(self, hidden_size=16, intermediate_size=32):
+        super().__init__()
+        self.hidden_size = hidden_size
+        self.intermediate_size = intermediate_size
+        self.gate_proj = torch.nn.Parameter(
+            torch.empty((intermediate_size, hidden_size)))
+        self.norm = RMSNorm(hidden_size, 1e-05)
+        # Initialize weights
+        torch.nn.init.normal_(self.gate_proj, std=0.02)
+
+    def forward(self, hidden_states, residual):
+        """
+        Forward pass implementing the operations in the FX graph
+        
+        Args:
+            hidden_states: Input tensor
+            residual: Residual tensor from previous layer
+            
+        Returns:
+            Tuple containing the output tensor
+        """
+        # Reshape input
+        view = hidden_states.reshape(-1, self.hidden_size)
+
+        #matrix multiplication
+        permute = self.gate_proj.permute(1, 0)
+        mm = torch.mm(view, permute)
+
+        # Tensor parallel all-reduce
+        all_reduce = tensor_model_parallel_all_reduce(mm)
+
+        # layer normalization
+        norm_output, residual_output = self.norm(all_reduce, residual)
+
+        return norm_output, residual_output
 
 
 @multi_gpu_test(num_gpus=2)
-@create_new_process_for_each_test()
-def test_sequence_parallelism_compilation():
-    temp_dir = tempfile.mkdtemp()
+@pytest.mark.parametrize("batch_size", [8])
+@pytest.mark.parametrize("seq_len", [16])
+@pytest.mark.parametrize("hidden_size", [16])
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.skipif(envs.VLLM_TARGET_DEVICE not in ["cuda"],
+                    reason="Only test on CUDA")
+def test_sequence_parallelism_pass(batch_size: int, seq_len: int,
+                                   hidden_size: int, dtype: torch.dtype):
+    num_processes = 2
 
-    config = CompilationConfig(
-        level=3,
-        custom_ops=["+rms_norm"],
-        compile_sizes=[4, 8],
-        splitting_ops=[],
-    )
-    config.pass_config.enable_sequence_parallelism = True
-    config.pass_config.dump_graph_dir = Path(temp_dir)
-    config.pass_config.dump_graph_stages = \
-        ["before_sequence_parallelism_pass", "after_sequence_parallelism_pass"]
+    def run_torch_spawn(fn, nprocs):
+        # need to use torch.mp.spawn otherwise will have problems with
+        # torch.distributed and cuda
+        torch.multiprocessing.spawn(fn,
+                                    args=(num_processes, batch_size, seq_len,
+                                          hidden_size, dtype),
+                                    nprocs=nprocs)
 
-    sampling_params = SamplingParams(temperature=0, )
-    llm = LLM(model="unsloth/Llama-3.2-1B-Instruct",
-              enforce_eager=False,
-              tensor_parallel_size=2,
-              distributed_executor_backend="mp",
-              dtype=torch.float16,
-              max_num_batched_tokens=2048,
-              compilation_config=config)
+    run_torch_spawn(sequence_parallelism_pass_on_test_model, num_processes)
 
-    prompts = [
-        "Can you calculate 19 + 20?", "How to make a cake?",
-        "How old a baby can start to try solid food?",
-        "What's pros and cons of using a pacifier for baby?"
-    ]
 
-    answers = [
-        " I'll let you know if you're correct", " A step-by-step guide",
-        " Most pediatricians recommend ", " The American Academy of Pediatrics"
-    ]
+def sequence_parallelism_pass_on_test_model(local_rank: int, world_size: int,
+                                            batch_size: int, seq_len: int,
+                                            hidden_size: int,
+                                            dtype: torch.dtype):
+    current_platform.seed_everything(0)
 
-    outputs = llm.generate(prompts, sampling_params)
-    for output, answer in zip(outputs, answers):
-        prompt = output.prompt
-        generated_text = output.outputs[0].text
-        print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
-        assert generated_text.startswith(answer)
+    device = torch.device(f"cuda:{local_rank}")
+    torch.cuda.set_device(device)
+    torch.set_default_device(device)
+    torch.set_default_dtype(dtype)
 
-    before_graph = os.path.join(temp_dir,
-                                "before_sequence_parallelism_pass-0.py")
+    update_environment_variables({
+        'RANK': str(local_rank),
+        'LOCAL_RANK': str(local_rank),
+        'WORLD_SIZE': str(world_size),
+        'MASTER_ADDR': 'localhost',
+        'MASTER_PORT': '12345',
+    })
 
-    assert Path(before_graph).exists(), \
-        f"Expected {before_graph} to exist, but it does not."
+    # initialize distributed
+    init_distributed_environment()
+    initialize_model_parallel(tensor_model_parallel_size=world_size)
 
-    c1, c2, c3 = count_comm_ops(before_graph)
-    assert c1 > 0, "Expected all_reduce ops, but found 0 before \
-        apply sequence parallelism pass"
-    assert c2 == 0, f"Expected 0 all_gather ops, but found {c2} before" + \
-        "apply sequence parallelism pass"
-    assert c3 == 0, f"Expected 0 reduce_scatter ops, but found {c3} before" + \
-        "apply sequence parallelism pass"
+    # configure vllm config for SequenceParallelismPass
+    vllm_config = VllmConfig()
+    vllm_config.compilation_config = CompilationConfig(
+        pass_config=CompilationConfig.PassConfig(
+            enable_sequence_parallelism=True, ), )
+    vllm_config.device_config = DeviceConfig(device=torch.device("cuda"))
 
-    after_graph = os.path.join(temp_dir,
-                               "after_sequence_parallelism_pass-0.py")
-    assert Path(after_graph).exists(), \
-        f"Expected {after_graph} to exist, but it does not."
+    # this is a fake model name to construct the model config
+    # in the vllm_config, it's not really used.
+    model = "nm-testing/TinyLlama-1.1B-Chat-v1.0-FP8-e2e"
+    vllm_config.model_config = ModelConfig(model=model,
+                                           task="auto",
+                                           tokenizer=model,
+                                           tokenizer_mode="auto",
+                                           trust_remote_code=True,
+                                           dtype=dtype,
+                                           seed=42)
 
-    c1, c2, c3 = count_comm_ops(after_graph)
+    sequence_parallelism_pass = SequenceParallelismPass(vllm_config)
+    backend = TestBackend(sequence_parallelism_pass)
 
-    assert c1 == 0, f"Expected 0 all_reduce ops, but found {c1} after" + \
-        "apply sequence parallelism pass"
-    assert c2 > 0, "Expected all_gather ops, but found 0 in after" + \
-        "apply sequence parallelism pass"
-    assert c3 > 0, "Expected 0 reduce_scatter ops, but found 0 after \
-        apply sequence parallelism pass"
+    model = TestModel(hidden_size, hidden_size * 2)
+    hidden_states = torch.randn((batch_size * seq_len, hidden_size),
+                                dtype=dtype)
+    residual = torch.randn((batch_size * seq_len, hidden_size), dtype=dtype)
 
-    assert c2 == c3, f"Expected all_gather ops and reduce_scatter ops to be \
-        equal, but found {c2} and {c3} after apply sequence parallelism pass"
+    compiled_model = torch.compile(model, backend=backend)
+    compiled_model(hidden_states, residual)
+
+    # Check substitution worked
+    pre_nodes = backend.graph_pre_pass.nodes
+    post_nodes = backend.graph_post_pass.nodes
+    print(f"before {backend.graph_pre_pass}")
+    print(f"after {backend.graph_post_pass}")
+
+    # c = find_specified_fn_maybe(pre_nodes, torch.ops.vllm.all_reduce.default)
+
+    # In pre-nodes, all reduce should be there,
+    # reduce scatter and all gather should not
+    for op in OPS_IN_MODEL_BEFORE:
+        find_specified_fn(pre_nodes, op)
+    for op in OPS_IN_MODEL_AFTER:
+        assert find_specified_fn_maybe(pre_nodes, op) is None
+
+    # In post-nodes, reduce scatter and all gather should be there,
+    # all reduce should not
+    for op in OPS_IN_MODEL_AFTER:
+        find_specified_fn(post_nodes, op)
+    for op in OPS_IN_MODEL_BEFORE:
+        assert find_specified_fn_maybe(post_nodes, op) is None

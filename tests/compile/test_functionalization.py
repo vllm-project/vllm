@@ -49,7 +49,8 @@ def test_fix_functionalization(model: str, quant_key: QuantKey,
                                do_fusion: bool):
     torch.set_default_device("cuda")
 
-    vllm_config = VllmConfig(pass_config= \
+    vllm_config = VllmConfig()
+    vllm_config.compilation_config = CompilationConfig(pass_config= \
         CompilationConfig.PassConfig(enable_fusion=do_fusion,
                                           enable_noop=True))
     noop_pass = NoOpEliminationPass(vllm_config)
