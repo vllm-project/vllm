@@ -43,6 +43,7 @@ from vllm.v1.spec_decode.utils import is_spec_decode_supported
 from vllm.v1.utils import bind_kv_cache
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
+from vllm.vllm_flash_attn.fa_utils import get_flash_attn_version
 
 from .utils import (gather_mm_placeholders, sanity_check_mm_encoder_outputs,
                     scatter_mm_placeholders)
@@ -134,6 +135,15 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             logger.error(error_msg)
             raise NotImplementedError(
                 "Non-Attention backend is not supported by V1 GPUModelRunner.")
+
+        if self.vllm_config.compilation_config.level == CompilationLevel.FULL_GRAPH:  # noqa: E501
+            attn_backend_name = self.attn_backend.__name__
+            flash_attn_version = get_flash_attn_version()
+            assert attn_backend_name == "FlashAttentionBackend" and \
+                flash_attn_version == 3, \
+                (f"CompilationLevel.FULL_GRAPH (-O4) is only supported with "
+                 f"FA3. Current attention backend is {attn_backend_name} and "
+                 f"FlashAttention version is {flash_attn_version}.")
 
         self.attn_metadata_builder = self.attn_backend.get_builder_cls()(
             weakref.proxy(self))
@@ -1417,7 +1427,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
     def _dummy_run(
         self,
         num_tokens: int,
-        initialize_attention_metadata: bool = False,
+        skip_attn: bool = False,
     ) -> torch.Tensor:
 
         # Set num_scheduled_tokens based on num_tokens and max_num_seqs
@@ -1434,15 +1444,15 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         num_scheduled_tokens = np.array(num_scheduled_tokens_list,
                                         dtype=np.int32)
 
-        if initialize_attention_metadata:
+        if skip_attn:
+            attn_metadata = None
+        else:
             attn_metadata = self.attn_metadata_builder.build(
                 num_reqs=num_tokens,
                 num_actual_tokens=num_tokens,
                 max_query_len=num_tokens,
                 common_prefix_len=0,
             )
-        else:
-            attn_metadata = None
 
         with self.maybe_dummy_run_with_lora(self.lora_config,
                                             num_scheduled_tokens):
@@ -1625,7 +1635,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # Cache the dummy encoder outputs.
             self.encoder_cache["tmp"] = dict(enumerate(dummy_encoder_outputs))
 
-        hidden_states = self._dummy_run(self.max_num_tokens)
+        hidden_states = self._dummy_run(self.max_num_tokens, skip_attn=True)
         if get_pp_group().is_last_rank:
             sampler_output = self._dummy_sampler_run(hidden_states)
         else:
@@ -1654,9 +1664,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             for num_tokens in reversed(self.cudagraph_batch_sizes):
                 for _ in range(self.vllm_config.compilation_config.
                                cudagraph_num_of_warmups):
-                    self._dummy_run(num_tokens,
-                                    initialize_attention_metadata=True)
-                self._dummy_run(num_tokens, initialize_attention_metadata=True)
+                    self._dummy_run(num_tokens)
+                self._dummy_run(num_tokens)
 
         end_time = time.perf_counter()
         end_free_gpu_memory = torch.cuda.mem_get_info()[0]

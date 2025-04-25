@@ -3553,14 +3553,13 @@ class CompilationConfig(BaseModel):
 
     def set_splitting_ops_for_v1(self):
         # NOTE: this function needs to be called
-        if not self.splitting_ops:
-            if self.level == CompilationLevel.PIECEWISE:
-                self.splitting_ops = [
-                    "vllm.unified_attention",
-                    "vllm.unified_attention_with_output",
-                ]
-            elif self.level == CompilationLevel.FULL_GRAPH:
-                self.splitting_ops = []
+        if self.level == CompilationLevel.PIECEWISE:
+            self.splitting_ops = [
+                "vllm.unified_attention",
+                "vllm.unified_attention_with_output",
+            ]
+        else:
+            assert not self.splitting_ops
 
 
 @dataclass
@@ -3787,7 +3786,8 @@ class VllmConfig:
             self.compilation_config.cudagraph_num_of_warmups = 1
             self.compilation_config.pass_config.enable_fusion = False
             self.compilation_config.pass_config.enable_noop = False
-            if self.compilation_config.level < CompilationLevel.PIECEWISE:
+            # Default to PIECEWISE except for when FULL_GRAPH is desired.
+            if self.compilation_config.level != CompilationLevel.FULL_GRAPH:
                 self.compilation_config.level = CompilationLevel.PIECEWISE
             self.compilation_config.set_splitting_ops_for_v1()
 
@@ -3810,6 +3810,12 @@ class VllmConfig:
                 "Disabling `torch.compile`.")
             self.compilation_config.level = CompilationLevel.NO_COMPILATION
 
+        if self.compilation_config.level == CompilationLevel.FULL_GRAPH and \
+            not self.model_config.disable_cascade_attn:
+            logger.warning_once(
+                "CompilationLevel.FULL_GRAPH (-O4) is not supported with "
+                "cascade attention. Disabling cascade attention.")
+            self.model_config.disable_cascade_attn = True
 
         if self.model_config and self.model_config.use_mla and \
             not (current_platform.is_cuda() or current_platform.is_rocm()):
