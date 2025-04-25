@@ -3767,6 +3767,17 @@ class VllmConfig:
             return quant_config
         return None
 
+    @staticmethod
+    def get_quantization_config(
+            model_config: ModelConfig,
+            load_config: LoadConfig) -> Optional[QuantizationConfig]:
+        import copy
+
+        # For some reason, the _ version of this modifies the model_config
+        # object, so using deepcopy to avoid this problem.
+        return VllmConfig._get_quantization_config(copy.deepcopy(model_config),
+                                                   load_config)
+
     def with_hf_config(
         self,
         hf_config: PretrainedConfig,
