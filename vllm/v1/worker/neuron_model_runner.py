@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
+import bisect
 import time
 from typing import TYPE_CHECKING, Optional
 
@@ -27,6 +28,8 @@ from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
                                         KVCacheSpec)
 from vllm.v1.outputs import (EMPTY_MODEL_RUNNER_OUTPUT, LogprobsTensors,
                              ModelRunnerOutput)
+from vllm.v1.sample.neuron.metadata import NeuronSupportedSamplingMetadata
+from vllm.v1.sample.neuron.sampler import Sampler as NeuronSampler
 from vllm.v1.utils import bind_kv_cache
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 
@@ -38,6 +41,8 @@ logger = init_logger(__name__)
 B_P_SIZE = 128
 LARGE_TILE_SZ = 2048
 INVALID_TOKEN_ID = -1
+# Smallest output size
+MIN_NUM_SEQS = 8
 
 
 def shift_bit_length(x):
@@ -122,6 +127,12 @@ class NeuronModelRunner:
                                      device="cpu")
         # None in the first PP rank. The rest are set after load_model.
         self.intermediate_tensors: Optional[IntermediateTensors] = None
+
+        self.query_start_loc_cpu = torch.zeros(self.max_num_tokens + 1,
+                                               dtype=torch.int32,
+                                               device="cpu",
+                                               pin_memory=self.pin_memory)
+        self.query_start_loc_np = self.query_start_loc_cpu.numpy()
 
         # Only relevant for models using M-RoPE (e.g, Qwen2-VL)
         if self.uses_mrope:
@@ -319,7 +330,7 @@ class NeuronModelRunner:
             self.input_batch.num_tokens[req_index] = end_token_index
 
         # Check if the batch has changed. If not, we can skip copying the
-        # sampling metadata from CPU to GPU.
+        # sampling metadata from CPU to device.
         batch_changed = len(removed_req_indices) > 0 or len(req_ids_to_add) > 0
 
         # Add the new or resumed requests to the persistent batch.
@@ -533,12 +544,19 @@ class NeuronModelRunner:
             num_active_blocks=num_active_blocks,
             active_block_table=active_block_table,
             attn_mask=attn_mask)
+
         # NOTE(woosuk): Due to chunked prefills, there can be at most 1 partial
         # request in the batch. While we should not sample any token from this
         # partial request, we do so for simplicity. We will ignore the sampled
         # token from the partial request.
         # TODO: Support prompt logprobs.
-        return attn_metadata, logits_indices
+        padded_num_reqs = _get_padded_num_reqs_with_upper_limit(
+            num_reqs, self.max_num_reqs)
+        # Indices at which we sample (positions of last token in the sequence).
+        # Padded to avoid recompiling when `num_reqs` varies.
+        logits_indices = self.query_start_loc_cpu[1:padded_num_reqs + 1] - 1
+        logits_indices = logits_indices.to(self.device)
+        return attn_metadata, logits_indices, padded_num_reqs
 
     def _execute_encoder(self, scheduler_output: "SchedulerOutput"):
         scheduled_encoder_inputs = scheduler_output.scheduled_encoder_inputs
@@ -631,7 +649,8 @@ class NeuronModelRunner:
             encoder_outputs = []
 
         # Prepare the decoder inputs.
-        attn_metadata, logits_indices = self._prepare_inputs(scheduler_output)
+        attn_metadata, logits_indices, padded_num_reqs = self._prepare_inputs(
+            scheduler_output)
         num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         num_input_tokens = self._get_padded_batch_size(num_scheduled_tokens)
 
@@ -660,6 +679,7 @@ class NeuronModelRunner:
         else:
             positions = self.positions[:num_input_tokens]
 
+        num_reqs = self.input_batch.num_reqs
         # Run the decoder.
         with set_forward_context(attn_metadata, self.vllm_config):
             hidden_states = self.model(
@@ -677,40 +697,39 @@ class NeuronModelRunner:
             # Compute logits on CPU
             self.model.lm_head = self.model.lm_head.cpu()
         logits = self.model.compute_logits(hidden_states, None)
+        sampling_metadata = NeuronSupportedSamplingMetadata.\
+            from_input_batch(self.input_batch, padded_num_reqs, self.device)
+        selected_token_ids = self.sample_from_logits(logits, sampling_metadata)
+        # Remove padding on cpu and keep dynamic op outside of xla graph.
+        selected_token_ids = selected_token_ids.cpu()[:num_reqs]
+        print(f"{selected_token_ids=}, {num_reqs=}")
 
-        # Sample the next token and get logprobs if needed.
-        sampling_metadata = self.input_batch.sampling_metadata
-        sampler_output = self.model.sample(
-            logits=logits,
-            sampling_metadata=sampling_metadata,
-        )
-
-        sampled_token_ids = sampler_output.sampled_token_ids.tolist()
-        # TODO(woosuk): The following loop can be slow since it iterates over
-        # the requests one by one. Optimize.
-        num_reqs = self.input_batch.num_reqs
-        for i, req_id in enumerate(self.input_batch.req_ids[:num_reqs]):
+        # Update the cache state concurrently. Code above will not block until
+        # we use `selected_token_ids`. Add mark_step if post-processing changes
+        request_seq_lens: list[tuple[int, CachedRequestState, int]] = []
+        discard_sampled_tokens_req_indices = []
+        for i, req_id in zip(range(num_reqs), self.input_batch.req_ids):
+            assert req_id is not None
             req_state = self.requests[req_id]
             seq_len = (req_state.num_computed_tokens +
                        scheduler_output.num_scheduled_tokens[req_id])
-            assert seq_len <= req_state.num_tokens
-            if seq_len == req_state.num_tokens:
-                # Append the sampled token to the output token ids.
-                token_id = sampled_token_ids[i]
-                self.input_batch.token_ids_cpu[i, seq_len] = np.array(token_id)
-                req_state.output_token_ids.append(token_id)
+            if seq_len >= req_state.num_tokens:
+                request_seq_lens.append((i, req_state, seq_len))
             else:
                 # Ignore the sampled token from the partial request.
                 # Rewind the generator state as if the token was not sampled.
                 generator = self.input_batch.generators.get(i)
                 if generator is not None:
+                    # This relies on cuda-specific torch-internal impl details
                     generator.set_offset(generator.get_offset() - 4)
 
-        # NOTE: device to host sync happens here.
-        # Move as many CPU operations as possible before this sync point.
-        logprobs_tensors = sampler_output.logprobs_tensors
-        logprobs_lists = logprobs_tensors.tolists() \
-            if logprobs_tensors is not None else None
+                # Record the index of the request that should not be sampled,
+                # so that we could clear the sampled tokens before returning.
+                discard_sampled_tokens_req_indices.append(i)
+
+        assert all(
+            req_id is not None for req_id in
+            self.input_batch.req_ids[:num_reqs]), "req_ids contains None"
 
         # Compute prompt logprobs if needed.
         prompt_logprobs_dict: dict[str, Optional[LogprobsTensors]] = {}
@@ -718,27 +737,43 @@ class NeuronModelRunner:
             prompt_logprobs_dict[req_id] = None
 
         # Get the valid generated tokens.
-        sampled_token_ids = sampler_output.sampled_token_ids
-        max_gen_len = sampled_token_ids.shape[-1]
+        max_gen_len = selected_token_ids.shape[-1]
         if max_gen_len == 1:
-            # No spec decode tokens.
-            valid_sampled_token_ids = sampled_token_ids.tolist()
+            valid_sampled_token_ids = selected_token_ids.tolist()
+
+            # Mask out the sampled tokens that should not be sampled.
+            # TODO: Keep in sync with gpu_model_runner.py, in particular
+            #       the "else" case here
+            for i in discard_sampled_tokens_req_indices:
+                valid_sampled_token_ids[i].clear()
+
+            # Append sampled tokens
+            for i, req_state, seq_len in request_seq_lens:
+                token_id = valid_sampled_token_ids[i][0]
+                self.input_batch.token_ids_cpu[i, seq_len] = token_id
+                req_state.output_token_ids.append(token_id)
+                self.input_batch.num_tokens[i] += 1
+
         else:
-            # Includes spec decode tokens.
-            valid_mask = sampled_token_ids != INVALID_TOKEN_ID
+            valid_mask = selected_token_ids != INVALID_TOKEN_ID
             gen_lens = valid_mask.sum(dim=1).tolist()
-            # TODO(woosuk): Optimize this.
             valid_sampled_token_ids = [
                 seq.tolist()
-                for seq in sampled_token_ids[valid_mask].split(gen_lens)
+                for seq in selected_token_ids[valid_mask].split(gen_lens)
             ]
+            self.input_batch.num_tokens[:num_reqs] += gen_lens
+            for i, req_state, seq_len in request_seq_lens:
+                target_slice = slice(seq_len - gen_lens[i] + 1, seq_len + 1)
+                self.input_batch.token_ids_cpu[
+                    i, target_slice] = valid_sampled_token_ids[i]
+                req_state.output_token_ids.extend(valid_sampled_token_ids[i])
 
         model_runner_output = ModelRunnerOutput(
             req_ids=self.input_batch.req_ids,
             req_id_to_index=self.input_batch.req_id_to_index,
             sampled_token_ids=valid_sampled_token_ids,
             spec_token_ids=None,
-            logprobs=logprobs_lists,
+            logprobs=None,
             prompt_logprobs_dict=prompt_logprobs_dict,
         )
         return model_runner_output
@@ -756,6 +791,7 @@ class NeuronModelRunner:
                                        backend="openxla",
                                        fullgraph=True,
                                        dynamic=False)
+            self.sampler = NeuronSampler()
 
     @torch.inference_mode()
     def _dummy_run(self, kv_caches, num_tokens: int) -> torch.Tensor:
@@ -879,6 +915,18 @@ class NeuronModelRunner:
             kv_caches,
             self.vllm_config.compilation_config.static_forward_context,
             self.kv_caches)
+
+    @torch.compile(backend="openxla", fullgraph=True, dynamic=False)
+    def sample_from_logits(
+            self, logits: torch.Tensor,
+            sampling_metadata: NeuronSupportedSamplingMetadata
+    ) -> torch.Tensor:
+        if sampling_metadata.all_greedy:
+            out_tokens = torch.argmax(logits, dim=-1, keepdim=True)
+        else:
+            out_tokens = self.sampler(logits,
+                                      sampling_metadata).sampled_token_ids
+        return out_tokens
 
     def _get_padded_batch_size(self,
                                batch_size: int,
@@ -1007,3 +1055,68 @@ class BlockDiagonalCausalFromBottomRightMask:
             active_mask = BlockDiagonalCausalFromBottomRightMask._from_seqlens(
                 query_lens, query_lens)
         return prior_mask, active_mask
+
+
+def _get_req_paddings(min_req_size: int, max_req_size: int) -> list[int]:
+    logger.info("Preparing request paddings:")
+    # assert min_req_size is power of 2
+    assert (min_req_size & (min_req_size - 1) == 0) and min_req_size > 0
+    paddings: list = []
+    num = max(MIN_NUM_SEQS, min_req_size)
+    while num <= max_req_size and (len(paddings) == 0 or paddings[-1] != num):
+        paddings.append(num)
+        logger.info("    %d", num)
+        num = _get_padded_num_reqs_with_upper_limit(num + 1, max_req_size)
+    return paddings
+
+
+def _get_padded_num_reqs_with_upper_limit(x: int, upper_limit: int) -> int:
+    res = MIN_NUM_SEQS if x <= MIN_NUM_SEQS else 1 << (x - 1).bit_length()
+    return min(res, upper_limit)
+
+
+def _get_token_paddings(min_token_size: int, max_token_size: int,
+                        padding_gap: int) -> list[int]:
+    """Generate a list of padding size, starting from min_token_size, 
+    ending with a number that can cover max_token_size
+    
+    If padding_gap == 0 then:
+        increase 2X each time (exponential)
+    else:
+        first increase the size to twice, 
+        then increase the padding size by padding_gap.
+    """
+    # assert min_token_size is power of 2
+    assert (min_token_size & (min_token_size - 1) == 0) and min_token_size > 0
+    paddings = []
+    num = min_token_size
+
+    if padding_gap == 0:
+        logger.info("Using exponential token paddings:")
+        while True:
+            logger.info("    %d", num)
+            paddings.append(num)
+            if num >= max_token_size:
+                break
+            num *= 2
+    else:
+        logger.info("Using incremental token paddings:")
+        while num <= padding_gap:
+            logger.info("    %d", num)
+            paddings.append(num)
+            num *= 2
+        num //= 2
+        while num < max_token_size:
+            num += padding_gap
+            logger.info("    %d", num)
+            paddings.append(num)
+
+    return paddings
+
+
+def _get_padded_token_len(paddings: list[int], x: int) -> int:
+    """Return the first element in paddings list greater or equal to x.
+    """
+    index = bisect.bisect_left(paddings, x)
+    assert index < len(paddings)
+    return paddings[index]
