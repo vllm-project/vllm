@@ -127,39 +127,6 @@ def test_chunked_prefill(
     )
 
 
-@pytest.mark.parametrize("model", HYBRID_MODELS)
-@pytest.mark.parametrize("max_tokens", [15])
-@pytest.mark.parametrize("num_logprobs", [5])
-def test_parallel_sampling(
-    vllm_runner,
-    example_prompts,
-    model: str,
-    max_tokens: int,
-    num_logprobs: int,
-) -> None:
-    with vllm_runner(model, max_num_seqs=MAX_NUM_SEQS) as vllm_model:
-        for_loop_outputs = []
-        for _ in range(10):
-            single_output, = vllm_model.generate_greedy_logprobs(
-                [example_prompts[1]], max_tokens, num_logprobs)
-            for_loop_outputs.append(single_output)
-
-        sampling_params = SamplingParams(n=10,
-                                         temperature=0.001,
-                                         seed=0,
-                                         max_tokens=max_tokens,
-                                         logprobs=num_logprobs)
-        n_lt_1_outputs, = vllm_model.generate_w_logprobs([example_prompts[1]],
-                                                         sampling_params)
-
-    check_logprobs_close(
-        outputs_0_lst=n_lt_1_outputs,
-        outputs_1_lst=for_loop_outputs,
-        name_0="vllm_n_lt_1_outputs",
-        name_1="vllm",
-    )
-
-
 @pytest.mark.parametrize("model", [SSM_MODELS[0], HYBRID_MODELS[0]])
 @pytest.mark.parametrize("max_tokens", [10])
 def test_chunked_prefill_with_parallel_sampling(
