@@ -121,7 +121,7 @@ main() {
     echo "All servers are up. Starting benchmark..."
 
     # begin benchmark
-    cd ../../../../benchmarks/
+    cd ../../../benchmarks/
     python benchmark_serving.py --port 9000 --seed $(date +%s) \
         --model meta-llama/Llama-3.1-8B-Instruct \
         --dataset-name random --random-input-len 7500 --random-output-len 200 \
