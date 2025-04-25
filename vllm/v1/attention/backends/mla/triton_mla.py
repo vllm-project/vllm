@@ -1,5 +1,4 @@
 # SPDX-License-Identifier: Apache-2.0
-# type: ignore
 from typing import Any, Optional
 
 import torch
