@@ -15,7 +15,7 @@ from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.outputs import LogprobsTensors
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.utils import copy_slice
-from vllm.v1.worker.block_table import initialize_block_table
+from vllm.v1.worker.block_table import MultiGroupBlockTable
 
 _SAMPLING_EPS = 1e-5
 
@@ -99,7 +99,7 @@ class InputBatch:
             self.num_computed_tokens_cpu_tensor.numpy()
 
         # Block table.
-        self.block_table = initialize_block_table(
+        self.block_table = MultiGroupBlockTable(
             max_num_reqs=max_num_reqs,
             max_model_len=max_model_len,
             max_num_tokens=max_num_tokens,
@@ -267,7 +267,7 @@ class InputBatch:
         self.num_tokens_no_spec[req_index] = request.num_tokens
 
         self.num_computed_tokens_cpu[req_index] = request.num_computed_tokens
-        self.block_table.add_row(request.block_ids, req_index)  # type: ignore
+        self.block_table.add_row(request.block_ids, req_index)
 
         sampling_params = request.sampling_params
         if sampling_params.sampling_type == SamplingType.GREEDY:

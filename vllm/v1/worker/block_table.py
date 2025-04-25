@@ -102,18 +102,22 @@ class BlockTable:
 P = ParamSpec("P")
 
 
-class MultiLayerBlockTable:
+class MultiGroupBlockTable:
     move_row: Callable[P, None]
     swap_row: Callable[P, None]
     commit: Callable[P, None]
     clear: Callable[P, None]
 
-    append_row: Callable[Concatenate[list[int], P], None]
-    add_row: Callable[Concatenate[list[int], P], None]
+    append_row: Callable[Concatenate[list[list[int]], P], None]
+    add_row: Callable[Concatenate[list[list[int]], P], None]
 
-    def __init__(self, max_num_reqs: int, max_num_blocks_per_req: list[int],
+    def __init__(self, max_num_reqs: int, max_model_len: int,
                  max_num_tokens: int, pin_memory: bool, device: torch.device,
                  kv_cache_config: KVCacheConfig) -> None:
+        max_num_blocks_per_req = [
+            cdiv(max_model_len, g.kv_cache_spec.block_size)
+            for g in kv_cache_config.kv_cache_groups
+        ]
         self.block_tables = [
             BlockTable(max_num_reqs, max_num_blocks_per_req[i], max_num_tokens,
                        pin_memory, device)
@@ -147,20 +151,3 @@ class MultiLayerBlockTable:
 
     def __getitem__(self, idx: int) -> "BlockTable":
         return self.block_tables[idx]
-
-
-def initialize_block_table(
-    max_num_reqs: int,
-    max_model_len: int,
-    max_num_tokens: int,
-    pin_memory: bool,
-    device: torch.device,
-    kv_cache_config: KVCacheConfig,
-) -> MultiLayerBlockTable:
-    max_num_blocks_per_req = [
-        cdiv(max_model_len, g.kv_cache_spec.block_size)
-        for g in kv_cache_config.kv_cache_groups
-    ]
-    return MultiLayerBlockTable(max_num_reqs, max_num_blocks_per_req,
-                                max_num_tokens, pin_memory, device,
-                                kv_cache_config)
