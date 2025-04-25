@@ -8,7 +8,7 @@ import torch
 from torch import nn
 
 if TYPE_CHECKING:
-    from . import QuantizationMethods
+    from vllm.model_executor.layers.quantization import QuantizationMethods
 else:
     QuantizationMethods = str
 
@@ -71,7 +71,7 @@ class QuantizationConfig(ABC):
         self.packed_modules_mapping: Dict[str, List[str]] = dict()
 
     @abstractmethod
-    def get_name(self) -> str:
+    def get_name(self) -> QuantizationMethods:
         """Name of the quantization method."""
         raise NotImplementedError
 
