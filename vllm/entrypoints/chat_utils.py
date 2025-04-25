@@ -1226,6 +1226,8 @@ def apply_mistral_chat_template(
     tools: Optional[list[dict[str, Any]]],
     **kwargs: Any,
 ) -> list[int]:
+    from mistral_common.exceptions import MistralCommonException
+
     # The return value of resolve_mistral_chat_template is always None,
     # and we won't use it.
     resolve_mistral_chat_template(
@@ -1243,7 +1245,7 @@ def apply_mistral_chat_template(
     # if input does not comply with the expected format.
     # We convert those assertion errors to ValueErrors so they can be
     # are properly caught in the preprocessing_input step
-    except AssertionError as e:
+    except (AssertionError, MistralCommonException) as e:
         raise ValueError from e
 
     # External library exceptions can sometimes occur despite the framework's
