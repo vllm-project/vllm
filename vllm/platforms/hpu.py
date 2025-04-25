@@ -58,10 +58,6 @@ class HpuPlatform(Platform):
             parallel_config.worker_cls = \
                 "vllm.worker.multi_step_hpu_worker.MultiStepHPUWorker"
 
-        if vllm_config.speculative_config is not None:
-            raise NotImplementedError(
-                "Speculative decoding is not implemented for HPU")
-
         if parallel_config.worker_cls == "auto":
             if envs.VLLM_USE_V1:
                 parallel_config.worker_cls = \
