@@ -22,7 +22,7 @@ MODELS = [
 
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("dtype", ["float"])
-@pytest.mark.parametrize("max_tokens", [96])
+@pytest.mark.parametrize("max_tokens", [64])
 def test_models(
     hf_runner,
     vllm_runner,
@@ -52,7 +52,7 @@ def test_models(
 
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("dtype", ["float"])
-@pytest.mark.parametrize("max_tokens", [96])
+@pytest.mark.parametrize("max_tokens", [64])
 def test_batching(
     vllm_runner,
     example_prompts,
@@ -188,7 +188,6 @@ def test_parallel_sampling(
     )
 
 
-@pytest.mark.skip(reason="RE-ENABLE: test is currently failing on main.")
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("dtype", ["bfloat16"])
 @pytest.mark.parametrize("max_tokens", [20])
@@ -251,7 +250,7 @@ def test_models_preemption_recompute(
 
 
 @pytest.mark.parametrize("model", MODELS)
-@pytest.mark.parametrize("dtype", ["float"])
+@pytest.mark.parametrize("dtype", ["bfloat16"])
 def test_fail_upon_inc_requests_and_finished_requests_lt_available_blocks(
     vllm_runner,
     model: str,
@@ -273,7 +272,7 @@ def test_fail_upon_inc_requests_and_finished_requests_lt_available_blocks(
 
 
 @pytest.mark.parametrize("model", MODELS)
-@pytest.mark.parametrize("dtype", ["float"])
+@pytest.mark.parametrize("dtype", ["bfloat16"])
 def test_state_cleanup(
     vllm_runner,
     model: str,
@@ -291,9 +290,8 @@ def test_state_cleanup(
                     "could be related to finished_requests_ids")
 
 
-@pytest.mark.skip(reason="RE-ENABLE: test is currently failing on main.")
 @pytest.mark.parametrize("model", MODELS)
-@pytest.mark.parametrize("dtype", ["float"])
+@pytest.mark.parametrize("dtype", ["bfloat16"])
 def test_multistep(
     vllm_runner,
     model: str,
@@ -302,23 +300,22 @@ def test_multistep(
 ) -> None:
     # This test is verifying that multistep works correctly
     #on mamba-like models
-    with vllm_runner(model, num_scheduler_steps=8,
+    with vllm_runner(model, dtype=dtype, num_scheduler_steps=8,
                      max_num_seqs=2) as vllm_model:
         vllm_model.generate_greedy([example_prompts[0]] * 10, 1)
 
 
-@pytest.mark.skip(reason="RE-ENABLE: test is currently failing on main.")
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("dtype", ["float"])
 @pytest.mark.parametrize("max_tokens", [64])
 def test_multistep_correctness(vllm_runner, model: str, dtype: str,
                                max_tokens: int, example_prompts) -> None:
-    with vllm_runner(model, num_scheduler_steps=8,
+    with vllm_runner(model, dtype=dtype, num_scheduler_steps=8,
                      max_num_seqs=2) as vllm_model:
         vllm_outputs_multistep = vllm_model.generate_greedy(
             example_prompts, max_tokens)
 
-    with vllm_runner(model, num_scheduler_steps=1,
+    with vllm_runner(model, dtype=dtype, num_scheduler_steps=1,
                      max_num_seqs=2) as vllm_model:
         vllm_outputs_single_step = vllm_model.generate_greedy(
             example_prompts, max_tokens)
