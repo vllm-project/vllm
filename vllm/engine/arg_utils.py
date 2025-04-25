@@ -1459,7 +1459,7 @@ class EngineArgs:
             if speculative_method:
                 if speculative_method in ("ngram", "[ngram]"):
                     is_ngram_enabled = True
-                elif speculative_method == "eagle":
+                elif speculative_method in ("eagle", "eagle3"):
                     is_eagle_enabled = True
             else:
                 speculative_model = self.speculative_config.get("model")

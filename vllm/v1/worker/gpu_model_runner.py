@@ -165,14 +165,18 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         # Set up speculative decoding.
         self.use_spec_decode = False
+        self.use_aux_hidden_state_outputs = False
         if self.speculative_config:
             self.use_spec_decode = True
             if get_pp_group().is_last_rank:
                 if self.speculative_config.method == "ngram":
                     self.drafter = NgramProposer(self.vllm_config)
-                elif self.speculative_config.method == "eagle":
+                elif self.speculative_config.method == "eagle" or \
+                        self.speculative_config.method == "eagle3":
                     self.drafter = EagleProposer(self.vllm_config,
                                                  self.device)  # type: ignore
+                    if self.speculative_config.method == "eagle3":
+                        self.use_aux_hidden_state_outputs = True
                 else:
                     raise ValueError("Unknown speculative decoding method: "
                                      f"{self.speculative_config.method}")
@@ -1079,12 +1083,18 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # Run the decoder.
         # Use persistent buffers for CUDA graphs.
         with set_forward_context(attn_metadata, self.vllm_config):
-            hidden_states = self.model(
+            output = self.model(
                 input_ids=input_ids,
                 positions=positions,
                 intermediate_tensors=intermediate_tensors,
                 inputs_embeds=inputs_embeds,
             )
+
+        if self.use_aux_hidden_state_outputs:
+            hidden_states, aux_hidden_states = output
+        else:
+            hidden_states = output
+
         if not get_pp_group().is_last_rank:
             # For mid-pipeline stages, return the hidden states.
             return hidden_states
@@ -1182,7 +1192,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             assert isinstance(self.drafter, NgramProposer)
             spec_token_ids = self.generate_draft_token_ids(
                 valid_sampled_token_ids, sampling_metadata)
-        elif self.speculative_config.method == "eagle":
+        elif self.speculative_config.method == "eagle" or \
+                self.speculative_config.method == "eagle3":
             assert isinstance(self.drafter, EagleProposer)
             # TODO(woosuk): Refactor the loop.
             next_token_ids: list[int] = []
@@ -1210,7 +1221,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 # not include padding.
                 target_token_ids = self.input_ids[:num_scheduled_tokens]
                 target_positions = positions[:num_scheduled_tokens]
-                target_hidden_states = hidden_states[:num_scheduled_tokens]
+                if self.use_aux_hidden_state_outputs:
+                    target_hidden_states = [
+                        h[:num_scheduled_tokens] for h in aux_hidden_states
+                    ]
+                else:
+                    target_hidden_states = hidden_states[:num_scheduled_tokens]
                 target_slot_mapping = attn_metadata.slot_mapping
                 cu_num_tokens = attn_metadata.query_start_loc
             else:
@@ -1231,9 +1247,16 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 )
                 target_token_ids = self.input_ids[token_indices]
                 target_positions = positions[token_indices]
-                target_hidden_states = hidden_states[token_indices]
+                if self.use_aux_hidden_state_outputs:
+                    target_hidden_states = [
+                        h[token_indices] for h in aux_hidden_states
+                    ]
+                else:
+                    target_hidden_states = hidden_states[token_indices]
                 target_slot_mapping = attn_metadata.slot_mapping[token_indices]
 
+            if self.use_aux_hidden_state_outputs:
+                target_hidden_states = torch.cat(target_hidden_states, dim=-1)
             draft_token_ids = self.drafter.propose(
                 target_token_ids=target_token_ids,
                 target_positions=target_positions,
@@ -1311,6 +1334,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             if hasattr(self, "drafter"):
                 logger.info("Loading drafter model...")
                 self.drafter.load_model(self.model)
+            if self.use_aux_hidden_state_outputs:
+                self.model.set_aux_hidden_state_layers(
+                    self.model.get_eagle3_aux_hidden_state_layers())
             time_after_load = time.perf_counter()
         self.model_memory_usage = m.consumed_memory
         logger.info("Model loading took %.4f GiB and %.6f seconds",
@@ -1463,12 +1489,16 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             with set_forward_context(None,
                                      self.vllm_config,
                                      num_tokens=num_tokens):
-                hidden_states = model(
+                outputs = model(
                     input_ids=input_ids,
                     positions=positions,
                     intermediate_tensors=intermediate_tensors,
                     inputs_embeds=inputs_embeds,
                 )
+            if self.use_aux_hidden_state_outputs:
+                hidden_states, _ = outputs
+            else:
+                hidden_states = outputs
 
         logit_indices = np.cumsum(num_scheduled_tokens) - 1
         return hidden_states[logit_indices]
