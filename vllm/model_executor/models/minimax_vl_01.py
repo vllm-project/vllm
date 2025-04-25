@@ -2,6 +2,7 @@
 
 from abc import abstractmethod
 from collections.abc import Iterable, Mapping, Sequence
+from dataclasses import dataclass
 from typing import (Final, Literal, Optional, Protocol, Set, Tuple, TypedDict,
                     TypeVar, Union, cast)
 
@@ -42,6 +43,13 @@ from .utils import (AutoWeightsLoader, flatten_bn, init_vllm_registered_model,
 from .vision import get_vision_encoder_info
 
 logger = init_logger(__name__)
+
+
+# For dummy input only
+@dataclass
+class MaxImageTokenMeta:
+    width: int = 1024
+    height: int = 1024
 
 
 class MiniMaxVL01ImagePixelInputs(TypedDict):
@@ -184,13 +192,11 @@ class MiniMaxVL01DummyInputsBuilder(BaseDummyInputsBuilder[_I]):
         mm_counts: Mapping[str, int],
     ) -> MultiModalDataDict:
         num_images = mm_counts.get("image", 0)
-        target_width, target_height = \
-            self.info.get_image_size_with_most_features()
 
         return {
             "image":
-            self._get_dummy_images(width=target_width,
-                                   height=target_height,
+            self._get_dummy_images(width=MaxImageTokenMeta.width,
+                                   height=MaxImageTokenMeta.height,
                                    num_images=num_images)
         }
 
