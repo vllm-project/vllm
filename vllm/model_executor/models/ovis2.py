@@ -25,7 +25,6 @@ from torch import Tensor
 from transformers import BatchFeature
 
 from vllm.config import VllmConfig
-from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.model_executor.models.aimv2 import Aimv2VisualTokenizer
 from vllm.model_executor.models.utils import (AutoWeightsLoader, flatten_bn,
                                               init_vllm_registered_model,
@@ -205,13 +204,10 @@ class Ovis2ForConditionalGeneration(nn.Module, SupportsMultiModal):
         super().__init__()
         config = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
-        multimodal_config = vllm_config.model_config.multimodal_config
 
         self.config: OvisConfig = config
-        self.multimodal_config = multimodal_config
-        self.padding_idx = config.pad_token_id
         self.llm = init_vllm_registered_model(
-            vllm_config=vllm_config.with_hf_config(config.text_config),
+            vllm_config=vllm_config.with_hf_config(config.get_text_config()),
             prefix=maybe_prefix(prefix, "llm"),
         )
 
@@ -230,10 +226,6 @@ class Ovis2ForConditionalGeneration(nn.Module, SupportsMultiModal):
         # TODO(Isotr0py): PP support
         # self.make_empty_intermediate_tensors = (
         #    self.language_model.make_empty_intermediate_tensors)
-
-    @property
-    def sampler(self):
-        return self.llm.sampler
 
     def _parse_and_validate_image_input(
             self, **kwargs: object) -> Optional[Ovis2ImagePatchInputs]:
@@ -330,15 +322,10 @@ class Ovis2ForConditionalGeneration(nn.Module, SupportsMultiModal):
                                            sampling_metadata)
         return logits
 
-    def sample(
-        self,
-        logits: torch.Tensor,
-        sampling_metadata: SamplingMetadata,
-    ) -> Optional[SamplerOutput]:
-        next_tokens = self.llm.sampler(logits, sampling_metadata)
-        return next_tokens
-
     def load_weights(self, weights: Iterable[Tuple[str,
                                                    torch.Tensor]]) -> Set[str]:
         loader = AutoWeightsLoader(self)
         return loader.load_weights(weights)
+
+    def get_language_model(self) -> torch.nn.Module:
+        return self.llm
