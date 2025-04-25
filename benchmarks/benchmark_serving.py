@@ -588,16 +588,16 @@ def main(args: argparse.Namespace):
     elif args.dataset_name == "hf":
         # all following datasets are implemented from the
         # HuggingFaceDataset base class
-        if args.dataset_path in VisionArenaDataset.SUPPORTED_DATASET_PATHS:
+        if VisionArenaDataset.is_available(args.dataset_path):
             dataset_class = VisionArenaDataset
             args.hf_split = "train"
             args.hf_subset = None
-        elif args.dataset_path in InstructCoderDataset.SUPPORTED_DATASET_PATHS:
+        elif InstructCoderDataset.is_available(args.dataset_path):
             dataset_class = InstructCoderDataset
             args.hf_split = "train"
-        elif args.dataset_path in ConversationDataset.SUPPORTED_DATASET_PATHS:
+        elif ConversationDataset.is_available(args.dataset_path):
             dataset_class = ConversationDataset
-        elif args.dataset_path in AIMODataset.SUPPORTED_DATASET_PATHS:
+        elif AIMODataset.is_available(args.dataset_path):
             dataset_class = AIMODataset
             args.hf_split = "train"
         elif args.dataset_path in ASRDataset.SUPPORTED_DATASET_PATHS:
