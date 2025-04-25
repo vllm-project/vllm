@@ -777,12 +777,37 @@ class ModelConfig:
         if quant_cfg is not None:
             quant_method = quant_cfg.get("quant_method", "").lower()
 
+            # Quantization methods which are overrides (i.e. they have a
+            # `override_quantization_method` method) must be checked in order
+            # of preference (this is particularly important for GPTQ).
+            overrides = [
+                "marlin",
+                "bitblas",
+                "gptq_marlin_24",
+                "gptq_marlin",
+                "gptq_bitblas",
+                "awq_marlin",
+                "ipex",
+                "moe_wna16",
+            ]
+            quantization_methods = [
+                q for q in get_args(QuantizationMethods) if q not in overrides
+            ]
+            # We check the overrides first
+            quantization_methods = overrides + quantization_methods
+
             # Detect which checkpoint is it
-            for name in get_args(QuantizationMethods):
+            for name in quantization_methods:
                 method = get_quantization_config(name)
                 quantization_override = method.override_quantization_method(
                     quant_cfg, self.quantization)
-                if quantization_override:
+                if quantization_override is not None:
+                    if name not in overrides:
+                        raise ValueError(
+                            f"Quantization method {name} is an override but "
+                            "is has not been added to the `overrides` list "
+                            "above. This is necessary to ensure that the "
+                            "overrides are checked in order of preference.")
                     quant_method = quantization_override
                     self.quantization = quantization_override
                     break
