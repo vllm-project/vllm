@@ -1,5 +1,4 @@
 # SPDX-License-Identifier: Apache-2.0
-# type: ignore
 from dataclasses import dataclass
 from typing import Any, Optional
 
@@ -16,7 +15,7 @@ from vllm.v1.attention.backends.mla.common import (MLACommonBackend,
                                                    MLACommonImpl,
                                                    MLACommonMetadata,
                                                    MLACommonMetadataBuilder)
-from vllm.v1.kv_cache_interface import KVCacheSpec
+from vllm.v1.kv_cache_interface import AttentionSpec
 from vllm.v1.worker.block_table import BlockTable
 
 logger = init_logger(__name__)
@@ -54,7 +53,7 @@ class FlashMLAMetadata(MLACommonMetadata[FlashMLADecodeMetadata]):
 
 class FlashMLAMetadataBuilder(MLACommonMetadataBuilder[FlashMLAMetadata]):
 
-    def __init__(self, runner, kv_cache_spec: KVCacheSpec,
+    def __init__(self, runner, kv_cache_spec: AttentionSpec,
                  block_table: BlockTable):
         super().__init__(runner, kv_cache_spec, block_table)
 
