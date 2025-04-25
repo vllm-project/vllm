@@ -1089,7 +1089,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # For mid-pipeline stages, return the hidden states.
             return hidden_states
 
-        hidden_states = hidden_states[:num_scheduled_tokens]
         sample_hidden_states = hidden_states[logits_indices]
         logits = self.model.compute_logits(sample_hidden_states, None)
 
@@ -1155,7 +1154,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         # Compute prompt logprobs if needed.
         prompt_logprobs_dict = self._get_prompt_logprobs_dict(
-            hidden_states,
+            hidden_states[:num_scheduled_tokens],
             scheduler_output,
         )
 
@@ -1208,9 +1207,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 # We need to slice token_ids, positions, and hidden_states
                 # because the eagle head does not use cuda graph and should
                 # not include padding.
-                target_token_ids = self.input_ids[:num_scheduled_tokens]
-                target_positions = positions[:num_scheduled_tokens]
-                target_hidden_states = hidden_states[:num_scheduled_tokens]
+                num_actual_draft_tokens = num_scheduled_tokens
+                target_token_ids = self.input_ids[:num_input_tokens]
+                target_positions = positions[:num_input_tokens]
+                target_hidden_states = hidden_states[:num_input_tokens]
                 target_slot_mapping = attn_metadata.slot_mapping
                 cu_num_tokens = attn_metadata.query_start_loc
             else:
@@ -1229,6 +1229,19 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     attn_metadata.query_start_loc,
                     num_rejected_tokens,
                 )
+
+                num_actual_draft_tokens = len(token_indices)
+                if self.use_cuda_graph and \
+                    num_actual_draft_tokens <= self.cudagraph_batch_sizes[-1]:
+                    num_padded_draft_tokens = self.vllm_config. \
+                        pad_for_cudagraph(num_actual_draft_tokens)
+
+                    if num_padded_draft_tokens > num_actual_draft_tokens:
+                        token_indices = torch.cat((
+                            token_indices,
+                            token_indices[-1].repeat(num_padded_draft_tokens -
+                                                     num_actual_draft_tokens)))
+
                 target_token_ids = self.input_ids[token_indices]
                 target_positions = positions[token_indices]
                 target_hidden_states = hidden_states[token_indices]
@@ -1243,6 +1256,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 cu_num_tokens=cu_num_tokens,
                 block_table=attn_metadata.block_table,
                 sampling_metadata=sampling_metadata,
+                num_actual_draft_tokens=num_actual_draft_tokens,
             )
             spec_token_ids = draft_token_ids.tolist()
 
@@ -1469,6 +1483,18 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     intermediate_tensors=intermediate_tensors,
                     inputs_embeds=inputs_embeds,
                 )
+
+            if self.use_spec_decode and \
+                self.speculative_config.method == 'eagle':
+                assert isinstance(self.drafter, EagleProposer)
+                with set_forward_context(None,
+                                         self.drafter.vllm_config,
+                                         num_tokens=num_tokens):
+                    self.drafter.model(
+                        input_ids=self.drafter.input_ids[:num_tokens],
+                        positions=self.drafter.positions[:num_tokens],
+                        hidden_states=self.drafter.hidden_states[:num_tokens],
+                    )
 
         logit_indices = np.cumsum(num_scheduled_tokens) - 1
         return hidden_states[logit_indices]

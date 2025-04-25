@@ -4,7 +4,7 @@ import torch.nn as nn
 import triton
 import triton.language as tl
 
-from vllm.config import VllmConfig, set_current_vllm_config
+from vllm.config import CompilationLevel, VllmConfig, set_current_vllm_config
 from vllm.forward_context import set_forward_context
 from vllm.model_executor.model_loader.loader import get_model_loader
 from vllm.model_executor.model_loader.utils import set_default_torch_dtype
@@ -27,12 +27,48 @@ class EagleProposer:
             vllm_config.speculative_config.num_speculative_tokens)
         self.max_model_len = vllm_config.model_config.max_model_len
         self.block_size = vllm_config.cache_config.block_size
+
+        self.dtype = vllm_config.model_config.dtype
+
+        self.max_num_tokens = vllm_config.scheduler_config \
+            .max_num_batched_tokens
+        self.hidden_size = vllm_config.model_config.get_hidden_size()
+
+        self.use_cuda_graph = (self.vllm_config.compilation_config.level
+                               == CompilationLevel.PIECEWISE and
+                               not self.vllm_config.model_config.enforce_eager)
+
+        self.cudagraph_batch_sizes = list(
+            reversed(
+                self.vllm_config.compilation_config.cudagraph_capture_sizes))
+
+        # persistent buffers for cuda graph
+        self.input_ids = torch.zeros(self.max_num_tokens,
+                                     dtype=torch.int32,
+                                     device=device)
+        self.positions = torch.zeros(self.max_num_tokens,
+                                     dtype=torch.int64,
+                                     device=device)
+        self.hidden_states = torch.zeros(
+            (self.max_num_tokens, self.hidden_size),
+            dtype=self.dtype,
+            device=device)
         # We need +1 here because the arange is used to set query_start_loc,
         # which has one more element than batch_size.
         self.arange = torch.arange(vllm_config.scheduler_config.max_num_seqs +
                                    1,
                                    device=device,
                                    dtype=torch.int32)
+
+    def copy_model_inputs_to_buffer(
+        self,
+        input_ids: torch.Tensor,
+        positions: torch.Tensor,
+        hidden_states: torch.Tensor,
+    ) -> None:
+        self.input_ids[:input_ids.size(0)].copy_(input_ids)
+        self.positions[:positions.size(0)].copy_(positions)
+        self.hidden_states[:hidden_states.size(0)].copy_(hidden_states)
 
     def propose(
         self,
@@ -51,18 +87,18 @@ class EagleProposer:
         # [batch_size, max_num_blocks_per_req]
         block_table: torch.Tensor,
         sampling_metadata: SamplingMetadata,
+        num_actual_draft_tokens: int,
     ) -> torch.Tensor:
         num_tokens = target_token_ids.shape[0]
         batch_size = next_token_ids.shape[0]
         last_token_indices = cu_num_tokens[1:] - 1
 
-        input_ids = torch.empty_like(target_token_ids)
         # Shift the input ids by one token.
         # E.g., [a1, b1, b2, c1, c2, c3] -> [b1, b2, c1, c2, c3, c3]
-        input_ids[:-1] = target_token_ids[1:]
+        self.input_ids[:num_tokens - 1] = target_token_ids[1:]
         # Replace the last token with the next token.
         # E.g., [b1, b2, c1, c2, c3, c3] -> [a2, b2, b3, c2, c3, c4]
-        input_ids[last_token_indices] = next_token_ids
+        self.input_ids[last_token_indices] = next_token_ids
 
         # FA requires seq_len to have dtype int32.
         seq_lens = (target_positions[last_token_indices] + 1).int()
@@ -71,7 +107,7 @@ class EagleProposer:
         max_seq_len = seq_lens.max().item()
         max_num_tokens = (cu_num_tokens[1:] - cu_num_tokens[:-1]).max().item()
         attn_metadata = FlashAttentionMetadata(
-            num_actual_tokens=num_tokens,
+            num_actual_tokens=num_actual_draft_tokens,
             max_query_len=max_num_tokens,
             query_start_loc=cu_num_tokens,
             max_seq_len=max_seq_len,
@@ -85,12 +121,17 @@ class EagleProposer:
             prefix_kv_lens=None,
             suffix_kv_lens=None,
         )
+        attn_metadata.num_input_tokens = num_tokens
+
+        # copy inputs to buffer for cudagraph
+        self.positions[:num_tokens] = target_positions
+        self.hidden_states[:num_tokens] = target_hidden_states
 
         with set_forward_context(attn_metadata, self.vllm_config):
             hidden_states = self.model(
-                input_ids=input_ids,
-                hidden_states=target_hidden_states,
-                positions=target_positions,
+                input_ids=self.input_ids[:num_tokens],
+                positions=self.positions[:num_tokens],
+                hidden_states=self.hidden_states[:num_tokens],
             )
         sample_hidden_states = hidden_states[last_token_indices]
         logits = self.model.compute_logits(sample_hidden_states, None)
@@ -106,12 +147,22 @@ class EagleProposer:
 
         positions = target_positions[last_token_indices]
         hidden_states = sample_hidden_states
+
+        if self.use_cuda_graph and \
+            batch_size <= self.cudagraph_batch_sizes[-1]:
+            padded_batch_size = self.vllm_config. \
+                pad_for_cudagraph(batch_size)
+        else:
+            padded_batch_size = batch_size
         attn_metadata.num_actual_tokens = batch_size
+        attn_metadata.num_input_tokens = padded_batch_size
         attn_metadata.max_query_len = 1
         attn_metadata.query_start_loc = self.arange[:batch_size + 1]
         for _ in range(self.num_speculative_tokens - 1):
             # Update the inputs.
-            input_ids = draft_token_ids_list[-1]
+            # cast to int32 is crucial when eagle model is compiled.
+            # tensor.argmax() returns int64 by default.
+            input_ids = draft_token_ids_list[-1].int()
             positions += 1
 
             # NOTE(woosuk): We should handle the case where the draft model
@@ -149,13 +200,19 @@ class EagleProposer:
             attn_metadata.slot_mapping.masked_fill_(exceeds_max_model_len,
                                                     PADDING_SLOT_ID)
 
+            # copy inputs to buffer for cudagraph
+            self.input_ids[:batch_size] = input_ids
+            self.positions[:batch_size] = clamped_positions
+            self.hidden_states[:batch_size] = hidden_states
+
             # Run the model.
             with set_forward_context(attn_metadata, self.vllm_config):
                 hidden_states = self.model(
-                    input_ids=input_ids,
-                    hidden_states=hidden_states,
-                    positions=clamped_positions,
+                    input_ids=self.input_ids[:padded_batch_size],
+                    positions=self.positions[:padded_batch_size],
+                    hidden_states=self.hidden_states[:padded_batch_size],
                 )
+            hidden_states = hidden_states[:batch_size]
             logits = self.model.compute_logits(hidden_states, None)
             draft_token_ids = logits.argmax(dim=-1)
             draft_token_ids_list.append(draft_token_ids)
@@ -222,13 +279,11 @@ class EagleProposer:
                 draft_model_config.dtype), set_current_vllm_config(
                     self.vllm_config):
             self.model = EagleLlamaForCausalLM(
-                model_config=draft_model_config,
+                vllm_config=self.vllm_config,
                 start_layer_id=target_layer_num).to(target_device)
 
         self.model.load_weights(
-            loader.get_all_weights(
-                self.vllm_config.speculative_config.draft_model_config,
-                self.model))
+            loader.get_all_weights(draft_model_config, self.model))
         self.model.lm_head = target_model.lm_head
 
 
