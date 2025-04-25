@@ -522,6 +522,7 @@ class LLM:
         self,
         prompts: list[Union[TokensPrompt, TextPrompt]],
         params: BeamSearchParams,
+        lora_request: Optional[Union[list[LoRARequest], LoRARequest]] = None,
     ) -> list[BeamSearchOutput]:
         """
         Generate sequences using beam search.
@@ -530,6 +531,7 @@ class LLM:
             prompts: A list of prompts. Each prompt can be a string or a list
                 of token IDs.
             params: The beam search parameters.
+            lora_request: LoRA request to use for generation, if any.
         """
         # TODO: how does beam search work together with length penalty,
         # frequency, penalty, and stopping criteria, etc.?
@@ -604,7 +606,8 @@ class LLM:
             # we don't need to use tqdm here
             output = self.generate(prompts_batch,
                                    sampling_params=beam_search_params,
-                                   use_tqdm=False)
+                                   use_tqdm=False,
+                                   lora_request=lora_request)
 
             for (start, end), instance in zip(instance_start_and_end,
                                               instances):
