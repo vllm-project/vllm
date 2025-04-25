@@ -57,6 +57,7 @@ from .utils import (AutoWeightsLoader, embed_multimodal,
 
 ### Audio Input
 class GraniteSpeechAudioInputs(TypedDict):
+
     input_features: torch.Tensor
     """Shape: `(bsz, num_features, 160)`"""
 
@@ -150,7 +151,7 @@ class GraniteSpeechMultiModalProcessor(
         audios = mm_data.pop("audios", [])
 
         if audios:
-            # GraniteSpeechFeatureExtractor processor accepts "audio"
+            # GraniteSpeechFeatureExtractor accepts "audio"
             mm_data["audio"] = audios
 
         processed_outputs = super()._call_hf_processor(
@@ -250,7 +251,9 @@ class GraniteSpeechEncoderProjector(nn.Module):
         return query_proj
 
 
-### Encoder - conformer is adapted from: https://github.com/lucidrains/conformer.git
+# Encoder - conformer is adapted from: https://github.com/lucidrains/conformer.git
+# NOTE - it would be nice to see if we can align this with other models using
+# conformer in vLLM, e.g., phi4mm audio.
 class GraniteSpeechConformerFeedForward(nn.Module):
     """Feedforward module for conformer encoder blocks."""
 
@@ -451,6 +454,7 @@ class GraniteSpeechConformerBlock(nn.Module):
 
 
 class GraniteSpeechCTCEncoder(nn.Module):
+    """CTC Encoder comprising conformer blocks and additional linear layers."""
 
     def __init__(self,
                  config: PretrainedConfig,
@@ -550,11 +554,14 @@ class GraniteSpeechForConditionalGeneration(
             prefix=maybe_prefix(prefix, "language_model"),
         )
 
+        # Conformer encoder
         self.encoder = GraniteSpeechCTCEncoder(
             config=config.encoder_config,
             quant_config=quant_config,
             prefix=f"{prefix}.encoder",
         )
+
+        # Blip2 QFormer
         self.projector = GraniteSpeechEncoderProjector(
             config=config,
             quant_config=quant_config,
@@ -579,8 +586,6 @@ class GraniteSpeechForConditionalGeneration(
         # to mask the features; usually we would get an input_features_mask
         # from the processor, but we handle rebuilding it here since
         # vLLM generally processes everything independently + batches.
-
-        # TODO - make sure mixed batches fail gracefully
         if input_features_mask is None:
             input_features_mask = self._build_input_features_mask(
                 audio_embed_sizes)
@@ -671,9 +676,9 @@ class GraniteSpeechForConditionalGeneration(
         # Input features are of shape [bsz, num_features, 160]
         feat_lens = [feats.shape[1] for feats in input_features]
         padding = [max(feat_lens) - length for length in feat_lens]
-        # TODO - Validate that it's okay to zero pad like this; in transformers,
-        # we zero pad prior to calculating the speech features, so the value is
-        # not zero and is dependent on the batched features.
+        # TODO (Alex) - Validate that it's okay to zero pad like this;
+        # in transformers we zero pad prior to calculating the speech features,
+        # so the value is not zero and is dependent on the batched features.
         padded = [
             torch.nn.functional.pad(feats, (0, 0, 0, pad, 0, 0))
             for feats, pad in zip(input_features, padding)
@@ -694,7 +699,7 @@ class GraniteSpeechForConditionalGeneration(
         Returns:
             tuple[torch.Tensor]: List of length bsz.
         """
-        # in addition to raw audio data, but for now we don't
+        # TODO (Alex) - support embedding inputs
         encoder_embeds = self.encoder(audio_input["input_features"])
         # [bsz, <max feature size>, 4096]
         projected_embeds = self.projector(encoder_embeds)
