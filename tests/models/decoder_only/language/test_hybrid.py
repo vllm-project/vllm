@@ -129,6 +129,7 @@ def test_chunked_prefill(
 
 @pytest.mark.parametrize("model", HYBRID_MODELS)
 @pytest.mark.parametrize("max_tokens", [15])
+@pytest.mark.parametrize("num_logprobs", [5])
 def test_parallel_sampling(
     vllm_runner,
     example_prompts,
