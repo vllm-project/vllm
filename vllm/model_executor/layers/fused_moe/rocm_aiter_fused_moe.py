@@ -61,22 +61,23 @@ def rocm_aiter_fused_experts(
 
         a1, a1_scale = per_token_group_quant_fp8(hidden_states, scale_blk_k)
         rocm_aiter.fmoe_fp8_blockscale_g1u1(
-            out_asm,
-            a1,
-            w1,
-            w2,
-            sorted_token_ids,
-            sorted_weight_buf,
-            sorted_expert_ids,
-            num_valid_ids,
-            topk,
-            w1_scale.view(local_E, -1),
-            w2_scale.view(local_E, -1),
-            a1_scale.t().contiguous(),
-            block_shape[0],
-            block_shape[1],
-            None,
+            out=out_asm,
+            input=a1,
+            gate=w1,
+            down=w2,
+            sorted_token_ids=sorted_token_ids,
+            sorted_weight_buf=sorted_weight_buf,
+            sorted_expert_ids=sorted_expert_ids,
+            num_valid_ids=num_valid_ids,
+            topk=topk,
+            input_scale=a1_scale.t().contiguous(),
+            fc1_scale=w1_scale.view(local_E, -1),
+            fc2_scale=w2_scale.view(local_E, -1),
+            fc_scale_blkn=block_shape[0],
+            fc_scale_blkk=block_shape[1],
+            fc2_smooth_scale=None,
         )
+
         return out_asm
 
     elif use_fp8_w8a8:
