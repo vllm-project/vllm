@@ -665,46 +665,6 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
     def _is_valid_bucket(self, bucket):
         return bucket[0] * bucket[1] <= self.max_num_batched_tokens
 
-    def _setup_buckets(self) -> None:
-        align_bs = lambda x: min(self.max_num_seqs, x)
-        #FIXME: The default values should be max_model_len
-        max_prompt_seq = 1024
-        max_decode_seq = 2048
-        self.bucketing_global_state.prompt_bs_bucket_cfg = read_bucket_settings(
-            'prompt',
-            'bs',
-            min=1,
-            step=align_bs(32),
-            max=self.max_num_prefill_seqs)
-        self.bucketing_global_state.decode_bs_bucket_cfg = read_bucket_settings(
-            'decode', 'bs', min=1, step=align_bs(32), max=self.max_num_seqs)
-        self.bucketing_global_state.prompt_seq_bucket_cfg = \
-            read_bucket_settings(
-            'prompt',
-            'seq',
-            min=self.block_size,
-            step=self.block_size,
-            max=max_prompt_seq)
-        self.bucketing_global_state.decode_block_bucket_cfg = \
-            read_bucket_settings(
-            'decode',
-            'block',
-            min=self.block_size,
-            step=self.block_size,
-            max=max(self.block_size,
-                    self.max_num_seqs * max_decode_seq // self.block_size))
-        self.graphed_buckets: Set[Any] = set()
-
-        msg = ("Prompt bucket config (min, step, max_warmup) "
-               f"bs:{self.bucketing_global_state.prompt_bs_bucket_cfg}, "
-               f"seq:{self.bucketing_global_state.prompt_seq_bucket_cfg}")
-        logger.info(msg)
-
-        msg = ("Decode bucket config (min, step, max_warmup) "
-               f"bs:{self.bucketing_global_state.decode_bs_bucket_cfg}, "
-               f"block:{self.bucketing_global_state.decode_block_bucket_cfg}")
-        logger.info(msg)
-
     def _prepare_prompt(
         self,
         seq_group_metadata_list: List[SequenceGroupMetadata],
@@ -1004,11 +964,11 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
             padding_fn = lambda tensor, pad_value: gather_list(
                 tensor, indices, pad_value)
         else:
-            cross_block_bucket_size = \
+            block_bucket_size = \
                     self.bucketing_ctx.get_padded_decode_num_blocks(
-                    len(cross_block_list))
+                    len(block_list))
             padding_fn = lambda tensor, pad_value: pad_list(
-                tensor, cross_block_bucket_size, pad_value)
+                tensor, block_bucket_size, pad_value)
 
         block_list = padding_fn(block_list, _PAD_BLOCK_ID)
         block_groups = padding_fn(block_groups, -1)
@@ -1570,12 +1530,12 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
                                                  'max_bs')
                 mem_post_prompt, prompt_batch_seq, prompt_captured_all = \
                     self.warmup_graphs(
-                    prompt_strategy, self.bucketing_global_state.prompt_buckets,
-                    True, prompt_available_memory)
+                    prompt_strategy, self.bucketing_ctx.prompt_buckets,
+                    True, kv_caches, prompt_available_memory)
                 mem_post_decode, decode_batch_seq, decode_captured_all = \
                     self.warmup_graphs(
-                    decode_strategy, self.bucketing_global_state.decode_buckets,
-                    False, decode_available_memory)
+                    decode_strategy, self.bucketing_ctx.decode_buckets,
+                    False, kv_caches, decode_available_memory)
 
                 # Not all prompt buckets were captured, but all decode buckets
                 # were captured and we have some free graph-allocated space
@@ -1585,7 +1545,7 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
                     mem_post_prompt, _, prompt_captured_all = (
                         self.warmup_graphs(
                             prompt_strategy,
-                            self.bucketing_global_state.prompt_buckets, True,
+                            self.bucketing_ctx.prompt_buckets, True, kv_caches,
                             graph_free_mem - mem_post_prompt - mem_post_decode,
                             mem_post_prompt, prompt_batch_seq))
 
@@ -1597,15 +1557,15 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
                         and prompt_captured_all:
                     mem_post_decode, _, _ = self.warmup_graphs(
                         decode_strategy,
-                        self.bucketing_global_state.decode_buckets, False,
+                        self.bucketing_ctx.decode_buckets, False, kv_caches,
                         graph_free_mem - mem_post_prompt - mem_post_decode,
                         mem_post_decode, decode_batch_seq)
 
                 self.log_graph_warmup_summary(
-                    self.bucketing_global_state.prompt_buckets, True,
+                    self.bucketing_ctx.prompt_buckets, True,
                     mem_post_prompt)
                 self.log_graph_warmup_summary(
-                    self.bucketing_global_state.decode_buckets, False,
+                    self.bucketing_ctx.decode_buckets, False,
                     mem_post_decode)
 
         end_time = time.perf_counter()
