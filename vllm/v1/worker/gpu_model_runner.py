@@ -125,10 +125,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # Sampler
         self.sampler = Sampler()
 
-        # Lazy initialization
+        # Lazy initializations
         # self.model: nn.Module  # Set after load_model
-        # init in initialize_kv_cache
-        self.kv_caches: list[torch.Tensor] = []
+        # Initialized in initialize_kv_cache
         self.kv_cache_config = cast(KVCacheConfig, None)
         self.attn_backends: list[type[AttentionBackend]] = []
         self.attn_metadata_builders: list[type[AttentionMetadataBuilder]] = []
@@ -239,6 +238,32 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                                         device="cpu",
                                         pin_memory=self.pin_memory)
         self.seq_lens_np = self.seq_lens_cpu.numpy()
+
+    def _may_reorder_batch(self, scheduler_output: "SchedulerOutput") -> bool:
+        """
+        Update the order of requests in the batch based on the attention
+        backend's needs. For example, some attention backends (namely MLA) may 
+        want to separate requests based on if the attention computation will be
+        compute-bound or memory-bound.
+
+        Args:
+            scheduler_output: The scheduler output.
+
+        Returns:
+            True if the batch was reordered, False otherwise.
+        """
+        batch_reordered = self.attn_metadata_builders[0].reorder_batch(
+            self.input_batch, scheduler_output)
+
+        # For models with multiple KV cache groups, the groups should agree on
+        # the same order of requests. We ensure this by only allowing the first
+        # group to reorder the batch.
+        for kv_cache_group_id in range(
+                1, len(self.kv_cache_config.kv_cache_groups)):
+            assert not self.attn_metadata_builders[
+                kv_cache_group_id].reorder_batch(self.input_batch,
+                                                 scheduler_output)
+        return batch_reordered
 
     def _update_states(self, scheduler_output: "SchedulerOutput") -> None:
         """Update the cached states and the persistent batch with the scheduler
@@ -395,9 +420,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # Update the persistent batch.
             self.input_batch.num_computed_tokens_cpu[req_index] = (
                 num_computed_tokens)
-            self.input_batch.block_table.append_row(
-                req_data.new_block_ids,  # type: ignore
-                req_index)
+            self.input_batch.block_table.append_row(req_data.new_block_ids,
+                                                    req_index)
             # Add new_token_ids to token_ids_cpu.
             start_token_index = num_computed_tokens
             end_token_index = num_computed_tokens + len(req_data.new_token_ids)
@@ -437,17 +461,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         if removed_req_indices:
             self.input_batch.condense(removed_req_indices)
 
-        # Some attention backends (namely MLA) may want to separate requests
-        # based on if the attention computation will be compute-bound or
-        # memory-bound. This gives them a hook to do that.
-        batch_reordered = self.attn_metadata_builders[0].reorder_batch(
-            self.input_batch, scheduler_output)
-
-        for kv_cache_group_id in range(
-                1, len(self.kv_cache_config.kv_cache_groups)):
-            assert not self.attn_metadata_builders[
-                kv_cache_group_id].reorder_batch(self.input_batch,
-                                                 scheduler_output)
+        batch_reordered = self._may_reorder_batch(scheduler_output)
 
         if batch_changed or batch_reordered:
             self.input_batch.refresh_sampling_metadata()
@@ -515,6 +529,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                            torch.from_numpy(token_indices),
                            out=self.input_ids_cpu[:total_num_scheduled_tokens])
 
+        # Calculate the slot mapping for each KV cache group.
         for kv_cache_group_id, kv_cache_group_spec in enumerate(
                 self.kv_cache_config.kv_cache_groups):
             block_size = kv_cache_group_spec.kv_cache_spec.block_size
@@ -565,6 +580,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 non_blocking=True)
 
         attn_metadata: dict[str, FlashAttentionMetadata] = {}
+        # Prepare the attention metadata for each KV cache group and make layers
+        # in the same group share the same metadata.
         for kv_cache_group_id, kv_cache_group_spec in enumerate(
                 self.kv_cache_config.kv_cache_groups):
 
@@ -1734,8 +1751,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                                                 kv_cache_raw_tensors)
         bind_kv_cache(
             kv_caches,
-            self.vllm_config.compilation_config.static_forward_context,
-            self.kv_caches)
+            self.vllm_config.compilation_config.static_forward_context, [])
 
     def initialize_attn_backend(self, kv_cache_config: KVCacheConfig) -> None:
         # TODO: docstring
