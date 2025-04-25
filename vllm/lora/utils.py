@@ -114,7 +114,7 @@ def parse_fine_tuned_lora_name(
             is_bias whether the tensor is lora bias.
     """
 
-    # LoRA weight qualified name usually start with `base_model.model.`,
+    # LoRA weight qualified name usually starts with `base_model.model.`,
     # so we remove the prefix `base_model.model.` to make the following
     # mapping correctly.
     if "base_model.model." in name:
@@ -123,9 +123,8 @@ def parse_fine_tuned_lora_name(
         # recover the prefix `base_model.model.`
         name = "base_model.model." + name
 
-    # In some situations, we may not start with `base_model.model.`, depending
-    # on if the model is intended to be loaded through the transformers peft
-    # integration; if it's the latter, we should take the whole prefix.
+    # In some situations, we may not start with `base_model.model.`.
+    # If we don't, we should keep the prefix intact.
     start_index = 2 if "base_model.model." in name else 0
 
     parts = name.split(".")
