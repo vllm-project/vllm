@@ -478,7 +478,8 @@ class Gemma3ForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP,
         self.config = config
         self.quant_config = quant_config
         self.multimodal_config = multimodal_config
-        self.sliding_window = config.text_config.interleaved_sliding_window
+        self.sliding_window = getattr(config.text_config,
+                                      "interleaved_sliding_window", None)
 
         self.vision_tower = SiglipVisionModel(config.vision_config,
                                               quant_config,
