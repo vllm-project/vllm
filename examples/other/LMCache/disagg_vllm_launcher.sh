@@ -3,7 +3,7 @@
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 if [[ $# -lt 1 ]]; then
-    echo "Usage: $0 <prefiller | decoder | proxy> [model]"
+    echo "Usage: $0 <prefiller | decoder> [model]"
     exit 1
 fi
 
@@ -33,9 +33,6 @@ if [[ $1 == "prefiller" ]]; then
         --kv-transfer-config \
         '{"kv_connector":"LMCacheConnectorV1","kv_role":"kv_producer","kv_connector_extra_config": {"discard_partial_chunks": false, "lmcache_rpc_port": "producer1"}}'
 
-    # Potential Env vars and cmdline options
-    # LMCACHE_LOG_LEVEL=DEBUG -- Set log level to DEBUG
-    # --enforce-eager -- Enforce eager mode
 
 elif [[ $1 == "decoder" ]]; then
     # Decoder listens on port 8200
@@ -54,22 +51,9 @@ elif [[ $1 == "decoder" ]]; then
         --kv-transfer-config \
         '{"kv_connector":"LMCacheConnectorV1","kv_role":"kv_consumer","kv_connector_extra_config": {"discard_partial_chunks": false, "lmcache_rpc_port": "consumer1"}}'
 
-    # Potential Env vars and cmdline options
-    # LMCACHE_LOG_LEVEL=DEBUG -- Set log level to DEBUG
-    # --enforce-eager -- Enforce eager mode
-
-elif [[ $1 == "proxy" ]]; then
-    # Proxy listens on port 9000
-    python3 $SCRIPT_DIR/disagg_proxy_server.py \
-        --host localhost \
-        --port 9000 \
-        --prefiller-host localhost \
-        --prefiller-port 8100 \
-        --decoder-host localhost \
-        --decoder-port 8200 
 
 else
     echo "Invalid role: $1"
-    echo "Should be either prefill, decode, or proxy"
+    echo "Should be either prefill, decode"
     exit 1
 fi
