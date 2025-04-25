@@ -123,7 +123,8 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "BambaForCausalLM": _HfExamplesInfo("ibm-ai-platform/Bamba-9B"),
     "BloomForCausalLM": _HfExamplesInfo("bigscience/bloomz-1b1"),
     "ChatGLMModel": _HfExamplesInfo("THUDM/chatglm3-6b",
-                                    trust_remote_code=True),
+                                    trust_remote_code=True,
+                                    max_transformers_version="4.51.1"),
     "ChatGLMForConditionalGeneration": _HfExamplesInfo("thu-coai/ShieldLM-6B-chatglm3",  # noqa: E501
                                                        trust_remote_code=True),
     "CohereForCausalLM": _HfExamplesInfo("CohereForAI/c4ai-command-r-v01",

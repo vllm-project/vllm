@@ -9,6 +9,7 @@ import torch
 
 from vllm.platforms import current_platform
 
+from ...registry import HF_EXAMPLE_MODELS
 from ...utils import check_logprobs_close
 
 # These have unsupported head_dim for FA. We do not
@@ -33,54 +34,50 @@ AITER_MODEL_LIST = [
 
 # @maybe_test_rocm_aiter
 @pytest.mark.parametrize(
-    "model",
+    "model_arch",
     [
         pytest.param(
-            "bigscience/bloom-560m",  # bloom - testing alibi slopes
+            "BloomForCausalLM",  # testing alibi slopes
             marks=[pytest.mark.core_model, pytest.mark.cpu_model],
         ),
         pytest.param(
-            "openai-community/gpt2",  # gpt2
+            "GPT2LMHeadModel",  # gpt2
             marks=[pytest.mark.core_model, pytest.mark.cpu_model],
         ),
-        pytest.param("Milos/slovak-gpt-j-405M"),  # gptj
-        pytest.param("bigcode/tiny_starcoder_py"),  # gpt_bigcode
-        pytest.param("EleutherAI/pythia-70m"),  # gpt_neox
+        pytest.param("GPTJForCausalLM"),
+        pytest.param("GPTBigCodeForCausalLM"),
+        pytest.param("GPTNeoXForCausalLM"),
         pytest.param(
-            "google/gemma-1.1-2b-it",  # gemma
+            "GemmaForCausalLM",  # gemma
+            marks=[pytest.mark.core_model, pytest.mark.cpu_model],
+        ),
+        pytest.param("GlmForCausalLM"),
+        pytest.param(
+            "LlamaForCausalLM",
             marks=[pytest.mark.core_model, pytest.mark.cpu_model],
         ),
         pytest.param(
-            "THUDM/chatglm3-6b",  # chatglm (text-only)
-        ),
-        pytest.param(
-            "meta-llama/Llama-3.2-1B-Instruct",  # llama
-            marks=[pytest.mark.core_model, pytest.mark.cpu_model],
-        ),
-        pytest.param(
-            "openbmb/MiniCPM3-4B",
+            "MiniCPM3ForCausalLM",
             # fused_moe not supported on CPU
             marks=[pytest.mark.core_model],
         ),
         pytest.param(
-            "facebook/opt-125m",  # opt
+            "OPTForCausalLM",
             marks=[pytest.mark.core_model, pytest.mark.cpu_model],
         ),
         pytest.param(
-            "microsoft/phi-2",  # phi
+            "PhiForCausalLM",
             marks=[pytest.mark.core_model],
         ),
+        pytest.param("QWenLMHeadModel", ),
         pytest.param(
-            "Qwen/Qwen-7B",  # qwen (text-only)
-        ),
-        pytest.param(
-            "Qwen/Qwen2.5-0.5B-Instruct",  # qwen2
+            "Qwen2ForCausalLM",
             marks=[pytest.mark.core_model],
         ),
-        pytest.param("stabilityai/stablelm-3b-4e1t"),  # stablelm
-        pytest.param("bigcode/starcoder2-3b"),  # starcoder2
+        pytest.param("StableLmForCausalLM"),
+        pytest.param("Starcoder2ForCausalLM"),
         pytest.param(
-            "ehristoforu/Falcon3-MoE-2x7B-Insruct",  # mixtral
+            "MixtralForCausalLM",
             marks=[pytest.mark.cpu_model],
         )
     ])
@@ -89,9 +86,11 @@ AITER_MODEL_LIST = [
 @pytest.mark.parametrize("num_logprobs", [5])
 @pytest.mark.parametrize(
     "use_rocm_aiter", [True, False] if current_platform.is_rocm() else [False])
-def test_models(hf_runner, vllm_runner, example_prompts, model: str,
+def test_models(hf_runner, vllm_runner, example_prompts, model_arch: str,
                 dtype: str, max_tokens: int, num_logprobs: int,
                 use_rocm_aiter: bool, monkeypatch) -> None:
+
+    model = HF_EXAMPLE_MODELS.get_hf_info(model_arch).default
 
     if model in REQUIRES_V0:
         monkeypatch.setenv("VLLM_USE_V1", "0")
