@@ -36,10 +36,9 @@ from vllm.transformers_utils.configs import (ChatGLMConfig, Cohere2Config,
                                              KimiVLConfig, MedusaConfig,
                                              MllamaConfig, MLPSpeculatorConfig,
                                              MPTConfig, NemotronConfig,
-                                             NVLM_D_Config, Olmo2Config,
-                                             RWConfig, SkyworkR1VChatConfig,
-                                             SolarConfig, Telechat2Config,
-                                             UltravoxConfig)
+                                             NVLM_D_Config, RWConfig,
+                                             SkyworkR1VChatConfig, SolarConfig,
+                                             Telechat2Config, UltravoxConfig)
 # yapf: enable
 from vllm.transformers_utils.utils import check_gguf_file
 from vllm.utils import resolve_obj_by_qualname
@@ -76,7 +75,6 @@ _CONFIG_REGISTRY: Dict[str, Type[PretrainedConfig]] = {
     "internvl_chat": InternVLChatConfig,
     "nemotron": NemotronConfig,
     "NVLM_D": NVLM_D_Config,
-    "olmo2": Olmo2Config,
     "solar": SolarConfig,
     "skywork_chat": SkyworkR1VChatConfig,
     "telechat": Telechat2Config,
@@ -652,6 +650,11 @@ def load_params_config(model: Union[str, Path], revision: Optional[str],
     config_file_name = "params.json"
 
     config_dict = get_hf_file_to_dict(config_file_name, model, revision)
+    if config_dict is None:
+        raise ValueError(
+            f"Failed to load mistral '{config_file_name}' config for model "
+            f"{model}. Please check if the model is a mistral-format model "
+            f"and if the config file exists.")
     assert isinstance(config_dict, dict)
 
     config_mapping = {

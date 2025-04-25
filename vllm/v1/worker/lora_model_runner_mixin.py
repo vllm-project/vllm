@@ -28,8 +28,9 @@ class LoRAModelRunnerMixin:
                         scheduler_config: SchedulerConfig,
                         lora_config: LoRAConfig, device: str) -> nn.Module:
 
-        assert supports_lora(
-            model), f"{model.__class__.__name__} does not support LoRA yet."
+        if not supports_lora(model):
+            raise ValueError(
+                f"{model.__class__.__name__} does not support LoRA yet.")
 
         if supports_multimodal(model):
             logger.warning("Regarding multimodal models, vLLM currently "

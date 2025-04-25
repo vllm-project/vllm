@@ -20,7 +20,7 @@ from vllm.pooling_params import PoolingParams
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import SamplingParams
 from vllm.transformers_utils.tokenizer_group import (
-    BaseTokenizerGroup, init_tokenizer_from_configs)
+    TokenizerGroup, init_tokenizer_from_configs)
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils import Device
 from vllm.v1.engine.core_client import EngineCoreClient
@@ -32,7 +32,6 @@ from vllm.v1.utils import report_usage_stats
 
 logger = init_logger(__name__)
 
-_G = TypeVar("_G", bound=BaseTokenizerGroup, default=BaseTokenizerGroup)
 _R = TypeVar("_R", default=Any)
 
 
@@ -74,9 +73,7 @@ class LLMEngine:
         self.tokenizer = init_tokenizer_from_configs(
             model_config=vllm_config.model_config,
             scheduler_config=vllm_config.scheduler_config,
-            parallel_config=vllm_config.parallel_config,
             lora_config=vllm_config.lora_config)
-        self.tokenizer.ping()
 
         # Processor (convert Inputs --> EngineCoreRequests)
         self.processor = Processor(vllm_config=vllm_config,
@@ -258,21 +255,12 @@ class LLMEngine:
     def is_sleeping(self) -> bool:
         return self.engine_core.is_sleeping()
 
-    def get_tokenizer_group(
-        self,
-        group_type: type[_G] = BaseTokenizerGroup,
-    ) -> _G:
-        tokenizer_group = self.tokenizer
-
-        if tokenizer_group is None:
+    def get_tokenizer_group(self) -> TokenizerGroup:
+        if self.tokenizer is None:
             raise ValueError("Unable to get tokenizer because "
                              "skip_tokenizer_init is True")
-        if not isinstance(tokenizer_group, group_type):
-            raise TypeError("Invalid type of tokenizer group. "
-                            f"Expected type: {group_type}, but "
-                            f"found type: {type(tokenizer_group)}")
 
-        return tokenizer_group
+        return self.tokenizer
 
     def add_lora(self, lora_request: LoRARequest) -> bool:
         """Load a new LoRA adapter into the engine for future requests."""
