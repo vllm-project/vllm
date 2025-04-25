@@ -396,7 +396,7 @@ class MiniMaxText01LinearAttention(nn.Module):
                                             (num_hidden_layer - 1) + 1e-5)
         self.tp_slope = self.slope_rate[self.tp_rank *
                                         self.tp_heads:(self.tp_rank + 1) *
-                                        self.tp_heads].squeeze().contiguous()
+                                        self.tp_heads].contiguous()
 
     @staticmethod
     def weight_direct_load(param: torch.Tensor,
@@ -423,7 +423,8 @@ class MiniMaxText01LinearAttention(nn.Module):
                     2 * closest_power_of_2)[0::2][:n - closest_power_of_2])
 
         slopes = torch.tensor(get_slopes(n_attention_heads),
-                              dtype=torch.float32)
+                              dtype=torch.float32).reshape(
+                                  n_attention_heads, 1, 1)
         return slopes
 
     def _prefill_and_mix_infer(self, q, k, v, kv_cache, state_indices_tensor,
@@ -440,6 +441,7 @@ class MiniMaxText01LinearAttention(nn.Module):
             qs = q[_start:_end].transpose(0, 1).contiguous()
             ks = k[_start:_end].transpose(0, 1).contiguous()
             vs = v[_start:_end].transpose(0, 1).contiguous()
+            slot_id = state_indices_tensor[_prefill_idx]
             slice_layer_cache = kv_cache[slot_id, ...]
 
             out_slice = MiniMaxText01LinearKernel.jit_linear_forward_prefix(
@@ -447,7 +449,7 @@ class MiniMaxText01LinearAttention(nn.Module):
                 ks,
                 vs,
                 slice_layer_cache,
-                self.tp_slope.squeeze(),
+                self.tp_slope,
                 self.BLOCK,
                 layer_idx=self.layer_idx)
             hidden.append(out_slice.contiguous())
@@ -469,8 +471,7 @@ class MiniMaxText01LinearAttention(nn.Module):
         v = v[attn_metadata.num_prefill_tokens:].unsqueeze(2).contiguous()
         slot_id = state_indices_tensor[getattr(attn_metadata, "num_prefills", 0
                                                ):]
-        tp_slope_1d = self.tp_slope.squeeze()
-        hidden = linear_decode_forward_triton(q, k, v, kv_cache, tp_slope_1d,
+        hidden = linear_decode_forward_triton(q, k, v, kv_cache, self.tp_slope,
                                               slot_id, 32)
         return hidden
 

@@ -683,8 +683,6 @@ class MiniMaxVL01ForConditionalGeneration(nn.Module, SupportsMultiModal,
         inputs_embeds: Optional[torch.Tensor] = None,
         **kwargs: object,
     ) -> Union[torch.Tensor, IntermediateTensors]:
-        pixel_values = kwargs.pop("pixel_values", None)
-        image_sizes = kwargs.pop("image_sizes", None)
         attention_mask = kwargs.pop("attention_mask", None)
         position_ids = kwargs.pop("position_ids", None)
         if inputs_embeds is None:
@@ -695,28 +693,6 @@ class MiniMaxVL01ForConditionalGeneration(nn.Module, SupportsMultiModal,
             vision_embeddings = self.get_multimodal_embeddings(**kwargs)
             inputs_embeds = self.get_input_embeddings(for_inputs_embeds_ids,
                                                       vision_embeddings)
-
-            # 2. Merge text and images
-            has_valid_shape = isinstance(input_ids, torch.Tensor) and len(
-                input_ids.shape) > 1
-            has_images = pixel_values is not None and (
-                isinstance(pixel_values, torch.Tensor)
-                and pixel_values.size(0) > 0
-                or isinstance(pixel_values, list) and len(pixel_values) > 0)
-
-            if has_images and has_valid_shape and input_ids.shape[1] != 1:
-                inputs_embeds = self._process_vision_features(
-                    pixel_values=pixel_values,
-                    image_sizes=image_sizes,
-                    inputs_embeds=inputs_embeds,
-                    input_ids=input_ids,
-                )
-            # pixel_values exists but is empty or
-            # input_ids is a single token -> text only cases
-            elif pixel_values is not None and (has_valid_shape
-                                               and input_ids.shape[1]
-                                               == 1) or not has_valid_shape:
-                pass
 
         hidden_states = self.language_model.model(
             input_ids=input_ids,
