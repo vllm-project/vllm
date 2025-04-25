@@ -60,7 +60,7 @@ class InputBatch:
         self,
         max_num_reqs: int,
         max_model_len: int,
-        max_num_tokens: int,
+        max_num_batched_tokens: int,
         device: torch.device,
         pin_memory: bool,
         vocab_size: int,
@@ -102,7 +102,7 @@ class InputBatch:
         self.block_table = MultiGroupBlockTable(
             max_num_reqs=max_num_reqs,
             max_model_len=max_model_len,
-            max_num_tokens=max_num_tokens,
+            max_num_batched_tokens=max_num_batched_tokens,
             pin_memory=pin_memory,
             device=device,
             kv_cache_config=kv_cache_config,

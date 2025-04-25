@@ -18,13 +18,13 @@ class BlockTable:
         self,
         max_num_reqs: int,
         max_num_blocks_per_req: int,
-        max_num_tokens: int,  # TODO
+        max_num_batched_tokens: int,
         pin_memory: bool,
         device: torch.device,
     ):
         self.max_num_reqs = max_num_reqs
         self.max_num_blocks_per_req = max_num_blocks_per_req
-        self.max_num_tokens = max_num_tokens
+        self.max_num_batched_tokens = max_num_batched_tokens
         self.pin_memory = pin_memory
         self.device = device
 
@@ -42,7 +42,7 @@ class BlockTable:
         self.block_table_np = self.block_table_cpu.numpy()
         self.num_blocks_per_row = np.zeros(max_num_reqs, dtype=np.int32)
 
-        self.slot_mapping_cpu = torch.zeros(self.max_num_tokens,
+        self.slot_mapping_cpu = torch.zeros(self.max_num_batched_tokens,
                                             dtype=torch.int32,
                                             device="cpu",
                                             pin_memory=self.pin_memory)
@@ -112,15 +112,15 @@ class MultiGroupBlockTable:
     add_row: Callable[Concatenate[list[list[int]], P], None]
 
     def __init__(self, max_num_reqs: int, max_model_len: int,
-                 max_num_tokens: int, pin_memory: bool, device: torch.device,
-                 kv_cache_config: KVCacheConfig) -> None:
+                 max_num_batched_tokens: int, pin_memory: bool,
+                 device: torch.device, kv_cache_config: KVCacheConfig) -> None:
         max_num_blocks_per_req = [
             cdiv(max_model_len, g.kv_cache_spec.block_size)
             for g in kv_cache_config.kv_cache_groups
         ]
         self.block_tables = [
-            BlockTable(max_num_reqs, max_num_blocks_per_req[i], max_num_tokens,
-                       pin_memory, device)
+            BlockTable(max_num_reqs, max_num_blocks_per_req[i],
+                       max_num_batched_tokens, pin_memory, device)
             for i in range(len(kv_cache_config.kv_cache_groups))
         ]
         # For methods that just pass the arguments to each BlockTable.
