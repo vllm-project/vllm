@@ -763,20 +763,20 @@ def test_eagle_enabled_removes_last_block():
     req = make_request("divisible_request", token_ids)
 
     # Prime the cache
-    computed_blocks, _ = manager.get_computed_blocks(req, enable_eagle=False)
+    computed_blocks, _ = manager.get_computed_blocks(req, use_eagle=False)
     manager.allocate_slots(req, len(token_ids), computed_blocks)
     manager.free(req)
 
     # New request with same tokens + Eagle enabled
     req_eagle = make_request("eagle_divisible", token_ids)
-    computed_blocks, num_tokens = manager.get_computed_blocks(
-        req_eagle, enable_eagle=True)
+    computed_blocks, num_tokens = manager.get_computed_blocks(req_eagle,
+                                                              use_eagle=True)
 
     # Should retain 2 blocks:
     # 1. Original 3 blocks → pop last hash → 2 matched blocks
-    # 2. last_block_hash is not None → Eagle pop is SKIPPED
-    assert len(computed_blocks) == 2
-    assert num_tokens == 2 * block_size  # 32 tokens
+    # 2. last_block_hash is not None → Eagle pop is not SKIPPED
+    assert len(computed_blocks) == 1
+    assert num_tokens == 1 * block_size  # 32 tokens
 
 
 def test_eagle_with_partial_blocks():
@@ -792,14 +792,14 @@ def test_eagle_with_partial_blocks():
     req = make_request("partial_block_test", token_ids)
 
     # Prime the cache
-    computed_blocks, _ = manager.get_computed_blocks(req, enable_eagle=False)
+    computed_blocks, _ = manager.get_computed_blocks(req, use_eagle=False)
     manager.allocate_slots(req, len(token_ids), computed_blocks)
     manager.free(req)
 
     # New request with Eagle enabled
     req_eagle = make_request("partial_eagle", token_ids)
-    computed_blocks, num_tokens = manager.get_computed_blocks(
-        req_eagle, enable_eagle=True)
+    computed_blocks, num_tokens = manager.get_computed_blocks(req_eagle,
+                                                              use_eagle=True)
     # Original match: 2 full blocks → Eagle removes 1 → 1 remaining
     assert len(computed_blocks) == 1
     assert num_tokens == 1 * block_size

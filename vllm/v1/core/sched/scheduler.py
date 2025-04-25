@@ -126,7 +126,9 @@ class Scheduler(SchedulerInterface):
 
         self.num_lookahead_tokens = 0
         speculative_config = vllm_config.speculative_config
+        self.use_eagle = False
         if speculative_config and speculative_config.method == "eagle":
+            self.use_eagle = True
             self.num_lookahead_tokens = \
                 speculative_config.num_speculative_tokens
 
@@ -322,7 +324,7 @@ class Scheduler(SchedulerInterface):
                 # Get already-cached tokens.
                 computed_blocks, num_computed_tokens = \
                     self.kv_cache_manager.get_computed_blocks(
-                        request, self.num_lookahead_tokens > 0)
+                        request, self.use_eagle)
 
                 # Get externally-cached tokens if using a KVConnector.
                 num_external_tokens = (
