@@ -71,7 +71,9 @@ class BasevLLMParameter(Parameter):
     def load_column_parallel_weight(self, loaded_weight: torch.Tensor):
         self._assert_and_load(loaded_weight)
 
-    def load_row_parallel_weight(self, loaded_weight: torch.Tensor):
+    def load_row_parallel_weight(self,
+                                 loaded_weight: torch.Tensor,
+                                 use_presharded_weights: bool = False):
         self._assert_and_load(loaded_weight)
 
     def load_merged_column_weight(self, loaded_weight: torch.Tensor, **kwargs):
