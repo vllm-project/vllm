@@ -36,7 +36,7 @@ QuantizationMethods = Literal[
     "moe_wna16",
     "torchao",
 ]
-QUANTIZATION_METHODS: list[str] = get_args(QuantizationMethods)
+QUANTIZATION_METHODS: list[str] = list(get_args(QuantizationMethods))
 
 # The customized quantization methods which will be added to this dict.
 _CUSTOMIZED_METHOD_TO_QUANT_CONFIG = {}
