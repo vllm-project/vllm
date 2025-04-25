@@ -18,7 +18,7 @@ for more details on this and other advanced features.
 
 ## Installation
 
-You can quantize your own models by installing [GPTQModel](https://github.com/ModelCloud/GPTQModel) or picking one of the [5000+ models on Huggingface](https://huggingface.co/models?sort=trending&search=gptq).
+You can quantize your own models by installing [GPTQModel](https://github.com/ModelCloud/GPTQModel) or picking one of the [5000+ models on Huggingface](https://huggingface.co/models?search=gptq).
 
 ```console
 pip install -U gptqmodel --no-build-isolation -v
