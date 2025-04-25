@@ -94,7 +94,7 @@ EXPECTED_VALUES = {
     "vllm:request_queue_time_seconds": [("_count", _NUM_REQUESTS)],
     "vllm:request_inference_time_seconds": [("_count", _NUM_REQUESTS)],
     "vllm:request_prefill_time_seconds": [("_count", _NUM_REQUESTS)],
-    "vllm:time_per_prefill_token_requests_seconds": [("_count", _NUM_REQUESTS)
+    "vllm:time_per_prefill_token_request_seconds": [("_count", _NUM_REQUESTS)
                                                      ],
     "vllm:request_decode_time_seconds": [("_count", _NUM_REQUESTS)],
     "vllm:request_prompt_tokens":
@@ -192,9 +192,9 @@ EXPECTED_METRICS = [
     "vllm:time_per_output_token_seconds_sum",
     "vllm:time_per_output_token_seconds_bucket",
     "vllm:time_per_output_token_seconds_count",
-    "vllm:time_per_prefill_token_requests_seconds_sum",
-    "vllm:time_per_prefill_token_requests_seconds_bucket",
-    "vllm:time_per_prefill_token_requests_seconds_count",
+    "vllm:time_per_prefill_token_request_seconds_sum",
+    "vllm:time_per_prefill_token_request_seconds_bucket",
+    "vllm:time_per_prefill_token_request_seconds_count",
     "vllm:e2e_request_latency_seconds_sum",
     "vllm:e2e_request_latency_seconds_bucket",
     "vllm:e2e_request_latency_seconds_count",
