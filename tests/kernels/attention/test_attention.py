@@ -6,12 +6,11 @@ from typing import Optional
 import pytest
 import torch
 
+from tests.kernels.allclose_default import get_default_atol, get_default_rtol
 from tests.kernels.utils import opcheck
 from vllm import _custom_ops as ops
 from vllm.platforms import current_platform
 from vllm.utils import get_max_shared_memory_bytes, is_navi
-
-from .allclose_default import get_default_atol, get_default_rtol
 
 if not current_platform.is_rocm():
     from xformers import ops as xops
