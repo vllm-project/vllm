@@ -472,7 +472,7 @@ class MPClient(EngineCoreClient):
             self.pending_messages.appendleft((tracker, msg))
 
     def free_pending_messages(self):
-        while self.pending_messages and self.pending_messages[-1][0].done():
+        while self.pending_messages and self.pending_messages[-1][0].done:
             self.pending_messages.pop()
 
 

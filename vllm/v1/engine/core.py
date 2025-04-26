@@ -548,7 +548,7 @@ class EngineCoreProc(EngineCore):
                 outputs.engine_index = engine_index
 
                 # Reclaim buffers that zmq is finished with.
-                while pending and pending[-1][0].done():
+                while pending and pending[-1][0].done:
                     reuse_buffers.append(pending.pop()[2])
 
                 buffer = reuse_buffers.pop() if reuse_buffers else bytearray()
