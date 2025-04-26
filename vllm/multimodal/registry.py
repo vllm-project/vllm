@@ -85,17 +85,17 @@ class _ProcessorFactories(Generic[_I]):
         return self.processor(info, dummy_inputs_builder, cache=cache)
 
 
-class _MultiModalLimits(UserDict["ModelConfig", dict[str, int]]):
+class _MultiModalLimits(UserDict[str, dict[str, int]]):
     """
     Wraps `_limits_by_model` for a more informative error message
     when attempting to access a model that does not exist.
     """
 
-    def __getitem__(self, key: "ModelConfig") -> dict[str, int]:
+    def __getitem__(self, model: str) -> dict[str, int]:
         try:
-            return super().__getitem__(key)
+            return super().__getitem__(model)
         except KeyError as exc:
-            msg = (f"Cannot find `mm_limits` for model={key.model}. Did you "
+            msg = (f"Cannot find `mm_limits` for model={model}. Did you "
                    "forget to call `init_mm_limits_per_prompt`?")
             raise KeyError(msg) from exc
 
@@ -192,7 +192,7 @@ class MultiModalRegistry:
             plugin = self._get_plugin(data_key)
 
             num_items = len(data_value) if isinstance(data_value, list) else 1
-            max_items = self._limits_by_model[model_config][data_key]
+            max_items = self._limits_by_model[model_config.model][data_key]
             if num_items > max_items:
                 raise ValueError(
                     f"You set '{json.dumps({data_key: max_items})}' (or "
@@ -340,7 +340,7 @@ class MultiModalRegistry:
         Initialize the maximum number of multi-modal input instances for each
         modality that are allowed per prompt for a model class.
         """
-        if model_config in self._limits_by_model:
+        if model_config.model in self._limits_by_model:
             logger.warning(
                 "`mm_limits` has already been set for model=%s, and will "
                 "be overwritten by the new values.", model_config.model)
@@ -366,7 +366,7 @@ class MultiModalRegistry:
                 for key in self._plugins
             }
 
-        self._limits_by_model[model_config] = limits_per_plugin
+        self._limits_by_model[model_config.model] = limits_per_plugin
 
     def get_mm_limits_per_prompt(
         self,
@@ -384,7 +384,7 @@ class MultiModalRegistry:
             profiler = MultiModalProfiler(processor)
             return profiler.get_mm_limits()
 
-        return self._limits_by_model[model_config]
+        return self._limits_by_model[model_config.model]
 
     def register_processor(
         self,
