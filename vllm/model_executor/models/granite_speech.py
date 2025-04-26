@@ -34,7 +34,7 @@ from vllm.config import CacheConfig, VllmConfig
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
+from vllm.model_executor.layers.sampler import get_sampler
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
@@ -72,13 +72,6 @@ class GraniteSpeechMultiModalProcessingInfo(BaseProcessingInfo):
 
     def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
         return {"audio": 1}
-
-    def get_mm_max_tokens_per_item(
-        self,
-        seq_len: int,
-        mm_counts: Mapping[str, int],
-    ) -> Mapping[str, int]:
-        return {"audio": self.get_max_audio_tokens()}
 
     # There is no limit to the maximum number of audio tokens that can be
     # encoded as features; we pick ~5000 as a number that is probably higher
@@ -767,13 +760,6 @@ class GraniteSpeechForConditionalGeneration(
             hidden_states,
             sampling_metadata,
         )
-
-    def sample(
-        self,
-        logits: torch.Tensor,
-        sampling_metadata: SamplingMetadata,
-    ) -> Optional[SamplerOutput]:
-        return self.language_model.sample(logits, sampling_metadata)
 
     def load_weights(
         self,
