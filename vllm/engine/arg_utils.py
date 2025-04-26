@@ -1368,23 +1368,6 @@ class EngineArgs:
                                recommend_to_remove=False)
             return False
 
-        if current_platform.is_rocm():
-            from vllm.model_executor.layers.quantization.fp8 import Fp8Config
-            load_config = self.create_load_config()
-            quantization_config = VllmConfig.get_quantization_config(
-                model_config, load_config)
-            if isinstance(quantization_config, Fp8Config):
-                _raise_or_fallback(feature_name="fp8 for ROCm",
-                                   recommend_to_remove=False)
-                return False
-            from vllm.model_executor.layers.quantization.quark.quark import (
-                QuarkConfig)
-
-            if isinstance(quantization_config, QuarkConfig
-                          ) and quantization_config.has_fp8_layer_weights():
-                _raise_or_fallback(feature_name="Quark fp8 for ROCm",
-                                   recommend_to_remove=False)
-
         # No Fp8 KV cache so far.
         if self.kv_cache_dtype != "auto":
             fp8_attention = self.kv_cache_dtype.startswith("fp8")
