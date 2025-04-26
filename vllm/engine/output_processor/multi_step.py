@@ -178,7 +178,7 @@ class MultiStepOutputProcessor(SequenceGroupOutputProcessor):
         # generates a fixed number of tokens without evaluating stopping
         # conditions within the block. This can cause an eos token to be
         # unintentionally ignored.
-        if not sampling_params.ignore_eos:
+        if not sampling_params.ignore_eos and self.detokenizer:
             eos_token_id = self.get_tokenizer_for_seq(seq).eos_token_id
             # Avoiding .index calls as exception throwing in the happy path
             # is expensive.
