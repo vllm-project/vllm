@@ -724,6 +724,7 @@ model_example_map = {
     "NVLM_D": load_nvlm_d,
     "phi3_v": load_phi3v,
     "phi4_mm": load_phi4mm,
+    "phi4_multimodal": load_phi4_multimodal,
     "pixtral_hf": load_pixtral_hf,
     "qwen_vl_chat": load_qwen_vl_chat,
     "qwen2_vl": load_qwen2_vl,
