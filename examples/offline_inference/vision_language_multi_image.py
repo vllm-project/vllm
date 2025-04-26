@@ -540,7 +540,6 @@ def load_phi4_multimodal(question: str, image_urls: list[str]) -> ModelRequestDa
     vision_lora_path = os.path.join(orig_model_path, "vision-lora")
     engine_args = EngineArgs(
         model=model_path,
-        trust_remote_code=True,
         max_model_len=4096,
         max_num_seqs=2,
         limit_mm_per_prompt={"image": len(image_urls)},

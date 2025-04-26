@@ -843,6 +843,24 @@ class Phi4MMProcessingInfo(BaseProcessingInfo):
         # Return time frames (T)
         return num_frames
 
+    def _compute_audio_embed_size(self, audio_frames: int) -> int:
+        # `_compute_audio_embed_size` in audio_processor use torch for
+        # computation, therefore we re-implement it to use pythonic
+        # numeric computation to avoid extra tensor conversion.
+        audio_processor = self.get_feature_extractor()
+        audio_compression_rate = audio_processor.audio_compression_rate
+        audio_downsample_rate = audio_processor.audio_downsample_rate
+
+        integer = audio_frames // audio_compression_rate
+        remainder = audio_frames % audio_compression_rate
+        result = integer + int(remainder > 0)
+
+        integer = result // audio_downsample_rate
+        remainder = result % audio_downsample_rate
+        result = integer + int(remainder > 0)   # qformer compression
+
+        return result
+
 
 class Phi4MMDummyInputsBuilder(BaseDummyInputsBuilder[Phi4MMProcessingInfo]):
 
@@ -899,28 +917,31 @@ class Phi4MMMultiModalProcessor(BaseMultiModalProcessor[Phi4MMProcessingInfo]):
             return BatchFeature(dict(input_ids=[prompt_ids]), tensor_type="pt")
 
         # sr = self.info.get_feature_extractor().sampling_rate
-        # if (audio_data := mm_data.get("audios", [])):
-        #     mm_data['audios'] = [(data, sr) for data in audio_data]
+        if (audio_data := mm_data.pop("audios", [])):
+            mm_data['audio'] = audio_data
 
         processed_outputs = super()._call_hf_processor(prompt, mm_data,
                                                        mm_kwargs)
 
-        num_img_tokens = [
-            self.info.get_num_image_tokens(image_width=img_size[0],
-                                           image_height=img_size[1])
-            for img_size in processed_outputs["image_sizes"]
-        ]
-        processed_outputs["num_img_tokens"] = num_img_tokens
+        if "image_pixel_values" in processed_outputs:
+            num_img_tokens = [
+                self.info.get_num_image_tokens(image_width=img_size[0],
+                                            image_height=img_size[1])
+                for img_size in processed_outputs["image_sizes"]
+            ]
+            processed_outputs["num_img_tokens"] = num_img_tokens
 
-        # audio_features = processed_outputs['audio_input_features']
-        # feature_sizes = [
-        #     self.info.get_audio_num_frames(len(audio), sr)
-        #     for audio in audio_data
-        # ]
-        # processed_outputs['audio_input_features'] = [
-        #     audio_features[idx, :size]
-        #     for idx, size in enumerate(feature_sizes)
-        # ]
+        if audio_data:
+            audio_features = processed_outputs['audio_input_features']
+            sr = self.info.get_feature_extractor().sampling_rate
+            feature_sizes = [
+                self.info.get_audio_num_frames(len(audio), sr)
+                for audio in audio_data
+            ]
+            processed_outputs['audio_input_features'] = [
+                audio_features[idx, :size]
+                for idx, size in enumerate(feature_sizes)
+            ]
 
         return processed_outputs
 
@@ -974,7 +995,7 @@ class Phi4MMMultiModalProcessor(BaseMultiModalProcessor[Phi4MMProcessingInfo]):
             audio_len = audios.get_audio_length(item_idx)
             audio_frames = self.info.get_audio_num_frames(
                 audio_len, audio_processor.sampling_rate)
-            audio_embed_size = audio_processor._compute_audio_embed_size(
+            audio_embed_size = self.info._compute_audio_embed_size(
                 audio_frames)
 
             audio_tokens = [audio_token_id] * audio_embed_size
