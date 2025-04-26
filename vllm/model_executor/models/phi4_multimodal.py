@@ -52,15 +52,6 @@ _AUDIO_PLACEHOLDER_TOKEN_ID = 200011
 
 _AUDIO_MAX_SOUNDFILE_SIZE = 241_000
 
-SIGLIP_NAME = "siglip-so400m-patch14-448"
-VISION_ENCODER_TO_PROCESSING_CONFIG = {
-    'siglip-so400m-patch14-448': {
-        'vit_image_size': 448,
-        'vit_patch_size': 14,
-        'token_compression_factor': 2,
-    },
-}
-
 
 def _get_padding_size(orig_width: int, orig_height: int, target_height: int,
                       target_width: int):
@@ -953,10 +944,8 @@ class Phi4MMMultiModalProcessor(BaseMultiModalProcessor[Phi4MMProcessingInfo]):
         out_mm_kwargs: MultiModalKwargs,
     ) -> Sequence[PromptUpdate]:
         tokenizer = self.info.get_tokenizer()
-        image_token = tokenizer.image_token
-        audio_token = tokenizer.audio_token
-        image_token_id = tokenizer.vocab[image_token]
-        audio_token_id = tokenizer.vocab[audio_token]
+        image_token_id = tokenizer.vocab[tokenizer.image_token]
+        audio_token_id = tokenizer.vocab[tokenizer.audio_token]
 
         hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
         audio_processor = self.info.get_feature_extractor()
@@ -1026,7 +1015,7 @@ class Phi4MultimodalForCausalLM(nn.Module, SupportsLoRA, SupportsMultiModal):
 
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={
-            # vocal embedding
+            # Multimodal embedding
             "model.embed_tokens_extend.": "",
             # LLM backbone
             "model.": "language_model.model.",
@@ -1060,12 +1049,7 @@ class Phi4MultimodalForCausalLM(nn.Module, SupportsLoRA, SupportsMultiModal):
 
         self.language_model = init_vllm_registered_model(
             vllm_config=vllm_config,
-            # The prefix is empty intentionally because default prefix of
-            # LlamaForCausalLM is "model"
-            prefix="",
-            # We don't directly initialize vLLM's LlamaForCausalLM so we
-            # can automatically apply embedding wrapper if this model is
-            # initialized as an embedding model
+            prefix=maybe_prefix(prefix, "language_model"),
             architectures=["LlamaForCausalLM"],
         )
 
@@ -1328,7 +1312,7 @@ class Phi4MultimodalForCausalLM(nn.Module, SupportsLoRA, SupportsMultiModal):
                     audio_input=audio_input)
                 input_ids = None
 
-        hidden_states = self.language_model.model(
+        hidden_states = self.language_model(
             input_ids,
             positions,
             intermediate_tensors,
