@@ -11,8 +11,9 @@ from vllm.logger import init_logger
 from .interface import Platform, PlatformEnum, _Backend
 
 if TYPE_CHECKING:
-    from vllm.config import VllmConfig
+    from vllm.config import ModelConfig, VllmConfig
 else:
+    ModelConfig = None
     VllmConfig = None
 
 logger = init_logger(__name__)
@@ -31,6 +32,9 @@ class HpuPlatform(Platform):
                              dtype: torch.dtype, kv_cache_dtype: Optional[str],
                              block_size: int, use_v1: bool,
                              use_mla: bool) -> str:
+        if use_v1:
+            logger.info("Using HPUAttentionV1 backend.")
+            return "vllm.v1.attention.backends.hpu_attn.HPUAttentionBackendV1"
         logger.info("Using HPUAttention backend.")
         return "vllm.attention.backends.hpu_attn.HPUAttentionBackend"
 
@@ -41,6 +45,10 @@ class HpuPlatform(Platform):
     @staticmethod
     def inference_mode():
         return torch.no_grad()
+
+    @classmethod
+    def get_device_name(cls, device_id: int = 0) -> str:
+        return cls.device_name
 
     @classmethod
     def check_and_update_config(cls, vllm_config: VllmConfig) -> None:
@@ -56,8 +64,11 @@ class HpuPlatform(Platform):
                 "Speculative decoding is not implemented for HPU")
 
         if parallel_config.worker_cls == "auto":
-            parallel_config.worker_cls = "vllm.worker.hpu_worker.HPUWorker"
-
+            if envs.VLLM_USE_V1:
+                parallel_config.worker_cls = \
+                    "vllm.v1.worker.hpu_worker.HPUWorker"
+            else:
+                parallel_config.worker_cls = "vllm.worker.hpu_worker.HPUWorker"
         # NOTE(kzawora): default block size for Gaudi should be 128
         # smaller sizes still work, but very inefficiently
         cache_config = vllm_config.cache_config
@@ -92,3 +103,12 @@ class HpuPlatform(Platform):
     @classmethod
     def get_device_communicator_cls(cls) -> str:
         return "vllm.distributed.device_communicators.hpu_communicator.HpuCommunicator"  # noqa
+
+    @classmethod
+    def supports_structured_output(cls) -> bool:
+        return True
+
+    @classmethod
+    def supports_v1(cls, model_config: ModelConfig) -> bool:
+        # V1 support on HPU is experimental
+        return True
