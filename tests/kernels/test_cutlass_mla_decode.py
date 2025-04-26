@@ -85,6 +85,9 @@ def test_cutlass_mla_decode(dtype: torch.dtype, mean_seq_len: int, bs: int,
     out_ref = q.new_zeros(bs, h_q, dv)
     ref_mla(out_ref, q, kv_cache, scale, block_table, seq_lens)
     out_ans = torch.zeros_like(out_ref)
-    ops.cutlass_mla_decode(out_ans, q, kv_cache, seq_lens, block_table, scale)
+    q_nope = q[:, :, :dv].clone()
+    q_pe = q[:, :, dv:].clone()
+    ops.cutlass_mla_decode(out_ans, q_nope, q_pe, kv_cache, seq_lens,
+                           block_table, scale)
 
     torch.testing.assert_close(out_ans, out_ref, atol=1e-2, rtol=1e-2)

@@ -18,19 +18,21 @@
 
 #if defined ENABLE_CUTLASS_MLA && ENABLE_CUTLASS_MLA
 void cutlass_mla_decode_sm100a(torch::Tensor const& out,
-                               torch::Tensor const& q_nope_and_q_pe,
+                               torch::Tensor const& q_nope,
+                               torch::Tensor const& q_pe,
                                torch::Tensor const& kv_c_and_k_pe_cache,
                                torch::Tensor const& seq_lens,
                                torch::Tensor const& page_table, double scale);
 #endif
 
 void cutlass_mla_decode(torch::Tensor const& out,
-                        torch::Tensor const& q_nope_and_q_pe,
+                        torch::Tensor const& q_nope,
+                        torch::Tensor const& q_pe,
                         torch::Tensor const& kv_c_and_k_pe_cache,
                         torch::Tensor const& seq_lens,
                         torch::Tensor const& page_table, double scale) {
 #if defined ENABLE_CUTLASS_MLA && ENABLE_CUTLASS_MLA
-  return cutlass_mla_decode_sm100a(out, q_nope_and_q_pe, kv_c_and_k_pe_cache,
+  return cutlass_mla_decode_sm100a(out, q_nope, q_pe, kv_c_and_k_pe_cache,
                                    seq_lens, page_table, scale);
 #endif
   TORCH_CHECK_NOT_IMPLEMENTED(false, "No compiled cutlass MLA");
