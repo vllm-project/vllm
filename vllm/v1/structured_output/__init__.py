@@ -51,13 +51,11 @@ class StructuredOutputManager:
         # backends on a per-request basis in V1 (for now, anyway...).
         if self.backend is None:
             backend_name = request.sampling_params.guided_decoding.backend_name
-            tokenizer_group = init_tokenizer_from_configs(
+            tokenizer = init_tokenizer_from_configs(
                 model_config=self.vllm_config.model_config,
                 scheduler_config=self.vllm_config.scheduler_config,
                 lora_config=self.vllm_config.lora_config,
-            )
-            tokenizer_group.ping()
-            tokenizer = tokenizer_group.get_lora_tokenizer(None)
+            ).get_lora_tokenizer(None)
             vocab_size = self.vllm_config.model_config.get_vocab_size()
             if backend_name == "xgrammar":
                 self.backend = XgrammarBackend(
