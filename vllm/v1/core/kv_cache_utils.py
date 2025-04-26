@@ -801,7 +801,8 @@ def get_kv_cache_config(vllm_config: VllmConfig,
         The generated KVCacheConfigs
     """
     check_enough_kv_cache_memory(vllm_config, kv_cache_spec, available_memory)
-    if vllm_config.cache_config.disable_hybrid_allocator:
+    if (vllm_config.cache_config.disable_hybrid_allocator
+            or vllm_config.device_config.device.type != "cuda"):
         unify_hybrid_kv_cache_specs(kv_cache_spec)
     if is_kv_cache_type_uniform(kv_cache_spec):
         # KV cache of all layers are the same, which is true for
