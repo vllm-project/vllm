@@ -2566,6 +2566,9 @@ class SpeculativeConfig:
         """
         return self.num_speculative_tokens
 
+    def use_eagle(self) -> bool:
+        return self.method in ("eagle", "eagle3")
+
     def __repr__(self) -> str:
         method = self.method
         model = None if method == "ngram" else self.draft_model_config.model
