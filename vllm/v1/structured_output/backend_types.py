@@ -7,9 +7,9 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-import torch
-
 if TYPE_CHECKING:
+    import torch
+
     from vllm.config import VllmConfig
     from vllm.transformers_utils.tokenizer import AnyTokenizer
 

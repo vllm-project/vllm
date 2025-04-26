@@ -704,15 +704,16 @@ class Scheduler(SchedulerInterface):
                 # the outer lists can be of length > 1.
                 new_logprobs = logprobs.slice(req_index, req_index + 1)
 
-            if request.use_structured_output:
+            if new_token_ids and request.use_structured_output:
                 batch_index = scheduler_output.structured_output_request_ids.get(  # noqa: E501
                     req_id, 0)
                 jump_tokens = self.structured_output_manager.jump_forward_tokens(  # noqa: E501
                     request, batch_index)
                 if jump_tokens:
                     new_token_ids.extend(jump_tokens)
-            # --- End jump-forward decoding ---
 
+            # Get prompt logprobs for this request.
+            prompt_logprobs_tensors = prompt_logprobs_dict.get(req_id)
             if new_token_ids:
                 # Add EngineCoreOutput for this Request.
                 outputs.append(
@@ -721,13 +722,12 @@ class Scheduler(SchedulerInterface):
                         new_token_ids=new_token_ids,
                         finish_reason=request.get_finished_reason(),
                         new_logprobs=new_logprobs,
-                        new_prompt_logprobs_tensors=prompt_logprobs_dict.get(
-                            req_id),
+                        new_prompt_logprobs_tensors=prompt_logprobs_tensors,
                         stop_reason=request.stop_reason,
                         events=request.take_events()))
             else:
                 # Invariant: EngineCore returns no partial prefill outputs.
-                assert not prompt_logprobs_dict.get(req_id)
+                assert not prompt_logprobs_tensors
 
             if not stopped:
                 new_running.append(request)
