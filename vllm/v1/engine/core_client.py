@@ -818,9 +818,6 @@ class DPAsyncMPClient(AsyncMPClient):
         ]))[0]
 
     async def add_request_async(self, request: EngineCoreRequest) -> None:
-        # NOTE: text prompt is not needed in the core engine as it has been
-        # tokenized.
-        request.prompt = None
         request.current_wave = self.current_wave
 
         chosen_engine = self.get_core_engine_for_request()
