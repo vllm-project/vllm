@@ -1215,9 +1215,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
             if spec_decode_metadata is None:
                 # input_ids can be None for multimodal models.
-                # We need to slice token_ids, positions, and hidden_states
-                # because the eagle head does not use cuda graph and should
-                # not include padding.
                 num_actual_draft_tokens = num_scheduled_tokens
                 target_token_ids = self.input_ids[:num_input_tokens]
                 target_positions = positions[:num_input_tokens]
