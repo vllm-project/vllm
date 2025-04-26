@@ -711,6 +711,7 @@ class _attention(torch.autograd.Function):
         causal=False,
         sm_scale=1.0,
         bias=None,
+        full_scales=None,
     ):
         if o is None:
             o = torch.empty_like(q, dtype=v.dtype)
