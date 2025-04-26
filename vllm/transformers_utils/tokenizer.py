@@ -76,7 +76,7 @@ def get_cached_tokenizer(tokenizer: AnyTokenizer) -> AnyTokenizer:
     each time they are called, leading to a significant slowdown.
     This proxy caches these properties for faster access.
     """
-    orig_tokenizer = copy.deepcopy(tokenizer)
+    cached_tokenizer = copy.deepcopy(tokenizer)
 
     tokenizer_all_special_ids = tokenizer.all_special_ids
     tokenizer_all_special_tokens = tokenizer.all_special_tokens
@@ -119,12 +119,12 @@ def get_cached_tokenizer(tokenizer: AnyTokenizer) -> AnyTokenizer:
             return tokenizer_len
 
         def __reduce__(self):
-            return (get_cached_tokenizer, (orig_tokenizer, ))
+            return (get_cached_tokenizer, (tokenizer, ))
 
     CachedTokenizer.__name__ = f"Cached{tokenizer.__class__.__name__}"
 
-    tokenizer.__class__ = CachedTokenizer
-    return tokenizer
+    cached_tokenizer.__class__ = CachedTokenizer
+    return cached_tokenizer
 
 
 def patch_padding_side(tokenizer: PreTrainedTokenizer) -> None:
