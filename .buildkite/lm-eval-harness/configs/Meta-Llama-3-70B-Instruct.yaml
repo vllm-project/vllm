@@ -1,3 +1,4 @@
+# For hf script, without -t option (tensor parallel size).
 # bash .buildkite/lm-eval-harness/run-lm-eval-gsm-hf-baseline.sh -m meta-llama/Meta-Llama-3-70B-Instruct -b 32 -l 250 -f 5
 model_name: "meta-llama/Meta-Llama-3-70B-Instruct"
 tasks:

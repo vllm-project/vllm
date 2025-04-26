@@ -1,3 +1,4 @@
+# For vllm script, with -t option (tensor parallel size).
 # bash .buildkite/lm-eval-harness/run-lm-eval-gsm-vllm-baseline.sh -m neuralmagic/Llama-3.2-1B-Instruct-quantized.w8a8 -b "auto" -l 1000 -f 5 -t 1
 model_name: "neuralmagic/Llama-3.2-1B-Instruct-quantized.w8a8"
 tasks:
