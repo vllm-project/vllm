@@ -1396,7 +1396,9 @@ class LLM:
             grammar=guided_options.guided_grammar,
             json_object=guided_options.guided_json_object,
             backend=guided_options.guided_decoding_backend,
-            whitespace_pattern=guided_options.guided_whitespace_pattern)
+            whitespace_pattern=guided_options.guided_whitespace_pattern,
+            structural_tag=guided_options.structural_tag,
+        )
         return params
 
     def _run_engine(
