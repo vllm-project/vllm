@@ -254,6 +254,7 @@ def _test_processing_correctness_mistral(
     "adept/fuyu-8b",
     "google/gemma-3-4b-it",
     "THUDM/glm-4v-9b",
+    "ibm-granite/granite-speech-3.3-8b"
     "h2oai/h2ovl-mississippi-800m",
     "OpenGVLab/InternVL2-1B",
     "HuggingFaceM4/Idefics3-8B-Llama3",
@@ -285,7 +286,6 @@ def _test_processing_correctness_mistral(
     "Skywork/Skywork-R1V-38B",
     "fixie-ai/ultravox-v0_5-llama-3_2-1b",
     "openai/whisper-large-v3",
-    "ibm-granite/granite-speech-3.3-8b"
 ])
 @pytest.mark.parametrize("hit_rate", [0.3, 0.5, 1.0])
 @pytest.mark.parametrize("num_batches", [32])
