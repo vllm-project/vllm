@@ -18,7 +18,7 @@ from transformers.models.phi4_multimodal.modeling_phi4_multimodal import (
 from vllm.attention.layer import MultiHeadAttention
 from vllm.config import VllmConfig
 from vllm.distributed import get_pp_group, divide, get_tensor_model_parallel_world_size
-from vllm.model_executor.layers.activation import get_act_fn, get_act_and_mul_fn
+from vllm.model_executor.layers.activation import get_act_fn, get_act_and_mul_fn, MulAndSilu
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                MergedColumnParallelLinear,
                                                QKVParallelLinear,
@@ -211,7 +211,7 @@ class Phi4MultimodalAudioMLP(nn.Module):
     ):
         super().__init__()
         self.layer_norm = nn.LayerNorm(config.hidden_size)
-        self.act_fn = get_act_and_mul_fn("silu")
+        self.act_fn = MulAndSilu()
         self.gate_up_proj = MergedColumnParallelLinear(config.hidden_size,
                                         [config.intermediate_size] * 2,
                                         bias=True,
