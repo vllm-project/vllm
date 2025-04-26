@@ -322,7 +322,7 @@ See [this page](#generative-models) for more information on how to use generativ
   * ✅︎
 - * `GemmaForCausalLM`
   * Gemma
-  * `google/gemma-2b`, `google/gemma-7b`, etc.
+  * `google/gemma-2b`, `google/gemma-1.1-2b-it`, etc.
   * ✅︎
   * ✅︎
 - * `Gemma2ForCausalLM`
