@@ -753,12 +753,6 @@ class EngineArgs:
         )
         device_group.add_argument("--device", **device_kwargs["device"])
 
-        parser.add_argument('--num-scheduler-steps',
-                            type=int,
-                            default=1,
-                            help=('Maximum number of forward steps per '
-                                  'scheduler call.'))
-
         # Speculative arguments
         speculative_group = parser.add_argument_group(
             title="SpeculativeConfig",
@@ -779,13 +773,6 @@ class EngineArgs:
             help="The pattern(s) to ignore when loading the model."
             "Default to `original/**/*` to avoid repeated loading of llama's "
             "checkpoints.")
-        parser.add_argument(
-            '--preemption-mode',
-            type=str,
-            default=None,
-            help='If \'recompute\', the engine performs preemption by '
-            'recomputing; If \'swap\', the engine performs preemption by '
-            'block swapping.')
 
         parser.add_argument(
             "--served-model-name",
@@ -865,14 +852,18 @@ class EngineArgs:
                                      **scheduler_kwargs["num_lookahead_slots"])
         scheduler_group.add_argument('--scheduler-delay-factor',
                                      **scheduler_kwargs["delay_factor"])
-        scheduler_group.add_argument(
-            '--enable-chunked-prefill',
-            **scheduler_kwargs["enable_chunked_prefill"])
+        scheduler_group.add_argument('--preemption-mode',
+                                     **scheduler_kwargs["preemption_mode"])
+        scheduler_group.add_argument('--num-scheduler-steps',
+                                     **scheduler_kwargs["num_scheduler_steps"])
         scheduler_group.add_argument(
             '--multi-step-stream-outputs',
             **scheduler_kwargs["multi_step_stream_outputs"])
         scheduler_group.add_argument('--scheduling-policy',
                                      **scheduler_kwargs["policy"])
+        scheduler_group.add_argument(
+            '--enable-chunked-prefill',
+            **scheduler_kwargs["enable_chunked_prefill"])
         scheduler_group.add_argument(
             "--disable-chunked-mm-input",
             **scheduler_kwargs["disable_chunked_mm_input"])
@@ -1377,6 +1368,23 @@ class EngineArgs:
                                recommend_to_remove=False)
             return False
 
+        if current_platform.is_rocm():
+            from vllm.model_executor.layers.quantization.fp8 import Fp8Config
+            load_config = self.create_load_config()
+            quantization_config = VllmConfig.get_quantization_config(
+                model_config, load_config)
+            if isinstance(quantization_config, Fp8Config):
+                _raise_or_fallback(feature_name="fp8 for ROCm",
+                                   recommend_to_remove=False)
+                return False
+            from vllm.model_executor.layers.quantization.quark.quark import (
+                QuarkConfig)
+
+            if isinstance(quantization_config, QuarkConfig
+                          ) and quantization_config.has_fp8_layer_weights():
+                _raise_or_fallback(feature_name="Quark fp8 for ROCm",
+                                   recommend_to_remove=False)
+
         # No Fp8 KV cache so far.
         if self.kv_cache_dtype != "auto":
             fp8_attention = self.kv_cache_dtype.startswith("fp8")
@@ -1451,7 +1459,7 @@ class EngineArgs:
             if speculative_method:
                 if speculative_method in ("ngram", "[ngram]"):
                     is_ngram_enabled = True
-                elif speculative_method == "eagle":
+                elif speculative_method in ("eagle", "eagle3"):
                     is_eagle_enabled = True
             else:
                 speculative_model = self.speculative_config.get("model")

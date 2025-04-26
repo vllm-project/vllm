@@ -1082,7 +1082,7 @@ See [this page](#generative-models) for more information on how to use generativ
 
 :::{important}
 Pan-and-scan image pre-processing is currently supported on V0 (but not V1).
-You can enable it by passing `--mm-processor-kwargs '{"do_pan_and_scan": True}'`.
+You can enable it by passing `--mm-processor-kwargs '{"do_pan_and_scan": true}'`.
 :::
 
 :::{warning}
@@ -1097,7 +1097,7 @@ V0 correctly implements the model's attention pattern:
 
 V1 currently uses a simplified attention pattern:
 - Uses causal attention for all tokens, including image tokens
-- Generates reasonable outputs but does not match the original model's attention for text + image inputs, especially when `{"do_pan_and_scan": True}`
+- Generates reasonable outputs but does not match the original model's attention for text + image inputs, especially when `{"do_pan_and_scan": true}`
 - Will be updated in the future to support the correct behavior
 
 This limitation exists because the model's mixed attention pattern (bidirectional for images, causal otherwise) is not yet supported by vLLM's attention backends.
@@ -1112,7 +1112,33 @@ To use `TIGER-Lab/Mantis-8B-siglip-llama3`, you have to pass `--hf_overrides '{"
 :::
 
 :::{warning}
-For improved output quality of `AllenAI/Molmo-7B-D-0924` (especially in object localization tasks), we recommend using the pinned dependency versions listed in <gh-file:requirements/molmo.txt> (including `vllm==0.7.0`). These versions match the environment that achieved consistent results on both A10 and L40 GPUs.
+The output quality of `AllenAI/Molmo-7B-D-0924` (especially in object localization tasks) has deteriorated in recent updates.
+
+For the best results, we recommend using the following dependency versions (tested on A10 and L40):
+
+```text
+# Core vLLM-compatible dependencies with Molmo accuracy setup (tested on L40)
+torch==2.5.1
+torchvision==0.20.1
+transformers==4.48.1
+tokenizers==0.21.0
+tiktoken==0.7.0
+vllm==0.7.0
+
+# Optional but recommended for improved performance and stability
+triton==3.1.0
+xformers==0.0.28.post3
+uvloop==0.21.0
+protobuf==5.29.3
+openai==1.60.2
+opencv-python-headless==4.11.0.86
+pillow==10.4.0
+
+# Installed FlashAttention (for float16 only)
+flash-attn>=2.5.6  # Not used in float32, but should be documented
+```
+
+**Note:** Make sure you understand the security implications of using outdated packages.
 :::
 
 :::{note}
@@ -1129,7 +1155,7 @@ To use Qwen2.5-Omni, you have to install Hugging Face Transformers library from 
 `pip install git+https://github.com/huggingface/transformers.git`.
 
 Read audio from video pre-processing is currently supported on V0 (but not V1), because overlapping modalities is not yet supported in V1.
-`--mm-processor-kwargs '{"use_audio_in_video": True}'`.
+`--mm-processor-kwargs '{"use_audio_in_video": true}'`.
 :::
 
 ### Pooling Models

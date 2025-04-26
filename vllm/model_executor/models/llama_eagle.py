@@ -84,7 +84,8 @@ class LlamaModel(nn.Module):
                 hidden_states,
                 residual,
             )
-        return hidden_states + residual
+        hidden_states = hidden_states + residual
+        return hidden_states, hidden_states
 
     def load_weights(self, weights: Iterable[Tuple[str,
                                                    torch.Tensor]]) -> Set[str]:

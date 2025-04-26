@@ -6,11 +6,15 @@ import triton.language as tl
 
 from vllm.config import CompilationLevel, VllmConfig, set_current_vllm_config
 from vllm.forward_context import set_forward_context
+from vllm.logger import init_logger
 from vllm.model_executor.model_loader.loader import get_model_loader
 from vllm.model_executor.model_loader.utils import set_default_torch_dtype
 from vllm.model_executor.models.llama_eagle import EagleLlamaForCausalLM
+from vllm.model_executor.models.llama_eagle3 import Eagle3LlamaForCausalLM
 from vllm.v1.attention.backends.flash_attn import FlashAttentionMetadata
 from vllm.v1.sample.metadata import SamplingMetadata
+
+logger = init_logger(__name__)
 
 PADDING_SLOT_ID = -1
 
@@ -23,6 +27,7 @@ class EagleProposer:
         device: torch.device,
     ):
         self.vllm_config = vllm_config
+        self.method = self.vllm_config.speculative_config.method
         self.num_speculative_tokens = (
             vllm_config.speculative_config.num_speculative_tokens)
         self.max_model_len = vllm_config.model_config.max_model_len
@@ -32,11 +37,14 @@ class EagleProposer:
 
         self.max_num_tokens = vllm_config.scheduler_config \
             .max_num_batched_tokens
+
         self.hidden_size = vllm_config.model_config.get_hidden_size()
 
-        self.use_cuda_graph = (self.vllm_config.compilation_config.level
-                               == CompilationLevel.PIECEWISE and
-                               not self.vllm_config.model_config.enforce_eager)
+        # TODO: make eagle3 compatible with cudagraph
+        self.use_cuda_graph = self.method != 'eagle3' and \
+            (self.vllm_config.compilation_config.level
+             == CompilationLevel.PIECEWISE and
+             not self.vllm_config.model_config.enforce_eager)
 
         self.cudagraph_batch_sizes = list(
             reversed(
@@ -49,6 +57,7 @@ class EagleProposer:
         self.positions = torch.zeros(self.max_num_tokens,
                                      dtype=torch.int64,
                                      device=device)
+
         self.hidden_states = torch.zeros(
             (self.max_num_tokens, self.hidden_size),
             dtype=self.dtype,
@@ -115,15 +124,21 @@ class EagleProposer:
 
         # copy inputs to buffer for cudagraph
         self.positions[:num_tokens] = target_positions
-        self.hidden_states[:num_tokens] = target_hidden_states
+
+        if self.method == 'eagle':
+            self.hidden_states[:num_tokens] = target_hidden_states
+            hidden_states = self.hidden_states[:num_tokens]
+        else:
+            # TODO: make eagle3 compatible with cuda graph
+            hidden_states = target_hidden_states[:num_tokens]
 
         with set_forward_context(attn_metadata, self.vllm_config):
-            hidden_states = self.model(
+            last_hidden_states, hidden_states = self.model(
                 input_ids=self.input_ids[:num_tokens],
                 positions=self.positions[:num_tokens],
-                hidden_states=self.hidden_states[:num_tokens],
+                hidden_states=hidden_states,
             )
-        sample_hidden_states = hidden_states[last_token_indices]
+        sample_hidden_states = last_hidden_states[last_token_indices]
         logits = self.model.compute_logits(sample_hidden_states, None)
         draft_token_ids = logits.argmax(dim=-1)
 
@@ -136,7 +151,7 @@ class EagleProposer:
         draft_token_ids_list = [draft_token_ids]
 
         positions = target_positions[last_token_indices]
-        hidden_states = sample_hidden_states
+        hidden_states = hidden_states[last_token_indices]
 
         if self.use_cuda_graph and \
             batch_size <= self.cudagraph_batch_sizes[-1]:
@@ -144,6 +159,7 @@ class EagleProposer:
                 pad_for_cudagraph(batch_size)
         else:
             padded_batch_size = batch_size
+
         attn_metadata.num_actual_tokens = batch_size
         attn_metadata.num_input_tokens = padded_batch_size
         attn_metadata.max_query_len = 1
@@ -193,17 +209,22 @@ class EagleProposer:
             # copy inputs to buffer for cudagraph
             self.input_ids[:batch_size] = input_ids
             self.positions[:batch_size] = clamped_positions
-            self.hidden_states[:batch_size] = hidden_states
+
+            if self.method == 'eagle':
+                # TODO: make eagle3 compatible with cudagraph.
+                self.hidden_states[:batch_size] = hidden_states
+                hidden_states = self.hidden_states
 
             # Run the model.
             with set_forward_context(attn_metadata, self.vllm_config):
-                hidden_states = self.model(
+                last_hidden_states, hidden_states = self.model(
                     input_ids=self.input_ids[:padded_batch_size],
                     positions=self.positions[:padded_batch_size],
-                    hidden_states=self.hidden_states[:padded_batch_size],
+                    hidden_states=hidden_states[:padded_batch_size],
                 )
             hidden_states = hidden_states[:batch_size]
-            logits = self.model.compute_logits(hidden_states, None)
+            logits = self.model.compute_logits(last_hidden_states[:batch_size],
+                                               None)
             draft_token_ids = logits.argmax(dim=-1)
             draft_token_ids_list.append(draft_token_ids)
 
@@ -268,13 +289,27 @@ class EagleProposer:
         with set_default_torch_dtype(
                 draft_model_config.dtype), set_current_vllm_config(
                     self.vllm_config):
-            self.model = EagleLlamaForCausalLM(
-                vllm_config=self.vllm_config,
-                start_layer_id=target_layer_num).to(target_device)
+            if self.vllm_config.speculative_config.method == "eagle":
+                self.model = EagleLlamaForCausalLM(
+                    vllm_config=self.vllm_config,
+                    start_layer_id=target_layer_num).to(target_device)
+            else:
+                assert self.vllm_config.speculative_config.method == "eagle3"
+                self.model = Eagle3LlamaForCausalLM(
+                    model_config=draft_model_config,
+                    start_layer_id=target_layer_num).to(target_device)
 
-        self.model.load_weights(
+        loaded_weights = self.model.load_weights(
             loader.get_all_weights(draft_model_config, self.model))
-        self.model.lm_head = target_model.lm_head
+
+        if self.vllm_config.speculative_config.method == "eagle3":
+            if "model.embed_tokens.weight" not in loaded_weights:
+                logger.info(
+                    "Loading EAGLE embedding weights from the target model.")
+                self.model.model.embed_tokens = target_model.model.embed_tokens
+        else:
+            logger.info("Loading EAGLE LM head weights from the target model.")
+            self.model.lm_head = target_model.lm_head
 
 
 # NOTE(woosuk): Currently, the below code is not used and we always use argmax
