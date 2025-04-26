@@ -19,7 +19,7 @@ from vllm.entrypoints.openai.protocol import (ErrorResponse,
                                               PoolingChatRequest,
                                               PoolingRequest, PoolingResponse,
                                               PoolingResponseData, UsageInfo)
-from vllm.entrypoints.openai.serving_engine import OpenAIServing
+from vllm.entrypoints.openai.serving_engine import OpenAIServing, ServeContext
 from vllm.entrypoints.openai.serving_models import OpenAIServingModels
 from vllm.entrypoints.utils import _validate_truncation_size
 from vllm.logger import init_logger
@@ -195,6 +195,18 @@ class OpenAIServingPooling(OpenAIServing):
             return self.create_error_response(str(e))
 
         return response
+
+    async def _preprocess(
+            self,
+            ctx: ServeContext[PoolingRequest]) -> Optional[ErrorResponse]:
+        # TODO: real preprocessing later
+        return self.create_error_response("Pooling not implemented")
+
+    def _build_response(
+        self, ctx: ServeContext[PoolingRequest]
+    ) -> Union[PoolingResponse, ErrorResponse]:
+        # TODO: real builder later
+        return self.create_error_response("Pooling not implemented")
 
     def request_output_to_pooling_response(
         self,

@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import base64
-from typing import Final, Literal, Optional, Union
+from typing import Final, Literal, Optional, Union, cast
 
 import numpy as np
 from fastapi import Request
@@ -16,12 +16,14 @@ from vllm.entrypoints.openai.protocol import (EmbeddingChatRequest,
                                               EmbeddingResponse,
                                               EmbeddingResponseData,
                                               ErrorResponse, UsageInfo)
-from vllm.entrypoints.openai.serving_engine import (AnyResponse, OpenAIServing,
+from vllm.entrypoints.openai.serving_engine import (EmbeddingServeContext,
+                                                    OpenAIServing,
                                                     ServeContext)
 from vllm.entrypoints.openai.serving_models import OpenAIServingModels
 from vllm.entrypoints.utils import _validate_truncation_size
 from vllm.logger import init_logger
-from vllm.outputs import EmbeddingOutput, EmbeddingRequestOutput
+from vllm.outputs import (EmbeddingOutput, EmbeddingRequestOutput,
+                          PoolingRequestOutput)
 
 logger = init_logger(__name__)
 
@@ -42,7 +44,7 @@ def _get_embedding(
 
 
 class OpenAIServingEmbedding(OpenAIServing):
-    _id_prefix = "embd"
+    request_id_prefix = "embd"
 
     def __init__(
         self,
@@ -73,14 +75,24 @@ class OpenAIServingEmbedding(OpenAIServing):
         See https://platform.openai.com/docs/api-reference/embeddings/create
         for the API specification. This API mimics the OpenAI Embedding API.
         """
-        response = await self.handle(request, raw_request)
-        if isinstance(response, (EmbeddingResponse, ErrorResponse)):
-            return response
+        model_name = self._get_model_name(request.model)
+        request_id = (f"{self.request_id_prefix}-"
+                      f"{self._base_request_id(raw_request)}")
 
-        return self.create_error_response("Unexpected response type")
+        ctx = EmbeddingServeContext(
+            request=request,
+            raw_request=raw_request,
+            model_name=model_name,
+            request_id=request_id,
+        )
+
+        return await super().handle(ctx)  # type: ignore
 
     @override
-    def _validate_request(self, ctx: ServeContext) -> Optional[ErrorResponse]:
+    def _validate_request(
+        self,
+        ctx: ServeContext[EmbeddingRequest],
+    ) -> Optional[ErrorResponse]:
         if error := super()._validate_request(ctx):
             return error
 
@@ -93,9 +105,13 @@ class OpenAIServingEmbedding(OpenAIServing):
         except ValueError as e:
             return self.create_error_response(str(e))
 
+        return None
+
     @override
     async def _preprocess(
-            self, ctx: ServeContext) -> Union[AnyResponse, ErrorResponse]:
+        self,
+        ctx: ServeContext[EmbeddingRequest],
+    ) -> Optional[ErrorResponse]:
         try:
             truncate_prompt_tokens = _validate_truncation_size(
                 self.max_model_len, ctx.truncate_prompt_tokens)
@@ -140,23 +156,29 @@ class OpenAIServingEmbedding(OpenAIServing):
                      truncate_prompt_tokens=ctx.truncate_prompt_tokens,
                      add_special_tokens=ctx.request.add_special_tokens,
                  )
+            return None
         except (ValueError, TypeError) as e:
             logger.exception("Error in preprocessing prompt inputs")
             return self.create_error_response(str(e))
 
     @override
     def _build_response(
-            self, ctx: ServeContext) -> Union[AnyResponse, ErrorResponse]:
+        self,
+        ctx: ServeContext[EmbeddingRequest],
+    ) -> Union[EmbeddingResponse, ErrorResponse]:
         items: list[EmbeddingResponseData] = []
         num_prompt_tokens = 0
 
-        for idx, final_res in enumerate(ctx.final_res_batch):
+        final_res_batch_checked = cast(list[PoolingRequestOutput],
+                                       ctx.final_res_batch)
+
+        for idx, final_res in enumerate(final_res_batch_checked):
             embedding_res = EmbeddingRequestOutput.from_base(final_res)
 
             item = EmbeddingResponseData(
                 index=idx,
                 embedding=_get_embedding(embedding_res.outputs,
-                                         ctx.encoding_format),
+                                         ctx.request.encoding_format),
             )
             prompt_token_ids = final_res.prompt_token_ids
 

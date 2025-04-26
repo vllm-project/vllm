@@ -15,7 +15,7 @@ from vllm.entrypoints.openai.protocol import (
     DeltaMessage, ErrorResponse, RequestResponseMetadata, TranscriptionRequest,
     TranscriptionResponse, TranscriptionResponseStreamChoice,
     TranscriptionStreamResponse, UsageInfo)
-from vllm.entrypoints.openai.serving_engine import OpenAIServing
+from vllm.entrypoints.openai.serving_engine import OpenAIServing, ServeContext
 from vllm.entrypoints.openai.serving_models import OpenAIServingModels
 from vllm.inputs.data import PromptType
 from vllm.logger import init_logger
@@ -221,6 +221,18 @@ class OpenAIServingTranscription(OpenAIServing):
             f"<|startoftranscript|>{lang_token}<|transcribe|><|notimestamps|>{request.prompt}"
         }
         return cast(PromptType, prompt), duration
+
+    async def _preprocess(
+            self, ctx: ServeContext[TranscriptionRequest]
+    ) -> Optional[ErrorResponse]:
+        # TODO: real preprocessing later
+        return self.create_error_response("Transcription not implemented")
+
+    def _build_response(
+        self, ctx: ServeContext[TranscriptionRequest]
+    ) -> Union[TranscriptionResponse, ErrorResponse]:
+        # TODO: real builder later
+        return self.create_error_response("Transcription not implemented")
 
     # TODO (varun) : Make verbose response work !
     async def create_transcription(

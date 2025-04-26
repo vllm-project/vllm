@@ -27,6 +27,7 @@ from vllm.entrypoints.openai.protocol import (
     DeltaToolCall, ErrorResponse, FunctionCall, FunctionDefinition,
     PromptTokenUsageInfo, RequestResponseMetadata, ToolCall, UsageInfo)
 from vllm.entrypoints.openai.serving_engine import (OpenAIServing,
+                                                    ServeContext,
                                                     clamp_prompt_logprobs)
 from vllm.entrypoints.openai.serving_models import OpenAIServingModels
 from vllm.entrypoints.openai.tool_parsers import ToolParser, ToolParserManager
@@ -275,6 +276,18 @@ class OpenAIServingChat(OpenAIServing):
         if request.add_generation_prompt:
             return self.response_role
         return request.messages[-1]["role"]
+
+    async def _preprocess(
+            self, ctx: ServeContext[ChatCompletionRequest]
+    ) -> Optional[ErrorResponse]:
+        # TODO: real preprocessing later
+        return self.create_error_response("Chat completion not implemented")
+
+    def _build_response(
+        self, ctx: ServeContext[ChatCompletionRequest]
+    ) -> Union[ChatCompletionResponse, ErrorResponse]:
+        # TODO: real builder later
+        return self.create_error_response("Chat completion not implemented")
 
     @staticmethod
     def _bracket_level(s: str, opening='{', closing='}') -> int:

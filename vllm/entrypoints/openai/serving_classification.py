@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from http import HTTPStatus
-from typing import Optional, Union
+from typing import Optional, Union, cast
 
 import numpy as np
 from fastapi import Request
@@ -15,16 +15,18 @@ from vllm.entrypoints.openai.protocol import (ClassificationData,
                                               ClassificationResponse,
                                               ErrorResponse, UsageInfo)
 # yapf: enable
-from vllm.entrypoints.openai.serving_engine import OpenAIServing, ServeContext
+from vllm.entrypoints.openai.serving_engine import (ClassificationServeContext,
+                                                    OpenAIServing,
+                                                    ServeContext)
 from vllm.entrypoints.openai.serving_models import OpenAIServingModels
 from vllm.logger import init_logger
-from vllm.outputs import ClassificationOutput
+from vllm.outputs import ClassificationOutput, PoolingRequestOutput
 
 logger = init_logger(__name__)
 
 
 class ServingClassification(OpenAIServing):
-    _id_prefix = "classify"
+    request_id_prefix = "classify"
 
     def __init__(
         self,
@@ -44,16 +46,26 @@ class ServingClassification(OpenAIServing):
     async def create_classify(
         self,
         request: ClassificationRequest,
-        raw_request: Optional[Request] = None,
+        raw_request: Request,
     ) -> Union[ClassificationResponse, ErrorResponse]:
-        response = await self.handle(request, raw_request)
-        if isinstance(response, (ClassificationResponse, ErrorResponse)):
-            return response
+        model_name = self._get_model_name(request.model)
+        request_id = (f"{self.request_id_prefix}-"
+                      f"{self._base_request_id(raw_request)}")
 
-        return self.create_error_response("Unexpected response type")
+        ctx = ClassificationServeContext(
+            request=request,
+            raw_request=raw_request,
+            model_name=model_name,
+            request_id=request_id,
+        )
+
+        return await super().handle(ctx)  # type: ignore
 
     @override
-    async def _preprocess(self, ctx: ServeContext):
+    async def _preprocess(
+        self,
+        ctx: ServeContext[ClassificationRequest],
+    ) -> Optional[ErrorResponse]:
         """
         Process classification inputs: tokenize text, resolve adapters,
         and prepare model-specific inputs.
@@ -98,7 +110,7 @@ class ServingClassification(OpenAIServing):
             return self.create_error_response(str(e))
 
     @override
-    def _build_response(self, ctx: ServeContext):
+    def _build_response(self, ctx: ServeContext[ClassificationRequest]):
         """
         Convert model outputs to a formatted classification response
         with probabilities and labels.
@@ -106,7 +118,10 @@ class ServingClassification(OpenAIServing):
         items: list[ClassificationData] = []
         num_prompt_tokens = 0
 
-        for idx, final_res in enumerate(ctx.final_res_batch):
+        final_res_batch_checked = cast(list[PoolingRequestOutput],
+                                       ctx.final_res_batch)
+
+        for idx, final_res in enumerate(final_res_batch_checked):
             classify_res = ClassificationOutput.from_base(final_res.outputs)
 
             probs = classify_res.probs

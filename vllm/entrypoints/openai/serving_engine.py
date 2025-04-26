@@ -6,13 +6,12 @@ from abc import abstractmethod
 from collections.abc import (AsyncGenerator, Iterable, Iterator, Mapping,
                              Sequence)
 from concurrent.futures.thread import ThreadPoolExecutor
-from dataclasses import dataclass, field
 from http import HTTPStatus
-from typing import (Annotated, Any, Callable, Literal, Optional, TypedDict,
-                    Union, cast)
+from typing import (Annotated, Any, Callable, ClassVar, Generic, Optional,
+                    TypedDict, TypeVar, Union)
 
 from fastapi import Request
-from pydantic import Field
+from pydantic import BaseModel, Field
 from starlette.datastructures import Headers
 
 import vllm.envs as envs
@@ -39,12 +38,10 @@ from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
                                               EmbeddingCompletionRequest,
                                               EmbeddingRequest,
                                               EmbeddingResponse, ErrorResponse,
-                                              PoolingRequest, PoolingResponse,
-                                              RerankRequest, ScoreRequest,
-                                              ScoreResponse,
+                                              PoolingResponse, RerankRequest,
+                                              ScoreRequest, ScoreResponse,
                                               TokenizeChatRequest,
                                               TokenizeCompletionRequest,
-                                              TokenizeRequest,
                                               TokenizeResponse,
                                               TranscriptionRequest,
                                               TranscriptionResponse)
@@ -55,6 +52,8 @@ from vllm.inputs import TokensPrompt
 from vllm.inputs.parse import parse_and_batch_prompt
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
+from vllm.multimodal import (  # noqa: F401 - Required to resolve Pydantic error in RequestProcessingMixin
+    MultiModalDataDict)
 from vllm.outputs import PoolingRequestOutput, RequestOutput
 from vllm.pooling_params import PoolingParams
 from vllm.prompt_adapter.request import PromptAdapterRequest
@@ -70,19 +69,25 @@ logger = init_logger(__name__)
 
 CompletionLikeRequest = Union[CompletionRequest, DetokenizeRequest,
                               EmbeddingCompletionRequest, RerankRequest,
-                              ScoreRequest, TokenizeCompletionRequest]
+                              ClassificationRequest, ScoreRequest,
+                              TokenizeCompletionRequest]
 
 ChatLikeRequest = Union[ChatCompletionRequest, EmbeddingChatRequest,
                         TokenizeChatRequest]
 
 AnyRequest = Union[CompletionLikeRequest, ChatLikeRequest,
-                   TranscriptionRequest, PoolingRequest, EmbeddingRequest,
-                   ClassificationRequest, TokenizeRequest]
+                   TranscriptionRequest]
 
-AnyRequestOutput = Union[PoolingRequestOutput, RequestOutput]
-
-AnyResponse = Union[PoolingResponse, CompletionResponse, EmbeddingResponse,
-                    ScoreResponse, TokenizeResponse, TranscriptionResponse]
+AnyResponse = Union[
+    CompletionResponse,
+    ChatCompletionResponse,
+    EmbeddingResponse,
+    TranscriptionResponse,
+    TokenizeResponse,
+    PoolingResponse,
+    ClassificationResponse,
+    ScoreResponse,
+]
 
 
 class TextTokensPrompt(TypedDict):
@@ -92,40 +97,80 @@ class TextTokensPrompt(TypedDict):
 
 RequestPrompt = Union[list[int], str, TextTokensPrompt]
 
-ServingHandlerResponse = Union[
-    CompletionResponse,
-    ChatCompletionResponse,
-    ScoreResponse,
-    EmbeddingResponse,
-    ClassificationResponse,
-    PoolingResponse,
-    ErrorResponse,
-]
+RequestT = TypeVar("RequestT", bound=AnyRequest)
 
 
-@dataclass
-class ServeContext:
-    request: AnyRequest
-    raw_request: Optional[Request]
-    encoding_format: Literal["float", "base64"]
-    model_name: str = ""
-    request_id: str = ""
-    created_time: int = 0
-    truncate_prompt_tokens: Optional[Annotated[int, Field(ge=1)]] = None
+class RequestProcessingMixin(BaseModel):
+    """
+    Mixin for request processing, 
+    handling prompt preparation and engine input.
+    """
+    request_prompts: Optional[Sequence[RequestPrompt]] = Field(
+        default_factory=list)
+    engine_prompts: Optional[list[TokensPrompt]] = Field(default_factory=list)
+
+    class Config:
+        arbitrary_types_allowed = True
+
+
+class ResponseGenerationMixin(BaseModel):
+    """
+    Mixin for response generation, 
+    managing result generators and final batch results.
+    """
+    result_generator: Optional[AsyncGenerator[tuple[int, Union[
+        RequestOutput, PoolingRequestOutput]], None]] = None
+    final_res_batch: list[Union[RequestOutput, PoolingRequestOutput]] = Field(
+        default_factory=list)
+
+    class Config:
+        arbitrary_types_allowed = True
+
+
+class ServeContext(RequestProcessingMixin, ResponseGenerationMixin, BaseModel,
+                   Generic[RequestT]):
+    # Shared across all requests
+    request: RequestT
+    raw_request: Request
+    model_name: str
+    request_id: str
+    created_time: int = Field(default_factory=lambda: int(time.time()))
     lora_request: Optional[LoRARequest] = None
     prompt_adapter_request: Optional[PromptAdapterRequest] = None
+
+    # Shared across most requests
     tokenizer: Optional[AnyTokenizer] = None
-    request_prompts: Optional[Sequence[RequestPrompt]] = field(
-        default_factory=list)
-    engine_prompts: Optional[list[TokensPrompt]] = field(default_factory=list)
-    result_generator: list[Optional[AsyncGenerator]] = field(
-        default_factory=list)
-    final_res_batch: list[Optional[PoolingRequestOutput]] = field(
-        default_factory=list)
+    truncate_prompt_tokens: Optional[Annotated[int, Field(ge=1)]] = None
+
+    class Config:
+        arbitrary_types_allowed = True
+
+
+class ClassificationServeContext(ServeContext[ClassificationRequest]):
+
+    class Config:
+        arbitrary_types_allowed = True
+
+
+class EmbeddingServeContext(ServeContext[EmbeddingRequest]):
+
+    class Config:
+        arbitrary_types_allowed = True
+
+
+# Used to resolve the Pydantic error related to
+# forward reference of MultiModalDataDict in TokensPrompt
+RequestProcessingMixin.model_rebuild()
+ServeContext.model_rebuild()
+ClassificationServeContext.model_rebuild()
+EmbeddingServeContext.model_rebuild()
 
 
 class OpenAIServing:
-    _id_prefix: str = ""
+    request_id_prefix: ClassVar[str] = """
+    A short string prepended to every request’s ID (e.g. "embd", "classify")
+    so you can easily tell “this ID came from Embedding vs Classification.”
+    """
 
     def __init__(
         self,
@@ -155,49 +200,58 @@ class OpenAIServing:
             self._tokenize_prompt_input_or_inputs,
             executor=self._tokenizer_executor)
 
+    @abstractmethod
+    async def _preprocess(self, ctx: ServeContext) -> Optional[ErrorResponse]:
+        """Preprocess the request context before response generation."""
+        ...
+
+    @abstractmethod
+    def _build_response(
+        self,
+        ctx: ServeContext,
+    ) -> Union[AnyResponse, ErrorResponse]:
+        """Build the final response from the processed context."""
+        ...
+
     async def handle(
-        self, request: AnyRequest, raw_request: Optional[Request]
-    ) -> AsyncGenerator[ServingHandlerResponse, None]:
-        ctx = ServeContext(
-            request=request,
-            raw_request=raw_request,
-            encoding_format=getattr(request, "encoding_format", "float"),
-        )
+        self,
+        ctx: ServeContext,
+    ) -> Union[AnyResponse, ErrorResponse]:
+        generation: AsyncGenerator[Union[AnyResponse, ErrorResponse], None]
+        generation = self._pipeline(ctx)
 
-        if error := await self._check_model(request):
-            return error
+        async for response in generation:
+            return response
+
+        return self.create_error_response("No response yielded from pipeline")
+
+    async def _pipeline(
+        self,
+        ctx: ServeContext,
+    ) -> AsyncGenerator[Union[AnyResponse, ErrorResponse], None]:
+        """Execute the request processing pipeline yielding responses."""
+        if error := await self._check_model(ctx.request):
+            yield error
         if error := self._validate_request(ctx):
-            return error
-
-        ctx.model_name = self._get_model_name(request.model)
-        ctx.request_id = (
-            f"{self._id_prefix}-{self._base_request_id(raw_request)}")
-        ctx.created_time = int(time.time())
+            yield error
 
         preprocess_ret = await self._preprocess(ctx)
         if isinstance(preprocess_ret, ErrorResponse):
-            return preprocess_ret
+            yield preprocess_ret
 
         generators_ret = await self._prepare_generators(ctx)
         if isinstance(generators_ret, ErrorResponse):
-            return generators_ret
+            yield generators_ret
 
         collect_ret = await self._collect_batch(ctx)
         if isinstance(collect_ret, ErrorResponse):
-            return collect_ret
+            yield collect_ret
 
-        return self._build_response(ctx)
-
-    def _pre_run(self) -> Union[BaseException, None]:
-        # If the engine is dead, raise the engine's DEAD_ERROR.
-        # This is required for the streaming case, where we return a
-        # success status before we actually start generating text :).
-        if self.engine_client.errored:
-            raise self.engine_client.dead_error
-        return None
+        yield self._build_response(ctx)
 
     def _validate_request(self, ctx: ServeContext) -> Optional[ErrorResponse]:
-        truncate_prompt_tokens = ctx.request.truncate_prompt_tokens
+        truncate_prompt_tokens = getattr(ctx.request, "truncate_prompt_tokens",
+                                         None)
 
         if truncate_prompt_tokens is not None:
             if truncate_prompt_tokens <= self.max_model_len:
@@ -209,28 +263,35 @@ class OpenAIServing:
                     " Please, select a smaller truncation size.")
         return None
 
-    @abstractmethod
-    async def _preprocess(
-            self, ctx: ServeContext) -> Union[AnyResponse, ErrorResponse]:
-        ...
-
-    @abstractmethod
-    def _build_response(
-            self, ctx: ServeContext) -> Union[AnyResponse, ErrorResponse]:
-        ...
-
-    async def _prepare_generators(self, ctx: ServeContext) -> None:
-        # Schedule the request and get the result generator.
-        generators: list[AsyncGenerator[AnyRequestOutput], None] = []
+    async def _prepare_generators(
+        self,
+        ctx: ServeContext,
+    ) -> Optional[ErrorResponse]:
+        """Schedule the request and get the result generator."""
+        generators: list[AsyncGenerator[Union[RequestOutput,
+                                              PoolingRequestOutput],
+                                        None]] = []
 
         try:
             trace_headers = (None if ctx.raw_request is None else await
                              self._get_trace_headers(ctx.raw_request.headers))
 
+            if not hasattr(ctx.request, "to_pooling_params"):
+                return self.create_error_response(
+                    "Request type does not support pooling parameters")
+
             pooling_params = ctx.request.to_pooling_params()
+
+            if ctx.engine_prompts is None:
+                return self.create_error_response(
+                    "Engine prompts not available")
 
             for i, engine_prompt in enumerate(ctx.engine_prompts):
                 request_id_item = f"{ctx.request_id}-{i}"
+
+                if ctx.request_prompts is None:
+                    return self.create_error_response(
+                        "Request prompts not available")
 
                 self._log_inputs(
                     request_id_item,
@@ -245,7 +306,7 @@ class OpenAIServing:
                     request_id_item,
                     lora_request=ctx.lora_request,
                     trace_headers=trace_headers,
-                    priority=ctx.request.priority,
+                    priority=getattr(ctx.request, "priority", 0),
                 )
 
                 generators.append(generator)
@@ -258,21 +319,35 @@ class OpenAIServing:
             # TODO: Use a vllm-specific Validation Error
             return self.create_error_response(str(e))
 
-    async def _collect_batch(self,
-                             ctx: ServeContext) -> Optional[ErrorResponse]:
+    async def _collect_batch(
+        self,
+        ctx: ServeContext,
+    ) -> Optional[ErrorResponse]:
+        """Collect batch results from the result generator."""
         try:
+            if ctx.engine_prompts is None:
+                return self.create_error_response(
+                    "Engine prompts not available")
+
             num_prompts = len(ctx.engine_prompts)
-            final_res_batch: list[Optional[AnyRequestOutput, None]]
+            final_res_batch: list[Optional[Union[RequestOutput,
+                                                 PoolingRequestOutput]]]
             final_res_batch = [None] * num_prompts
+
+            if ctx.result_generator is None:
+                return self.create_error_response(
+                    "Result generator not available")
 
             async for i, res in ctx.result_generator:
                 final_res_batch[i] = res
 
-            if not all(final_res is not None for final_res in final_res_batch):
+            if None in final_res_batch:
                 return self.create_error_response(
                     "Failed to generate results for all prompts")
 
-            ctx.final_res_batch = cast(list[AnyRequestOutput], final_res_batch)
+            ctx.final_res_batch = [
+                res for res in final_res_batch if res is not None
+            ]
 
             return None
 
@@ -429,7 +504,7 @@ class OpenAIServing:
             # TODO(#9845): remove max_tokens when field dropped from OpenAI API
             max_tokens = request.max_completion_tokens or request.max_tokens
         else:
-            max_tokens = request.max_tokens
+            max_tokens = getattr(request, "max_tokens", None)
         if max_tokens is None:
             if token_num >= self.max_model_len:
                 raise ValueError(
