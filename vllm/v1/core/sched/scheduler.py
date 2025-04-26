@@ -65,8 +65,8 @@ class Scheduler(SchedulerInterface):
             self.scheduler_config.max_num_batched_tokens
         self.max_model_len = self.scheduler_config.max_model_len
         self.enable_kv_cache_events = (
-            self.kv_events_config.enable_kv_cache_events
-            if self.kv_events_config is not None else False)
+            self.kv_events_config is not None
+            and self.kv_events_config.enable_kv_cache_events)
 
         # Create KVConnector for the Scheduler. Note that each Worker
         # will have a corresponding KVConnector with Role=WORKER.
@@ -504,7 +504,7 @@ class Scheduler(SchedulerInterface):
 
         events = self.kv_cache_manager.take_events()
         if events:
-            batch = KVEventBatch(ts=time.monotonic(), events=events)
+            batch = KVEventBatch(ts=time.time(), events=events)
             self.kv_event_publisher.publish(batch)
 
         # Advance the number of computed tokens for the request AFTER

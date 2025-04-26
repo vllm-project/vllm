@@ -127,7 +127,8 @@ class BlockPool:
             prev_block_hash_value = prev_block.block_hash.hash_value
 
         parent_block_hash = prev_block_hash_value
-        new_hashes: list[int] = []
+        new_hashes: Optional[list[int]] = ([] if self.enable_kv_cache_events
+                                           else None)
         for i, blk in enumerate(new_full_blocks):
             assert blk.block_hash is None
 
@@ -165,7 +166,8 @@ class BlockPool:
             # Update and added the full block to the cache.
             blk.block_hash = block_hash
             self.cached_block_hash_to_block[block_hash][blk.block_id] = blk
-            new_hashes.append(block_hash.hash_value)
+            if new_hashes is not None:
+                new_hashes.append(block_hash.hash_value)
             prev_block_hash_value = block_hash.hash_value
 
         if self.enable_kv_cache_events:
@@ -234,7 +236,7 @@ class BlockPool:
 
             if self.enable_kv_cache_events:
                 self.kv_event_queue.append(
-                    BlockRemoved(block_hashes=[block_hash.hash_value], ))
+                    BlockRemoved(block_hashes=[block_hash.hash_value]))
             return True
         return False
 

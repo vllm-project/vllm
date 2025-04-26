@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
-import collections
 from abc import ABC, abstractmethod
+from collections import deque
 from typing import Any, Callable, Optional, Union
 
 import msgspec
@@ -118,9 +118,7 @@ class ZmqEventPublisher(EventPublisher):
             self._replay = self._ctx.socket(zmq.ROUTER)
             self._replay.bind(replay_endpoint)
 
-        self._buffer: collections.deque[tuple[int,
-                                              bytes]] = (collections.deque(
-                                                  maxlen=buffer_steps))
+        self._buffer = deque[tuple[int, bytes]](maxlen=buffer_steps)
         self._seq = 0
         self._pack = msgspec.msgpack.Encoder()
 
@@ -132,7 +130,7 @@ class ZmqEventPublisher(EventPublisher):
         payload = self._pack.encode(events)
         seq_bytes = self._seq.to_bytes(8, "big")
 
-        self._pub.send_multipart([self._topic_bytes, seq_bytes, payload])
+        self._pub.send_multipart((self._topic_bytes, seq_bytes, payload))
 
         self._buffer.append((self._seq, payload))
         self._seq += 1
@@ -152,18 +150,16 @@ class ZmqEventPublisher(EventPublisher):
             return
         if not self._replay.poll(0):  # no request waiting
             return
-        # Receive request frames: [client_id, start_seq_bytes]
-        frames = self._replay.recv_multipart()
-        client_id = frames[0]
-        start_seq = int.from_bytes(frames[-1], "big")
+
+        client_id, start_seq_bytes = self._replay.recv_multipart()
+        start_seq = int.from_bytes(start_seq_bytes, "big")
         for seq, buf in self._buffer:
             if seq >= start_seq:
                 # [identity, empty_delim, seq_bytes, payload]
                 self._replay.send_multipart(
-                    [client_id, b"",
-                     seq.to_bytes(8, "big"), buf])
+                    (client_id, b"", seq.to_bytes(8, "big"), buf))
         # Send end of sequence marker
-        self._replay.send_multipart([client_id, b"", b""])
+        self._replay.send_multipart((client_id, b"", b""))
 
 
 class EventPublisherFactory:
