@@ -22,6 +22,7 @@ if TYPE_CHECKING:
 
     from vllm.v1.request import Request
 else:
+    torch = LazyLoader('torch', globals(), 'torch')
     xgr_testing = LazyLoader('xgr_testing', globals(), 'xgrammar.testing')
 
 logger = init_logger(__name__)
@@ -125,30 +126,24 @@ class StructuredOutputManager:
         # and deserialization when sending this to the GPU workers.
         return bitmask_tensor.numpy()
 
-    def jump_forward_tokens(self, request, batch_index) -> list[int]:
+    def jump_forward_tokens(self, request: Request, bitmask: np.ndarray,
+                            batch_index: int) -> list[int]:
         """
-        For xgrammar-based structured output requests, repeatedly
+        For structured output requests, repeatedly
         check if the grammar bitmask is a single-token bitmask, and if so,
         advance the FSM and collect all jump-forward tokens.
         Returns the list of jump-forward token IDs.
         """
-        so_request = request.structured_output_request
-        if so_request is None or so_request.grammar is None:
-            return []
+        if TYPE_CHECKING:
+            assert request.structured_output_request is not None
+            assert request.structured_output_request.grammar is not None
+            assert self.backend is not None
 
         jump_tokens = []
-        bitmask = torch.zeros(so_request.grammar.vocab_size, dtype=torch.int32)
-        so_request.grammar.allocate_token_bitmask(1)
-        so_request.grammar.fill_bitmask(bitmask, 0)
         is_single, unique_token_id = xgr_testing._is_single_token_bitmask(
-            bitmask, so_request.grammar.vocab_size, 0)
-        while is_single and unique_token_id != -1:
+            torch.from_numpy(bitmask), self.backend.vocab_size, batch_index)
+        if is_single:
             jump_tokens.append(unique_token_id)
-            so_request.grammar.accept_tokens(request.request_id,
-                                             [unique_token_id])
-            so_request.grammar.fill_bitmask(bitmask, batch_index)
-            is_single, unique_token_id = xgr_testing._is_single_token_bitmask(
-                bitmask, so_request.grammar.vocab_size, 0)
         return jump_tokens
 
     def clear_backend(self) -> None:

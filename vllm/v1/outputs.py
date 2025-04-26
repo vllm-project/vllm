@@ -1,8 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 
-from dataclasses import dataclass
-from typing import NamedTuple, Optional
+from __future__ import annotations
 
+from dataclasses import dataclass
+from typing import NamedTuple, Optional, TypedDict
+
+import numpy as np
 import torch
 
 
@@ -41,7 +44,7 @@ class LogprobsTensors(NamedTuple):
 
     @staticmethod
     def empty_cpu(num_positions: int,
-                  num_tokens_per_position: int) -> "LogprobsTensors":
+                  num_tokens_per_position: int) -> LogprobsTensors:
         """Create empty LogprobsTensors on CPU."""
 
         logprob_token_ids = torch.empty(
@@ -68,6 +71,11 @@ class SamplerOutput:
     # PLACEHOLDER_TOKEN_ID (-1 by default) is used for padding.
     sampled_token_ids: torch.Tensor
     logprobs_tensors: Optional[LogprobsTensors]
+
+
+class ModelRunnerStructuredOutputMetadata(TypedDict):
+    grammar_bitmask: Optional[np.ndarray]
+    struct_out_req_batch_indices: Optional[dict[str, int]]
 
 
 # ModelRunnerOutput is serialized and sent to the scheduler process.
@@ -99,6 +107,7 @@ class ModelRunnerOutput:
     # [prompt_len, num_prompt_logprobs]
     # [prompt_len]
     prompt_logprobs_dict: dict[str, Optional[LogprobsTensors]]
+    structured_output_metadata: ModelRunnerStructuredOutputMetadata
 
 
 EMPTY_MODEL_RUNNER_OUTPUT = ModelRunnerOutput(
@@ -108,4 +117,8 @@ EMPTY_MODEL_RUNNER_OUTPUT = ModelRunnerOutput(
     spec_token_ids=None,
     logprobs=None,
     prompt_logprobs_dict={},
+    structured_output_metadata=ModelRunnerStructuredOutputMetadata(
+        grammar_bitmask=None,
+        struct_out_req_batch_indices=None,
+    ),
 )
