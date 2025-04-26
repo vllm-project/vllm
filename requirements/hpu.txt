@@ -9,4 +9,4 @@ numpy==1.26.4
 tabulate
 setuptools>=61
 setuptools-scm>=8
-vllm-hpu-extension @ git+https://github.com/HabanaAI/vllm-hpu-extension.git@4312768
+vllm-hpu-extension @ git+https://github.com/HabanaAI/vllm-hpu-extension.git@f1f6624
