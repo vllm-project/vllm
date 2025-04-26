@@ -37,6 +37,7 @@ wait_for_server() {
 vllm serve $MODEL_NAME \
     --port 8100 \
     --max-model-len 100 \
+    --enforce-eager \
     --gpu-memory-utilization 0.8 \
     --trust-remote-code \
     --kv-events-config \
