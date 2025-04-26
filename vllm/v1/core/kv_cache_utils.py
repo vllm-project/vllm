@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 """KV-Cache Utilities."""
-import math
 import os
 from collections import defaultdict, deque
 from collections.abc import Sequence
@@ -706,23 +705,28 @@ def _get_kv_cache_config_uniform_page_size(
         The generated KVCacheConfig
     """
     # Group all layers by type_id.
-    # E.g., 2 full attention layers and 4 sliding window attention layers,
-    # -> (full.0, full.1), (sw.0, sw.1, sw.2, sw.3).
+    # E.g., 2 full attention layers and 3 sliding window attention layers,
+    # -> (full.0, full.1), (sw.0, sw.1, sw.2).
     same_type_layers: dict[str, list[str]] = defaultdict(list)
     for layer_name, layer_spec in kv_cache_spec.items():
         same_type_layers[layer_spec.type_id].append(layer_name)
 
-    # Split each group into smaller groups, to make the number of layers in
-    # each group identical.
-    # E.g., (full.0, full.1), (sw.0, sw.1, sw.2, sw.3), group_size_gcd is 2,
+    # Split each group into smaller groups, to make the number of layers in each
+    # group identical. Add padding to the last group of each type if necessary.
+    # E.g., (full.0, full.1), (sw.0, sw.1, sw.2)
     # split to 3 groups with 2 layers each:
-    # (full.0, full.1), (sw.0, sw.1), (sw.2, sw.3).
-    group_size_gcd = math.gcd(
-        *[len(layers) for layers in same_type_layers.values()])
+    # (full.0, full.1), (sw.0, sw.1), (sw.2, padding).
+    group_size = min([len(layers) for layers in same_type_layers.values()])
     grouped_layers = []
     for layers in same_type_layers.values():
-        for i in range(0, len(layers), group_size_gcd):
-            grouped_layers.append(layers[i:i + group_size_gcd])
+        num_padding_layers = len(layers) % group_size
+        if num_padding_layers > 0:
+            logger.warning(
+                "Add %d padding layers, may waste at most %.2f%% KV cache memory",  # noqa
+                num_padding_layers,
+                num_padding_layers / len(layers) * 100)
+        for i in range(0, len(layers), group_size):
+            grouped_layers.append(layers[i:i + group_size])
 
     # Divide the available memory equally among all layers in the first group.
     # The memory layout in the example will be:
@@ -738,12 +742,12 @@ def _get_kv_cache_config_uniform_page_size(
     # Reuse the KV cache tensors of the first group for the other groups.
     # The memory layout in the example will be:
     # full.0, sw.0, sw.2: share a Tensor with size=available_memory//2
-    # full.1, sw.1, sw.3: share another Tensor with size=available_memory//2
+    # full.1, sw.1: share another Tensor with size=available_memory//2
     # Layers of different groups have different block table, so they will
     # use different parts of the shared Tensor.
     for layers in grouped_layers[1:]:
-        for layer_name, layer_name_first_group in zip(layers,
-                                                      grouped_layers[0]):
+        for layer_name, layer_name_first_group in zip(
+                layers, grouped_layers[0][:len(layers)]):
             kv_cache_config.tensors[layer_name] = KVCacheReuseTensor(
                 reused_layer_name=layer_name_first_group)
 
