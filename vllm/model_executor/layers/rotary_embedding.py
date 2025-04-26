@@ -1321,13 +1321,14 @@ class MRotaryEmbedding(RotaryEmbedding):
                     audio_start_idx = start_idx if len(
                         audio_llm_pos_ids_list
                     ) == 0 else audio_llm_pos_ids_list[-1][0].item()
-                    if min(t_ntoken_per_chunk,
-                           pure_audio_len - added_audio_len) > 0:
-                        audio_llm_pos_ids_list = (torch.arange(
-                            min(t_ntoken_per_chunk, pure_audio_len -
-                                added_audio_len)).expand(3, -1) +
-                                                  audio_start_idx + 1).split(
-                                                      1, dim=1)
+                    num_audio_tokens = min(t_ntoken_per_chunk,
+                                           pure_audio_len - added_audio_len)
+                    if num_audio_tokens > 0:
+                        audio_positions = torch.arange(num_audio_tokens)
+                        audio_positions = audio_positions.expand(
+                            3, -1) + audio_start_idx + 1
+                        audio_llm_pos_ids_list = audio_positions.split(1,
+                                                                       dim=1)
                     else:
                         audio_llm_pos_ids_list = []
                     added_audio_len += min(t_ntoken_per_chunk,
