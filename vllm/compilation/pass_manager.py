@@ -53,7 +53,7 @@ class PostGradPassManager(CustomGraphPass):
             self.passes += [FusionPass.instance(config)]
 
         if self.pass_config.enable_sequence_parallelism:
-            self.passes += [SequenceParallelismPass.instance(config)]
+            self.passes += [SequenceParallelismPass(config)]
 
         self.fix_functionalization = FixFunctionalizationPass(config)
 

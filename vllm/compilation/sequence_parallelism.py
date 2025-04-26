@@ -235,24 +235,8 @@ class LastAllReduceRMSNormPattern(AllReduceRMSNormPattern):
 
 
 class SequenceParallelismPass(VllmInductorPass):
-    _instance: "Optional[SequenceParallelismPass]" = None
-
-    @classmethod
-    def instance(cls, config: VllmConfig) -> "SequenceParallelismPass":
-        """
-        Get the singleton instance of the CollectiveFusionPass.
-        If the instance exists, the config is updated but
-        initialization is not repeated.
-        """
-        if cls._instance is None:
-            cls._instance = SequenceParallelismPass(config)
-        else:
-            cls._instance.pass_config = config.compilation_config.pass_config
-        return cls._instance
 
     def __init__(self, config: VllmConfig):
-        assert self.__class__._instance is None, (
-            "CollectiveFusionPass singleton instance already exists")
         super().__init__(config)
 
         self.patterns: PatternMatcherPass = PatternMatcherPass(
@@ -278,5 +262,7 @@ class SequenceParallelismPass(VllmInductorPass):
     def __call__(self, graph: fx.Graph):
         self.dump_graph(graph, "before_sequence_parallelism_pass")
         count = self.patterns.apply(graph)
+        tp_size = get_tensor_model_parallel_world_size()
         logger.debug("Replaced %s patterns", count)
+        print(f"tp_size= {tp_size} after graph: {graph}")
         self.dump_graph(graph, "after_sequence_parallelism_pass")
