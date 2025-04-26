@@ -20,7 +20,6 @@ class Request:
     def __init__(
         self,
         request_id: str,
-        prompt: Optional[str],
         prompt_token_ids: list[int],
         multi_modal_inputs: Optional[list[MultiModalKwargs]],
         multi_modal_hashes: Optional[list[str]],
@@ -46,7 +45,6 @@ class Request:
         assert sampling_params.max_tokens is not None
         self.max_tokens = sampling_params.max_tokens
 
-        self.prompt = prompt
         self.prompt_token_ids = prompt_token_ids
         self.num_prompt_tokens = len(self.prompt_token_ids)
         self._output_token_ids: list[int] = []
@@ -81,7 +79,6 @@ class Request:
 
         return cls(
             request_id=request.request_id,
-            prompt=request.prompt,
             prompt_token_ids=request.prompt_token_ids,
             multi_modal_inputs=request.mm_inputs,
             multi_modal_hashes=request.mm_hashes,

@@ -35,7 +35,6 @@ PROMPT_TOKENS = TOKENIZER(PROMPT).input_ids
 def make_request(params: SamplingParams) -> EngineCoreRequest:
     return EngineCoreRequest(
         request_id=str(uuid.uuid4()),
-        prompt=PROMPT,
         prompt_token_ids=PROMPT_TOKENS,
         mm_inputs=None,
         mm_hashes=None,

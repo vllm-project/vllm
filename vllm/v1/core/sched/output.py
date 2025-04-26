@@ -22,7 +22,6 @@ class NewRequestData:
 
     req_id: str
     prompt_token_ids: list[int]
-    prompt: Optional[str]
     mm_inputs: list[MultiModalKwargs]
     mm_hashes: list[str]
     mm_positions: list[PlaceholderRange]
@@ -40,7 +39,6 @@ class NewRequestData:
         return cls(
             req_id=request.request_id,
             prompt_token_ids=request.prompt_token_ids,
-            prompt=request.prompt,
             mm_inputs=request.mm_inputs,
             mm_hashes=request.mm_hashes,
             mm_positions=request.mm_positions,
