@@ -73,7 +73,7 @@ def optional_float(val: str) -> Optional[float]:
 def nullable_kvs(val: str) -> Optional[dict[str, int]]:
     """NOTE: This function is deprecated, args should be passed as JSON
     strings instead.
-    
+
     Parses a string containing comma separate key [str] to value [int]
     pairs into a dictionary.
 
@@ -263,6 +263,8 @@ class EngineArgs:
     def __post_init__(self):
         if not self.tokenizer:
             self.tokenizer = self.model
+
+        self.enable_reasoning = self.reasoning_parser is not None
 
         # support `EngineArgs(compilation_config={...})`
         # without having to manually construct a
@@ -1706,7 +1708,7 @@ def _warn_or_fallback(feature_name: str) -> bool:
 def human_readable_int(value):
     """Parse human-readable integers like '1k', '2M', etc.
     Including decimal values with decimal multipliers.
-    
+
     Examples:
     - '1k' -> 1,000
     - '1K' -> 1,024

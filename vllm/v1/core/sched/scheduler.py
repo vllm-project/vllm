@@ -705,8 +705,8 @@ class Scheduler(SchedulerInterface):
                 new_logprobs = logprobs.slice(req_index, req_index + 1)
 
             if new_token_ids and request.use_structured_output:
-                advance_fsm = False
                 reasoner = self.structured_output_manager.reasoner
+                advance_fsm = reasoner is None
                 is_reasoning_end_this_step = False
 
                 # NOTE: use_structured_output implies
@@ -718,23 +718,22 @@ class Scheduler(SchedulerInterface):
                     assert request.structured_output_request is not None
                     assert request.structured_output_request.grammar is not None
 
-                if reasoner is None or request.structured_output_request.reasoning_ended:  # noqa: E501
-                    advance_fsm = True
-                elif reasoner.is_reasoning_end(request.all_token_ids):
-                    request.structured_output_request.reasoning_ended = True
-                    is_reasoning_end_this_step = True
-                    advance_fsm = False
-                else:
-                    advance_fsm = False
+                if reasoner is not None:
+                    if request.structured_output_request.reasoning_ended:  # noqa: E501
+                        advance_fsm = True
+                    elif reasoner.is_reasoning_end(request.all_token_ids):
+                        request.structured_output_request.reasoning_ended = True
+                        is_reasoning_end_this_step = True
+                        advance_fsm = False
+                    else:
+                        advance_fsm = False
 
                 # Only advance FSM if reasoning was already off OR
                 # if we are not in the specific step where reasoning just ended.
-                if advance_fsm and not is_reasoning_end_this_step:
-                    # NOTE: structured_output_request
-                    # should not be None if use_structured_output, we have
-                    # check above, so safe to ignore type warning
-                    request.structured_output_request.grammar.accept_tokens(
-                        req_id, new_token_ids)
+                # yapf: off
+                if advance_fsm and (not is_reasoning_end_this_step if reasoner is not None else True):  # noqa: E501
+                    request.structured_output_request.grammar.accept_tokens(req_id, new_token_ids)  # noqa: E501
+                # yapf: on
 
             # Get prompt logprobs for this request.
             prompt_logprobs_tensors = prompt_logprobs_dict.get(req_id)
