@@ -106,3 +106,9 @@ class StructuredOutputBackend(ABC):
         """
         Finds the tokens that can be used to jump forward in the grammar.
         """
+
+    @abstractmethod
+    def destroy(self):
+        """
+        Backend-specific cleanup.
+        """

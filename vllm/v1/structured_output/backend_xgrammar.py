@@ -10,7 +10,7 @@ import torch
 
 import vllm.envs
 from vllm.logger import init_logger
-from vllm.sampling_params import SamplingParams
+from vllm.sampling_params import GuidedDecodingParams, SamplingParams
 from vllm.transformers_utils.tokenizers.mistral import MistralTokenizer
 from vllm.utils import LazyLoader
 from vllm.v1.structured_output.backend_types import (StructuredOutputBackend,
@@ -32,9 +32,17 @@ logger = init_logger(__name__)
 class XgrammarBackend(StructuredOutputBackend):
 
     def __post_init__(self):
-        self.disable_any_whitespace = (
-            "disable-any-whitespace"
-            in self.vllm_config.decoding_config.guided_decoding_backend)
+        self.disable_any_whitespace = False
+        backend_options = GuidedDecodingParams(
+            backend=self.vllm_config.decoding_config.guided_decoding_backend
+        ).backend_options()
+        for option in backend_options:
+            if option == "disable-any-whitespace":
+                self.disable_any_whitespace = True
+            else:
+                raise ValueError(
+                    f"Unsupported option for the xgrammar backend: {option}")
+
         if isinstance(self.tokenizer, MistralTokenizer):
             # NOTE: ideally, xgrammar should handle this accordingly.
             # refer to https://github.com/mlc-ai/xgrammar/blob/d77c0a0173ef14779c918e3be7966ba852f7910f/python/xgrammar/tokenizer_info.py#L98
@@ -109,6 +117,9 @@ class XgrammarBackend(StructuredOutputBackend):
     def allocate_token_bitmask(self, max_num_seqs: int):
         return xgr.allocate_token_bitmask(max_num_seqs, self.vocab_size)
 
+    def destroy(self):
+        del self.compiler
+
 
 @dataclass
 class XgrammarGrammar(StructuredOutputGrammar):
@@ -166,15 +177,8 @@ def has_xgrammar_unsupported_json_features(schema: dict[str, Any]) -> bool:
         if not isinstance(obj, dict):
             return False
 
-        # Check for pattern restrictions
-        if "pattern" in obj:
-            return True
-
         # Check for numeric ranges
-        if obj.get("type") in ("integer", "number") and any(
-                key in obj
-                for key in ("minimum", "maximum", "exclusiveMinimum",
-                            "exclusiveMaximum", "multipleOf")):
+        if obj.get("type") in ("integer", "number") and ("multipleOf" in obj):
             return True
 
         # Check for array unsupported keywords

@@ -17,7 +17,7 @@ from vllm.multimodal.utils import merge_and_sort_multimodal_metadata
 from vllm.pooling_params import PoolingParams
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import SamplingParams
-from vllm.transformers_utils.tokenizer_group import BaseTokenizerGroup
+from vllm.transformers_utils.tokenizer_group import TokenizerGroup
 from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.engine.mm_input_cache import MirroredProcessingCache
 from vllm.v1.structured_output.backend_guidance import (
@@ -31,7 +31,7 @@ class Processor:
     def __init__(
         self,
         vllm_config: VllmConfig,
-        tokenizer: BaseTokenizerGroup,
+        tokenizer: TokenizerGroup,
         mm_registry: MultiModalRegistry = MULTIMODAL_REGISTRY,
     ):
 
@@ -145,15 +145,7 @@ class Processor:
         if not params.guided_decoding or not self.decoding_config:
             return
 
-        supported_backends = [
-            "xgrammar", "xgrammar:disable-any-whitespace", "guidance",
-            "guidance:disable-any-whitespace", "auto"
-        ]
-
         engine_level_backend = self.decoding_config.guided_decoding_backend
-        if engine_level_backend not in supported_backends:
-            raise ValueError(f"Only {supported_backends} structured output is "
-                             "supported in V1.")
         if params.guided_decoding.backend:
             # Request-level backend selection is not supported in V1.
             # The values may differ if `params` is reused and was set
@@ -210,7 +202,7 @@ class Processor:
         trace_headers: Optional[Mapping[str, str]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
         priority: int = 0,
-    ) -> EngineCoreRequest:
+    ) -> tuple[Optional[str], EngineCoreRequest]:
 
         # TODO(woosuk): Support pooling models.
         # TODO(woosuk): Support encoder-decoder models.
@@ -314,9 +306,8 @@ class Processor:
             else:
                 sorted_mm_inputs = orig_sorted_mm_inputs
 
-        return EngineCoreRequest(
+        return decoder_inputs.get("prompt"), EngineCoreRequest(
             request_id=request_id,
-            prompt=decoder_inputs.get("prompt"),
             prompt_token_ids=decoder_inputs["prompt_token_ids"],
             mm_inputs=sorted_mm_inputs,
             mm_hashes=sorted_mm_hashes,

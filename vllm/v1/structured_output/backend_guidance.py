@@ -2,14 +2,16 @@
 
 from __future__ import annotations
 
+import copy
+import json
 import os
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Any, Optional, Union
 
 import torch
 
 from vllm.logger import init_logger
-from vllm.sampling_params import SamplingParams
+from vllm.sampling_params import GuidedDecodingParams, SamplingParams
 from vllm.utils import LazyLoader
 from vllm.v1.structured_output.backend_types import (StructuredOutputBackend,
                                                      StructuredOutputGrammar,
@@ -29,13 +31,46 @@ else:
 logger = init_logger(__name__)
 
 
+def _walk_json_for_additional_properties(data: object):
+    if isinstance(data, dict):
+        for value in data.values():
+            _walk_json_for_additional_properties(value)
+        if 'additionalProperties' not in data and \
+            ('properties' in data or 'patternProperties' in data):
+            data['additionalProperties'] = False
+    elif isinstance(data, list):
+        for item in data:
+            _walk_json_for_additional_properties(item)
+
+
+def process_for_additional_properties(
+        guide_json: Union[str, dict[str, Any]]) -> dict[str, Any]:
+    if isinstance(guide_json, str):
+        guide_json_obj = json.loads(guide_json)
+    else:
+        # copy for modifications
+        guide_json_obj = copy.deepcopy(guide_json)
+    _walk_json_for_additional_properties(guide_json_obj)
+    return guide_json_obj
+
+
 @dataclass
 class GuidanceBackend(StructuredOutputBackend):
 
     def __post_init__(self):
-        self.disable_any_whitespace = (
-            "disable-any-whitespace"
-            in self.vllm_config.decoding_config.guided_decoding_backend)
+        self.disable_any_whitespace = False
+        self.no_additional_properties = False
+        backend_options = GuidedDecodingParams(
+            backend=self.vllm_config.decoding_config.guided_decoding_backend
+        ).backend_options()
+        for option in backend_options:
+            if option == "disable-any-whitespace":
+                self.disable_any_whitespace = True
+            elif option == "no-additional-properties":
+                self.no_additional_properties = True
+            else:
+                raise ValueError(
+                    f"Unsupported option for the guidance backend: {option}")
 
         self.ll_tokenizer = llguidance_hf.from_tokenizer(
             self.tokenizer, self.vocab_size)
@@ -43,7 +78,8 @@ class GuidanceBackend(StructuredOutputBackend):
     def compile_grammar(self, request_type: StructuredOutputOptions,
                         grammar_spec: str) -> StructuredOutputGrammar:
         self.serialized_grammar = serialize_guidance_grammar(
-            request_type, grammar_spec, self.disable_any_whitespace)
+            request_type, grammar_spec, self.disable_any_whitespace,
+            self.no_additional_properties)
 
         ll_matcher = llguidance.LLMatcher(
             self.ll_tokenizer,
@@ -63,6 +99,9 @@ class GuidanceBackend(StructuredOutputBackend):
     def allocate_token_bitmask(self, max_num_seqs: int):
         return llguidance_torch.allocate_token_bitmask(
             max_num_seqs, self.ll_tokenizer.vocab_size)
+
+    def destroy(self):
+        pass
 
 
 @dataclass
@@ -123,10 +162,15 @@ class GuidanceGrammar(StructuredOutputGrammar):
         raise NotImplementedError
 
 
-def serialize_guidance_grammar(request_type: StructuredOutputOptions,
-                               grammar_spec: str,
-                               disable_any_whitespace: bool = False) -> str:
+def serialize_guidance_grammar(
+    request_type: StructuredOutputOptions,
+    grammar_spec: Union[str, dict[str, Any]],
+    disable_any_whitespace: bool = False,
+    no_additional_properties: bool = False,
+) -> str:
     if request_type == StructuredOutputOptions.JSON:
+        if no_additional_properties:
+            grammar_spec = process_for_additional_properties(grammar_spec)
         return llguidance.LLMatcher.grammar_from_json_schema(
             grammar_spec,
             defaults={

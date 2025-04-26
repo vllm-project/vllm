@@ -129,8 +129,9 @@ class StructuredOutputManager:
 
     def jump_forward_tokens(self, request, batch_index) -> list[int]:
         """
-        For xgrammar-based structured output requests, repeatedly check if the grammar bitmask
-        is a single-token bitmask, and if so, advance the FSM and collect all jump-forward tokens.
+        For xgrammar-based structured output requests, repeatedly
+        check if the grammar bitmask is a single-token bitmask, and if so,
+        advance the FSM and collect all jump-forward tokens.
         Returns the list of jump-forward token IDs.
         """
         so_request = request.structured_output_request
@@ -151,3 +152,7 @@ class StructuredOutputManager:
             is_single, unique_token_id = xgr_testing._is_single_token_bitmask(
                 bitmask, so_request.grammar.vocab_size, 0)
         return jump_tokens
+
+    def clear_backend(self) -> None:
+        if self.backend is not None:
+            self.backend.destroy()
