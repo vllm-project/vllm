@@ -110,10 +110,14 @@ class CompilerManager:
         compiled_graph = self.load(graph, example_inputs, graph_index,
                                    runtime_shape)
         if compiled_graph is not None:
-            if graph_index == 0:
-                # adds some info logging for the first graph
-                logger.info("Directly load the compiled graph for shape %s "
-                            "from the cache", str(runtime_shape))  # noqa
+            if graph_index == num_graphs - 1:
+                # after loading the last graph for this shape, record the time.
+                # there can be multiple graphs due to piecewise compilation.
+                now = time.time()
+                elapsed = now - compilation_start_time
+                logger.info(
+                    "Directly load the compiled graph(s) for shape %s "
+                    "from the cache, took %.3f s", str(runtime_shape), elapsed)
             return compiled_graph
 
         # no compiler cached the graph, or the cache is disabled,
@@ -278,7 +282,7 @@ class PiecewiseCompileInterpreter(torch.fx.Interpreter):
 
 
 class VllmBackend:
-    """The compilation backend for `torch.compile` with VLLM.
+    """The compilation backend for `torch.compile` with vLLM.
     It is used for compilation level of `CompilationLevel.PIECEWISE`,
     where we customize the compilation.
 
@@ -357,6 +361,11 @@ class VllmBackend:
             # graph.
 
             factors = []
+            # 0. factors come from the env, for example, The values of
+            # VLLM_PP_LAYER_PARTITION will affects the computation graph.
+            env_hash = envs.compute_hash()
+            factors.append(env_hash)
+
             # 1. factors come from the vllm_config (it mainly summarizes how the
             #    model is created)
             config_hash = vllm_config.compute_hash()
@@ -376,8 +385,8 @@ class VllmBackend:
                 with open(filepath) as f:
                     hash_content.append(f.read())
             import hashlib
-            code_hash = hashlib.md5(
-                "\n".join(hash_content).encode()).hexdigest()
+            code_hash = hashlib.md5("\n".join(hash_content).encode(),
+                                    usedforsecurity=False).hexdigest()
             factors.append(code_hash)
 
             # 3. compiler hash
@@ -385,7 +394,8 @@ class VllmBackend:
             factors.append(compiler_hash)
 
             # combine all factors to generate the cache dir
-            hash_key = hashlib.md5(str(factors).encode()).hexdigest()[:10]
+            hash_key = hashlib.md5(str(factors).encode(),
+                                   usedforsecurity=False).hexdigest()[:10]
 
             cache_dir = os.path.join(
                 envs.VLLM_CACHE_ROOT,
@@ -396,8 +406,10 @@ class VllmBackend:
 
         cache_dir = self.compilation_config.cache_dir
         os.makedirs(cache_dir, exist_ok=True)
-        local_cache_dir = os.path.join(
-            cache_dir, f"rank_{vllm_config.parallel_config.rank}")
+        rank = vllm_config.parallel_config.rank
+        dp_rank = vllm_config.parallel_config.data_parallel_rank
+        local_cache_dir = os.path.join(cache_dir, f"rank_{rank}_{dp_rank}")
+        os.makedirs(local_cache_dir, exist_ok=True)
         self.compilation_config.local_cache_dir = local_cache_dir
 
         disable_cache = envs.VLLM_DISABLE_COMPILE_CACHE

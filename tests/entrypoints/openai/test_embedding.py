@@ -11,10 +11,12 @@ import requests
 from vllm.entrypoints.openai.protocol import EmbeddingResponse
 from vllm.transformers_utils.tokenizer import get_tokenizer
 
+from ...models.embedding.utils import correctness_test
 from ...utils import RemoteOpenAIServer
 
-MODEL_NAME = "intfloat/e5-mistral-7b-instruct"
+MODEL_NAME = "intfloat/multilingual-e5-small"
 DUMMY_CHAT_TEMPLATE = """{% for message in messages %}{{message['role'] + ': ' + message['content'] + '\\n'}}{% endfor %}"""  # noqa: E501
+DTYPE = "bfloat16"
 
 
 @pytest.fixture(scope="module")
@@ -24,10 +26,10 @@ def server():
         "embed",
         # use half precision for speed and memory savings in CI environment
         "--dtype",
-        "bfloat16",
+        DTYPE,
         "--enforce-eager",
         "--max-model-len",
-        "8192",
+        "512",
         "--chat-template",
         DUMMY_CHAT_TEMPLATE,
     ]
@@ -42,9 +44,17 @@ async def client(server):
         yield async_client
 
 
+@pytest.fixture(scope="module")
+def hf_model(hf_runner):
+    with hf_runner(MODEL_NAME, dtype=DTYPE,
+                   is_sentence_transformer=True) as hf_model:
+        yield hf_model
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
-async def test_single_embedding(client: openai.AsyncOpenAI, model_name: str):
+async def test_single_embedding(hf_model, client: openai.AsyncOpenAI,
+                                model_name: str):
     input_texts = [
         "The chef prepared a delicious meal.",
     ]
@@ -60,10 +70,13 @@ async def test_single_embedding(client: openai.AsyncOpenAI, model_name: str):
 
     assert embeddings.id is not None
     assert len(embeddings.data) == 1
-    assert len(embeddings.data[0].embedding) == 4096
+    assert len(embeddings.data[0].embedding) == 384
     assert embeddings.usage.completion_tokens == 0
-    assert embeddings.usage.prompt_tokens == 9
-    assert embeddings.usage.total_tokens == 9
+    assert embeddings.usage.prompt_tokens == 11
+    assert embeddings.usage.total_tokens == 11
+
+    vllm_outputs = [d.embedding for d in embeddings.data]
+    correctness_test(hf_model, input_texts, vllm_outputs)
 
     # test using token IDs
     input_tokens = [1, 1, 1, 1, 1]
@@ -77,7 +90,7 @@ async def test_single_embedding(client: openai.AsyncOpenAI, model_name: str):
 
     assert embeddings.id is not None
     assert len(embeddings.data) == 1
-    assert len(embeddings.data[0].embedding) == 4096
+    assert len(embeddings.data[0].embedding) == 384
     assert embeddings.usage.completion_tokens == 0
     assert embeddings.usage.prompt_tokens == 5
     assert embeddings.usage.total_tokens == 5
@@ -85,8 +98,9 @@ async def test_single_embedding(client: openai.AsyncOpenAI, model_name: str):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
-async def test_batch_embedding(client: openai.AsyncOpenAI, model_name: str):
-    # test List[str]
+async def test_batch_embedding(hf_model, client: openai.AsyncOpenAI,
+                               model_name: str):
+    # test list[str]
     input_texts = [
         "The cat sat on the mat.", "A feline was resting on a rug.",
         "Stars twinkle brightly in the night sky."
@@ -101,12 +115,15 @@ async def test_batch_embedding(client: openai.AsyncOpenAI, model_name: str):
 
     assert embeddings.id is not None
     assert len(embeddings.data) == 3
-    assert len(embeddings.data[0].embedding) == 4096
+    assert len(embeddings.data[0].embedding) == 384
     assert embeddings.usage.completion_tokens == 0
-    assert embeddings.usage.prompt_tokens == 32
-    assert embeddings.usage.total_tokens == 32
+    assert embeddings.usage.prompt_tokens == 33
+    assert embeddings.usage.total_tokens == 33
 
-    # test List[List[int]]
+    vllm_outputs = [d.embedding for d in embeddings.data]
+    correctness_test(hf_model, input_texts, vllm_outputs)
+
+    # test list[list[int]]
     input_tokens = [[4, 5, 7, 9, 20], [15, 29, 499], [24, 24, 24, 24, 24],
                     [25, 32, 64, 77]]
     embedding_response = await client.embeddings.create(
@@ -119,7 +136,7 @@ async def test_batch_embedding(client: openai.AsyncOpenAI, model_name: str):
 
     assert embeddings.id is not None
     assert len(embeddings.data) == 4
-    assert len(embeddings.data[0].embedding) == 4096
+    assert len(embeddings.data[0].embedding) == 384
     assert embeddings.usage.completion_tokens == 0
     assert embeddings.usage.prompt_tokens == 17
     assert embeddings.usage.total_tokens == 17
@@ -180,7 +197,7 @@ async def test_conversation_embedding(server: RemoteOpenAIServer,
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
-async def test_batch_base64_embedding(client: openai.AsyncOpenAI,
+async def test_batch_base64_embedding(hf_model, client: openai.AsyncOpenAI,
                                       model_name: str):
     input_texts = [
         "Hello my name is",
@@ -190,30 +207,25 @@ async def test_batch_base64_embedding(client: openai.AsyncOpenAI,
     responses_float = await client.embeddings.create(input=input_texts,
                                                      model=model_name,
                                                      encoding_format="float")
+    float_data = [d.embedding for d in responses_float.data]
+    correctness_test(hf_model, input_texts, float_data)
 
     responses_base64 = await client.embeddings.create(input=input_texts,
                                                       model=model_name,
                                                       encoding_format="base64")
-
-    decoded_responses_base64_data = []
+    base64_data = []
     for data in responses_base64.data:
-        decoded_responses_base64_data.append(
+        base64_data.append(
             np.frombuffer(base64.b64decode(data.embedding),
                           dtype="float32").tolist())
 
-    assert responses_float.data[0].embedding == decoded_responses_base64_data[
-        0]
-    assert responses_float.data[1].embedding == decoded_responses_base64_data[
-        1]
+    correctness_test(hf_model, input_texts, base64_data)
 
     # Default response is float32 decoded from base64 by OpenAI Client
     responses_default = await client.embeddings.create(input=input_texts,
                                                        model=model_name)
-
-    assert responses_float.data[0].embedding == responses_default.data[
-        0].embedding
-    assert responses_float.data[1].embedding == responses_default.data[
-        1].embedding
+    default_data = [d.embedding for d in responses_default.data]
+    correctness_test(hf_model, input_texts, default_data)
 
 
 @pytest.mark.asyncio
@@ -234,7 +246,7 @@ async def test_single_embedding_truncation(client: openai.AsyncOpenAI,
 
     assert embeddings.id is not None
     assert len(embeddings.data) == 1
-    assert len(embeddings.data[0].embedding) == 4096
+    assert len(embeddings.data[0].embedding) == 384
     assert embeddings.usage.completion_tokens == 0
     assert embeddings.usage.prompt_tokens == 10
     assert embeddings.usage.total_tokens == 10
@@ -252,7 +264,7 @@ async def test_single_embedding_truncation(client: openai.AsyncOpenAI,
 
     assert embeddings.id is not None
     assert len(embeddings.data) == 1
-    assert len(embeddings.data[0].embedding) == 4096
+    assert len(embeddings.data[0].embedding) == 384
     assert embeddings.usage.completion_tokens == 0
     assert embeddings.usage.prompt_tokens == 10
     assert embeddings.usage.total_tokens == 10

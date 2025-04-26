@@ -2,15 +2,15 @@
 
 # OpenAI-Compatible Server
 
-vLLM provides an HTTP server that implements OpenAI's [Completions API](https://platform.openai.com/docs/api-reference/completions), [Chat API](https://platform.openai.com/docs/api-reference/chat), and more!
+vLLM provides an HTTP server that implements OpenAI's [Completions API](https://platform.openai.com/docs/api-reference/completions), [Chat API](https://platform.openai.com/docs/api-reference/chat), and more! This functionality lets you serve models and interact with them using an HTTP client.
 
-You can start the server via the [`vllm serve`](#vllm-serve) command, or through [Docker](#deployment-docker):
+In your terminal, you can [install](../getting_started/installation.md) vLLM, then start the server with the [`vllm serve`](#vllm-serve) command. (You can also use our [Docker](#deployment-docker) image.)
 
 ```bash
 vllm serve NousResearch/Meta-Llama-3-8B-Instruct --dtype auto --api-key token-abc123
 ```
 
-To call the server, you can use the [official OpenAI Python client](https://github.com/openai/openai-python), or any other HTTP client.
+To call the server, in your preferred text editor, create a script that uses an HTTP client. Include any messages that you want to send to the model. Then run that script. Below is an example script using the [official OpenAI Python client](https://github.com/openai/openai-python).
 
 ```python
 from openai import OpenAI
@@ -28,6 +28,17 @@ completion = client.chat.completions.create(
 
 print(completion.choices[0].message)
 ```
+
+:::{tip}
+vLLM supports some parameters that are not supported by OpenAI, `top_k` for example.
+You can pass these parameters to vLLM using the OpenAI client in the `extra_body` parameter of your requests, i.e. `extra_body={"top_k": 50}` for `top_k`.
+:::
+
+:::{important}
+By default, the server applies `generation_config.json` from the Hugging Face model repository if it exists. This means the default values of certain sampling parameters can be overridden by those recommended by the model creator.
+
+To disable this behavior, please pass `--generation-config vllm` when launching the server.
+:::
 
 ## Supported APIs
 
@@ -163,6 +174,12 @@ print(completion._request_id)
 
 The `vllm serve` command is used to launch the OpenAI-compatible server.
 
+:::{tip}
+The vast majority of command-line arguments are based on those for offline inference.
+
+See [here](configuration-options) for some common options.
+:::
+
 :::{argparse}
 :module: vllm.entrypoints.openai.cli_args
 :func: create_parser_for_docs
@@ -179,6 +196,7 @@ For example:
 ```yaml
 # config.yaml
 
+model: meta-llama/Llama-3.1-8B-Instruct
 host: "127.0.0.1"
 port: 6379
 uvicorn-log-level: "info"
@@ -187,12 +205,13 @@ uvicorn-log-level: "info"
 To use the above config file:
 
 ```bash
-vllm serve SOME_MODEL --config config.yaml
+vllm serve --config config.yaml
 ```
 
 :::{note}
 In case an argument is supplied simultaneously using command line and the config file, the value from the command line will take precedence.
 The order of priorities is `command line > config file values > defaults`.
+e.g. `vllm serve SOME_MODEL --config config.yaml`, SOME_MODEL takes precedence over `model` in config file.
 :::
 
 ## API Reference
@@ -266,11 +285,85 @@ you can use the [official OpenAI Python client](https://github.com/openai/openai
 If the model has a [chat template](#chat-template), you can replace `inputs` with a list of `messages` (same schema as [Chat API](#chat-api))
 which will be treated as a single prompt to the model.
 
-:::{tip}
-This enables multi-modal inputs to be passed to embedding models, see [this page](#multimodal-inputs) for details.
+Code example: <gh-file:examples/online_serving/openai_embedding_client.py>
+
+#### Multi-modal inputs
+
+You can pass multi-modal inputs to embedding models by defining a custom chat template for the server
+and passing a list of `messages` in the request. Refer to the examples below for illustration.
+
+:::::{tab-set}
+::::{tab-item} VLM2Vec
+
+To serve the model:
+
+```bash
+vllm serve TIGER-Lab/VLM2Vec-Full --task embed \
+  --trust-remote-code --max-model-len 4096 --chat-template examples/template_vlm2vec.jinja
+```
+
+:::{important}
+Since VLM2Vec has the same model architecture as Phi-3.5-Vision, we have to explicitly pass `--task embed`
+to run this model in embedding mode instead of text generation mode.
+
+The custom chat template is completely different from the original one for this model,
+and can be found here: <gh-file:examples/template_vlm2vec.jinja>
 :::
 
-Code example: <gh-file:examples/online_serving/openai_embedding_client.py>
+Since the request schema is not defined by OpenAI client, we post a request to the server using the lower-level `requests` library:
+
+```python
+import requests
+
+image_url = "https://upload.wikimedia.org/wikipedia/commons/thumb/d/dd/Gfp-wisconsin-madison-the-nature-boardwalk.jpg/2560px-Gfp-wisconsin-madison-the-nature-boardwalk.jpg"
+
+response = requests.post(
+    "http://localhost:8000/v1/embeddings",
+    json={
+        "model": "TIGER-Lab/VLM2Vec-Full",
+        "messages": [{
+            "role": "user",
+            "content": [
+                {"type": "image_url", "image_url": {"url": image_url}},
+                {"type": "text", "text": "Represent the given image."},
+            ],
+        }],
+        "encoding_format": "float",
+    },
+)
+response.raise_for_status()
+response_json = response.json()
+print("Embedding output:", response_json["data"][0]["embedding"])
+```
+
+::::
+
+::::{tab-item} DSE-Qwen2-MRL
+
+To serve the model:
+
+```bash
+vllm serve MrLight/dse-qwen2-2b-mrl-v1 --task embed \
+  --trust-remote-code --max-model-len 8192 --chat-template examples/template_dse_qwen2_vl.jinja
+```
+
+:::{important}
+Like with VLM2Vec, we have to explicitly pass `--task embed`.
+
+Additionally, `MrLight/dse-qwen2-2b-mrl-v1` requires an EOS token for embeddings, which is handled
+by a custom chat template: <gh-file:examples/template_dse_qwen2_vl.jinja>
+:::
+
+:::{important}
+`MrLight/dse-qwen2-2b-mrl-v1` requires a placeholder image of the minimum image size for text query embeddings. See the full code
+example below for details.
+:::
+
+::::
+
+:::::
+
+Full example: <gh-file:examples/online_serving/openai_chat_embedding_client_for_multimodal.py>
 
 #### Extra parameters
 
@@ -305,9 +398,30 @@ For chat-like input (i.e. if `messages` is passed), these extra parameters are s
 Our Transcriptions API is compatible with [OpenAI's Transcriptions API](https://platform.openai.com/docs/api-reference/audio/createTranscription);
 you can use the [official OpenAI Python client](https://github.com/openai/openai-python) to interact with it.
 
-<!-- TODO: api enforced limits + uploading audios -->
+:::{note}
+To use the Transcriptions API, please install with extra audio dependencies using `pip install vllm[audio]`.
+:::
 
 Code example: <gh-file:examples/online_serving/openai_transcription_client.py>
+<!-- TODO: api enforced limits + uploading audios -->
+
+#### Extra Parameters
+
+The following [sampling parameters](#sampling-params) are supported.
+
+:::{literalinclude} ../../../vllm/entrypoints/openai/protocol.py
+:language: python
+:start-after: begin-transcription-sampling-params
+:end-before: end-transcription-sampling-params
+:::
+
+The following extra parameters are supported:
+
+:::{literalinclude} ../../../vllm/entrypoints/openai/protocol.py
+:language: python
+:start-after: begin-transcription-extra-params
+:end-before: end-transcription-extra-params
+:::
 
 (tokenizer-api)=
 

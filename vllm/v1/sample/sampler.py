@@ -6,6 +6,7 @@ import torch.nn as nn
 
 from vllm.v1.outputs import LogprobsTensors, SamplerOutput
 from vllm.v1.sample.metadata import SamplingMetadata
+from vllm.v1.sample.ops.bad_words import apply_bad_words
 from vllm.v1.sample.ops.penalties import (apply_all_penalties,
                                           apply_min_token_penalties)
 from vllm.v1.sample.ops.topk_topp_sampler import TopKTopPSampler
@@ -38,12 +39,19 @@ class Sampler(nn.Module):
         logits = logits.to(torch.float32)
         # Apply allowed token ids.
         logits = self.apply_allowed_token_ids(logits, sampling_metadata)
+        # Apply bad words exclusion.
+        logits = self.apply_bad_words(logits, sampling_metadata)
         # Apply logits bias.
         logits = self.apply_logits_bias(logits, sampling_metadata)
         # Apply penalties (e.g., min_tokens, freq_penalties).
         logits = self.apply_penalties(logits, sampling_metadata)
         # Sample the next token.
         sampled = self.sample(logits, sampling_metadata)
+        # Convert sampled token ids to int64 (long) type to ensure compatibility
+        # with subsequent operations that may use these values as indices.
+        # This conversion is necessary because FlashInfer sampling operations
+        # return int32 (while PyTorch argmax and topk return int64).
+        sampled = sampled.long()
 
         # Gather the logprobs of the topk and sampled token (if requested).
         # Get logprobs and rank tensors (if requested)
@@ -79,6 +87,12 @@ class Sampler(nn.Module):
         logits: torch.Tensor,
         sampling_metadata: SamplingMetadata,
     ) -> torch.Tensor:
+        """Sample logits based on sampling metadata.
+
+        The various logits processing functions called in this method
+        may update the logits tensor in-place.
+        """
+
         assert not (sampling_metadata.all_greedy
                     and sampling_metadata.all_random)
         if sampling_metadata.all_random:
@@ -116,14 +130,6 @@ class Sampler(nn.Module):
         )
         return sampled
 
-    def compute_probs(self, logits: torch.Tensor,
-                      sampling_metadata: SamplingMetadata) -> torch.Tensor:
-        if sampling_metadata.all_greedy:
-            return logits
-        # Apply temperature. This is an in-place op changing logits.
-        logits = self.apply_temperature(logits, sampling_metadata.temperature)
-        return logits.softmax(dim=-1, dtype=torch.float32)
-
     def compute_logprobs(self, logits: torch.Tensor) -> torch.Tensor:
         return logits.log_softmax(dim=-1, dtype=torch.float32)
 
@@ -137,19 +143,21 @@ class Sampler(nn.Module):
         Gather logprobs for topk and sampled/prompt token.
 
         Args:
-          logits: (num tokens) x (vocab) tensor
+          logprobs: (num tokens) x (vocab) tensor
           num_logprobs: minimum number of logprobs to
                         retain per token
           token_ids: prompt tokens (if prompt logprobs)
                      or sampled tokens (if sampled
                      logprobs); 1D token ID tensor
                      with (num tokens) elements
+                     Must be int64.
 
         Returns:
           Top-k int indices tensor, (num tokens) x (num_logprobs + 1)
           Top-k float logprobs tensor, (num tokens) x (num_logprobs + 1)
           Sampled token rank tensor, (num tokens)
         """
+        assert token_ids.dtype == torch.int64
         # Find the topK values.
         topk_logprobs, topk_indices = torch.topk(logprobs,
                                                  num_logprobs,
@@ -222,9 +230,19 @@ class Sampler(nn.Module):
         # TODO(houseroad): this implementation is extremely inefficient.
         # One idea is implement this as a PyTorch C++ op, and we may
         # even optimize the logit_bias layout.
+
+        # Get vocabulary size from logits
+        vocab_size = logits.shape[-1]
+
         for i, logit_bias in enumerate(sampling_metadata.logit_bias):
             if logit_bias:
                 for token_id, bias in logit_bias.items():
+                    # Check token_id bounds to ensure within vocabulary
+                    if token_id < 0 or token_id >= vocab_size:
+                        raise ValueError(
+                            f"token_id {token_id} in logit_bias contains "
+                            f"out-of-vocab token id. Vocabulary size: "
+                            f"{vocab_size}")
                     logits[i, token_id] += bias
         return logits
 
@@ -236,4 +254,17 @@ class Sampler(nn.Module):
         if sampling_metadata.allowed_token_ids_mask is not None:
             logits.masked_fill_(sampling_metadata.allowed_token_ids_mask,
                                 float("-inf"))
+        return logits
+
+    def apply_bad_words(
+        self,
+        logits: torch.Tensor,
+        sampling_metadata: SamplingMetadata,
+    ) -> torch.Tensor:
+        if sampling_metadata.bad_words_token_ids:
+            apply_bad_words(
+                logits,
+                sampling_metadata.bad_words_token_ids,
+                sampling_metadata.output_token_ids,
+            )
         return logits

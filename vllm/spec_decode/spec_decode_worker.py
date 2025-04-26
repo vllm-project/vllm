@@ -92,22 +92,20 @@ def create_spec_worker(*args, **kwargs) -> "SpecDecodeWorker":
     # Override draft-model specific worker args.
     draft_worker_kwargs.update(
         vllm_config=draft_worker_config,
-        ngram_prompt_lookup_max=speculative_config.ngram_prompt_lookup_max,
-        ngram_prompt_lookup_min=speculative_config.ngram_prompt_lookup_min,
+        ngram_prompt_lookup_max=speculative_config.prompt_lookup_max,
+        ngram_prompt_lookup_min=speculative_config.prompt_lookup_min,
     )
 
     spec_decode_worker = SpecDecodeWorker.create_worker(
         scorer_worker=target_worker,
         draft_worker_kwargs=draft_worker_kwargs,
-        disable_mqa_scorer=speculative_config.speculative_disable_mqa_scorer,
-        disable_by_batch_size=speculative_config.
-        speculative_disable_by_batch_size,
-        draft_token_acceptance_method=speculative_config.
-        draft_token_acceptance_method,
+        disable_mqa_scorer=speculative_config.disable_mqa_scorer,
+        disable_by_batch_size=speculative_config.disable_by_batch_size,
+        draft_token_acceptance_method=speculative_config.acceptance_method,
         typical_acceptance_sampler_posterior_threshold=speculative_config.
-        typical_acceptance_sampler_posterior_threshold,
+        posterior_threshold,
         typical_acceptance_sampler_posterior_alpha=speculative_config.
-        typical_acceptance_sampler_posterior_alpha,
+        posterior_alpha,
         disable_logprobs=speculative_config.disable_logprobs,
         disable_log_stats=speculative_config.disable_log_stats,
         num_speculative_tokens=speculative_config.num_speculative_tokens,
@@ -184,8 +182,7 @@ class SpecDecodeWorker(LoRANotSupportedWorkerBase):
             elif draft_model_config.hf_config.model_type == "medusa":
                 proposer_worker = MedusaWorker(**draft_worker_kwargs)
             else:
-                if draft_tp == 1 or draft_model_config.hf_config.model_type ==\
-                        "deepseek_mtp":
+                if draft_tp == 1:
                     if current_platform.is_cuda_alike():
                         draft_worker_kwargs[
                             "model_runner_cls"] = TP1DraftModelRunner
@@ -203,7 +200,8 @@ class SpecDecodeWorker(LoRANotSupportedWorkerBase):
 
                 proposer_worker = MultiStepWorker(**draft_worker_kwargs)
                 if draft_model_config.hf_config.model_type == "deepseek_mtp":
-                    num_spec_prefill_steps = num_speculative_tokens
+                    num_spec_prefill_steps = \
+                        draft_model_config.hf_config.n_predict
 
             proposer_worker = SmallerTpProposerWorker.maybe_wrap_worker(
                 proposer_worker, draft_tp, target_tp)
@@ -412,9 +410,9 @@ class SpecDecodeWorker(LoRANotSupportedWorkerBase):
         NOTE(cade): This will require a special check if the proposer worker
         does not have a sampler (e.g. ngram speculation).
         """
-        (self.scorer_worker.model_runner.model.sampler.include_gpu_probs_tensor
+        (self.scorer_worker.model_runner.sampler.include_gpu_probs_tensor
          ) = True
-        (self.scorer_worker.model_runner.model.sampler.
+        (self.scorer_worker.model_runner.sampler.
          should_modify_greedy_probs_inplace) = True
         self.proposer_worker.set_include_gpu_probs_tensor()
         self.proposer_worker.set_should_modify_greedy_probs_inplace()
@@ -1080,7 +1078,7 @@ class SpecDecodeWorker(LoRANotSupportedWorkerBase):
                         [sequence_index][:num_logprobs],
                         topk_logprobs=topk_logprobs_by_step[step_index]
                         [sequence_index][:num_logprobs],
-                    ))
+                        step_index=step_index))
             sampler_output_list.append(
                 SamplerOutput(outputs=step_output_token_ids))
 

@@ -16,7 +16,6 @@ from vllm.model_executor.layers.linear import (QKVParallelLinear,
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
-from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     DEFAULT_VOCAB_PADDING_SIZE, ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import (
@@ -65,6 +64,7 @@ class DbrxExperts(FusedMoE):
         config: DbrxConfig,
         quant_config: Optional[QuantizationConfig] = None,
         params_dtype: Optional[torch.dtype] = None,
+        prefix: str = "",
     ):
         super().__init__(
             num_experts=config.ffn_config.moe_num_experts,
@@ -76,6 +76,7 @@ class DbrxExperts(FusedMoE):
             renormalize=True,
             quant_config=quant_config,
             tp_size=get_tensor_model_parallel_world_size(),
+            prefix=prefix,
         )
         self.config = config
         self.tp_size = get_tensor_model_parallel_world_size()
@@ -139,6 +140,7 @@ class DbrxMoE(nn.Module):
         config: DbrxConfig,
         quant_config: Optional[QuantizationConfig] = None,
         params_dtype: Optional[torch.dtype] = None,
+        prefix: str = "",
     ):
         super().__init__()
         self.d_model = config.d_model
@@ -150,7 +152,8 @@ class DbrxMoE(nn.Module):
 
         self.experts = DbrxExperts(config=config,
                                    quant_config=quant_config,
-                                   params_dtype=self.params_dtype)
+                                   params_dtype=self.params_dtype,
+                                   prefix=f"{prefix}.experts")
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         orig_shape = hidden_states.shape
@@ -291,7 +294,7 @@ class DbrxBlock(nn.Module):
             cache_config,
             quant_config,
             prefix=f"{prefix}.norm_attn_norm")
-        self.ffn = DbrxMoE(config, quant_config)
+        self.ffn = DbrxMoE(config, quant_config, prefix=f"{prefix}.ffn")
 
     def forward(
         self,
@@ -386,7 +389,6 @@ class DbrxForCausalLM(nn.Module, SupportsPP):
         )
         self.logits_processor = LogitsProcessor(self.unpadded_vocab_size,
                                                 config.vocab_size)
-        self.sampler = get_sampler()
         self.make_empty_intermediate_tensors = (
             self.transformer.make_empty_intermediate_tensors)
 
@@ -412,14 +414,6 @@ class DbrxForCausalLM(nn.Module, SupportsPP):
         logits = self.logits_processor(self.lm_head, hidden_states,
                                        sampling_metadata)
         return logits
-
-    def sample(
-        self,
-        logits: Optional[torch.Tensor],
-        sampling_metadata: SamplingMetadata,
-    ) -> Optional[SamplerOutput]:
-        next_tokens = self.sampler(logits, sampling_metadata)
-        return next_tokens
 
     def load_weights(self, weights: Iterable[Tuple[str,
                                                    torch.Tensor]]) -> Set[str]:

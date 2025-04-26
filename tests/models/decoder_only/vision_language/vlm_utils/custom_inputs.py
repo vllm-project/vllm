@@ -1,6 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 """Custom input builders for edge-cases in different models."""
+from io import BytesIO
 from typing import Callable
+
+import requests
+from PIL import Image
 
 from vllm.multimodal.image import rescale_image_size
 from vllm.multimodal.video import (rescale_video_size, resize_video,
@@ -102,3 +106,17 @@ def different_patch_input_cases_internvl():
         build_single_image_inputs(images, formatted_sprompts, wrapped_sf),
         build_multi_image_inputs([images], formatted_mprompts, wrapped_sf),
     ]
+
+
+def windows_attention_image_qwen2_5_vl():
+    # image from regression issue: https://github.com/vllm-project/vllm/issues/15122
+    image_url = "https://aomediacodec.github.io/av1-avif/testFiles/Link-U/hato.jpg"
+    image = Image.open(BytesIO(requests.get(image_url).content))
+
+    question = "Describe the image."
+    img_prompt = "<|vision_start|><|image_pad|><|vision_end|>"
+    prompt = (f"<|im_start|>User\n{img_prompt}{question}<|im_end|>\n"
+              "<|im_start|>assistant\n")
+
+    wrapped_sf = ImageSizeWrapper(type=SizeType.SIZE_FACTOR, data=[0.5])
+    return build_single_image_inputs([image], [prompt], wrapped_sf)

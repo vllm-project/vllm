@@ -10,8 +10,8 @@ import jsonschema
 import jsonschema.exceptions
 import pytest
 
-from vllm.entrypoints.openai.tool_parsers.mistral_tool_parser import (  # noqa
-    MistralToolParser)
+from vllm.entrypoints.openai.tool_parsers.mistral_tool_parser import (
+    MistralToolCall, MistralToolParser)
 from vllm.sampling_params import GuidedDecodingParams, SamplingParams
 
 from ...utils import check_logprobs_close
@@ -174,15 +174,8 @@ SAMPLE_JSON_SCHEMA = {
 @pytest.mark.parametrize("dtype", ["bfloat16"])
 @pytest.mark.parametrize("max_tokens", [64])
 @pytest.mark.parametrize("num_logprobs", [5])
-def test_models(
-    hf_runner,
-    vllm_runner,
-    example_prompts,
-    model: str,
-    dtype: str,
-    max_tokens: int,
-    num_logprobs: int,
-) -> None:
+def test_models(hf_runner, vllm_runner, example_prompts, model: str,
+                dtype: str, max_tokens: int, num_logprobs: int) -> None:
     # TODO(sang): Sliding window should be tested separately.
     with hf_runner(model, dtype=dtype) as hf_model:
         hf_outputs = hf_model.generate_greedy_logprobs_limit(
@@ -205,24 +198,8 @@ def test_models(
 @pytest.mark.parametrize("dtype", ["bfloat16"])
 @pytest.mark.parametrize("max_tokens", [64])
 @pytest.mark.parametrize("num_logprobs", [5])
-def test_mistral_format(
-    vllm_runner,
-    example_prompts,
-    model: str,
-    dtype: str,
-    max_tokens: int,
-    num_logprobs: int,
-) -> None:
-    with vllm_runner(
-            model,
-            dtype=dtype,
-            tokenizer_mode="auto",
-            load_format="safetensors",
-            config_format="hf",
-    ) as hf_format_model:
-        hf_format_outputs = hf_format_model.generate_greedy_logprobs(
-            example_prompts, max_tokens, num_logprobs)
-
+def test_mistral_format(vllm_runner, example_prompts, model: str, dtype: str,
+                        max_tokens: int, num_logprobs: int) -> None:
     with vllm_runner(
             model,
             dtype=dtype,
@@ -231,6 +208,16 @@ def test_mistral_format(
             config_format="mistral",
     ) as mistral_format_model:
         mistral_format_outputs = mistral_format_model.generate_greedy_logprobs(
+            example_prompts, max_tokens, num_logprobs)
+
+    with vllm_runner(
+            model,
+            dtype=dtype,
+            tokenizer_mode="auto",
+            load_format="safetensors",
+            config_format="hf",
+    ) as hf_format_model:
+        hf_format_outputs = hf_format_model.generate_greedy_logprobs(
             example_prompts, max_tokens, num_logprobs)
 
     check_logprobs_close(
@@ -243,11 +230,8 @@ def test_mistral_format(
 
 @pytest.mark.parametrize("model", MISTRAL_FORMAT_MODELS)
 @pytest.mark.parametrize("dtype", ["bfloat16"])
-def test_mistral_symbolic_languages(
-    vllm_runner,
-    model: str,
-    dtype: str,
-) -> None:
+def test_mistral_symbolic_languages(vllm_runner, model: str,
+                                    dtype: str) -> None:
     with vllm_runner(model,
                      dtype=dtype,
                      max_model_len=8192,
@@ -261,14 +245,9 @@ def test_mistral_symbolic_languages(
             assert "�" not in outputs[0].outputs[0].text.strip()
 
 
+@pytest.mark.parametrize("model", MISTRAL_FORMAT_MODELS)
 @pytest.mark.parametrize("dtype", ["bfloat16"])
-@pytest.mark.parametrize("model",
-                         MISTRAL_FORMAT_MODELS)  # v1 can't do func calling
-def test_mistral_function_calling(
-    vllm_runner,
-    model: str,
-    dtype: str,
-) -> None:
+def test_mistral_function_calling(vllm_runner, model: str, dtype: str) -> None:
     with vllm_runner(model,
                      dtype=dtype,
                      tokenizer_mode="mistral",
@@ -288,7 +267,8 @@ def test_mistral_function_calling(
         parsed_message = tool_parser.extract_tool_calls(model_output, None)
 
         assert parsed_message.tools_called
-        assert parsed_message.tool_calls[0].id == "0UAqFzWsD"
+
+        assert MistralToolCall.is_valid_id(parsed_message.tool_calls[0].id)
         assert parsed_message.tool_calls[
             0].function.name == "get_current_weather"
         assert parsed_message.tool_calls[
@@ -300,30 +280,37 @@ def test_mistral_function_calling(
 @pytest.mark.parametrize("guided_backend",
                          ["outlines", "lm-format-enforcer", "xgrammar"])
 def test_mistral_guided_decoding(
+    monkeypatch: pytest.MonkeyPatch,
     vllm_runner,
     model: str,
     guided_backend: str,
 ) -> None:
-    with vllm_runner(model, dtype='bfloat16',
-                     tokenizer_mode="mistral") as vllm_model:
+    with monkeypatch.context() as m:
+        # Guided JSON not supported in xgrammar + V1 yet
+        m.setenv("VLLM_USE_V1", "0")
 
-        guided_decoding = GuidedDecodingParams(json=SAMPLE_JSON_SCHEMA,
-                                               backend=guided_backend)
-        params = SamplingParams(max_tokens=512,
-                                temperature=0.7,
-                                guided_decoding=guided_decoding)
+        with vllm_runner(
+                model,
+                dtype='bfloat16',
+                tokenizer_mode="mistral",
+                guided_decoding_backend=guided_backend,
+        ) as vllm_model:
+            guided_decoding = GuidedDecodingParams(json=SAMPLE_JSON_SCHEMA)
+            params = SamplingParams(max_tokens=512,
+                                    temperature=0.7,
+                                    guided_decoding=guided_decoding)
 
-        messages = [{
-            "role": "system",
-            "content": "you are a helpful assistant"
-        }, {
-            "role":
-            "user",
-            "content":
-            f"Give an example JSON for an employee profile that "
-            f"fits this schema: {SAMPLE_JSON_SCHEMA}"
-        }]
-        outputs = vllm_model.model.chat(messages, sampling_params=params)
+            messages = [{
+                "role": "system",
+                "content": "you are a helpful assistant"
+            }, {
+                "role":
+                "user",
+                "content":
+                f"Give an example JSON for an employee profile that "
+                f"fits this schema: {SAMPLE_JSON_SCHEMA}"
+            }]
+            outputs = vllm_model.model.chat(messages, sampling_params=params)
 
         generated_text = outputs[0].outputs[0].text
         json_response = json.loads(generated_text)

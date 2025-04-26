@@ -28,7 +28,7 @@ MODELS_ON_S3 = [
     "HuggingFaceM4/Idefics3-8B-Llama3",
     "internlm/internlm2-1_8b-reward",
     "intfloat/e5-mistral-7b-instruct",
-    "intfloat/multilingual-e5-large",
+    "intfloat/multilingual-e5-small",
     "jason9693/Qwen2.5-1.5B-apeach",
     "llava-hf/llava-1.5-7b-hf",
     "llava-hf/llava-onevision-qwen2-0.5b-ov-hf",

@@ -1,14 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from dataclasses import dataclass
-from typing import List, Literal, NamedTuple, Optional
+from typing import Literal, NamedTuple, Optional
 
 import pytest
 
 from vllm.config import TaskOption
 from vllm.logger import init_logger
 
-from ..utils import compare_two_settings, fork_new_process_for_each_test
+from ..utils import compare_two_settings, create_new_process_for_each_test
 
 logger = init_logger("test_expert_parallel")
 
@@ -28,8 +28,8 @@ class EPTestOptions(NamedTuple):
 
 @dataclass
 class EPTestSettings:
-    parallel_setups: List[ParallelSetup]
-    distributed_backends: List[str]
+    parallel_setups: list[ParallelSetup]
+    distributed_backends: list[str]
     task: TaskOption
     test_options: EPTestOptions
 
@@ -209,7 +209,7 @@ def _compare_tp(
         for params in settings.iter_params(model_name)
     ],
 )
-@fork_new_process_for_each_test
+@create_new_process_for_each_test()
 def test_ep(
     model_name: str,
     parallel_setup: ParallelSetup,

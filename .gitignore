@@ -2,7 +2,9 @@
 /vllm/_version.py
 
 # vllm-flash-attn built from source
-vllm/vllm_flash_attn/
+vllm/vllm_flash_attn/*
+!vllm/vllm_flash_attn/__init__.py
+!vllm/vllm_flash_attn/fa_utils.py
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
@@ -197,8 +199,11 @@ _build/
 hip_compat.h
 
 # Benchmark dataset
-benchmarks/*.json
+benchmarks/**/*.json
 
 # Linting
 actionlint
 shellcheck*/
+
+# Ingore moe/marlin_moe gen code
+csrc/moe/marlin_moe_wna16/kernel_*

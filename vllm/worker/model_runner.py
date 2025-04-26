@@ -15,7 +15,7 @@ import numpy as np
 import torch
 import torch.distributed
 import torch.nn as nn
-from tqdm import tqdm
+from tqdm.auto import tqdm
 
 import vllm.envs as envs
 from vllm.attention import AttentionMetadata, get_attn_backend
@@ -23,7 +23,8 @@ from vllm.attention.backends.abstract import AttentionState
 from vllm.attention.backends.utils import CommonAttentionState
 from vllm.config import CompilationLevel, VllmConfig
 from vllm.core.scheduler import SchedulerOutputs
-from vllm.distributed import get_kv_transfer_group, get_pp_group
+from vllm.distributed import get_pp_group
+from vllm.distributed.kv_transfer import get_kv_transfer_group
 from vllm.distributed.parallel_state import (get_tensor_model_parallel_rank,
                                              graph_capture)
 from vllm.forward_context import get_forward_context, set_forward_context
@@ -34,7 +35,7 @@ from vllm.lora.request import LoRARequest
 from vllm.lora.worker_manager import LRUCacheWorkerLoRAManager
 from vllm.model_executor import SamplingMetadata, SamplingMetadataCache
 from vllm.model_executor.layers.rotary_embedding import MRotaryEmbedding
-from vllm.model_executor.layers.sampler import SamplerOutput
+from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.model_loader import get_model
 from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
 from vllm.model_executor.models import supports_lora, supports_multimodal
@@ -698,11 +699,17 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
         if self.runner.model_config.uses_mrope:
             image_grid_thw = mm_kwargs.get("image_grid_thw", None)
             video_grid_thw = mm_kwargs.get("video_grid_thw", None)
-            assert image_grid_thw is not None or video_grid_thw is not None, (
-                "mrope embedding type requires multi-modal input mapper "
-                "returns 'image_grid_thw' or 'video_grid_thw'.")
+            audio_feature_lengths = mm_kwargs.get("audio_feature_lengths",
+                                                  None)
+            assert (
+                image_grid_thw is not None or video_grid_thw is not None
+                or audio_feature_lengths is not None), (
+                    "mrope embedding type requires multi-modal input mapper "
+                    "returns 'image_grid_thw' or 'video_grid_thw' or "
+                    "'audio_feature_lengths'.")
 
             second_per_grid_ts = mm_kwargs.get("second_per_grid_ts", None)
+            use_audio_in_video = mm_kwargs.get("use_audio_in_video", False)
             hf_config = self.runner.model_config.hf_config
 
             inter_data.mrope_input_positions = [None] * inter_data.n_seqs
@@ -720,6 +727,8 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
                         second_per_grid_ts=second_per_grid_ts,
                         context_len=inter_data.context_lens[seq_idx],
                         seq_len=inter_data.seq_lens[seq_idx],
+                        audio_feature_lengths=audio_feature_lengths,
+                        use_audio_in_video=use_audio_in_video,
                     )
 
                 seq_data.mrope_position_delta = mrope_position_delta
@@ -1085,6 +1094,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
         # Set after load_model.
         self.lora_manager: Optional[LRUCacheWorkerLoRAManager] = None
         self.prompt_adapter_manager: LRUCacheWorkerPromptAdapterManager = None
+        self.sampler = get_sampler()
 
         set_cpu_offload_max_bytes(
             int(self.cache_config.cpu_offload_gb * 1024**3))
@@ -1111,41 +1121,37 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
         with DeviceMemoryProfiler(self.device) as m:
             time_before_load = time.perf_counter()
             self.model = get_model(vllm_config=self.vllm_config)
+            if self.lora_config:
+                assert supports_lora(
+                    self.model
+                ), f"{self.model.__class__.__name__} does not support LoRA yet."
+
+                if supports_multimodal(self.model):
+                    logger.warning(
+                        "Regarding multimodal models, vLLM currently "
+                        "only supports adding LoRA to language model.")
+
+                # Use get_text_config() in case of multimodal models
+                text_config = self.model_config.hf_config.get_text_config()
+
+                self.lora_manager = LRUCacheWorkerLoRAManager(
+                    self.scheduler_config.max_num_seqs,
+                    self.scheduler_config.max_num_batched_tokens,
+                    self.vocab_size,
+                    self.lora_config,
+                    self.device,
+                    self.model.embedding_modules,
+                    self.model.embedding_padding_modules,
+                    max_position_embeddings=text_config.
+                    max_position_embeddings,
+                )
+                self.model = self.lora_manager.create_lora_manager(self.model)
             time_after_load = time.perf_counter()
 
         self.model_memory_usage = m.consumed_memory
-        logger.info("Loading model weights took %.4f GB and %.6f seconds",
-                    self.model_memory_usage / float(2**30),
+        logger.info("Model loading took %.4f GiB and %.6f seconds",
+                    self.model_memory_usage / GiB_bytes,
                     time_after_load - time_before_load)
-
-        if self.lora_config:
-            assert supports_lora(
-                self.model
-            ), f"{self.model.__class__.__name__} does not support LoRA yet."
-
-            if supports_multimodal(self.model):
-                logger.warning("Regarding multimodal models, vLLM currently "
-                               "only supports adding LoRA to language model.")
-            # It's necessary to distinguish between the max_position_embeddings
-            # of VLMs and LLMs.
-            if hasattr(self.model.config, "max_position_embeddings"):
-                max_pos_embeddings = self.model.config.max_position_embeddings
-            else:
-                max_pos_embeddings = (
-                    self.model.config.text_config.max_position_embeddings)
-
-            self.lora_manager = LRUCacheWorkerLoRAManager(
-                self.scheduler_config.max_num_seqs,
-                self.scheduler_config.max_num_batched_tokens,
-                self.vocab_size,
-                self.lora_config,
-                self.device,
-                self.model.embedding_modules,
-                self.model.embedding_padding_modules,
-                max_position_embeddings=max_pos_embeddings,
-            )
-            self.model = self.lora_manager.create_lora_manager(self.model)
-
         if self.prompt_adapter_config:
             self.prompt_adapter_manager = LRUCacheWorkerPromptAdapterManager(
                 self.scheduler_config.max_num_seqs,
@@ -1242,6 +1248,29 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
         max_num_seqs = self.scheduler_config.max_num_seqs
         self._dummy_run(max_num_batched_tokens, max_num_seqs)
 
+    def _add_dummy_loras(self, num_loras: int) -> list[LoRARequest]:
+        assert num_loras > 0
+        assert self.lora_manager is not None
+
+        dummy_lora_requests: list[LoRARequest] = []
+        with self.lora_manager.dummy_lora_cache():
+            for idx in range(num_loras):
+                lora_id = idx + 1
+                dummy_lora_request = LoRARequest(
+                    lora_name=f"warmup_{lora_id}",
+                    lora_int_id=lora_id,
+                    lora_path="/not/a/real/path",
+                )
+                self.lora_manager.add_dummy_lora(dummy_lora_request,
+                                                 rank=LORA_WARMUP_RANK)
+                dummy_lora_requests.append(dummy_lora_request)
+        return dummy_lora_requests
+
+    def _remove_dummy_loras(self):
+        # Remove dummy loras.
+        assert self.lora_manager is not None
+        self.remove_all_loras()
+
     def _dummy_run(self,
                    max_num_batched_tokens: int,
                    max_num_seqs: int = 1) -> None:
@@ -1251,28 +1280,20 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                 SamplingParams(top_p=0.99, top_k=self.vocab_size - 1)
 
             # This represents the maximum number of different requests
-            # that will have unique loras, an therefore the max amount of memory
-            # consumption create dummy lora request copies from the lora request
-            # passed in, which contains a lora from the lora warmup path.
+            # that will have unique loras, and therefore the max amount of
+            # memory consumption. Create dummy lora request copies from the
+            # lora request passed in, which contains a lora from the lora
+            # warmup path.
             dummy_lora_requests: List[LoRARequest] = []
             dummy_lora_requests_per_seq: List[LoRARequest] = []
             if self.lora_config:
-                assert self.lora_manager is not None
-                with self.lora_manager.dummy_lora_cache():
-                    for idx in range(self.lora_config.max_loras):
-                        lora_id = idx + 1
-                        dummy_lora_request = LoRARequest(
-                            lora_name=f"warmup_{lora_id}",
-                            lora_int_id=lora_id,
-                            lora_path="/not/a/real/path",
-                        )
-                        self.lora_manager.add_dummy_lora(dummy_lora_request,
-                                                         rank=LORA_WARMUP_RANK)
-                        dummy_lora_requests.append(dummy_lora_request)
-                    dummy_lora_requests_per_seq = [
-                        dummy_lora_requests[idx % len(dummy_lora_requests)]
-                        for idx in range(max_num_seqs)
-                    ]
+                dummy_lora_requests = self._add_dummy_loras(
+                    self.lora_config.max_loras)
+                assert len(dummy_lora_requests) == self.lora_config.max_loras
+                dummy_lora_requests_per_seq = [
+                    dummy_lora_requests[idx % len(dummy_lora_requests)]
+                    for idx in range(max_num_seqs)
+                ]
 
             # Profile memory usage with max_num_sequences sequences and the
             # total number of tokens equal to max_num_batched_tokens.
@@ -1354,9 +1375,8 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
             self.execute_model(model_input, kv_caches, intermediate_tensors)
             torch.cuda.synchronize()
             if self.lora_config:
-                # Remove dummy loras.
-                assert self.lora_manager is not None
-                self.remove_all_loras()
+                self._remove_dummy_loras()
+
             return
 
     def remove_all_loras(self):
@@ -1479,6 +1499,16 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                 dtype=self.model_config.dtype,
                 device=self.device)
 
+        dummy_lora_id: Optional[int] = None
+        dummy_lora_request: LoRARequest = []
+        if self.lora_config:
+            # The goal is to capture the LoRA kernels in cuda graphs.
+            # for this purpose, as single dummy lora is sufficient.
+            dummy_lora_requests = self._add_dummy_loras(num_loras=1)
+            assert len(dummy_lora_requests) == 1
+            dummy_lora_request = dummy_lora_requests[0]
+            dummy_lora_id = dummy_lora_request.lora_int_id
+
         with self.attn_state.graph_capture(max_batch_size), graph_capture(
                 self.device) as graph_capture_context:
             # NOTE: Capturing the largest batch size first may help reduce the
@@ -1503,10 +1533,11 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                     attn_metadata.enable_kv_scales_calculation = False
                     if self.lora_config:
                         lora_mapping = LoRAMapping(
-                            **dict(index_mapping=[0] * batch_size,
-                                   prompt_mapping=[0] * batch_size,
+                            **dict(index_mapping=[dummy_lora_id] * batch_size,
+                                   prompt_mapping=[dummy_lora_id] * batch_size,
                                    is_prefill=False))
-                        self.set_active_loras(set(), lora_mapping)
+                        self.set_active_loras(set([dummy_lora_request]),
+                                              lora_mapping)
 
                     if self.prompt_adapter_config:
                         prompt_adapter_mapping = PromptAdapterMapping(
@@ -1561,6 +1592,9 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                     self.graph_memory_pool = graph_runner.graph.pool()
                     self.graph_runners[virtual_engine][batch_size] = (
                         graph_runner)
+
+        if self.lora_config:
+            self._remove_dummy_loras()
 
         end_time = time.perf_counter()
         end_free_gpu_memory = torch.cuda.mem_get_info()[0]
@@ -1685,11 +1719,22 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
         # TODO(andoorve): We can remove this once all
         # virtual engines share the same kv cache.
         virtual_engine = model_input.virtual_engine
+        previous_hidden_states = kwargs.get("previous_hidden_states")
         if prefill_meta is None and decode_meta.use_cuda_graph:
             assert model_input.input_tokens is not None
             graph_batch_size = model_input.input_tokens.shape[0]
             model_executable = self.graph_runners[virtual_engine][
                 graph_batch_size]
+            if previous_hidden_states is not None:
+                previous_hidden_states = torch.cat([
+                    previous_hidden_states,
+                    torch.empty([
+                        graph_batch_size - previous_hidden_states.shape[0],
+                        *previous_hidden_states.shape[1:]
+                    ],
+                                dtype=previous_hidden_states.dtype,
+                                device=previous_hidden_states.device)
+                ])
         else:
             model_executable = self.model
 
@@ -1716,7 +1761,6 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
             "finished_requests_ids": model_input.finished_requests_ids,
             "request_ids_to_seq_ids": model_input.request_ids_to_seq_ids,
         } if self.has_inner_state else {}
-        previous_hidden_states = kwargs.get("previous_hidden_states")
         model_kwargs = {}
         if previous_hidden_states is not None:
             model_kwargs["previous_hidden_states"] = previous_hidden_states
@@ -1785,7 +1829,7 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
             model_input.async_callback()
 
         # Sample the next token.
-        output: SamplerOutput = self.model.sample(
+        output: SamplerOutput = self.sampler(
             logits=logits,
             sampling_metadata=model_input.sampling_metadata,
         )

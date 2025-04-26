@@ -1,19 +1,41 @@
 # SPDX-License-Identifier: Apache-2.0
 
-from dataclasses import asdict
+from dataclasses import MISSING, Field, asdict, dataclass, field
 
 import pytest
 
-from vllm.config import ModelConfig, PoolerConfig
+from vllm.config import ModelConfig, PoolerConfig, get_field
 from vllm.model_executor.layers.pooler import PoolingType
 from vllm.platforms import current_platform
+
+
+def test_get_field():
+
+    @dataclass
+    class TestConfig:
+        a: int
+        b: dict = field(default_factory=dict)
+        c: str = "default"
+
+    with pytest.raises(ValueError):
+        get_field(TestConfig, "a")
+
+    b = get_field(TestConfig, "b")
+    assert isinstance(b, Field)
+    assert b.default is MISSING
+    assert b.default_factory is dict
+
+    c = get_field(TestConfig, "c")
+    assert isinstance(c, Field)
+    assert c.default == "default"
+    assert c.default_factory is MISSING
 
 
 @pytest.mark.parametrize(
     ("model_id", "expected_runner_type", "expected_task"),
     [
         ("distilbert/distilgpt2", "generate", "generate"),
-        ("intfloat/e5-mistral-7b-instruct", "pooling", "embed"),
+        ("intfloat/multilingual-e5-small", "pooling", "embed"),
         ("jason9693/Qwen2.5-1.5B-apeach", "pooling", "classify"),
         ("cross-encoder/ms-marco-MiniLM-L-6-v2", "pooling", "score"),
         ("Qwen/Qwen2.5-Math-RM-72B", "pooling", "reward"),
@@ -289,7 +311,7 @@ def test_uses_mrope(model_id, uses_mrope):
 def test_generation_config_loading():
     model_id = "Qwen/Qwen2.5-1.5B-Instruct"
 
-    # When set generation_config to None, the default generation config
+    # When set generation_config to "vllm", the default generation config
     # will not be loaded.
     model_config = ModelConfig(model_id,
                                task="auto",
@@ -298,7 +320,7 @@ def test_generation_config_loading():
                                trust_remote_code=False,
                                seed=0,
                                dtype="float16",
-                               generation_config=None)
+                               generation_config="vllm")
     assert model_config.get_diff_sampling_param() == {}
 
     # When set generation_config to "auto", the default generation config
@@ -340,7 +362,7 @@ def test_generation_config_loading():
 
     assert model_config.get_diff_sampling_param() == override_result
 
-    # When generation_config is set to None and override_generation_config
+    # When generation_config is set to "vllm" and override_generation_config
     # is set, the override_generation_config should be used directly.
     model_config = ModelConfig(
         model_id,
@@ -350,7 +372,7 @@ def test_generation_config_loading():
         trust_remote_code=False,
         seed=0,
         dtype="float16",
-        generation_config=None,
+        generation_config="vllm",
         override_generation_config=override_generation_config)
 
     assert model_config.get_diff_sampling_param() == override_generation_config

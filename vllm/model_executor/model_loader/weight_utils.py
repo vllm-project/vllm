@@ -8,6 +8,7 @@ import os
 import tempfile
 import time
 from collections import defaultdict
+from pathlib import Path
 from typing import Any, Callable, Dict, Generator, List, Optional, Tuple, Union
 
 import filelock
@@ -36,6 +37,14 @@ except (ImportError, OSError):
         "runai_model_streamer")  # type: ignore[assignment]
     SafetensorsStreamer = runai_model_streamer.placeholder_attr(
         "SafetensorsStreamer")
+
+try:
+    from fastsafetensors import SafeTensorsFileLoader, SingleGroup
+except ImportError:
+    fastsafetensors = PlaceholderModule("fastsafetensors")
+    SafeTensorsFileLoader = fastsafetensors.placeholder_attr(
+        "SafeTensorsFileLoader")
+    SingleGroup = fastsafetensors.placeholder_attr("SingleGroup")
 
 logger = init_logger(__name__)
 
@@ -67,8 +76,10 @@ class DisabledTqdm(tqdm):
         super().__init__(*args, **kwargs, disable=True)
 
 
-def get_lock(model_name_or_path: str, cache_dir: Optional[str] = None):
+def get_lock(model_name_or_path: Union[str, Path],
+             cache_dir: Optional[str] = None):
     lock_dir = cache_dir or temp_dir
+    model_name_or_path = str(model_name_or_path)
     os.makedirs(os.path.dirname(lock_dir), exist_ok=True)
     model_name = model_name_or_path.replace("/", "-")
     hash_name = hashlib.sha256(model_name.encode()).hexdigest()
@@ -363,16 +374,22 @@ def filter_files_not_needed_for_inference(
 _BAR_FORMAT = "{desc}: {percentage:3.0f}% Completed | {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]\n"  # noqa: E501
 
 
+def enable_tqdm(use_tqdm_on_load: bool):
+    return use_tqdm_on_load and (not torch.distributed.is_initialized()
+                                 or torch.distributed.get_rank() == 0)
+
+
 def np_cache_weights_iterator(
-    model_name_or_path: str, cache_dir: Optional[str], hf_folder: str,
-    hf_weights_files: List[str]
+    model_name_or_path: str,
+    cache_dir: Optional[str],
+    hf_folder: str,
+    hf_weights_files: List[str],
+    use_tqdm_on_load: bool,
 ) -> Generator[Tuple[str, torch.Tensor], None, None]:
     """Iterate over the weights in the model np files.
 
     Will dump the model weights to numpy files if they are not already dumped.
     """
-    enable_tqdm = not torch.distributed.is_initialized(
-    ) or torch.distributed.get_rank() == 0
     # Convert the model weights from torch tensors to numpy arrays for
     # faster loading.
     np_folder = os.path.join(hf_folder, "np")
@@ -386,7 +403,7 @@ def np_cache_weights_iterator(
             for bin_file in tqdm(
                     hf_weights_files,
                     desc="Loading np_cache checkpoint shards",
-                    disable=not enable_tqdm,
+                    disable=not enable_tqdm(use_tqdm_on_load),
                     bar_format=_BAR_FORMAT,
             ):
                 state = torch.load(bin_file,
@@ -411,15 +428,14 @@ def np_cache_weights_iterator(
 
 
 def safetensors_weights_iterator(
-    hf_weights_files: List[str]
+    hf_weights_files: List[str],
+    use_tqdm_on_load: bool,
 ) -> Generator[Tuple[str, torch.Tensor], None, None]:
     """Iterate over the weights in the model safetensor files."""
-    enable_tqdm = not torch.distributed.is_initialized(
-    ) or torch.distributed.get_rank() == 0
     for st_file in tqdm(
             hf_weights_files,
             desc="Loading safetensors checkpoint shards",
-            disable=not enable_tqdm,
+            disable=not enable_tqdm(use_tqdm_on_load),
             bar_format=_BAR_FORMAT,
     ):
         with safe_open(st_file, framework="pt") as f:
@@ -429,32 +445,69 @@ def safetensors_weights_iterator(
 
 
 def runai_safetensors_weights_iterator(
-    hf_weights_files: List[str]
+    hf_weights_files: List[str],
+    use_tqdm_on_load: bool,
 ) -> Generator[Tuple[str, torch.Tensor], None, None]:
     """Iterate over the weights in the model safetensor files."""
-    enable_tqdm = not torch.distributed.is_initialized(
-    ) or torch.distributed.get_rank() == 0
     with SafetensorsStreamer() as streamer:
         for st_file in tqdm(
                 hf_weights_files,
                 desc="Loading safetensors using Runai Model Streamer",
-                disable=not enable_tqdm,
+                disable=not enable_tqdm(use_tqdm_on_load),
                 bar_format=_BAR_FORMAT,
         ):
             streamer.stream_file(st_file)
             yield from streamer.get_tensors()
 
 
+def fastsafetensors_weights_iterator(
+    hf_weights_files: List[str],
+    use_tqdm_on_load: bool,
+) -> Generator[Tuple[str, torch.Tensor], None, None]:
+    """Iterate over the weights in the model safetensor files 
+    using fastsafetensor library."""
+    if torch.distributed.is_initialized():
+        pg = torch.distributed.group.WORLD
+    else:
+        pg = SingleGroup()
+
+    device = torch.device(f'cuda:{pg.rank()}')
+    weight_files_sub_lists = [
+        hf_weights_files[i:i + pg.size()]
+        for i in range(0, len(hf_weights_files), pg.size())
+    ]
+
+    for f_list in tqdm(
+            weight_files_sub_lists,
+            desc="Loading safetensors using Fastsafetensor loader",
+            disable=not enable_tqdm(use_tqdm_on_load),
+            bar_format=_BAR_FORMAT,
+    ):
+        loader = SafeTensorsFileLoader(pg, device)
+        rank_file_map = {i: [f] for i, f in enumerate(f_list)}
+        loader.add_filenames(rank_file_map)
+        try:
+            fb = loader.copy_files_to_device()
+            try:
+                keys = list(fb.key_to_rank_lidx.keys())
+                for k in keys:
+                    t = fb.get_tensor(k)
+                    yield k, t
+            finally:
+                fb.close()
+        finally:
+            loader.close()
+
+
 def pt_weights_iterator(
-    hf_weights_files: List[str]
+    hf_weights_files: List[str],
+    use_tqdm_on_load: bool,
 ) -> Generator[Tuple[str, torch.Tensor], None, None]:
     """Iterate over the weights in the model bin/pt files."""
-    enable_tqdm = not torch.distributed.is_initialized(
-    ) or torch.distributed.get_rank() == 0
     for bin_file in tqdm(
             hf_weights_files,
             desc="Loading pt checkpoint shards",
-            disable=not enable_tqdm,
+            disable=not enable_tqdm(use_tqdm_on_load),
             bar_format=_BAR_FORMAT,
     ):
         state = torch.load(bin_file, map_location="cpu", weights_only=True)
@@ -605,8 +658,21 @@ def initialize_dummy_weights(
     for param in model.state_dict().values():
         if torch.is_floating_point(param):
             if current_platform.is_tpu():
-                # XLA device does not support torch.Generator()
-                param.uniform_(low, high)
+                generator = torch.Generator(device="cpu")
+                generator.manual_seed(seed)
+                # Note: The param.uniform_ function cannot be used in this
+                # context because it demands more TPU HBM than directly copying
+                # from a CPU tensor.
+                # Note: We avoid using torch.rank_like as it doesn't currently
+                # support the generator argument.
+                param.copy_((high - low) *
+                            torch.rand(*param.shape,
+                                       generator=generator,
+                                       dtype=param.dtype,
+                                       layout=param.layout,
+                                       requires_grad=param.requires_grad,
+                                       device="cpu") + low)
+                torch._sync(param)
                 continue
 
             generator = torch.Generator(device=param.data.device)

@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
-from typing import List, Sequence
+from collections.abc import Sequence
+from typing import NamedTuple, Optional
 
 import torch
 import torch.nn.functional as F
@@ -8,8 +9,8 @@ import torch.nn.functional as F
 
 def check_embeddings_close(
     *,
-    embeddings_0_lst: Sequence[List[float]],
-    embeddings_1_lst: Sequence[List[float]],
+    embeddings_0_lst: Sequence[list[float]],
+    embeddings_1_lst: Sequence[list[float]],
     name_0: str,
     name_1: str,
     tol: float = 1e-3,
@@ -30,3 +31,36 @@ def check_embeddings_close(
                     f"\n{name_1}:\t{embeddings_1[:16]!r}")
 
         assert sim >= 1 - tol, fail_msg
+
+
+def matryoshka_fy(tensor, dimensions):
+    tensor = torch.tensor(tensor)
+    tensor = tensor[..., :dimensions]
+    tensor = F.normalize(tensor, p=2, dim=1)
+    return tensor
+
+
+class EmbedModelInfo(NamedTuple):
+    name: str
+    is_matryoshka: bool
+    matryoshka_dimensions: Optional[list[int]] = None
+    architecture: str = ""
+    enable_test: bool = True
+
+
+def correctness_test(hf_model,
+                     inputs,
+                     vllm_outputs: Sequence[list[float]],
+                     dimensions: Optional[int] = None):
+
+    hf_outputs = hf_model.encode(inputs)
+    if dimensions:
+        hf_outputs = matryoshka_fy(hf_outputs, dimensions)
+
+    check_embeddings_close(
+        embeddings_0_lst=hf_outputs,
+        embeddings_1_lst=vllm_outputs,
+        name_0="hf",
+        name_1="vllm",
+        tol=1e-2,
+    )

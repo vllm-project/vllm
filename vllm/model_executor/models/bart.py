@@ -31,18 +31,19 @@ from vllm.config import CacheConfig, LoRAConfig, VllmConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
+                                               QKVCrossParallelLinear,
                                                QKVParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
-from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
 
+from .interfaces import SupportsQuant, SupportsV0Only
 from .utils import maybe_prefix
 
 logger = logging.get_logger(__name__)
@@ -168,7 +169,7 @@ class BartEncoderAttention(nn.Module):
             # Number of KV heads is less than TP size, so we replicate
             # the KV heads across multiple tensor parallel GPUs.
             assert tp_world_size % self.total_num_kv_heads == 0
-        self.num_kv_heads = max(1, self.total_num_kv_heads // tp_world_size)
+        self.num_kv_heads = self.num_heads
         self.q_size = self.num_heads * self.head_dim
         self.kv_size = self.num_kv_heads * self.head_dim
 
@@ -247,7 +248,7 @@ class BartDecoderSelfAttention(nn.Module):
             # Number of KV heads is less than TP size, so we replicate
             # the KV heads across multiple tensor parallel GPUs.
             assert tp_world_size % self.total_num_kv_heads == 0
-        self.num_kv_heads = max(1, self.total_num_kv_heads // tp_world_size)
+        self.num_kv_heads = self.num_heads
         self.q_size = self.num_heads * self.head_dim
         self.kv_size = self.num_kv_heads * self.head_dim
 
@@ -298,14 +299,14 @@ class BartCrossAttention(nn.Module):
                              f" and `num_heads`: {num_heads}).")
         self.scaling = self.head_dim**-0.5
 
-        self.qkv_proj = QKVParallelLinear(
-            self.d_model,
-            self.d_model // self.total_num_heads,
-            self.total_num_heads,
-            self.total_num_kv_heads,
-            bias=bias,
-            quant_config=quant_config,
-        )
+        # TP sharding sizes is accounted for within "*Parallel" layers.
+        self.qkv_proj = QKVCrossParallelLinear(self.d_model,
+                                               self.d_model //
+                                               self.total_num_heads,
+                                               self.total_num_heads,
+                                               self.total_num_kv_heads,
+                                               bias,
+                                               quant_config=quant_config)
 
         self.out_proj = RowParallelLinear(
             embed_dim,
@@ -326,10 +327,7 @@ class BartCrossAttention(nn.Module):
             # Number of KV heads is less than TP size, so we replicate
             # the KV heads across multiple tensor parallel GPUs.
             assert tp_world_size % self.total_num_kv_heads == 0
-        self.num_kv_heads = max(1, self.total_num_kv_heads // tp_world_size)
-        self.q_size = self.num_heads * self.head_dim
-        self.kv_size = self.num_kv_heads * self.head_dim
-
+        self.num_kv_heads = self.num_heads  # No GQA in bart
         self.attn = Attention(self.num_heads,
                               self.head_dim,
                               self.scaling,
@@ -346,18 +344,7 @@ class BartCrossAttention(nn.Module):
     ) -> torch.Tensor:
         """Input shape: Batch x Time x Channel"""
 
-        # (afeldman-nm 2024/07/22) TODO:
-        # Need a more efficient solution for q/k/v
-        qkv_dec, _ = self.qkv_proj(decoder_hidden_states)
-        q, _, _ = qkv_dec.split([self.q_size, self.kv_size, self.kv_size],
-                                dim=-1)
-        if encoder_hidden_states is None:
-            k = None
-            v = None
-        else:
-            qkv_enc, _ = self.qkv_proj(encoder_hidden_states)
-            _, k, v = qkv_enc.split([self.q_size, self.kv_size, self.kv_size],
-                                    dim=-1)
+        q, k, v = self.qkv_proj(decoder_hidden_states, encoder_hidden_states)
 
         attn_output = self.attn(q, k, v)
 
@@ -709,7 +696,7 @@ class BartDecoder(nn.Module):
         return hidden_states
 
 
-class BartModel(nn.Module):
+class BartModel(nn.Module, SupportsQuant):
     _tied_weights_keys = [
         "encoder.embed_tokens.weight", "decoder.embed_tokens.weight"
     ]
@@ -724,7 +711,6 @@ class BartModel(nn.Module):
 
         self.config = config
 
-        self.padding_idx = config.pad_token_id
         lora_vocab = (lora_config.lora_extra_vocab_size *
                       (lora_config.max_loras or 1)) if lora_config else 0
         self.vocab_size = config.vocab_size + lora_vocab
@@ -776,7 +762,8 @@ class BartModel(nn.Module):
         return decoder_outputs
 
 
-class BartForConditionalGeneration(nn.Module):
+class BartForConditionalGeneration(nn.Module, SupportsV0Only, SupportsQuant):
+    packed_modules_mapping = {"qkv_proj": ["q_proj", "k_proj", "v_proj"]}
     base_model_prefix = "model"
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
@@ -803,7 +790,6 @@ class BartForConditionalGeneration(nn.Module):
 
         self.logits_processor = LogitsProcessor(self.unpadded_vocab_size,
                                                 config.vocab_size)
-        self.sampler = get_sampler()
 
     def forward(
         self,
@@ -839,14 +825,6 @@ class BartForConditionalGeneration(nn.Module):
         logits = self.logits_processor(self.lm_head, hidden_states,
                                        sampling_metadata)
         return logits
-
-    def sample(
-        self,
-        logits: Optional[torch.Tensor],
-        sampling_metadata: SamplingMetadata,
-    ) -> Optional[SamplerOutput]:
-        next_tokens = self.sampler(logits, sampling_metadata)
-        return next_tokens
 
     stacked_params_mapping = {
         "q_proj": {

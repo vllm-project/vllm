@@ -19,7 +19,6 @@ from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.mamba.mamba_mixer import MambaMixer
 from vllm.model_executor.layers.pooler import Pooler, PoolingType
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     DEFAULT_VOCAB_PADDING_SIZE, ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
@@ -30,12 +29,11 @@ from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors, PoolerOutput
 from vllm.utils import LayerBlockType
 
-from .interfaces import HasInnerState, IsHybrid, SupportsLoRA, SupportsPP
+from .interfaces import (HasInnerState, IsHybrid, SupportsLoRA, SupportsPP,
+                         SupportsV0Only)
 from .utils import (is_pp_missing_parameter,
                     make_empty_intermediate_tensors_factory, make_layers,
                     maybe_prefix)
-
-KVCache = Tuple[torch.Tensor, torch.Tensor]
 
 
 class JambaMoE(nn.Module):
@@ -46,7 +44,8 @@ class JambaMoE(nn.Module):
                  top_k: Optional[int] = None,
                  params_dtype: Optional[torch.dtype] = None,
                  tp_size: Optional[int] = None,
-                 quant_config: Optional[QuantizationConfig] = None):
+                 quant_config: Optional[QuantizationConfig] = None,
+                 prefix: str = ""):
         super().__init__()
         self.num_total_experts = num_experts or config.num_experts
         self.top_k = top_k or config.num_experts_per_tok
@@ -69,7 +68,8 @@ class JambaMoE(nn.Module):
                                 reduce_results=True,
                                 renormalize=False,
                                 use_grouped_topk=False,
-                                quant_config=quant_config)
+                                quant_config=quant_config,
+                                prefix=f"{prefix}.experts")
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         orig_shape = hidden_states.shape
@@ -91,13 +91,15 @@ class JambaMLP(JambaMoE):
                  config: JambaConfig,
                  params_dtype: Optional[torch.dtype] = None,
                  tp_size: Optional[int] = None,
-                 quant_config: Optional[QuantizationConfig] = None):
+                 quant_config: Optional[QuantizationConfig] = None,
+                 prefix: str = ""):
         super().__init__(config,
                          num_experts=1,
                          top_k=1,
                          params_dtype=params_dtype,
                          tp_size=tp_size,
-                         quant_config=quant_config)
+                         quant_config=quant_config,
+                         prefix=prefix)
 
 
 class JambaMambaDecoderLayer(nn.Module):
@@ -108,6 +110,7 @@ class JambaMambaDecoderLayer(nn.Module):
                  cache_config: Optional[CacheConfig] = None,
                  quant_config: Optional[QuantizationConfig] = None,
                  is_lora_enabled: Optional[bool] = False,
+                 prefix: str = "",
                  **kwargs) -> None:
         super().__init__()
         self.config = config
@@ -128,7 +131,9 @@ class JambaMambaDecoderLayer(nn.Module):
 
         num_experts = config.layers_num_experts[layer_idx]
         ffn_layer_class = JambaMoE if num_experts > 1 else JambaMLP
-        self.feed_forward = ffn_layer_class(config, quant_config=quant_config)
+        self.feed_forward = ffn_layer_class(config,
+                                            quant_config=quant_config,
+                                            prefix=f"{prefix}.feed_forward")
         self.input_layernorm = RMSNorm(config.hidden_size,
                                        eps=config.rms_norm_eps)
         self.pre_ff_layernorm = RMSNorm(config.hidden_size,
@@ -210,7 +215,9 @@ class JambaAttentionDecoderLayer(nn.Module):
 
         num_experts = config.layers_num_experts[layer_idx]
         ffn_layer_class = JambaMoE if num_experts > 1 else JambaMLP
-        self.feed_forward = ffn_layer_class(config, quant_config=quant_config)
+        self.feed_forward = ffn_layer_class(config,
+                                            quant_config=quant_config,
+                                            prefix=f"{prefix}.feed_forward")
         self.input_layernorm = RMSNorm(config.hidden_size,
                                        eps=config.rms_norm_eps)
         self.pre_ff_layernorm = RMSNorm(config.hidden_size,
@@ -270,7 +277,6 @@ class JambaModel(nn.Module):
         lora_config = vllm_config.lora_config
 
         self.config = config
-        self.padding_idx = config.pad_token_id
         lora_vocab = ((lora_config.lora_extra_vocab_size *
                        (lora_config.max_loras or 1)) if lora_config else 0)
         self.vocab_size = config.vocab_size + lora_vocab
@@ -353,7 +359,7 @@ class JambaModel(nn.Module):
 
 
 class JambaForCausalLM(nn.Module, HasInnerState, SupportsLoRA, SupportsPP,
-                       IsHybrid):
+                       IsHybrid, SupportsV0Only):
     packed_modules_mapping = {
         "qkv_proj": [
             "q_proj",
@@ -402,7 +408,6 @@ class JambaForCausalLM(nn.Module, HasInnerState, SupportsLoRA, SupportsPP,
 
         self.logits_processor = LogitsProcessor(self.unpadded_vocab_size,
                                                 config.vocab_size)
-        self.sampler = get_sampler()
 
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors)
@@ -458,14 +463,6 @@ class JambaForCausalLM(nn.Module, HasInnerState, SupportsLoRA, SupportsPP,
         logits = self.logits_processor(self.lm_head, hidden_states,
                                        sampling_metadata)
         return logits
-
-    def sample(
-        self,
-        logits: Optional[torch.Tensor],
-        sampling_metadata: SamplingMetadata,
-    ) -> Optional[SamplerOutput]:
-        next_tokens = self.sampler(logits, sampling_metadata)
-        return next_tokens
 
     def load_weights(self, weights: Iterable[Tuple[str,
                                                    torch.Tensor]]) -> Set[str]:

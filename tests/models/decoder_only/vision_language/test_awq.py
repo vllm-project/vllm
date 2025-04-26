@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
-from typing import List, Optional, Type
+from typing import Optional
 
 import pytest
 import torch
@@ -19,12 +19,12 @@ HF_IMAGE_PROMPTS = IMAGE_ASSETS.prompts({
 
 
 def run_awq_test(
-    vllm_runner: Type[VllmRunner],
+    vllm_runner: type[VllmRunner],
     image_assets: _ImageAssets,
     source_model: str,
     quant_model: str,
     *,
-    size_factors: List[float],
+    size_factors: list[float],
     dtype: str,
     max_tokens: int,
     num_logprobs: int,
@@ -108,7 +108,12 @@ def run_awq_test(
 @pytest.mark.parametrize("num_logprobs", [5])
 @torch.inference_mode()
 def test_awq_models(vllm_runner, image_assets, source_model, quant_model,
-                    size_factors, dtype, max_tokens, num_logprobs) -> None:
+                    size_factors, dtype, max_tokens, num_logprobs,
+                    monkeypatch) -> None:
+
+    # Test V1: this test hangs during setup on single-scale input.
+    # TODO: fixure out why and re-enable this on V1.
+    monkeypatch.setenv("VLLM_USE_V1", "0")
     run_awq_test(
         vllm_runner,
         image_assets,

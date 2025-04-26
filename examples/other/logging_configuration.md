@@ -127,7 +127,7 @@ configuration for the root vLLM logger and for the logger you wish to silence:
     "vllm": {
       "handlers": ["vllm"],
       "level": "DEBUG",
-      "propagage": false
+      "propagate": false
     },
     "vllm.example_noisy_logger": {
       "propagate": false

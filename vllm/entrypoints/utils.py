@@ -2,8 +2,15 @@
 
 import asyncio
 import functools
+import os
 
 from fastapi import Request
+from fastapi.responses import JSONResponse, StreamingResponse
+from starlette.background import BackgroundTask, BackgroundTasks
+
+from vllm.logger import init_logger
+
+logger = init_logger(__name__)
 
 
 async def listen_for_disconnect(request: Request) -> None:
@@ -17,9 +24,9 @@ async def listen_for_disconnect(request: Request) -> None:
 def with_cancellation(handler_func):
     """Decorator that allows a route handler to be cancelled by client
     disconnections.
-    
+
     This does _not_ use request.is_disconnected, which does not work with
-    middleware. Instead this follows the pattern from 
+    middleware. Instead this follows the pattern from
     starlette.StreamingResponse, which simultaneously awaits on two tasks- one
     to wait for an http disconnect message, and the other to do the work that we
     want done. When the first task finishes, the other is cancelled.
@@ -57,3 +64,73 @@ def with_cancellation(handler_func):
         return None
 
     return wrapper
+
+
+def decrement_server_load(request: Request):
+    request.app.state.server_load_metrics -= 1
+
+
+def load_aware_call(func):
+
+    @functools.wraps(func)
+    async def wrapper(*args, **kwargs):
+        raw_request = kwargs.get("raw_request",
+                                 args[1] if len(args) > 1 else None)
+
+        if raw_request is None:
+            raise ValueError(
+                "raw_request required when server load tracking is enabled")
+
+        if not raw_request.app.state.enable_server_load_tracking:
+            return await func(*args, **kwargs)
+
+        raw_request.app.state.server_load_metrics += 1
+        try:
+            response = await func(*args, **kwargs)
+        except Exception:
+            raw_request.app.state.server_load_metrics -= 1
+            raise
+
+        if isinstance(response, (JSONResponse, StreamingResponse)):
+            if response.background is None:
+                response.background = BackgroundTask(decrement_server_load,
+                                                     raw_request)
+            elif isinstance(response.background, BackgroundTasks):
+                response.background.add_task(decrement_server_load,
+                                             raw_request)
+            elif isinstance(response.background, BackgroundTask):
+                # Convert the single BackgroundTask to BackgroundTasks
+                # and chain the decrement_server_load task to it
+                tasks = BackgroundTasks()
+                tasks.add_task(response.background.func,
+                               *response.background.args,
+                               **response.background.kwargs)
+                tasks.add_task(decrement_server_load, raw_request)
+                response.background = tasks
+        else:
+            raw_request.app.state.server_load_metrics -= 1
+
+        return response
+
+    return wrapper
+
+
+def cli_env_setup():
+    # The safest multiprocessing method is `spawn`, as the default `fork` method
+    # is not compatible with some accelerators. The default method will be
+    # changing in future versions of Python, so we should use it explicitly when
+    # possible.
+    #
+    # We only set it here in the CLI entrypoint, because changing to `spawn`
+    # could break some existing code using vLLM as a library. `spawn` will cause
+    # unexpected behavior if the code is not protected by
+    # `if __name__ == "__main__":`.
+    #
+    # References:
+    # - https://docs.python.org/3/library/multiprocessing.html#contexts-and-start-methods
+    # - https://pytorch.org/docs/stable/notes/multiprocessing.html#cuda-in-multiprocessing
+    # - https://pytorch.org/docs/stable/multiprocessing.html#sharing-cuda-tensors
+    # - https://docs.habana.ai/en/latest/PyTorch/Getting_Started_with_PyTorch_and_Gaudi/Getting_Started_with_PyTorch.html?highlight=multiprocessing#torch-multiprocessing-for-dataloaders
+    if "VLLM_WORKER_MULTIPROC_METHOD" not in os.environ:
+        logger.debug("Setting VLLM_WORKER_MULTIPROC_METHOD to 'spawn'")
+        os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"

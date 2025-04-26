@@ -2,6 +2,7 @@
 
 from typing import TYPE_CHECKING, Optional
 
+from vllm import envs
 from vllm.logger import init_logger
 
 from .interface import Platform, PlatformEnum
@@ -49,9 +50,20 @@ class NeuronPlatform(Platform):
         if cache_config:
             # neuron needs block_size = max_model_len
             vllm_config.cache_config.block_size = \
-                vllm_config.model_config.max_model_len
+                vllm_config.model_config.max_model_len  # type: ignore
 
     @classmethod
     def is_pin_memory_available(cls) -> bool:
         logger.warning("Pin memory is not supported on Neuron.")
         return False
+
+    @classmethod
+    def get_device_communicator_cls(cls) -> str:
+        if envs.VLLM_USE_V1:
+            return "vllm.distributed.device_communicators.neuron_communicator.NeuronCommunicator"  # noqa
+        else:
+            return Platform.get_device_communicator_cls()
+
+    @classmethod
+    def use_all_gather(cls) -> bool:
+        return True
