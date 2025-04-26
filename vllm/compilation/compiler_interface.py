@@ -11,6 +11,7 @@ import torch
 import torch._inductor.compile_fx
 import torch.fx as fx
 
+import vllm.envs as envs
 from vllm.config import VllmConfig
 from vllm.utils import is_torch_equal_or_newer
 
@@ -317,10 +318,14 @@ class InductorAdaptor(CompilerInterface):
                 inner_compile=hijacked_compile_fx_inner,
                 config_patches=current_config)
 
-        assert hash_str is not None, (
-            "failed to get the hash of the compiled graph")
-        assert file_path is not None, (
-            "failed to get the file path of the compiled graph")
+        # We treat VLLM_DISABLE_COMPILE_CACHE as the overall switch for torch
+        # compilation cache. So turn off the checks if we disable the
+        # compilation cache.
+        if not envs.VLLM_DISABLE_COMPILE_CACHE:
+            assert hash_str is not None, (
+                "failed to get the hash of the compiled graph")
+            assert file_path is not None, (
+                "failed to get the file path of the compiled graph")
         return compiled_graph, (hash_str, file_path)
 
     def load(self,
