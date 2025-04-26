@@ -4,7 +4,6 @@
 # Copyright (C) 2024 Habana Labs, Ltd. an Intel Company
 ###############################################################################
 
-import os
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple, Type
 
@@ -200,7 +199,8 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
         key_cache = None
         value_cache = None
         if attn_metadata.is_prompt and self.attn_type \
-                is not AttentionType.ENCODER_ONLY:
+           is not AttentionType.ENCODER_ONLY \
+           and attn_metadata.block_list is None:
             key = key.unflatten(0, (block_indices.size(0), -1))
             value = value.unflatten(0, (block_indices.size(0), -1))
         if kv_cache is not None and isinstance(kv_cache, tuple):
@@ -248,23 +248,13 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
             # Decoding run.
             output = HPUPagedAttention.forward_decode(
                 query=query,
-                key_cache=key_cache,
-                value_cache=value_cache,
-                block_list=attn_metadata.block_list,
                 block_mapping=attn_metadata.block_mapping,
                 block_bias=attn_metadata.attn_bias,
-                block_scales=attn_metadata.block_scales,
                 block_groups=attn_metadata.block_groups,
-                scale=self.scale,
-                matmul_qk_op=self.matmul_qk,
-                matmul_av_op=self.matmul_av,
-                batch2block_matmul_op=self.batch2block_matmul,
-                block2batch_matmul_op=self.block2batch_matmul,
-                keys_fetch_func=self.k_cache.fetch_from_cache,
-                values_fetch_func=self.v_cache.fetch_from_cache)
+                **self.common_attention_args(attn_metadata.block_list,
+                                             key_cache, value_cache))
         # Reshape the output tensor.
         return output.view(batch_size, seq_len, hidden_size)
-
 
     def common_attention_args(self,
                               block_list=None,
