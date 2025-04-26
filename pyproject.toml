@@ -46,8 +46,7 @@ vllm = "vllm.entrypoints.cli.main:main"
 
 [tool.setuptools.packages.find]
 where = ["."]
-exclude = ["benchmarks", "csrc", "docs", "examples", "tests*"]
-namespaces = false
+include = ["vllm*"]
 
 [tool.yapfignore]
 ignore_patterns = [
