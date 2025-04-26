@@ -3319,13 +3319,17 @@ class KVEventsConfig(BaseModel):
     """
 
     buffer_steps: int = 10_000
-    """The number of steps to buffer in the event publisher. Will only save
+    """The number of steps to cache for replay endpoint. Will only save
     events from the last N steps for the replay endpoint.
     """
 
     hwm: int = 100_000
     """The zmq high water mark for the event publisher. After queueing N events,
     events will start dropping if the consumer is not keeping up.
+    """
+
+    max_queue_size: int = 100_000
+    """The maximum number of events to queue while waiting for publishing.
     """
 
     topic: str = ""

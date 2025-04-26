@@ -74,6 +74,7 @@ def test_replay_mechanism(publisher, subscriber):
         batch = create_test_events(1)
         publisher.publish(batch)
 
+    time.sleep(0.5)  # Need publisher to process above requests
     subscriber.request_replay(10)
 
     batch = create_test_events(1)
@@ -98,6 +99,7 @@ def test_buffer_limit(publisher, subscriber, publisher_config):
         batch = create_test_events(1)
         publisher.publish(batch)
 
+    time.sleep(0.5)  # Need publisher to process above requests
     subscriber.request_replay(0)
 
     batch = create_test_events(1)
@@ -139,7 +141,7 @@ def test_topic_filtering(publisher_config):
         assert all(msg is None for msg in bar_received), (
             "Subscriber with non-matching topic should receive no messages")
     finally:
-        pub.close()
+        pub.shutdown()
         sub_foo.close()
         sub_bar.close()
 
@@ -188,4 +190,4 @@ def test_null_publisher():
     # This should not raise any errors
     batch = create_test_events(5)
     publisher.publish(batch)
-    publisher.close()
+    publisher.shutdown()

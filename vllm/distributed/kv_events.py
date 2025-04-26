@@ -1,13 +1,21 @@
 # SPDX-License-Identifier: Apache-2.0
 
+import queue
+import threading
+import time
 from abc import ABC, abstractmethod
 from collections import deque
+from itertools import count
+from queue import Queue
 from typing import Any, Callable, Optional, Union
 
 import msgspec
 import zmq
 
 from vllm.config import KVEventsConfig
+from vllm.logger import init_logger
+
+logger = init_logger(__name__)
 
 
 class EventBatch(
@@ -60,8 +68,9 @@ class EventPublisher(ABC):
         monotonic ordering (e.g., via sequence numbers).
         """
 
-    def close(self) -> None:  # optional
-        return
+    @abstractmethod
+    def shutdown(self) -> None:
+        """Shutdown the publisher."""
 
 
 class NullEventPublisher(EventPublisher):
@@ -70,9 +79,14 @@ class NullEventPublisher(EventPublisher):
     def publish(self, events) -> None:
         return
 
+    def shutdown(self) -> None:
+        return
+
 
 class ZmqEventPublisher(EventPublisher):
     """Reliable PUB/ROUTER publisher with an in-memory replay buffer.
+
+    Spawns a separate thread to handle publishing from a queue.
 
     Parameters
     ----------
@@ -87,7 +101,12 @@ class ZmqEventPublisher(EventPublisher):
         Number of past batches to keep for replay.
     hwm:
         ZeroMQ high-water-mark for PUB socket.
+    max_queue_size:
+        Maximum number of events to buffer in memory.
+    topic:
+        Topic to publish events to.
     """
+    TIMEOUT: float = 1.0
 
     def __init__(
         self,
@@ -95,64 +114,143 @@ class ZmqEventPublisher(EventPublisher):
         replay_endpoint: Optional[str] = None,
         buffer_steps: int = 10_000,
         hwm: int = 100_000,
+        max_queue_size: int = 100_000,
         topic: str = "",
     ) -> None:
-        self._ctx = zmq.Context.instance()
+        # Storage
+        self._event_queue = Queue[EventBatch](maxsize=max_queue_size)
+        self._buffer = deque[tuple[int, bytes]](maxlen=buffer_steps)
 
-        self._pub = self._ctx.socket(zmq.PUB)
-        self._pub.set_hwm(hwm)
-        # Heuristic: bind if wildcard / * present, else connect.
-        # bind stable, connect volatile convention
-        if "*" in endpoint or "::" in endpoint or endpoint.startswith(
-                "ipc://") or endpoint.startswith("inproc://"):
-            self._pub.bind(endpoint)
-        else:
-            self._pub.connect(endpoint)
+        # ZMQ sockets
+        self._ctx = zmq.Context.instance()
+        self._pub: Optional[zmq.Socket] = None
+        self._replay: Optional[zmq.Socket] = None
+        self._endpoint = endpoint
+        self._replay_endpoint = replay_endpoint
+        self._hwm = hwm
+
+        # Payload
+        self._seq_gen = count()
+        self._topic_bytes = topic.encode('utf-8')
+
+        # Thread
+        self._running = True
+        logger.info("Starting ZMQ publisher thread")
+
+        self._thread = threading.Thread(target=self._publisher_thread,
+                                        daemon=True,
+                                        name="zmq-publisher")
+        self._thread.start()
+
+    def publish(self, events: EventBatch) -> None:
+        if not self._running:
+            raise RuntimeError("Publisher is closed")
+        self._event_queue.put(events)
+
+    def shutdown(self) -> None:
+        """Stop the publisher thread and clean up resources."""
+        self._running = False
+
+        start = time.time()
+
+        pending_items = True
+        while pending_items and (time.time() - start < self.TIMEOUT):
+            pending_items = not self._event_queue.empty()
+            if pending_items:
+                time.sleep(0.1)
+
+        if pending_items:
+            logger.warning(
+                "Warning: Queue still has %s items after %s seconds timeout",
+                self._event_queue.qsize(),
+                self.TIMEOUT,
+            )
+
+        if self._thread.is_alive():
+            self._thread.join(timeout=1.0)
+
+        # Clean up ZMQ resources
+        try:
+            if self._pub is not None:
+                self._pub.close(linger=0)
+            if self._replay is not None:
+                self._replay.close(linger=0)
+        finally:
+            # Do not terminate context; other sockets may use it
+            pass
+
+    def _socket_setup(self) -> None:
+        """Initialize sockets
+        https://pyzmq.readthedocs.io/en/v19.0.0/morethanbindings.html#thread-safety
+        """
+        if self._pub is None:
+            self._pub = self._ctx.socket(zmq.PUB)
+            self._pub.set_hwm(self._hwm)
+            # Heuristic: bind if wildcard / * present, else connect.
+            # bind stable, connect volatile convention
+            if ("*" in self._endpoint or "::" in self._endpoint
+                    or self._endpoint.startswith("ipc://")
+                    or self._endpoint.startswith("inproc://")):
+                self._pub.bind(self._endpoint)
+            else:
+                self._pub.connect(self._endpoint)
 
         # Set up replay socket: use ROUTER
         # 1) handles multiple REQ clients (identities)
         # 2) lets us send back one request → many replies (streamed events)
         # 3) works in our non‑blocking poll loop alongside PUB
-        self._replay = None
-        if replay_endpoint is not None:
+        if self._replay_endpoint is not None:
             self._replay = self._ctx.socket(zmq.ROUTER)
-            self._replay.bind(replay_endpoint)
+            self._replay.bind(self._replay_endpoint)
 
-        self._buffer = deque[tuple[int, bytes]](maxlen=buffer_steps)
-        self._seq = 0
+    def _publisher_thread(self) -> None:
+        """Background thread that processes the event queue."""
         self._pack = msgspec.msgpack.Encoder()
+        self._socket_setup()
 
-        self._topic = topic
-        self._topic_bytes = topic.encode('utf-8')
+        assert self._pub is not None  # narrows type for mypy
 
-    def publish(self, events: EventBatch) -> None:
-        self._service_replay()
-        payload = self._pack.encode(events)
-        seq_bytes = self._seq.to_bytes(8, "big")
+        while self._running or not self._event_queue.empty():
+            # --- replay (non-critical) ---------------------------------
+            if self._replay is not None and self._replay.poll(0):
+                try:
+                    self._service_replay()
+                except Exception as e:
+                    logger.exception("Error in replay: %s", e)
 
-        self._pub.send_multipart((self._topic_bytes, seq_bytes, payload))
+            # --- main queue (critical) ---------------------------------
+            try:
+                event = self._event_queue.get(timeout=0.1)
+            except queue.Empty:
+                continue
 
-        self._buffer.append((self._seq, payload))
-        self._seq += 1
+            try:
+                seq = next(self._seq_gen)
 
-    def close(self) -> None:
-        try:
-            self._pub.close(linger=0)
-            if self._replay is not None:
-                self._replay.close(linger=0)
-        finally:
-            # Do not terminate context; other sockets may use it.
-            pass
+                payload = self._pack.encode(event)
+                seq_bytes = seq.to_bytes(8, "big")
+                self._pub.send_multipart(
+                    (self._topic_bytes, seq_bytes, payload))
+
+                self._buffer.append((seq, payload))
+                self._event_queue.task_done()
+
+            except Exception as e:
+                # Publishing failed;  back-off a bit to avoid a tight error loop
+                logger.exception("Error in publisher thread: %s", e)
+                time.sleep(0.1)
 
     def _service_replay(self) -> None:
         """If a replay request is waiting, send buffered batches."""
-        if self._replay is None:
-            return
-        if not self._replay.poll(0):  # no request waiting
-            return
+        assert self._replay is not None  # narrows type for mypy
 
-        client_id, start_seq_bytes = self._replay.recv_multipart()
+        frame = self._replay.recv_multipart()
+        if len(frame) != 3:
+            logger.warning("Invalid replay request: %s", frame)
+            return
+        client_id, _, start_seq_bytes = frame
         start_seq = int.from_bytes(start_seq_bytes, "big")
+
         for seq, buf in self._buffer:
             if seq >= start_seq:
                 # [identity, empty_delim, seq_bytes, payload]
@@ -184,7 +282,7 @@ class EventPublisherFactory:
         config_dict = config.model_dump()
 
         kind = config_dict.pop("publisher", "null")
-        config_dict.pop("enable_kv_cache_events", False)
+        config_dict.pop("enable_kv_cache_events")
         try:
             constructor = cls._registry[kind]
         except KeyError as exc:

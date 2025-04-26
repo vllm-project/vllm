@@ -45,7 +45,7 @@ def publisher(publisher_config):
     """Create and return a publisher instance"""
     pub = EventPublisherFactory.create(publisher_config)
     yield pub
-    pub.close()
+    pub.shutdown()
 
 
 @pytest.fixture
@@ -94,7 +94,6 @@ class MockSubscriber:
     def receive_one(self,
                     timeout=1000) -> Union[tuple[int, SampleBatch], None]:
         """Receive a single message with timeout"""
-        print(f"self.sub: {self.sub}")
         if not self.sub.poll(timeout):
             return None
 

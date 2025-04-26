@@ -137,3 +137,8 @@ class SchedulerInterface(ABC):
         The SchedulerStats object is created for every scheduling step.
         """
         raise NotImplementedError
+
+    @abstractmethod
+    def shutdown(self) -> None:
+        """Shutdown the scheduler."""
+        raise NotImplementedError

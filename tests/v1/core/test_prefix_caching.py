@@ -748,8 +748,7 @@ def test_kv_cache_events(blocks_to_cache: int):
     block = events[-1]
     assert (len(block.block_hashes) == blocks_to_cache == len(
         manager.block_pool.cached_block_hash_to_block))
-    assert len(block.block_hashes) == len(block.num_toks_per_block)
-    assert len(block.token_ids) == sum(block.num_toks_per_block)
+    assert len(block.token_ids) == block.block_size * len(block.block_hashes)
     assert len(manager.block_pool.kv_event_queue) == 0
 
     stored_block_hash = block.block_hashes

@@ -846,3 +846,7 @@ class Scheduler(SchedulerInterface):
         spec_decoding_stats.observe(num_draft_tokens=num_draft_tokens,
                                     num_accepted_tokens=num_accepted_tokens)
         return spec_decoding_stats
+
+    def shutdown(self) -> None:
+        if self.kv_event_publisher:
+            self.kv_event_publisher.shutdown()

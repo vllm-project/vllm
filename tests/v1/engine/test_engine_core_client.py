@@ -318,10 +318,20 @@ def test_kv_cache_events(
         assert seq == 0, "Sequence number mismatch"
         assert len(received.events) == 1, (
             "We should have exactly one BlockStored event")
-        assert isinstance(received.events[0],
+        event = received.events[0]
+        assert isinstance(event,
                           BlockStored), ("We should have a BlockStored event")
-        assert len(received.events[0].block_hashes) == num_blocks, (
+        assert len(event.block_hashes) == num_blocks, (
             "We should have a BlockStored event with 2 block_hashes")
+        assert event.block_size == block_size, (
+            "Block size should be the same as the block size")
+        assert event.parent_block_hash is None, (
+            "Parent block hash should be None")
+        assert event.lora_id is None, "Lora id should be None"
+        assert len(event.token_ids) == num_blocks * block_size, (
+            "Token ids should be the same as the custom tokens")
+        assert event.token_ids == custom_tokens, (
+            "Token ids should be the same as the custom tokens")
         return
 
 
