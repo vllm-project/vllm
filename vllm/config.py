@@ -4077,3 +4077,16 @@ def assert_hashable(text):
         f"vLLM tried to hash some configs that may have Python objects ids "
         f"in them. This is a bug, please file an issue. "
         f"Text being hashed: {text}")
+
+
+T = TypeVar("T")
+
+
+def get_layers_from_vllm_config(vllm_config: VllmConfig,
+                                layer_type: type[T]) -> dict[str, T]:
+    return {
+        layer_name: layer
+        for layer_name, layer in
+        vllm_config.compilation_config.static_forward_context.items()
+        if isinstance(layer, layer_type)
+    }

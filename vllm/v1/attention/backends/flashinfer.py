@@ -14,7 +14,7 @@ import vllm.envs as envs
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionType)
 from vllm.attention.layer import Attention
-from vllm.config import VllmConfig
+from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.logger import init_logger
 from vllm.v1.attention.backends.flash_attn import use_cascade_attention
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata
@@ -84,12 +84,10 @@ def get_per_layer_parameters(
     to use during `plan`.
     """
 
-    layers = vllm_config.compilation_config.static_forward_context
+    layers = get_layers_from_vllm_config(vllm_config, Attention)
     per_layer_params: dict[str, PerLayerParameters] = {}
 
     for key, layer in layers.items():
-        assert isinstance(layer, Attention)
-
         impl = layer.impl
         assert isinstance(impl, FlashInferImpl)
 
