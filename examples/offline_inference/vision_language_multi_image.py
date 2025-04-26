@@ -792,7 +792,8 @@ def parse_args():
         "--num-images",
         "-n",
         type=int,
-        choices=list(range(1, len(IMAGE_URLS))),  # the max number of images
+        choices=list(range(1,
+                           len(IMAGE_URLS) + 1)),  # the max number of images
         default=2,
         help="Number of images to use for the demo.")
     return parser.parse_args()
