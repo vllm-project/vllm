@@ -52,3 +52,7 @@ Key points from the PyTorch security guide:
    - Restrict physical and network access to the deployment environment
    - Implement proper authentication and authorization for management interfaces
    - Follow the principle of least privilege for all system components
+
+## Reporting Security Vulnerabilities
+
+If you believe you have found a security vulnerability in vLLM, please report it following the project's security policy. For more information on how to report security issues and the project's security policy, please see the [vLLM Security Policy](https://github.com/vllm-project/vllm/blob/main/SECURITY.md).
