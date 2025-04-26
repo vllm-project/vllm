@@ -16,7 +16,7 @@ from transformers.models.phi4_multimodal.modeling_phi4_multimodal import (
     Phi4MultimodalAudioRelativeAttentionBias, adaptive_enc_mask, unfold_tensor)
 
 from vllm.config import VllmConfig
-from vllm.distributed import divide, get_tensor_model_parallel_world_size
+from vllm.distributed import divide, get_tensor_model_parallel_world_size, get_tensor_model_parallel_rank
 from vllm.model_executor.layers.activation import MulAndSilu, get_act_fn
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                MergedColumnParallelLinear,
@@ -296,7 +296,13 @@ class Phi4MultimodalAudioAttention(nn.Module):
         )
 
         self.tp_size = get_tensor_model_parallel_world_size()
+        self.tp_rank = get_tensor_model_parallel_rank()
         self.num_heads_per_partition = divide(self.num_heads, self.tp_size)
+    
+    def split_attn_mask(self, attention_mask: torch.Tensor) -> torch.Tensor:
+        start_idx = self.num_heads_per_partition * self.tp_rank
+        end_idx = self.num_heads_per_partition * (self.tp_rank + 1)
+        return attention_mask[:, start_idx: end_idx]
 
     def forward(
         self,
@@ -307,10 +313,12 @@ class Phi4MultimodalAudioAttention(nn.Module):
         query, key, value = qkv_states.chunk(3, dim=-1)
 
         bsz, seq_len, _ = query.size()
-        query = query.view(bsz, seq_len, self.num_heads, self.head_dim)
-        key = key.view(bsz, seq_len, self.num_heads, self.head_dim)
-        value = value.view(bsz, seq_len, self.num_heads, self.head_dim)
+        query = query.view(bsz, seq_len, self.num_heads_per_partition, self.head_dim)
+        key = key.view(bsz, seq_len, self.num_heads_per_partition, self.head_dim)
+        value = value.view(bsz, seq_len, self.num_heads_per_partition, self.head_dim)
         query, key, value = (x.transpose(1, 2) for x in (query, key, value))
+
+        attention_mask = self.split_attn_mask(attention_mask)
         out = F.scaled_dot_product_attention(
             query,
             key,
