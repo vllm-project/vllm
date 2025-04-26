@@ -60,16 +60,6 @@ class EagleProposer:
                                    device=device,
                                    dtype=torch.int32)
 
-    def copy_model_inputs_to_buffer(
-        self,
-        input_ids: torch.Tensor,
-        positions: torch.Tensor,
-        hidden_states: torch.Tensor,
-    ) -> None:
-        self.input_ids[:input_ids.size(0)].copy_(input_ids)
-        self.positions[:positions.size(0)].copy_(positions)
-        self.hidden_states[:hidden_states.size(0)].copy_(hidden_states)
-
     def propose(
         self,
         # [num_tokens]
