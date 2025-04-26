@@ -102,12 +102,6 @@ class StructuredOutputBackend(ABC):
         """
 
     @abstractmethod
-    def find_jump_forward_tokens(self) -> list[int]:
-        """
-        Finds the tokens that can be used to jump forward in the grammar.
-        """
-
-    @abstractmethod
     def destroy(self):
         """
         Backend-specific cleanup.

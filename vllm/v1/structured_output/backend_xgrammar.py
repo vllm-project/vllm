@@ -164,11 +164,6 @@ class XgrammarGrammar(StructuredOutputGrammar):
         self.num_processed_tokens = 0
         self.matcher.reset()
 
-    def find_jump_forward_tokens(self) -> list[int]:
-        jf_string = self.matcher.find_jump_forward_string()
-        return self.tokenizer.decode(
-            jf_string, skip_special_tokens=True) if jf_string else []
-
 
 def has_xgrammar_unsupported_json_features(schema: dict[str, Any]) -> bool:
     """Check if JSON schema contains features unsupported by xgrammar."""
