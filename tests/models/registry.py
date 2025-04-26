@@ -124,7 +124,7 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "BloomForCausalLM": _HfExamplesInfo("bigscience/bloomz-1b1"),
     "ChatGLMModel": _HfExamplesInfo("THUDM/chatglm3-6b",
                                     trust_remote_code=True,
-                                    max_transformers_version="4.51.1"),
+                                    max_transformers_version="4.48"),
     "ChatGLMForConditionalGeneration": _HfExamplesInfo("thu-coai/ShieldLM-6B-chatglm3",  # noqa: E501
                                                        trust_remote_code=True),
     "CohereForCausalLM": _HfExamplesInfo("CohereForAI/c4ai-command-r-v01",
@@ -144,8 +144,7 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "FalconForCausalLM": _HfExamplesInfo("tiiuae/falcon-7b"),
     "GemmaForCausalLM": _HfExamplesInfo("google/gemma-2b"),
     "Gemma2ForCausalLM": _HfExamplesInfo("google/gemma-2-9b"),
-    "Gemma3ForCausalLM": _HfExamplesInfo("google/gemma-3-1b-it",
-                                         min_transformers_version="4.50"),
+    "Gemma3ForCausalLM": _HfExamplesInfo("google/gemma-3-1b-it"),
     "GlmForCausalLM": _HfExamplesInfo("THUDM/glm-4-9b-chat-hf"),
     "Glm4ForCausalLM": _HfExamplesInfo(
         "THUDM/GLM-4-32B-0414",
@@ -158,8 +157,7 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "GPTNeoXForCausalLM": _HfExamplesInfo("EleutherAI/pythia-160m"),
     "GraniteForCausalLM": _HfExamplesInfo("ibm/PowerLM-3b"),
     "GraniteMoeForCausalLM": _HfExamplesInfo("ibm/PowerMoE-3b"),
-    "GraniteMoeSharedForCausalLM": _HfExamplesInfo("ibm-research/moe-7b-1b-active-shared-experts",  # noqa: E501
-                                                   min_transformers_version="4.49"),  # noqa: E501
+    "GraniteMoeSharedForCausalLM": _HfExamplesInfo("ibm-research/moe-7b-1b-active-shared-experts"),  # noqa: E501
     "Grok1ModelForCausalLM": _HfExamplesInfo("hpcai-tech/grok-1",
                                              trust_remote_code=True),
     "InternLMForCausalLM": _HfExamplesInfo("internlm/internlm-chat-7b",
@@ -236,8 +234,7 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "XverseForCausalLM": _HfExamplesInfo("xverse/XVERSE-7B-Chat",
                                          is_available_online=False,
                                          trust_remote_code=True),
-    "Zamba2ForCausalLM": _HfExamplesInfo("Zyphra/Zamba2-7B-instruct",
-                                         min_transformers_version="4.49"),
+    "Zamba2ForCausalLM": _HfExamplesInfo("Zyphra/Zamba2-7B-instruct"),
     # [Encoder-decoder]
     "BartModel": _HfExamplesInfo("facebook/bart-base"),
     "BartForConditionalGeneration": _HfExamplesInfo("facebook/bart-large-cnn"),
@@ -280,9 +277,7 @@ _CROSS_ENCODER_EXAMPLE_MODELS = {
     "BertForSequenceClassification": _HfExamplesInfo("cross-encoder/ms-marco-MiniLM-L-6-v2"),  # noqa: E501
     "RobertaForSequenceClassification": _HfExamplesInfo("cross-encoder/quora-roberta-base"),  # noqa: E501
     "XLMRobertaForSequenceClassification": _HfExamplesInfo("BAAI/bge-reranker-v2-m3"),  # noqa: E501
-    "ModernBertForSequenceClassification":
-        _HfExamplesInfo("Alibaba-NLP/gte-reranker-modernbert-base",
-                        min_transformers_version="4.49"),
+    "ModernBertForSequenceClassification": _HfExamplesInfo("Alibaba-NLP/gte-reranker-modernbert-base"),  # noqa: E501
 }
 
 _MULTIMODAL_EXAMPLE_MODELS = {
@@ -298,8 +293,7 @@ _MULTIMODAL_EXAMPLE_MODELS = {
                                                 transformers_version_reason="HF model is not compatible.",  # noqa: E501
                                                hf_overrides={"architectures": ["DeepseekVLV2ForCausalLM"]}),  # noqa: E501
     "FuyuForCausalLM": _HfExamplesInfo("adept/fuyu-8b"),
-    "Gemma3ForConditionalGeneration": _HfExamplesInfo("google/gemma-3-4b-it",
-                                                      min_transformers_version="4.50"),
+    "Gemma3ForConditionalGeneration": _HfExamplesInfo("google/gemma-3-4b-it"),
     "GLM4VForCausalLM": _HfExamplesInfo("THUDM/glm-4v-9b",
                                         trust_remote_code=True,
                                         hf_overrides={"architectures": ["GLM4VForCausalLM"]}),  # noqa: E501
@@ -335,7 +329,6 @@ _MULTIMODAL_EXAMPLE_MODELS = {
                                 extras={"2.6": "openbmb/MiniCPM-V-2_6"},  # noqa: E501
                                 trust_remote_code=True),
     "Mistral3ForConditionalGeneration": _HfExamplesInfo("mistralai/Mistral-Small-3.1-24B-Instruct-2503",  # noqa: E501
-                                                        min_transformers_version="4.50",  # noqa: E501
                                                         extras={"fp8": "nm-testing/Mistral-Small-3.1-24B-Instruct-2503-FP8-dynamic"}),  # noqa: E501
     "MolmoForCausalLM": _HfExamplesInfo("allenai/Molmo-7B-D-0924",
                                         max_transformers_version="4.48",
@@ -361,8 +354,7 @@ _MULTIMODAL_EXAMPLE_MODELS = {
                                                       hf_overrides={"architectures": ["QwenVLForConditionalGeneration"]}),  # noqa: E501
     "Qwen2AudioForConditionalGeneration": _HfExamplesInfo("Qwen/Qwen2-Audio-7B-Instruct"),  # noqa: E501
     "Qwen2VLForConditionalGeneration": _HfExamplesInfo("Qwen/Qwen2-VL-2B-Instruct"),  # noqa: E501
-    "Qwen2_5_VLForConditionalGeneration": _HfExamplesInfo("Qwen/Qwen2.5-VL-3B-Instruct",  # noqa: E501
-                                                          min_transformers_version="4.49"),  # noqa: E501
+    "Qwen2_5_VLForConditionalGeneration": _HfExamplesInfo("Qwen/Qwen2.5-VL-3B-Instruct"),  # noqa: E501
     "Qwen2_5OmniModel": _HfExamplesInfo("Qwen/Qwen2.5-Omni-7B",  # noqa: E501
                                                                   min_transformers_version="4.52"),  # noqa: E501
     "SkyworkR1VChatModel": _HfExamplesInfo("Skywork/Skywork-R1V-38B"),
