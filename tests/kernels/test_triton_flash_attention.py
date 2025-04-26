@@ -329,6 +329,8 @@ def test_op_fwd(Z,
 @pytest.mark.parametrize('causal', [True, False])
 @pytest.mark.parametrize('layout', ['bhsd'])
 @pytest.mark.parametrize('use_o_scale', [True, False])
+@pytest.mark.skipif(torch.cuda.get_device_capability() < (9, 0),
+                    reason="Triton FP8 requires CUDA 9.0 or higher")
 def test_op_fwd_fp8(Z,
                     H,
                     N_CTX_Q,
@@ -357,7 +359,7 @@ def test_op_fwd_fp8(Z,
         is_fp8=True,
         use_o_scale=use_o_scale)
 
-    o = torch.empty_like(q_quantized) if not use_o_scale else None
+    o = torch.empty_like(q_quantized) if use_o_scale else None
 
     tri_out, _ = triton_attention_rocm(q_quantized, k_quantized, v_quantized,
                                        o, input_metadata)

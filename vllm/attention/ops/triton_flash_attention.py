@@ -37,14 +37,14 @@ default_eight_bit_dtype_triton = tl.float8e4b8
 default_eight_bit_dtype_torch = current_platform.fp8_dtype()
 default_float8_info = torch.finfo(default_eight_bit_dtype_torch)
 
-FP8_MIN: triton.language.constexpr = default_float8_info.min
+FP8_MIN = triton.language.constexpr(default_float8_info.min)
 
 # According to https://github.com/vllm-project/vllm/blob/main
 #              /csrc/quantization/utils.cuh#L31,
 # need to make the max for the uz datatype be 224.0 for accuracy reasons.
-FP8_MAX: triton.language.constexpr = (default_float8_info.max
-                                      if default_eight_bit_dtype_torch
-                                      != torch.float8_e4m3fnuz else 224.0)
+FP8_MAX = triton.language.constexpr(
+    default_float8_info.max if default_eight_bit_dtype_torch !=
+    torch.float8_e4m3fnuz else 224.0)
 
 
 class MetaData:
