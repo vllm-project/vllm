@@ -1104,7 +1104,7 @@ This limitation exists because the model's mixed attention pattern (bidirectiona
 :::
 
 :::{note}
-`h2oai/h2ovl-mississippi-2b` will be available in V1 once we support backends other than FlashAttention.
+`h2oai/h2ovl-mississippi-2b` will be available in V1 once we support PagedAttention.
 :::
 
 :::{note}
