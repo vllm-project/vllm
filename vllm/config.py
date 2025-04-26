@@ -2220,9 +2220,10 @@ class SpeculativeConfig:
         excluding anything before input ids/embeddings and after
         the final hidden states.
         """
-        # no factors to consider.
-        # spec decode does not use `torch.compile` yet.
         factors: list[Any] = []
+        # Eagle3 affects the computation graph because it returns intermediate
+        # hidden states in addition to the final hidden state.
+        factors.append(self.method == "eagle3")
         hash_str = hashlib.md5(str(factors).encode(),
                                usedforsecurity=False).hexdigest()
         return hash_str
@@ -2565,6 +2566,9 @@ class SpeculativeConfig:
         token must be scored.
         """
         return self.num_speculative_tokens
+
+    def use_eagle(self) -> bool:
+        return self.method in ("eagle", "eagle3")
 
     def __repr__(self) -> str:
         method = self.method
