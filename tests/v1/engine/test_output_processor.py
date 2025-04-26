@@ -50,7 +50,6 @@ def test_incremental_detokenization(request_output_kind: RequestOutputKind,
     # Make N requests.
     requests = [
         EngineCoreRequest(request_id=f"request-{idx}",
-                          prompt=prompt,
                           prompt_token_ids=prompt_tokens,
                           arrival_time=0,
                           mm_inputs=None,
@@ -64,14 +63,13 @@ def test_incremental_detokenization(request_output_kind: RequestOutputKind,
                               output_kind=request_output_kind,
                               stop=[],
                               include_stop_str_in_output=False,
-                          )) for idx, (prompt, prompt_tokens) in enumerate(
-                              zip(dummy_test_vectors.prompt_strings,
-                                  dummy_test_vectors.prompt_tokens))
+                          ))
+        for idx, prompt_tokens in enumerate(dummy_test_vectors.prompt_tokens)
     ]
 
     # Add requests to the detokenizer.
-    for request in requests:
-        output_processor.add_request(request)
+    for request, prompt in zip(requests, dummy_test_vectors.prompt_strings):
+        output_processor.add_request(request, prompt)
 
     gen_strings = {}
     gen_tokens = {}
@@ -398,7 +396,6 @@ def test_logprobs_processor(request_output_kind: RequestOutputKind,
     ]
     requests = [
         EngineCoreRequest(request_id=request_id_list[idx],
-                          prompt=prompt,
                           prompt_token_ids=prompt_tokens,
                           arrival_time=0,
                           mm_inputs=None,
@@ -414,14 +411,13 @@ def test_logprobs_processor(request_output_kind: RequestOutputKind,
                               include_stop_str_in_output=False,
                               logprobs=num_sample_logprobs,
                               prompt_logprobs=num_prompt_logprobs,
-                          )) for idx, (prompt, prompt_tokens) in enumerate(
-                              zip(dummy_test_vectors.prompt_strings,
-                                  dummy_test_vectors.prompt_tokens))
+                          ))
+        for idx, prompt_tokens in enumerate(dummy_test_vectors.prompt_tokens)
     ]
 
     # Add requests to the detokenizer.
-    for request in requests:
-        output_processor.add_request(request)
+    for request, prompt in zip(requests, dummy_test_vectors.prompt_strings):
+        output_processor.add_request(request, prompt)
 
     gen_tokens = {}
     gen_logprobs = {}
@@ -562,7 +558,6 @@ def test_stop_token(include_stop_str_in_output: bool,
     request_id = "request-0"
     request = EngineCoreRequest(
         request_id=request_id,
-        prompt=prompt_string,
         prompt_token_ids=prompt_tokens,
         arrival_time=0,
         mm_inputs=None,
@@ -583,7 +578,7 @@ def test_stop_token(include_stop_str_in_output: bool,
         ))
 
     # Add request to the detokenizer.
-    output_processor.add_request(request)
+    output_processor.add_request(request, prompt_string)
 
     # Loop over engine core steps; run output processor
     gen_string = ""
@@ -659,7 +654,6 @@ def test_stop_string(include_stop_str_in_output: bool,
     requests = [
         EngineCoreRequest(
             request_id=request_id_list[idx],
-            prompt=prompt,
             prompt_token_ids=prompt_tokens,
             arrival_time=0,
             mm_inputs=None,
@@ -675,14 +669,13 @@ def test_stop_string(include_stop_str_in_output: bool,
                 include_stop_str_in_output=include_stop_str_in_output,
                 logprobs=num_sample_logprobs,
                 prompt_logprobs=None,
-            )) for idx, (prompt, prompt_tokens) in enumerate(
-                zip(dummy_test_vectors.prompt_strings,
-                    dummy_test_vectors.prompt_tokens))
+            ))
+        for idx, prompt_tokens in enumerate(dummy_test_vectors.prompt_tokens)
     ]
 
     # Add requests to the detokenizer.
-    for request in requests:
-        output_processor.add_request(request)
+    for request, prompt in zip(requests, dummy_test_vectors.prompt_strings):
+        output_processor.add_request(request, prompt)
 
     gen_strings = {}
     gen_tokens = {}
@@ -774,7 +767,6 @@ def test_iteration_stats(dummy_test_vectors):
     requests = [
         EngineCoreRequest(
             request_id=f"request-{idx}",
-            prompt=prompt,
             prompt_token_ids=prompt_tokens,
             arrival_time=0,
             mm_inputs=None,
@@ -783,15 +775,13 @@ def test_iteration_stats(dummy_test_vectors):
             eos_token_id=None,
             lora_request=None,
             sampling_params=SamplingParams(),
-        ) for idx, (prompt, prompt_tokens) in enumerate(
-            zip(dummy_test_vectors.prompt_strings,
-                dummy_test_vectors.prompt_tokens))
+        ) for idx, prompt_tokens in enumerate(dummy_test_vectors.prompt_tokens)
     ]
 
     # Add all requests except one to the OutputProcessor.
     num_active = len(dummy_test_vectors.generation_tokens) - 1
     for request in requests[:num_active]:
-        output_processor.add_request(request)
+        output_processor.add_request(request, None)
     inactive_request = requests[num_active]
 
     # First iteration has 2 prefills.
@@ -817,7 +807,7 @@ def test_iteration_stats(dummy_test_vectors):
     assert iteration_stats.num_generation_tokens == num_active
 
     # Add a new request - prefill and 2 decodes in this step.
-    output_processor.add_request(inactive_request)
+    output_processor.add_request(inactive_request, None)
     num_active += 1
     outputs = engine_core.get_outputs()[:num_active]
     iteration_stats = IterationStats()
