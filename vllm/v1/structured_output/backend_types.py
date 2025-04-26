@@ -12,6 +12,7 @@ class StructuredOutputOptions(enum.Enum):
     REGEX = enum.auto()
     GRAMMAR = enum.auto()
     CHOICE = enum.auto()
+    STRUCTURAL_TAG = enum.auto()
 
 
 StructuredOutputKey = tuple[StructuredOutputOptions, str]
