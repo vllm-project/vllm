@@ -1,11 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 
-from __future__ import annotations
-
 from dataclasses import dataclass
 from typing import NamedTuple, Optional, TypedDict
 
 import numpy as np
+import numpy.typing as npt
 import torch
 
 
@@ -44,7 +43,7 @@ class LogprobsTensors(NamedTuple):
 
     @staticmethod
     def empty_cpu(num_positions: int,
-                  num_tokens_per_position: int) -> LogprobsTensors:
+                  num_tokens_per_position: int) -> "LogprobsTensors":
         """Create empty LogprobsTensors on CPU."""
 
         logprob_token_ids = torch.empty(
@@ -74,7 +73,7 @@ class SamplerOutput:
 
 
 class ModelRunnerStructuredOutputMetadata(TypedDict):
-    grammar_bitmask: Optional[np.ndarray]
+    grammar_bitmask: Optional[npt.NDArray[np.int32]]
     struct_out_req_batch_indices: Optional[dict[str, int]]
 
 

@@ -1,6 +1,4 @@
 # SPDX-License-Identifier: Apache-2.0
-from __future__ import annotations
-
 import gc
 import time
 import weakref
@@ -284,7 +282,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                                         pin_memory=self.pin_memory)
         self.seq_lens_np = self.seq_lens_cpu.numpy()
 
-    def _update_states(self, scheduler_output: SchedulerOutput) -> None:
+    def _update_states(self, scheduler_output: "SchedulerOutput") -> None:
         """Update the cached states and the persistent batch with the scheduler
         output.
 
@@ -489,7 +487,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
     def _prepare_inputs(
         self,
-        scheduler_output: SchedulerOutput,
+        scheduler_output: "SchedulerOutput",
     ) -> tuple[FlashAttentionMetadata, torch.Tensor,
                Optional[SpecDecodeMetadata]]:
         total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
@@ -716,7 +714,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         )
         return common_prefix_len if use_cascade else 0
 
-    def _calc_mrope_positions(self, scheduler_output: SchedulerOutput):
+    def _calc_mrope_positions(self, scheduler_output: "SchedulerOutput"):
         mrope_pos_ptr = 0
         for index, req_id in enumerate(self.input_batch.req_ids):
             req = self.requests[req_id]
@@ -843,7 +841,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         )
         return metadata
 
-    def _execute_mm_encoder(self, scheduler_output: SchedulerOutput):
+    def _execute_mm_encoder(self, scheduler_output: "SchedulerOutput"):
         scheduled_encoder_inputs = scheduler_output.scheduled_encoder_inputs
         if not scheduled_encoder_inputs:
             return
@@ -907,7 +905,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
     def _gather_mm_embeddings(
         self,
-        scheduler_output: SchedulerOutput,
+        scheduler_output: "SchedulerOutput",
     ) -> list[torch.Tensor]:
         mm_embeds: list[torch.Tensor] = []
         for req_id in self.input_batch.req_ids:
@@ -956,9 +954,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
     def apply_grammar_bitmask(
         self,
-        scheduler_output: SchedulerOutput,
+        scheduler_output: "SchedulerOutput",
         logits: torch.Tensor,
-    ) -> tuple[np.ndarray | None, dict[str, int]]:
+    ) -> tuple[Optional[np.ndarray], dict[str, int]]:
         # Serialization of np.ndarray is much more efficient than a tensor,
         # so we receive it in that format.
         grammar_bitmask = scheduler_output.grammar_bitmask
@@ -1111,8 +1109,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         logits = self.model.compute_logits(sample_hidden_states, None)
 
         # Apply structured output bitmasks if present
-        grammar_bitmask_np: np.ndarray | None = None
-        struct_out_req_batch_indices: dict[str, int] | None = None
+        grammar_bitmask_np: Optional[np.ndarray] = None
+        struct_out_req_batch_indices: Optional[dict[str, int]] = None
         if scheduler_output.grammar_bitmask is not None:
             grammar_bitmask_np, struct_out_req_batch_indices = self.apply_grammar_bitmask(  # noqa: E501
                 scheduler_output,

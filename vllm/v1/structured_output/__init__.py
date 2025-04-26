@@ -126,25 +126,31 @@ class StructuredOutputManager:
         # and deserialization when sending this to the GPU workers.
         return bitmask_tensor.numpy()
 
-    def jump_forward_tokens(self, request: Request, bitmask: np.ndarray,
-                            batch_index: int) -> list[int]:
+    def jump_forward_tokens(
+        self,
+        request: Request,
+        bitmask: npt.NDArray[np.int32],
+        batch_index: int,
+    ) -> list[int] | None:
         """
         For structured output requests, repeatedly
         check if the grammar bitmask is a single-token bitmask, and if so,
         advance the FSM and collect all jump-forward tokens.
         Returns the list of jump-forward token IDs.
+
+        We can also consider to perform jump_and_retokenize here as well.
         """
         if TYPE_CHECKING:
             assert request.structured_output_request is not None
             assert request.structured_output_request.grammar is not None
             assert self.backend is not None
 
-        jump_tokens = []
         is_single, unique_token_id = xgr_testing._is_single_token_bitmask(
-            torch.from_numpy(bitmask), self.backend.vocab_size, batch_index)
-        if is_single:
-            jump_tokens.append(unique_token_id)
-        return jump_tokens
+            torch.from_numpy(bitmask),
+            vocab_size=self.backend.vocab_size,
+            index=batch_index,
+        )
+        return [unique_token_id] if is_single else None
 
     def clear_backend(self) -> None:
         if self.backend is not None:
