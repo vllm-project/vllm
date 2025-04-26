@@ -468,7 +468,7 @@ class MPClient(EngineCoreClient):
             raise EngineDeadError()
 
     def add_pending_message(self, tracker: zmq.MessageTracker, msg: Any):
-        if not tracker.done():
+        if not tracker.done:
             self.pending_messages.appendleft((tracker, msg))
 
     def free_pending_messages(self):

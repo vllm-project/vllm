@@ -556,7 +556,7 @@ class EngineCoreProc(EngineCore):
                 tracker = socket.send_multipart(buffers,
                                                 copy=False,
                                                 track=True)
-                if not tracker.done():
+                if not tracker.done:
                     ref = outputs if len(buffers) > 1 else None
                     pending.appendleft((tracker, ref, buffer))
                 elif len(reuse_buffers) < 2:
