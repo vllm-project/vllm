@@ -350,7 +350,7 @@ class ModelConfig:
     configure the neuron config that can not be gathered from the vllm
     arguments. e.g. `{"cast_logits_dtype": "bloat16"}`. When specified via CLI,
     the argument must be a valid JSON string."""
-    pooler_config: Optional["PoolerConfig"] = None
+    pooler_config: Optional["PoolerConfig"] = field(init=False)
     """Pooler config which controls the behaviour of output pooling in pooling
     models."""
     override_pooler_config: Optional[Union[dict, "PoolerConfig"]] = None
@@ -554,12 +554,7 @@ class ModelConfig:
         else:
             self.truncation_side = "right"
 
-        if self.override_pooler_config is not None:
-            if isinstance(self.override_pooler_config, dict):
-                self.override_pooler_config = PoolerConfig(
-                    **self.override_pooler_config)
-            self.pooler_config = self._init_pooler_config(
-                self.override_pooler_config)
+        self.pooler_config = self._init_pooler_config()
 
         self._verify_quantization()
         self._verify_cuda_graph()
@@ -612,29 +607,32 @@ class ModelConfig:
         return get_sentence_transformer_tokenizer_config(
             self.model, self.revision)
 
-    def _init_pooler_config(
-        self,
-        override_pooler_config: "PoolerConfig",
-    ) -> Optional["PoolerConfig"]:
+    def _init_pooler_config(self) -> Optional["PoolerConfig"]:
 
         if self.runner_type == "pooling":
+            if isinstance(self.override_pooler_config, dict):
+                self.override_pooler_config = PoolerConfig(
+                    **self.override_pooler_config)
+
+            pooler_config = self.override_pooler_config or PoolerConfig()
+
             base_config = get_pooling_config(self.model, self.revision)
             if base_config is not None:
                 # Only set values that are not overridden by the user
                 for k, v in base_config.items():
-                    if getattr(override_pooler_config, k) is None:
-                        setattr(override_pooler_config, k, v)
+                    if getattr(pooler_config, k) is None:
+                        setattr(pooler_config, k, v)
 
             if self.is_matryoshka:
-                if override_pooler_config.normalize is None:
-                    override_pooler_config.normalize = True
-                elif not override_pooler_config.normalize:
+                if pooler_config.normalize is None:
+                    pooler_config.normalize = True
+                elif not pooler_config.normalize:
                     raise ValueError(
                         "`normalize` must be enabled (set to True) "
                         "for models that are compatible with "
                         "Matryoshka Representation.")
 
-            return override_pooler_config
+            return pooler_config
 
         return None
 
