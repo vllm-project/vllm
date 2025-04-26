@@ -18,7 +18,7 @@ from transformers.models.phi4_multimodal.modeling_phi4_multimodal import (
 from vllm.attention.layer import MultiHeadAttention
 from vllm.config import VllmConfig
 from vllm.distributed import get_pp_group, divide, get_tensor_model_parallel_world_size
-from vllm.model_executor.layers.activation import get_act_fn
+from vllm.model_executor.layers.activation import get_act_fn, get_act_and_mul_fn
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                MergedColumnParallelLinear,
                                                QKVParallelLinear,
@@ -211,7 +211,7 @@ class Phi4MultimodalAudioMLP(nn.Module):
     ):
         super().__init__()
         self.layer_norm = nn.LayerNorm(config.hidden_size)
-        self.act_fn = get_act_fn("silu")
+        self.act_fn = get_act_and_mul_fn("silu")
         self.gate_up_proj = MergedColumnParallelLinear(config.hidden_size,
                                         [config.intermediate_size] * 2,
                                         bias=True,
@@ -268,9 +268,6 @@ class Phi4MultimodalAudioAttention(nn.Module):
         self.tp_size = get_tensor_model_parallel_world_size()
         self.num_heads_per_partition = divide(self.num_heads, self.tp_size)
 
-        self.attn = MultiHeadAttention(self.num_heads_per_partition,
-                                       self.head_dim, self.scale)
-
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -279,11 +276,10 @@ class Phi4MultimodalAudioAttention(nn.Module):
         qkv_states, _ = self.qkv_proj(hidden_states)
         query, key, value = qkv_states.chunk(3, dim=-1)
 
-        bsz, q_len, _ = query.size()
-        kv_len = key.size(1)
-        query = query.view(bsz, q_len, self.num_heads, self.head_dim)
-        key = key.view(bsz, kv_len, self.num_heads, self.head_dim)
-        value = value.view(bsz, kv_len, self.num_heads, self.head_dim)
+        bsz, seq_len, _ = query.size()
+        query = query.view(bsz, seq_len, self.num_heads, self.head_dim)
+        key = key.view(bsz, seq_len, self.num_heads, self.head_dim)
+        value = value.view(bsz, seq_len, self.num_heads, self.head_dim)
         query, key, value = (x.transpose(1, 2)
                              for x in (query, key, value))
         out = F.scaled_dot_product_attention(query,
@@ -291,7 +287,7 @@ class Phi4MultimodalAudioAttention(nn.Module):
                                              value,
                                              scale=self.scale,
                                              attn_mask=attention_mask,)
-        out = out.transpose(1, 2)
+        out = out.transpose(1, 2).reshape(bsz, seq_len, -1)
 
         attn_output, _ = self.o_proj(out)
 
@@ -1137,7 +1133,7 @@ class Phi4MultimodalForCausalLM(nn.Module, SupportsLoRA, SupportsMultiModal):
         dtype = next(self.audio_embed.parameters()).dtype
         audio_embeds = [
             self.audio_embed(
-                features.to(dtype),
+                features.unsqueeze(0).to(dtype),
                 audio_projection_mode=audio_projection_mode,
             ) for features in audio_features
         ]
