@@ -32,12 +32,7 @@
 using namespace cute;
 using namespace cutlass::fmha::kernel;
 
-template <bool v>
-struct IsPersistent {
-  static const bool value = v;
-};
-
-template <typename T, typename PersistenceOption = IsPersistent<true>>
+template <typename T, bool PersistenceOption = true>
 struct MlaSm100 {
   using Element = T;
   using ElementAcc = float;
@@ -55,7 +50,7 @@ struct MlaSm100 {
   using StrideO = StrideK;                            // H D B
   using StrideLSE = cute::tuple<_1, int>;             // H B
 
-  using TileScheduler = std::conditional_t<PersistenceOption::value,
+  using TileScheduler = std::conditional_t<PersistenceOption,
                                            Sm100MlaPersistentTileScheduler,
                                            Sm100MlaIndividualTileScheduler>;
 
@@ -70,7 +65,7 @@ template <typename T>
 typename T::Fmha::Arguments args_from_options(
     at::Tensor const& out, at::Tensor const& q_nope_and_q_pe,
     at::Tensor const& kv_c_and_k_pe_cache, at::Tensor const& seq_lens,
-    at::Tensor const& page_table) {
+    at::Tensor const& page_table, double scale) {
   cutlass::KernelHardwareInfo hw_info;
   hw_info.device_id = q_nope_and_q_pe.device().index();
   hw_info.sm_count =
@@ -89,11 +84,6 @@ typename T::Fmha::Arguments args_from_options(
 
   auto [H, K, D, B] = problem_shape;
   auto [D_latent, D_rope] = D;
-
-  // the scale is based on the non-absorbed sizes, change as appropriate
-  // we can't determine this parameter from the info we have, it's an input
-  int D_non_latent = 128;
-  float scale = 1.0 / sqrt(1.0 * (D_non_latent + D_rope));
 
   using StrideQ = typename T::StrideQ;
   using StrideK = typename T::StrideK;
@@ -116,9 +106,10 @@ typename T::Fmha::Arguments args_from_options(
   using ElementAcc = typename T::ElementAcc;
   auto Q_ptr = static_cast<Element*>(q_nope_and_q_pe.data_ptr());
   auto C_ptr = static_cast<Element*>(kv_c_and_k_pe_cache.data_ptr());
+  auto scale_f = static_cast<float>(scale);
   typename T::Fmha::Arguments arguments{
       problem_shape,
-      {scale, Q_ptr, stride_Q, Q_ptr + D_latent, stride_Q, C_ptr, stride_C,
+      {scale_f, Q_ptr, stride_Q, Q_ptr + D_latent, stride_Q, C_ptr, stride_C,
        C_ptr + D_latent, stride_C, static_cast<int*>(seq_lens.data_ptr()),
        static_cast<int*>(page_table.data_ptr()), stride_PT, page_count_total,
        page_size},
@@ -139,11 +130,11 @@ typename T::Fmha::Arguments args_from_options(
 template <typename Element>
 void runMla(at::Tensor const& out, at::Tensor const& q_nope_and_q_pe,
             at::Tensor const& kv_c_and_k_pe_cache, at::Tensor const& seq_lens,
-            at::Tensor const& page_table, cudaStream_t stream) {
+            at::Tensor const& page_table, float scale, cudaStream_t stream) {
   using MlaSm100Type = MlaSm100<Element>;
   typename MlaSm100Type::Fmha fmha;
   auto arguments = args_from_options<MlaSm100Type>(
-      out, q_nope_and_q_pe, kv_c_and_k_pe_cache, seq_lens, page_table);
+      out, q_nope_and_q_pe, kv_c_and_k_pe_cache, seq_lens, page_table, scale);
   size_t workspace_size = MlaSm100Type::Fmha::get_workspace_size(arguments);
   auto const workspace_options = torch::TensorOptions()
                                      .dtype(torch::kUInt8)
@@ -161,7 +152,8 @@ void cutlass_mla_decode_sm100a(torch::Tensor const& out,
                                torch::Tensor const& q_nope_and_q_pe,
                                torch::Tensor const& kv_c_and_k_pe_cache,
                                torch::Tensor const& seq_lens,
-                               torch::Tensor const& page_table) {
+                               torch::Tensor const& page_table,
+                               double scale) {
   TORCH_CHECK(q_nope_and_q_pe.device().is_cuda(),
               "q_nope_and_q_pe must be on CUDA");
   TORCH_CHECK(q_nope_and_q_pe.dim() == 3,
@@ -170,24 +162,30 @@ void cutlass_mla_decode_sm100a(torch::Tensor const& out,
               "kv_c_and_k_pe_cache must be a 3D tensor");
   TORCH_CHECK(seq_lens.dim() == 1, "seq_lens must be a 1D tensor");
   TORCH_CHECK(page_table.dim() == 2, "page_table must be a 2D tensor");
+  TORCH_CHECK(out.dim() == 3, "out must be a 3D tensor");
 
   auto B_q = q_nope_and_q_pe.size(0);
-  auto H = q_nope_and_q_pe.size(1);
+  auto H_q = q_nope_and_q_pe.size(1);
   auto D_q = q_nope_and_q_pe.size(2);
   auto B_pt = page_table.size(0);
   auto PAGE_NUM = page_table.size(1);
   auto PAGE_SIZE = kv_c_and_k_pe_cache.size(1);
   auto D_ckv = kv_c_and_k_pe_cache.size(2);
+  auto B_o = out.size(0);
+  auto H_o = out.size(1);
+  auto D_o = out.size(2);
 
   TORCH_CHECK(D_q == D_ckv && D_q == 576,
               "D_q must be equal to D_ckv and D_q must be equal to 576");
-  TORCH_CHECK(H == 128, "H must be 128");
+  TORCH_CHECK(H_q == H_o && H_q == 128,
+              "H_q must be equal to H_o and H_q must be 128");
   TORCH_CHECK(PAGE_SIZE > 0 && (PAGE_SIZE & (PAGE_SIZE - 1)) == 0,
               "PAGE_SIZE must be a power of 2");
-  TORCH_CHECK(B_q == B_pt,
-              "Batch dims must be same for page_table and q_nope_and_q_pe");
+  TORCH_CHECK(B_q == B_pt && B_q == B_o,
+              "Batch dims must be same for page_table, q_nope_and_q_pe, and out");
   TORCH_CHECK(PAGE_NUM % (128 / PAGE_SIZE) == 0,
               "PAGE_NUM must be divisible by 128 / PAGE_SIZE");
+  TORCH_CHECK(D_o == 512, "D_o must be equal to 512");
 
   TORCH_CHECK(
       q_nope_and_q_pe.dtype() == at::ScalarType::Half ||
@@ -207,13 +205,13 @@ void cutlass_mla_decode_sm100a(torch::Tensor const& out,
       at::cuda::getCurrentCUDAStream(q_nope_and_q_pe.get_device());
   if (in_dtype == at::ScalarType::Half) {
     runMla<cutlass::half_t>(out, q_nope_and_q_pe, kv_c_and_k_pe_cache, seq_lens,
-                            page_table, stream);
+                            page_table, scale, stream);
   } else if (in_dtype == at::ScalarType::BFloat16) {
     runMla<cutlass::bfloat16_t>(out, q_nope_and_q_pe, kv_c_and_k_pe_cache,
-                                seq_lens, page_table, stream);
+                                seq_lens, page_table, scale, stream);
   } else if (in_dtype == at::ScalarType::Float8_e4m3fn) {
     runMla<cutlass::float_e4m3_t>(out, q_nope_and_q_pe, kv_c_and_k_pe_cache,
-                                  seq_lens, page_table, stream);
+                                  seq_lens, page_table, scale, stream);
   } else {
     TORCH_CHECK(false, "Unsupported input data type of MLA");
   }

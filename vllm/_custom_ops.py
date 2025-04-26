@@ -1527,16 +1527,14 @@ def flash_mla_with_kvcache(
     return out, softmax_lse
 
 
-def cutlass_mla_decode(q_nope_and_q_pe: torch.Tensor,
+def cutlass_mla_decode(out: torch.Tensor,
+                       q_nope_and_q_pe: torch.Tensor,
                        kv_c_and_k_pe_cache: torch.Tensor,
                        seq_lens: torch.Tensor,
-                       page_table: torch.Tensor) -> torch.Tensor:
+                       page_table: torch.Tensor,
+                       scale: float) -> torch.Tensor:
     B_q, H, _ = q_nope_and_q_pe.shape
 
-    out = torch.empty((B_q, H, 512),
-                      device=q_nope_and_q_pe.device,
-                      dtype=q_nope_and_q_pe.dtype)
-
     torch.ops._C.cutlass_mla_decode(out, q_nope_and_q_pe, kv_c_and_k_pe_cache,
-                                    seq_lens, page_table)
+                                    seq_lens, page_table, scale)
     return out

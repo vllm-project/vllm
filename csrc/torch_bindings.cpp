@@ -134,7 +134,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   ops.def(
       "cutlass_mla_decode(Tensor! out, Tensor q_nope_and_q_pe,"
       "                   Tensor kv_c_and_k_pe_cache, Tensor seq_lens,"
-      "                   Tensor page_table) -> ()");
+      "                   Tensor page_table, float scale) -> ()");
   ops.impl("cutlass_mla_decode", torch::kCUDA, &cutlass_mla_decode);
 
   // Layernorm

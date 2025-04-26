@@ -132,7 +132,8 @@ void cutlass_mla_decode(torch::Tensor const& out,
                         torch::Tensor const& q_nope_and_q_pe,
                         torch::Tensor const& kv_c_and_k_pe_cache,
                         torch::Tensor const& seq_lens,
-                        torch::Tensor const& page_table);
+                        torch::Tensor const& page_table,
+                        double scale);
 
 torch::Tensor get_cuda_view_from_cpu_tensor(torch::Tensor& cpu_tensor);
 
