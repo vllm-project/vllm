@@ -215,6 +215,8 @@ class EagleProposer:
         loader = get_model_loader(self.vllm_config.load_config)
         target_layer_num = self.vllm_config.model_config.get_num_layers(
             self.vllm_config.parallel_config)
+        target_attn_layer_names = set(
+            self.vllm_config.compilation_config.static_forward_context.keys())
 
         draft_model_config = \
             self.vllm_config.speculative_config.draft_model_config
@@ -234,8 +236,12 @@ class EagleProposer:
                 self.model = Eagle3LlamaForCausalLM(
                     model_config=draft_model_config,
                     start_layer_id=target_layer_num).to(target_device)
-            # TODO: implement it
-            self.attn_layer_name = "TODO"
+
+        draft_attn_layer_names = (
+            self.vllm_config.compilation_config.static_forward_context.keys() -
+            target_attn_layer_names)
+        assert len(draft_attn_layer_names) == 1
+        self.attn_layer_name = iter(draft_attn_layer_names).__next__()
 
         loaded_weights = self.model.load_weights(
             loader.get_all_weights(
