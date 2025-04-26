@@ -707,7 +707,6 @@ class Scheduler(SchedulerInterface):
             if new_token_ids and request.use_structured_output:
                 reasoner = self.structured_output_manager.reasoner
                 advance_fsm = reasoner is None
-                is_reasoning_end_this_step = False
 
                 # NOTE: use_structured_output implies
                 # structured_output_request is not None,
@@ -723,17 +722,13 @@ class Scheduler(SchedulerInterface):
                         advance_fsm = True
                     elif reasoner.is_reasoning_end(request.all_token_ids):
                         request.structured_output_request.reasoning_ended = True
-                        is_reasoning_end_this_step = True
                         advance_fsm = False
                     else:
                         advance_fsm = False
 
-                # Only advance FSM if reasoning was already off OR
-                # if we are not in the specific step where reasoning just ended.
-                # yapf: off
-                if advance_fsm and (not is_reasoning_end_this_step if reasoner is not None else True):  # noqa: E501
-                    request.structured_output_request.grammar.accept_tokens(req_id, new_token_ids)  # noqa: E501
-                # yapf: on
+                if advance_fsm:
+                    request.structured_output_request.grammar.accept_tokens(
+                        req_id, new_token_ids)
 
             # Get prompt logprobs for this request.
             prompt_logprobs_tensors = prompt_logprobs_dict.get(req_id)
