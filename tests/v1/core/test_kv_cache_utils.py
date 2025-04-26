@@ -310,7 +310,7 @@ def test_metrics():
     def stats(requests, queries, hits):
         return PrefixCacheStats(requests=requests, queries=queries, hits=hits)
 
-    metrics = PrefixCachingMetrics(interval=5)
+    metrics = PrefixCachingMetrics(max_recent_requests=5)
     assert metrics.hit_rate == 0.0
 
     metrics.observe(stats(1, 20, 9))
