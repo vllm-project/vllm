@@ -288,7 +288,6 @@ def test_metric_spec_decode(
 @pytest.mark.parametrize("max_tokens", [10])
 @pytest.mark.parametrize("log_interval", [1, 3, 5, 7])
 def test_metric_spec_decode_interval(
-    vllm_runner,
     example_prompts,
     model: str,
     dtype: str,

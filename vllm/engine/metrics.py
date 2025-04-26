@@ -128,28 +128,28 @@ class Metrics:
                 multiprocess_mode="sum")
 
         # Multi-modal cache stats
-        self.gauge_mm_cache_usage = prometheus_client.Gauge(
+        self.gauge_mm_cache_usage = self._gauge_cls(
             name="vllm:mm_cache_usage",
             documentation="Multi-modal cache usage. "
             "1 means 100 percent usage.",
             labelnames=labelnames)
 
-        self.gauge_mm_cache_size_G = prometheus_client.Gauge(
+        self.gauge_mm_cache_size_G = self._gauge_cls(
             name="vllm:mm_cache_size_G",
             documentation="Multi-modal cache size (in GiB).",
             labelnames=labelnames)
 
-        self.gauge_mm_cache_size_items = prometheus_client.Gauge(
+        self.gauge_mm_cache_size_items = self._gauge_cls(
             name="vllm:mm_cache_size_items",
             documentation="Multi-modal cache size (in number of items).",
             labelnames=labelnames)
 
-        self.counter_mm_cache_queries = prometheus_client.Counter(
+        self.counter_mm_cache_queries = self._counter_cls(
             name="vllm:mm_cache_queries",
             documentation="Multi-modal cache queries.",
             labelnames=labelnames)
 
-        self.counter_mm_cache_hits = prometheus_client.Counter(
+        self.counter_mm_cache_hits = self._counter_cls(
             name="vllm:mm_cache_hits",
             documentation="Multi-modal cache hits.",
             labelnames=labelnames)
