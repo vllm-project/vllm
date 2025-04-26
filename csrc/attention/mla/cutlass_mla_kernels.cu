@@ -90,9 +90,8 @@ typename T::Fmha::Arguments args_from_options(
   using StrideO = typename T::StrideO;
   using StrideLSE = typename T::StrideLSE;
 
-  StrideQ stride_Q_latent =
-      cute::make_tuple(static_cast<int64_t>(D_latent), _1{},
-                       static_cast<int64_t>(H * D_latent));
+  StrideQ stride_Q_latent = cute::make_tuple(
+      static_cast<int64_t>(D_latent), _1{}, static_cast<int64_t>(H * D_latent));
   StrideQ stride_Q_rope = cute::make_tuple(static_cast<int64_t>(D_rope), _1{},
                                            static_cast<int64_t>(H * D_rope));
   StrideK stride_C =
@@ -112,8 +111,8 @@ typename T::Fmha::Arguments args_from_options(
   auto scale_f = static_cast<float>(scale);
   typename T::Fmha::Arguments arguments{
       problem_shape,
-      {scale_f, Q_latent_ptr, stride_Q_latent, Q_rope_ptr, stride_Q_rope,
-       C_ptr, stride_C, C_ptr + D_latent, stride_C,
+      {scale_f, Q_latent_ptr, stride_Q_latent, Q_rope_ptr, stride_Q_rope, C_ptr,
+       stride_C, C_ptr + D_latent, stride_C,
        static_cast<int*>(seq_lens.data_ptr()),
        static_cast<int*>(page_table.data_ptr()), stride_PT, page_count_total,
        page_size},
@@ -141,9 +140,8 @@ void runMla(at::Tensor const& out, at::Tensor const& q_nope,
   auto arguments = args_from_options<MlaSm100Type>(
       out, q_nope, q_pe, kv_c_and_k_pe_cache, seq_lens, page_table, scale);
   size_t workspace_size = MlaSm100Type::Fmha::get_workspace_size(arguments);
-  auto const workspace_options = torch::TensorOptions()
-                                     .dtype(torch::kUInt8)
-                                     .device(q_nope.device());
+  auto const workspace_options =
+      torch::TensorOptions().dtype(torch::kUInt8).device(q_nope.device());
   auto workspace = torch::empty(workspace_size, workspace_options);
 
   CUTLASS_CHECK(fmha.can_implement(arguments));
@@ -196,11 +194,10 @@ void cutlass_mla_decode_sm100a(torch::Tensor const& out,
               "PAGE_NUM must be divisible by 128 / PAGE_SIZE");
   TORCH_CHECK(D_o == 512, "D_o must be equal to 512");
 
-  TORCH_CHECK(
-      q_nope.dtype() == at::ScalarType::Half ||
-          q_nope.dtype() == at::ScalarType::BFloat16 ||
-          q_nope.dtype() == at::ScalarType::Float8_e4m3fn,
-      "q_nope must be a half, bfloat16, or float8_e4m3fn tensor");
+  TORCH_CHECK(q_nope.dtype() == at::ScalarType::Half ||
+                  q_nope.dtype() == at::ScalarType::BFloat16 ||
+                  q_nope.dtype() == at::ScalarType::Float8_e4m3fn,
+              "q_nope must be a half, bfloat16, or float8_e4m3fn tensor");
   TORCH_CHECK(kv_c_and_k_pe_cache.dtype() == q_nope.dtype() &&
                   q_nope.dtype() == q_pe.dtype(),
               "kv_c_and_k_pe_cache, q_nope, and q_pe must be the same type");
@@ -217,11 +214,11 @@ void cutlass_mla_decode_sm100a(torch::Tensor const& out,
     runMla<cutlass::half_t>(out, q_nope, q_pe, kv_c_and_k_pe_cache, seq_lens,
                             page_table, scale, stream);
   } else if (in_dtype == at::ScalarType::BFloat16) {
-    runMla<cutlass::bfloat16_t>(out, q_nope, q_pe, kv_c_and_k_pe_cache, seq_lens,
-                                page_table, scale, stream);
+    runMla<cutlass::bfloat16_t>(out, q_nope, q_pe, kv_c_and_k_pe_cache,
+                                seq_lens, page_table, scale, stream);
   } else if (in_dtype == at::ScalarType::Float8_e4m3fn) {
-    runMla<cutlass::float_e4m3_t>(out, q_nope, q_pe, kv_c_and_k_pe_cache, seq_lens,
-                                  page_table, scale, stream);
+    runMla<cutlass::float_e4m3_t>(out, q_nope, q_pe, kv_c_and_k_pe_cache,
+                                  seq_lens, page_table, scale, stream);
   } else {
     TORCH_CHECK(false, "Unsupported input data type of MLA");
   }

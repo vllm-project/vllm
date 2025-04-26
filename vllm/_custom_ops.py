@@ -1528,8 +1528,7 @@ def flash_mla_with_kvcache(
 
 
 def cutlass_mla_decode(out: torch.Tensor, q_nope: torch.Tensor,
-                       q_pe: torch.Tensor,
-                       kv_c_and_k_pe_cache: torch.Tensor,
+                       q_pe: torch.Tensor, kv_c_and_k_pe_cache: torch.Tensor,
                        seq_lens: torch.Tensor, page_table: torch.Tensor,
                        scale: float) -> torch.Tensor:
     torch.ops._C.cutlass_mla_decode(out, q_nope, q_pe, kv_c_and_k_pe_cache,
