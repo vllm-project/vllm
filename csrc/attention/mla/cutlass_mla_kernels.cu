@@ -50,9 +50,9 @@ struct MlaSm100 {
   using StrideO = StrideK;                            // H D B
   using StrideLSE = cute::tuple<_1, int>;             // H B
 
-  using TileScheduler = std::conditional_t<PersistenceOption,
-                                           Sm100MlaPersistentTileScheduler,
-                                           Sm100MlaIndividualTileScheduler>;
+  using TileScheduler =
+      std::conditional_t<PersistenceOption, Sm100MlaPersistentTileScheduler,
+                         Sm100MlaIndividualTileScheduler>;
 
   using FmhaKernel =
       cutlass::fmha::kernel::Sm100FmhaMlaKernelTmaWarpspecialized<
@@ -152,8 +152,7 @@ void cutlass_mla_decode_sm100a(torch::Tensor const& out,
                                torch::Tensor const& q_nope_and_q_pe,
                                torch::Tensor const& kv_c_and_k_pe_cache,
                                torch::Tensor const& seq_lens,
-                               torch::Tensor const& page_table,
-                               double scale) {
+                               torch::Tensor const& page_table, double scale) {
   TORCH_CHECK(q_nope_and_q_pe.device().is_cuda(),
               "q_nope_and_q_pe must be on CUDA");
   TORCH_CHECK(q_nope_and_q_pe.dim() == 3,
@@ -181,8 +180,9 @@ void cutlass_mla_decode_sm100a(torch::Tensor const& out,
               "H_q must be equal to H_o and H_q must be 128");
   TORCH_CHECK(PAGE_SIZE > 0 && (PAGE_SIZE & (PAGE_SIZE - 1)) == 0,
               "PAGE_SIZE must be a power of 2");
-  TORCH_CHECK(B_q == B_pt && B_q == B_o,
-              "Batch dims must be same for page_table, q_nope_and_q_pe, and out");
+  TORCH_CHECK(
+      B_q == B_pt && B_q == B_o,
+      "Batch dims must be same for page_table, q_nope_and_q_pe, and out");
   TORCH_CHECK(PAGE_NUM % (128 / PAGE_SIZE) == 0,
               "PAGE_NUM must be divisible by 128 / PAGE_SIZE");
   TORCH_CHECK(D_o == 512, "D_o must be equal to 512");
