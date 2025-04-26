@@ -4,7 +4,9 @@ import torch.nn as nn
 import triton
 import triton.language as tl
 
-from vllm.config import VllmConfig, set_current_vllm_config
+from vllm.attention.layer import Attention
+from vllm.config import (VllmConfig, get_layers_from_vllm_config,
+                         set_current_vllm_config)
 from vllm.forward_context import set_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader.loader import get_model_loader
@@ -216,7 +218,7 @@ class EagleProposer:
         target_layer_num = self.vllm_config.model_config.get_num_layers(
             self.vllm_config.parallel_config)
         target_attn_layer_names = set(
-            self.vllm_config.compilation_config.static_forward_context.keys())
+            get_layers_from_vllm_config(self.vllm_config, Attention).keys())
 
         draft_model_config = \
             self.vllm_config.speculative_config.draft_model_config
@@ -238,7 +240,7 @@ class EagleProposer:
                     start_layer_id=target_layer_num).to(target_device)
 
         draft_attn_layer_names = (
-            self.vllm_config.compilation_config.static_forward_context.keys() -
+            get_layers_from_vllm_config(self.vllm_config, Attention).keys() -
             target_attn_layer_names)
         assert len(draft_attn_layer_names) == 1
         self.attn_layer_name = iter(draft_attn_layer_names).__next__()
