@@ -127,8 +127,6 @@ def run_phi4_multimodal(question: str, audio_count: int) -> ModelRequestData:
         enable_lora=True,
         max_lora_rank=320,
         limit_mm_per_prompt={"audio": audio_count},
-        dtype="half",
-        enforce_eager=True,
     )
 
     return ModelRequestData(
