@@ -84,6 +84,10 @@ class AttentionBackend(ABC, Generic[AttentionMetadataType,
         raise NotImplementedError
 
     @staticmethod
+    def get_kv_cache_stride_order() -> Tuple[int, ...]:
+        raise NotImplementedError
+
+    @staticmethod
     @abstractmethod
     def swap_blocks(
         src_kv_cache: torch.Tensor,
@@ -242,6 +246,7 @@ class AttentionLayer(Protocol):
     _v_scale: torch.Tensor
     _k_scale_float: float
     _v_scale_float: float
+    _prob_scale: torch.Tensor
 
     def forward(
         self,

@@ -37,7 +37,6 @@ def make_request(request_id,
 
     return Request(
         request_id=request_id,
-        prompt=None,
         prompt_token_ids=prompt_token_ids,
         multi_modal_inputs=multi_modal_inputs,
         multi_modal_hashes=mm_hashes,
@@ -311,7 +310,7 @@ def test_metrics():
     def stats(requests, queries, hits):
         return PrefixCacheStats(requests=requests, queries=queries, hits=hits)
 
-    metrics = PrefixCachingMetrics(interval=5)
+    metrics = PrefixCachingMetrics(max_recent_requests=5)
     assert metrics.hit_rate == 0.0
 
     metrics.observe(stats(1, 20, 9))
