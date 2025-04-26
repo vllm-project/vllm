@@ -4080,8 +4080,8 @@ def assert_hashable(text):
 T = TypeVar("T")
 
 
-def get_layers_from_config(vllm_config: VllmConfig,
-                           layer_type: type[T]) -> dict[str, T]:
+def get_layers_from_vllm_config(vllm_config: VllmConfig,
+                                layer_type: type[T]) -> dict[str, T]:
     return {
         layer_name: layer
         for layer_name, layer in

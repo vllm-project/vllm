@@ -37,7 +37,7 @@ from vllm.attention.backends.utils import (PAD_SLOT_ID, compute_slot_mapping,
                                            is_block_tables_empty)
 from vllm.attention.layer import Attention
 from vllm.attention.ops.paged_attn import PagedAttention
-from vllm.config import VllmConfig, get_layers_from_config
+from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.logger import init_logger
 from vllm.utils import (async_tensor_h2d, get_kv_cache_torch_dtype,
                         make_tensor_with_pad)
@@ -128,7 +128,7 @@ def get_per_layer_parameters(
     to use during `plan`.
     """
 
-    layers = get_layers_from_config(vllm_config, Attention)
+    layers = get_layers_from_vllm_config(vllm_config, Attention)
     per_layer_params: Dict[str, PerLayerParameters] = {}
 
     for key, layer in layers.items():
