@@ -559,9 +559,6 @@ class SyncMPClient(MPClient):
         return future.result()
 
     def add_request(self, request: EngineCoreRequest) -> None:
-        # NOTE: text prompt is not needed in the core engine as it has been
-        # tokenized.
-        request.prompt = None
         self._send_input(EngineCoreRequestType.ADD, request)
 
     def abort_requests(self, request_ids: list[str]) -> None:
@@ -729,9 +726,6 @@ class AsyncMPClient(MPClient):
         return await future
 
     async def add_request_async(self, request: EngineCoreRequest) -> None:
-        # NOTE: text prompt is not needed in the core engine as it has been
-        # tokenized.
-        request.prompt = None
         await self._send_input(EngineCoreRequestType.ADD, request)
         self._ensure_output_queue_task()
 
