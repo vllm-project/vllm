@@ -1,9 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 import asyncio
+import contextlib
 import queue
 import uuid
 import weakref
 from abc import ABC, abstractmethod
+from collections import deque
 from collections.abc import Awaitable, Sequence
 from concurrent.futures import Future
 from dataclasses import dataclass, field
@@ -396,6 +398,12 @@ class MPClient(EngineCoreClient):
             self._wait_for_engine_startup()
 
             self.utility_results: dict[int, AnyFuture] = {}
+
+            # Request objects which may contain pytorch-allocated tensors
+            # that we need to keep references to until zmq is done with the
+            # underlying data.
+            self.pending_messages = deque[tuple[zmq.MessageTracker, Any]]()
+
             success = True
         finally:
             if not success:
@@ -458,6 +466,14 @@ class MPClient(EngineCoreClient):
     def ensure_alive(self):
         if self.resources.engine_dead:
             raise EngineDeadError()
+
+    def add_pending_message(self, tracker: zmq.MessageTracker, msg: Any):
+        if not tracker.done:
+            self.pending_messages.appendleft((tracker, msg))
+
+    def free_pending_messages(self):
+        while self.pending_messages and self.pending_messages[-1][0].done:
+            self.pending_messages.pop()
 
 
 def _process_utility_output(output: UtilityOutput,
@@ -544,10 +560,18 @@ class SyncMPClient(MPClient):
 
     def _send_input(self, request_type: EngineCoreRequestType, request: Any):
         self.ensure_alive()
+        self.free_pending_messages()
         # (Identity, RequestType, SerializedRequest)
         msg = (self.core_engine.identity, request_type.value,
                *self.encoder.encode(request))
-        self.input_socket.send_multipart(msg, copy=False)
+
+        if len(msg) <= 3:
+            # No auxiliary buffers => no tensor backing buffers in request.
+            self.input_socket.send_multipart(msg, copy=False)
+            return
+
+        tracker = self.input_socket.send_multipart(msg, copy=False, track=True)
+        self.add_pending_message(tracker, request)
 
     def call_utility(self, method: str, *args) -> Any:
         call_id = uuid.uuid1().int >> 64
@@ -698,19 +722,38 @@ class AsyncMPClient(MPClient):
     def _send_input(self,
                     request_type: EngineCoreRequestType,
                     request: Any,
-                    engine: Optional[CoreEngine] = None) -> Awaitable[None]:
+                    engine: Optional[CoreEngine] = None) -> Awaitable[Any]:
         self.ensure_alive()
         if engine is None:
             engine = self.core_engine
 
         message = (request_type.value, *self.encoder.encode(request))
-        return self._send_input_message(message, engine)
+        return self._send_input_message(message, engine, request)
 
-    def _send_input_message(self, message: tuple[bytestr, ...],
-                            engine: CoreEngine) -> Awaitable[None]:
+    def _send_input_message(self, message: tuple[bytestr,
+                                                 ...], engine: CoreEngine,
+                            objects: Any) -> Awaitable[Any]:
+        """
+        objects is a reference to retain until zmq is finished with the
+        buffers, in case they were extracted from tensors in the request.
+        """
         self.ensure_alive()
-        message = (engine.identity, ) + message
-        return self.input_socket.send_multipart(message, copy=False)
+        self.free_pending_messages()
+
+        msg = (engine.identity, ) + message
+        if not objects or len(msg) <= 3:
+            # No auxiliary buffers => no tensor backing buffers in request.
+            return self.input_socket.send_multipart(msg, copy=False)
+
+        future: asyncio.Future[zmq.MessageTracker]
+        future = self.input_socket.send_multipart(msg, copy=False, track=True)
+
+        def add_pending(f: asyncio.Future[zmq.MessageTracker]):
+            with contextlib.suppress(BaseException):
+                self.add_pending_message(f.result(), objects)
+
+        future.add_done_callback(add_pending)
+        return future
 
     async def call_utility_async(self, method: str, *args) -> Any:
         return await self._call_utility_async(method,
@@ -724,7 +767,7 @@ class AsyncMPClient(MPClient):
         self.utility_results[call_id] = future
         message = (EngineCoreRequestType.UTILITY.value, *self.encoder.encode(
             (call_id, method, args)))
-        await self._send_input_message(message, engine)
+        await self._send_input_message(message, engine, args)
         self._ensure_output_queue_task()
         return await future
 
