@@ -262,7 +262,5 @@ class SequenceParallelismPass(VllmInductorPass):
     def __call__(self, graph: fx.Graph):
         self.dump_graph(graph, "before_sequence_parallelism_pass")
         count = self.patterns.apply(graph)
-        tp_size = get_tensor_model_parallel_world_size()
         logger.debug("Replaced %s patterns", count)
-        print(f"tp_size= {tp_size} after graph: {graph}")
         self.dump_graph(graph, "after_sequence_parallelism_pass")
