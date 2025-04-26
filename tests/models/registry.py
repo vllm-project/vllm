@@ -121,7 +121,8 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "BaichuanForCausalLM": _HfExamplesInfo("baichuan-inc/Baichuan2-7B-chat",
                                          trust_remote_code=True),
     "BambaForCausalLM": _HfExamplesInfo("ibm-ai-platform/Bamba-9B"),
-    "BloomForCausalLM": _HfExamplesInfo("bigscience/bloomz-1b1"),
+    "BloomForCausalLM": _HfExamplesInfo("bigscience/bloom-560m",
+                                        {"1b": "bigscience/bloomz-1b1"}),
     "ChatGLMModel": _HfExamplesInfo("THUDM/chatglm3-6b",
                                     trust_remote_code=True,
                                     max_transformers_version="4.48"),
@@ -151,10 +152,14 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
         is_available_online=False,
         min_transformers_version="4.52.dev0"
     ),
-    "GPT2LMHeadModel": _HfExamplesInfo("gpt2"),
-    "GPTBigCodeForCausalLM": _HfExamplesInfo("bigcode/starcoder"),
-    "GPTJForCausalLM": _HfExamplesInfo("EleutherAI/gpt-j-6b"),
-    "GPTNeoXForCausalLM": _HfExamplesInfo("EleutherAI/pythia-160m"),
+    "GPT2LMHeadModel": _HfExamplesInfo("openai-community/gpt2",
+                                       {"alias": "gpt2"}),
+    "GPTBigCodeForCausalLM": _HfExamplesInfo("bigcode/starcoder",
+                                             {"tiny": "bigcode/tiny_starcoder_py"}),  # noqa: E501
+    "GPTJForCausalLM": _HfExamplesInfo("Milos/slovak-gpt-j-405M",
+                                       {"6b": "EleutherAI/gpt-j-6b"}),
+    "GPTNeoXForCausalLM": _HfExamplesInfo("EleutherAI/pythia-70m",
+                                          {"1b": "EleutherAI/pythia-1.4b"}),
     "GraniteForCausalLM": _HfExamplesInfo("ibm/PowerLM-3b"),
     "GraniteMoeForCausalLM": _HfExamplesInfo("ibm/PowerMoE-3b"),
     "GraniteMoeSharedForCausalLM": _HfExamplesInfo("ibm-research/moe-7b-1b-active-shared-experts"),  # noqa: E501
@@ -185,7 +190,8 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "MiniMaxText01ForCausalLM": _HfExamplesInfo("MiniMaxAI/MiniMax-Text-01",
                                                 trust_remote_code=True),
     "MistralForCausalLM": _HfExamplesInfo("mistralai/Mistral-7B-Instruct-v0.1"),
-    "MixtralForCausalLM": _HfExamplesInfo("mistralai/Mixtral-8x7B-Instruct-v0.1"),  # noqa: E501
+    "MixtralForCausalLM": _HfExamplesInfo("mistralai/Mixtral-8x7B-Instruct-v0.1",  # noqa: E501
+                                          {"falcon3": "ehristoforu/Falcon3-MoE-2x7B-Insruct"}),  # noqa: E501
     "QuantMixtralForCausalLM": _HfExamplesInfo("mistral-community/Mixtral-8x22B-v0.1-AWQ"),  # noqa: E501
     "MptForCausalLM": _HfExamplesInfo("mpt", is_available_online=False),
     "MPTForCausalLM": _HfExamplesInfo("mosaicml/mpt-7b"),
@@ -193,7 +199,8 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "OlmoForCausalLM": _HfExamplesInfo("allenai/OLMo-1B-hf"),
     "Olmo2ForCausalLM": _HfExamplesInfo("shanearora/OLMo-7B-1124-hf"),
     "OlmoeForCausalLM": _HfExamplesInfo("allenai/OLMoE-1B-7B-0924-Instruct"),
-    "OPTForCausalLM": _HfExamplesInfo("facebook/opt-iml-max-1.3b"),
+    "OPTForCausalLM": _HfExamplesInfo("facebook/opt-125m",
+                                      {"1b": "facebook/opt-iml-max-1.3b"}),
     "OrionForCausalLM": _HfExamplesInfo("OrionStarAI/Orion-14B-Chat",
                                         trust_remote_code=True),
     "PersimmonForCausalLM": _HfExamplesInfo("adept/persimmon-8b-chat"),
@@ -207,8 +214,8 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
                                         trust_remote_code=True),
     "QWenLMHeadModel": _HfExamplesInfo("Qwen/Qwen-7B-Chat",
                                        trust_remote_code=True),
-    "Qwen2ForCausalLM": _HfExamplesInfo("Qwen/Qwen2-7B-Instruct",
-                                        extras={"2.5": "Qwen/Qwen2.5-7B-Instruct"}), # noqa: E501
+    "Qwen2ForCausalLM": _HfExamplesInfo("Qwen/Qwen2.5-0.5B-Instruct",
+                                        extras={"2.5": "Qwen/Qwen2.5-1.5B-Instruct"}), # noqa: E501
     "Qwen2MoeForCausalLM": _HfExamplesInfo("Qwen/Qwen1.5-MoE-A2.7B-Chat"),
     "Qwen3ForCausalLM": _HfExamplesInfo(
         "Qwen/Qwen3-8B",

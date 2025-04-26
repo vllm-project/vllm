@@ -72,7 +72,7 @@ AITER_MODEL_LIST = [
             marks=[pytest.mark.core_model],
         ),
         pytest.param(
-            "Qwen/Qwen-7B",  # qwen (text-only)
+            "Qwen/Qwen-7B-Chat",  # qwen (text-only)
         ),
         pytest.param(
             "Qwen/Qwen2.5-0.5B-Instruct",  # qwen2
