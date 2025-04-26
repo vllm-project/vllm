@@ -60,7 +60,7 @@ def _run_incremental_decode(tokenizer,
         skip_special_tokens=skip_special_tokens,
         spaces_between_special_tokens=spaces_between_special_tokens,
     )
-    request = EngineCoreRequest("", "", prompt_token_ids, None, None, None,
+    request = EngineCoreRequest("", prompt_token_ids, None, None, None,
                                 params, None, 0.0, None)
 
     if fast is None:
