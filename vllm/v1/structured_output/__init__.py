@@ -117,6 +117,9 @@ class StructuredOutputManager:
         # position in the batch. Resize the bitmask down to the size of
         # the batch.
         bitmask_tensor = self._grammar_bitmask
+        # Reset the relevant part of the bitmask before filling
+        if batch_len > 0:
+            bitmask_tensor[:batch_len].fill_(-1)
 
         for req_id, batch_index in structured_output_request_ids.items():
             full_request = requests[req_id]

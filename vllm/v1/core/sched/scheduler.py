@@ -723,6 +723,9 @@ class Scheduler(SchedulerInterface):
                 elif reasoner.is_reasoning_end(request.all_token_ids):
                     request.structured_output_request.reasoning_ended = True
                     is_reasoning_end_this_step = True
+                    advance_fsm = False
+                else:
+                    advance_fsm = False
 
                 # Only advance FSM if reasoning was already off OR
                 # if we are not in the specific step where reasoning just ended.
