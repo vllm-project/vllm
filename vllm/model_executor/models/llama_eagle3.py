@@ -117,7 +117,7 @@ class LlamaModel(nn.Module):
         input_ids: torch.Tensor,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
-    ) -> torch.Tensor:
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         input_embeds = self.embed_tokens(input_ids)
         if (hidden_states.shape[-1] != input_embeds.shape[-1]):
             hidden_states = self.fc(hidden_states)
@@ -194,7 +194,7 @@ class Eagle3LlamaForCausalLM(LlamaForCausalLM):
         input_ids: torch.Tensor,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
-    ) -> torch.Tensor:
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         return self.model(input_ids, positions, hidden_states)
 
     def compute_logits(
