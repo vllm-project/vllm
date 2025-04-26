@@ -68,6 +68,7 @@ getting_started/examples/examples_index
 getting_started/troubleshooting
 getting_started/faq
 getting_started/v1_user_guide
+getting_started/security
 
 :::
 
