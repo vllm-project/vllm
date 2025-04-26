@@ -171,8 +171,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             if get_pp_group().is_last_rank:
                 if self.speculative_config.method == "ngram":
                     self.drafter = NgramProposer(self.vllm_config)
-                elif self.speculative_config.method == "eagle" or \
-                        self.speculative_config.method == "eagle3":
+                elif self.speculative_config.use_eagle():
                     self.drafter = EagleProposer(self.vllm_config,
                                                  self.device)  # type: ignore
                     if self.speculative_config.method == "eagle3":
@@ -1192,8 +1191,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             assert isinstance(self.drafter, NgramProposer)
             spec_token_ids = self.generate_draft_token_ids(
                 valid_sampled_token_ids, sampling_metadata)
-        elif self.speculative_config.method == "eagle" or \
-                self.speculative_config.method == "eagle3":
+        elif self.speculative_config.use_eagle():
             assert isinstance(self.drafter, EagleProposer)
             # TODO(woosuk): Refactor the loop.
             next_token_ids: list[int] = []
