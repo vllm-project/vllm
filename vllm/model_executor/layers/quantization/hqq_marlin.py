@@ -96,7 +96,9 @@ class HQQEmptyParameter(BasevLLMParameter):
     def load_merged_column_weight(self, loaded_weight: torch.Tensor, **kwargs):
         pass
 
-    def load_row_parallel_weight(self, loaded_weight: torch.Tensor):
+    def load_row_parallel_weight(self,
+                                 loaded_weight: torch.Tensor,
+                                 use_presharded_weights: bool = False):
         pass
 
     def load_qkv_weight(self, loaded_weight: torch.Tensor, **kwargs):
