@@ -13,6 +13,8 @@ import torch.nn as nn
 from vllm.attention import AttentionType, get_attn_backend
 from vllm.attention.layer import Attention
 from vllm.config import CompilationLevel, VllmConfig
+from vllm.distributed.kv_transfer import (get_kv_transfer_group,
+                                          has_kv_transfer_group)
 from vllm.distributed.parallel_state import get_pp_group, graph_capture
 from vllm.forward_context import set_forward_context
 from vllm.logger import init_logger
@@ -36,6 +38,7 @@ from vllm.v1.outputs import (EMPTY_MODEL_RUNNER_OUTPUT, LogprobsTensors,
                              ModelRunnerOutput)
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.rejection_sampler import RejectionSampler
+from vllm.v1.sample.sampler import Sampler
 from vllm.v1.spec_decode.eagle import EagleProposer
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 from vllm.v1.spec_decode.ngram_proposer import NgramProposer
@@ -151,6 +154,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.max_num_encoder_input_tokens = encoder_compute_budget
         self.encoder_cache_size = encoder_cache_size
 
+        # Sampler
+        self.sampler = Sampler()
+
         # Lazy initialization
         # self.model: nn.Module  # Set after load_model
         self.kv_caches: list[torch.Tensor] = []
@@ -239,10 +245,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             device=self.device)
 
         # OPTIMIZATION: Cache the tensors rather than creating them every step.
+        # Keep in int64 to avoid overflow with long context
         self.arange_np = np.arange(max(self.max_num_reqs + 1,
                                        self.max_model_len,
                                        self.max_num_tokens),
-                                   dtype=np.int32)
+                                   dtype=np.int64)
         # NOTE(woosuk): These tensors are "stateless", i.e., they are literally
         # a faster version of creating a new tensor every time. Thus, we should
         # not make any assumptions about the values in these tensors.
@@ -353,6 +360,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 image_grid_thw = []
                 video_grid_thw = []
                 second_per_grid_ts = []
+                audio_feature_lengths = []
+                use_audio_in_video = False
                 for mm_input in self.requests[req_id].mm_inputs:
                     if mm_input.get("image_grid_thw") is not None:
                         image_grid_thw.extend(
@@ -363,6 +372,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     if mm_input.get("second_per_grid_ts") is not None:
                         second_per_grid_ts.extend(
                             mm_input["second_per_grid_ts"])
+                    if mm_input.get("audio_feature_lengths") is not None:
+                        audio_feature_lengths.extend(
+                            mm_input["audio_feature_lengths"])
+                    if mm_input.get("use_audio_in_video") is True:
+                        use_audio_in_video = True
 
                 hf_config = self.model_config.hf_config
 
@@ -374,6 +388,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                         image_grid_thw=image_grid_thw,
                         video_grid_thw=video_grid_thw,
                         second_per_grid_ts=second_per_grid_ts,
+                        audio_feature_lengths=audio_feature_lengths,
+                        use_audio_in_video=use_audio_in_video,
                     )
 
             req_ids_to_add.append(req_id)
@@ -443,7 +459,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         # Add the new or resumed requests to the persistent batch.
         # The smaller empty indices are filled first.
-        removed_req_indices = sorted(removed_req_indices, reverse=True)
+        removed_req_indices.sort(reverse=True)
         for req_id in req_ids_to_add:
             req_state = self.requests[req_id]
             if removed_req_indices:
@@ -458,7 +474,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         if removed_req_indices:
             self.input_batch.condense(removed_req_indices)
 
-        if batch_changed:
+        # Some attention backends (namely MLA) may want to separate requests
+        # based on if the attention computation will be compute-bound or
+        # memory-bound. This gives them a hook to do that.
+        batch_reordered = self.attn_metadata_builder.reorder_batch(
+            self.input_batch, scheduler_output)
+
+        if batch_changed or batch_reordered:
             self.input_batch.refresh_sampling_metadata()
 
     def _prepare_inputs(
@@ -471,27 +493,15 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         num_reqs = self.input_batch.num_reqs
         assert num_reqs > 0
 
-        # Some attention backends (namely MLA) may want to separate requests
-        # based on if the attention computation will be compute-bound or
-        # memory-bound. This gives them a hook to do that.
-        modified_batch = self.attn_metadata_builder.reorder_batch(
-            self.input_batch, scheduler_output)
-        if modified_batch:
-            self.input_batch.refresh_sampling_metadata()
-
         # OPTIMIZATION: Start copying the block table first.
         # This way, we can overlap the copy with the following CPU operations.
         self.input_batch.block_table.commit(num_reqs)
 
         # Get the number of scheduled tokens for each request.
-        # TODO: The Python loop can be slow. Optimize.
-        num_scheduled_tokens = np.empty(num_reqs, dtype=np.int32)
-        max_num_scheduled_tokens = 0
-        for i, req_id in enumerate(self.input_batch.req_ids):
-            num_tokens = scheduler_output.num_scheduled_tokens[req_id]
-            num_scheduled_tokens[i] = num_tokens
-            max_num_scheduled_tokens = max(max_num_scheduled_tokens,
-                                           num_tokens)
+        req_ids = self.input_batch.req_ids
+        tokens = [scheduler_output.num_scheduled_tokens[i] for i in req_ids]
+        num_scheduled_tokens = np.array(tokens, dtype=np.int32)
+        max_num_scheduled_tokens = max(tokens)
 
         # Get request indices.
         # E.g., [2, 5, 3] -> [0, 0, 1, 1, 1, 1, 1, 2, 2, 2]
@@ -544,9 +554,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # because M (max_model_len) is not necessarily divisible by block_size.
         block_table_indices = (req_indices * self.max_num_blocks_per_req +
                                positions_np // self.block_size)
-        # NOTE(woosuk): We use torch.index_select instead of np.take here
-        # because torch.index_select is much faster than np.take for large
-        # tensors.
         block_table_cpu = self.input_batch.block_table.get_cpu_tensor()
         block_numbers = block_table_cpu.flatten()[block_table_indices].numpy()
         block_offsets = positions_np % self.block_size
@@ -694,7 +701,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # common_prefix_len should be a multiple of the block size.
         common_prefix_len = (common_prefix_len // self.block_size *
                              self.block_size)
-        use_cascade = self.attn_backend.use_cascade_attention(
+        use_cascade = self.attn_metadata_builder.use_cascade_attention(
             common_prefix_len=common_prefix_len,
             query_lens=num_scheduled_tokens,
             num_query_heads=self.num_query_heads,
@@ -996,17 +1003,15 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         scheduler_output: "SchedulerOutput",
         intermediate_tensors: Optional[IntermediateTensors] = None,
     ) -> Union[ModelRunnerOutput, torch.Tensor]:
+        # Update KVConnector with the KVConnector metadata forward().
+        if has_kv_transfer_group():
+            get_kv_transfer_group().bind_connector_metadata(
+                scheduler_output.kv_connector_metadata)
+
         self._update_states(scheduler_output)
         if not scheduler_output.total_num_scheduled_tokens:
-            # Return empty ModelRunnerOuptut if there's no work to do.
+            # Return empty ModelRunnerOutput if there's no work to do.
             return EMPTY_MODEL_RUNNER_OUTPUT
-
-        if self.is_multimodal_model:
-            # Run the multimodal encoder if any.
-            self._execute_mm_encoder(scheduler_output)
-            mm_embeds = self._gather_mm_embeddings(scheduler_output)
-        else:
-            mm_embeds = []
 
         # Prepare the decoder inputs.
         attn_metadata, logits_indices, spec_decode_metadata = (
@@ -1022,6 +1027,15 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # Eager mode.
             num_input_tokens = num_scheduled_tokens
         attn_metadata.num_input_tokens = num_input_tokens
+
+        # _prepare_inputs may reorder the batch, so we must gather multi
+        # modal outputs after that to ensure the correct order
+        if self.is_multimodal_model:
+            # Run the multimodal encoder if any.
+            self._execute_mm_encoder(scheduler_output)
+            mm_embeds = self._gather_mm_embeddings(scheduler_output)
+        else:
+            mm_embeds = []
 
         if self.is_multimodal_model:
             # NOTE(woosuk): To unify token ids and soft tokens (vision
@@ -1086,7 +1100,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # Sample the next token and get logprobs if needed.
         sampling_metadata = self.input_batch.sampling_metadata
         if spec_decode_metadata is None:
-            sampler_output = self.model.sample(
+            sampler_output = self.sampler(
                 logits=logits,
                 sampling_metadata=sampling_metadata,
             )
@@ -1096,7 +1110,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # logits tensor. This means any in-place operations on bonus_logits
             # won't affect the original logits tensor.
             bonus_logits = logits[spec_decode_metadata.bonus_logits_indices]
-            sampler_output = self.model.sample(
+            sampler_output = self.sampler(
                 logits=bonus_logits,
                 sampling_metadata=sampling_metadata,
             )
@@ -1191,9 +1205,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
             if spec_decode_metadata is None:
                 # input_ids can be None for multimodal models.
+                # We need to slice token_ids, positions, and hidden_states
+                # because the eagle head does not use cuda graph and should
+                # not include padding.
                 target_token_ids = self.input_ids[:num_scheduled_tokens]
-                target_positions = positions
-                target_hidden_states = hidden_states
+                target_positions = positions[:num_scheduled_tokens]
+                target_hidden_states = hidden_states[:num_scheduled_tokens]
                 target_slot_mapping = attn_metadata.slot_mapping
                 cu_num_tokens = attn_metadata.query_start_loc
             else:
@@ -1217,7 +1234,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 target_hidden_states = hidden_states[token_indices]
                 target_slot_mapping = attn_metadata.slot_mapping[token_indices]
 
-            draft_token_ids, draft_probs = self.drafter.propose(
+            draft_token_ids = self.drafter.propose(
                 target_token_ids=target_token_ids,
                 target_positions=target_positions,
                 target_hidden_states=target_hidden_states,
@@ -1228,9 +1245,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 sampling_metadata=sampling_metadata,
             )
             spec_token_ids = draft_token_ids.tolist()
-            # TODO(woosuk): Cache draft_probs and use it for rejection sampling
-            # in the next step.
-            del draft_probs
+
+        # Clear KVConnector state after all KVs are generated.
+        if has_kv_transfer_group():
+            get_kv_transfer_group().clear_connector_metadata()
 
         return ModelRunnerOutput(
             req_ids=self.input_batch.req_ids,
@@ -1255,7 +1273,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 draft_token_ids.append([])
                 continue
 
-            # Skip requests that require top-p, top-k, etc.
+            # Skip requests that require sampling parameters that are not
+            # supported with speculative decoding.
             req_id = self.input_batch.req_ids[i]
             if not is_spec_decode_supported(req_id, self.input_batch):
                 draft_token_ids.append([])
@@ -1264,6 +1283,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # Add sampled_token_ids to token_ids_cpu.
             start_idx = self.input_batch.num_tokens_no_spec[i]
             end_idx = start_idx + num_sampled_ids
+            if end_idx >= self.max_model_len:
+                # Skip requests that have already reached the max model length.
+                draft_token_ids.append([])
+                continue
+
             self.input_batch.token_ids_cpu[i, start_idx:end_idx] = sampled_ids
             drafter_output = self.drafter.propose(
                 self.input_batch.token_ids_cpu[i, :end_idx])
@@ -1363,8 +1387,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             tgt_token_ids = prompt_token_ids[start_tok:start_tok + num_logits]
 
             # Compute prompt logprobs.
-            logprobs = self.model.sampler.compute_logprobs(logits)
-            token_ids, logprobs, ranks = self.model.sampler.gather_logprobs(
+            logprobs = self.sampler.compute_logprobs(logits)
+            token_ids, logprobs, ranks = self.sampler.gather_logprobs(
                 logprobs, num_prompt_logprobs, tgt_token_ids)
 
             # Transfer GPU->CPU async.
@@ -1482,8 +1506,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             bad_words_token_ids={},
         )
         try:
-            sampler_output = self.model.sample(
-                logits=logits, sampling_metadata=dummy_metadata)
+            sampler_output = self.sampler(logits=logits,
+                                          sampling_metadata=dummy_metadata)
         except RuntimeError as e:
             if 'out of memory' in str(e):
                 raise RuntimeError(

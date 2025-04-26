@@ -1,18 +1,24 @@
 # SPDX-License-Identifier: Apache-2.0
 
+import json
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import torch
 
+import vllm.envs
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
+from vllm.sampling_params import GuidedDecodingParams, SamplingParams
 from vllm.transformers_utils.tokenizer_group import init_tokenizer_from_configs
 from vllm.transformers_utils.tokenizers.mistral import MistralTokenizer
 from vllm.utils import LazyLoader
 from vllm.v1.structured_output.backend_types import (StructuredOutputBackend,
                                                      StructuredOutputGrammar,
                                                      StructuredOutputOptions)
+from vllm.v1.structured_output.utils import (choice_as_grammar,
+                                             convert_lark_to_ebnf,
+                                             grammar_is_likely_lark)
 
 if TYPE_CHECKING:
     import xgrammar as xgr
@@ -26,15 +32,21 @@ class XgrammarBackend(StructuredOutputBackend):
 
     def __init__(self, vllm_config: VllmConfig):
         self.vllm_config = vllm_config
-        self.disable_any_whitespace = (
-            "disable-any-whitespace"
-            in vllm_config.decoding_config.guided_decoding_backend)
         tokenizer_group = init_tokenizer_from_configs(
             model_config=vllm_config.model_config,
             scheduler_config=vllm_config.scheduler_config,
-            parallel_config=vllm_config.parallel_config,
             lora_config=vllm_config.lora_config)  # type: ignore[arg-type]
-        tokenizer_group.ping()
+
+        self.disable_any_whitespace = False
+        backend_options = GuidedDecodingParams(
+            backend=vllm_config.decoding_config.guided_decoding_backend
+        ).backend_options()
+        for option in backend_options:
+            if option == "disable-any-whitespace":
+                self.disable_any_whitespace = True
+            else:
+                raise ValueError(
+                    f"Unsupported option for the xgrammar backend: {option}")
 
         tokenizer = tokenizer_group.get_lora_tokenizer(None)
         self.vocab_size = vllm_config.model_config.get_vocab_size()
@@ -76,7 +88,12 @@ class XgrammarBackend(StructuredOutputBackend):
                 tokenizer,
                 vocab_size=self.vocab_size,
             )
-        self.compiler = xgr.GrammarCompiler(tokenizer_info, max_threads=8)
+        self.compiler = xgr.GrammarCompiler(
+            tokenizer_info,
+            max_threads=8,
+            cache_enabled=True,
+            cache_limit_bytes=vllm.envs.VLLM_XGRAMMAR_CACHE_MB * 1024 * 1024,
+        )
 
     def compile_grammar(self, request_type: StructuredOutputOptions,
                         grammar_spec: str) -> StructuredOutputGrammar:
@@ -106,6 +123,9 @@ class XgrammarBackend(StructuredOutputBackend):
 
     def allocate_token_bitmask(self, max_num_seqs: int):
         return xgr.allocate_token_bitmask(max_num_seqs, self.vocab_size)
+
+    def destroy(self):
+        del self.compiler
 
 
 @dataclass
@@ -150,3 +170,105 @@ class XgrammarGrammar(StructuredOutputGrammar):
     def reset(self):
         self.num_processed_tokens = 0
         self.matcher.reset()
+
+
+def has_xgrammar_unsupported_json_features(schema: dict[str, Any]) -> bool:
+    """Check if JSON schema contains features unsupported by xgrammar."""
+
+    def check_object(obj: dict[str, Any]) -> bool:
+        if not isinstance(obj, dict):
+            return False
+
+        # Check for numeric ranges
+        if obj.get("type") in ("integer", "number") and ("multipleOf" in obj):
+            return True
+
+        # Check for array unsupported keywords
+        if obj.get("type") == "array" and any(
+                key in obj
+                for key in ("uniqueItems", "contains", "minContains",
+                            "maxContains", "minItems", "maxItems")):
+            return True
+
+        # Unsupported keywords for strings
+        if obj.get("type") == "string" and "format" in obj:
+            return True
+
+        # Unsupported keywords for objects
+        if obj.get("type") == "object" and any(
+                key in obj for key in ("minProperties", "maxProperties",
+                                       "propertyNames", "patternProperties")):
+            return True
+
+        # Recursively check all nested objects and arrays
+        for value in obj.values():
+            if isinstance(value, dict):
+                if check_object(value):
+                    return True
+            elif isinstance(value, list):
+                for item in value:
+                    if isinstance(item, dict) and check_object(item):
+                        return True
+
+        return False
+
+    return check_object(schema)
+
+
+def validate_xgrammar_grammar(sampling_params: SamplingParams) -> None:
+    """Validate that the request is supported by structured output.
+
+    Raises ValueError if the request is not supported.
+    """
+    if sampling_params.guided_decoding is None:
+        return
+
+    gd_params = sampling_params.guided_decoding
+
+    if gd_params.regex:
+        try:
+            xgr.Grammar.from_regex(gd_params.regex)
+        except Exception as err:
+            raise ValueError("Failed to transform regex into a grammar: "
+                             f"{err}") from err
+
+    if gd_params.choice:
+        choice_grammar = choice_as_grammar(gd_params.choice)
+        try:
+            xgr.Grammar.from_ebnf(choice_grammar)
+        except Exception as err:
+            raise ValueError("Failed to transform choices into a grammar: "
+                             "{err}") from err
+        gd_params.choice = None
+        gd_params.grammar = choice_grammar
+        return
+
+    if gd_params.json:
+        if isinstance(gd_params.json, str):
+            try:
+                schema = json.loads(gd_params.json)
+            except json.JSONDecodeError as e:
+                raise ValueError("Invalid JSON grammar specification.") from e
+        else:
+            schema = gd_params.json
+
+        if has_xgrammar_unsupported_json_features(schema):
+            raise ValueError("The provided JSON schema contains features not "
+                             "supported by xgrammar.")
+        return
+
+    if gd_params.grammar:
+        if grammar_is_likely_lark(gd_params.grammar):
+            # xgrammar supports EBNF grammars only
+            try:
+                gd_params.grammar = convert_lark_to_ebnf(gd_params.grammar)
+            except ValueError as e:
+                raise ValueError(
+                    "Failed to convert the grammar from Lark to EBNF. ") from e
+
+        # Test parsing EBNF grammar, possibly already converted from Lark
+        try:
+            # parse the grammar, but we aren't compiling it.
+            xgr.Grammar.from_ebnf(gd_params.grammar)
+        except Exception as e:
+            raise ValueError("Invalid grammar specification.") from e

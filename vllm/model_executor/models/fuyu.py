@@ -27,17 +27,17 @@ from transformers import (BatchFeature, FuyuConfig, FuyuImageProcessor,
 
 from vllm.config import VllmConfig
 from vllm.model_executor.layers.linear import ColumnParallelLinear
-from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.model_executor.models.persimmon import PersimmonForCausalLM
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.inputs import MultiModalFieldConfig, MultiModalKwargs
+from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig,
+                                    MultiModalKwargs)
 from vllm.multimodal.parse import (ImageProcessorItems, ImageSize,
                                    MultiModalDataItems)
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
                                         BaseProcessingInfo, PromptReplacement,
                                         PromptUpdate, PromptUpdateDetails)
-from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
+from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
 
 from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsPP
@@ -79,13 +79,6 @@ class FuyuProcessingInfo(BaseProcessingInfo):
 
     def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
         return {"image": 1}
-
-    def get_mm_max_tokens_per_item(
-        self,
-        seq_len: int,
-        mm_counts: Mapping[str, int],
-    ) -> Mapping[str, int]:
-        return {"image": self.get_max_image_tokens()}
 
     def get_image_feature_grid_size(
         self,
@@ -129,37 +122,27 @@ class FuyuProcessingInfo(BaseProcessingInfo):
         return ImageSize(width=image_processor.size["width"],
                          height=image_processor.size["height"])
 
-    def get_max_image_tokens(self) -> int:
-        target_width, target_height = self.get_image_size_with_most_features()
-
-        return self.get_num_image_tokens(
-            image_width=target_width,
-            image_height=target_height,
-        )
-
 
 class FuyuDummyInputsBuilder(BaseDummyInputsBuilder[FuyuProcessingInfo]):
 
-    def get_dummy_processor_inputs(
+    def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
+        return ""
+
+    def get_dummy_mm_data(
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-    ) -> ProcessorInputs:
+    ) -> MultiModalDataDict:
         target_width, target_height = \
             self.info.get_image_size_with_most_features()
         num_images = mm_counts.get("image", 0)
 
-        mm_data = {
+        return {
             "image":
             self._get_dummy_images(width=target_width,
                                    height=target_height,
                                    num_images=num_images)
         }
-
-        return ProcessorInputs(
-            prompt_text="",
-            mm_data=mm_data,
-        )
 
 
 class FuyuMultiModalProcessor(BaseMultiModalProcessor[FuyuProcessingInfo]):
@@ -286,10 +269,6 @@ class FuyuForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
         self.make_empty_intermediate_tensors = (
             self.language_model.make_empty_intermediate_tensors)
 
-    @property
-    def sampler(self):
-        return self.language_model.sampler
-
     def _validate_pixel_values(self, data: torch.Tensor) -> torch.Tensor:
 
         h = w = self.config.patch_size
@@ -340,6 +319,9 @@ class FuyuForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
             image_patches_flat)
 
         return vision_embeddings_flat.split(patches_per_image, dim=0)
+
+    def get_language_model(self) -> torch.nn.Module:
+        return self.language_model
 
     def get_multimodal_embeddings(
             self, **kwargs: object) -> Optional[MultiModalEmbeddings]:
@@ -399,14 +381,6 @@ class FuyuForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
         logits = self.language_model.logits_processor(
             self.language_model.lm_head, hidden_states, sampling_metadata)
         return logits
-
-    def sample(
-        self,
-        logits: torch.Tensor,
-        sampling_metadata: SamplingMetadata,
-    ) -> Optional[SamplerOutput]:
-        next_tokens = self.language_model.sampler(logits, sampling_metadata)
-        return next_tokens
 
     def load_weights(self, weights: Iterable[Tuple[str,
                                                    torch.Tensor]]) -> Set[str]:

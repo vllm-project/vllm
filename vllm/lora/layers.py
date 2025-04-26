@@ -866,6 +866,11 @@ class MergedQKVParallelLinearWithLoRA(MergedColumnParallelLinearWithLoRA):
                 and len(packed_modules_list) == 3)
 
 
+#TODO: Implement this
+class QKVCrossParallelLinearWithLoRA(BaseLayerWithLoRA):
+    pass
+
+
 class RowParallelLinearWithLoRA(BaseLinearLayerWithLoRA):
 
     def __init__(self, base_layer: RowParallelLinear) -> None:
