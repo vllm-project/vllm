@@ -689,7 +689,7 @@ class FlashAttentionImpl(AttentionImpl):
         assert output is not None, "Output tensor must be provided."
 
         # NOTE(woosuk): FlashAttention2 does not support FP8 KV cache.
-        if self.vllm_flash_attn_version < 3 or output.dtype != torch.bfloat16:
+        if not flash_attn_supports_fp8() or output.dtype != torch.bfloat16:
             assert (
                 layer._k_scale_float == 1.0 and layer._v_scale_float == 1.0), (
                     "key/v_scale is only supported in FlashAttention 3 with "
