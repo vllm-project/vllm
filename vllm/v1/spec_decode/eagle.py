@@ -6,11 +6,15 @@ import triton.language as tl
 
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.forward_context import set_forward_context
+from vllm.logger import init_logger
 from vllm.model_executor.model_loader.loader import get_model_loader
 from vllm.model_executor.model_loader.utils import set_default_torch_dtype
 from vllm.model_executor.models.llama_eagle import EagleLlamaForCausalLM
+from vllm.model_executor.models.llama_eagle3 import Eagle3LlamaForCausalLM
 from vllm.v1.attention.backends.flash_attn import FlashAttentionMetadata
 from vllm.v1.sample.metadata import SamplingMetadata
+
+logger = init_logger(__name__)
 
 PADDING_SLOT_ID = -1
 
@@ -87,12 +91,12 @@ class EagleProposer:
         )
 
         with set_forward_context(attn_metadata, self.vllm_config):
-            hidden_states = self.model(
+            hidden_states_logits, hidden_states_fwd = self.model(
                 input_ids=input_ids,
                 hidden_states=target_hidden_states,
                 positions=target_positions,
             )
-        sample_hidden_states = hidden_states[last_token_indices]
+        sample_hidden_states = hidden_states_logits[last_token_indices]
         logits = self.model.compute_logits(sample_hidden_states, None)
         draft_token_ids = logits.argmax(dim=-1)
 
@@ -105,7 +109,7 @@ class EagleProposer:
         draft_token_ids_list = [draft_token_ids]
 
         positions = target_positions[last_token_indices]
-        hidden_states = sample_hidden_states
+        hidden_states = hidden_states_fwd[last_token_indices]
         attn_metadata.num_actual_tokens = batch_size
         attn_metadata.max_query_len = 1
         attn_metadata.query_start_loc = self.arange[:batch_size + 1]
@@ -151,12 +155,12 @@ class EagleProposer:
 
             # Run the model.
             with set_forward_context(attn_metadata, self.vllm_config):
-                hidden_states = self.model(
+                hidden_states_logits, hidden_states = self.model(
                     input_ids=input_ids,
                     hidden_states=hidden_states,
                     positions=clamped_positions,
                 )
-            logits = self.model.compute_logits(hidden_states, None)
+            logits = self.model.compute_logits(hidden_states_logits, None)
             draft_token_ids = logits.argmax(dim=-1)
             draft_token_ids_list.append(draft_token_ids)
 
@@ -221,15 +225,28 @@ class EagleProposer:
         with set_default_torch_dtype(
                 draft_model_config.dtype), set_current_vllm_config(
                     self.vllm_config):
-            self.model = EagleLlamaForCausalLM(
-                model_config=draft_model_config,
-                start_layer_id=target_layer_num).to(target_device)
+            if self.vllm_config.speculative_config.method == "eagle":
+                self.model = EagleLlamaForCausalLM(
+                    model_config=draft_model_config,
+                    start_layer_id=target_layer_num).to(target_device)
+            else:
+                assert self.vllm_config.speculative_config.method == "eagle3"
+                self.model = Eagle3LlamaForCausalLM(
+                    model_config=draft_model_config,
+                    start_layer_id=target_layer_num).to(target_device)
 
-        self.model.load_weights(
+        loaded_weights = self.model.load_weights(
             loader.get_all_weights(
                 self.vllm_config.speculative_config.draft_model_config,
                 self.model))
-        self.model.lm_head = target_model.lm_head
+        if self.vllm_config.speculative_config.method == "eagle3":
+            if "model.embed_tokens.weight" not in loaded_weights:
+                logger.info(
+                    "Loading EAGLE embedding weights from the target model.")
+                self.model.model.embed_tokens = target_model.model.embed_tokens
+        else:
+            logger.info("Loading EAGLE LM head weights from the target model.")
+            self.model.lm_head = target_model.lm_head
 
 
 # NOTE(woosuk): Currently, the below code is not used and we always use argmax
