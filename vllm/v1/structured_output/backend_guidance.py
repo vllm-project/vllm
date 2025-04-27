@@ -194,6 +194,9 @@ def serialize_guidance_grammar(
             tp = "grammar"
         elif request_type == StructuredOutputOptions.CHOICE:
             tp = "choice"
+        elif request_type == StructuredOutputOptions.STRUCTURAL_TAG:
+            raise ValueError("Structural tag is not supported "
+                             "for guidance backend yet")
         else:
             logger.error("Validation should have already occurred. "
                          "Please file an issue.")

@@ -2220,9 +2220,10 @@ class SpeculativeConfig:
         excluding anything before input ids/embeddings and after
         the final hidden states.
         """
-        # no factors to consider.
-        # spec decode does not use `torch.compile` yet.
         factors: list[Any] = []
+        # Eagle3 affects the computation graph because it returns intermediate
+        # hidden states in addition to the final hidden state.
+        factors.append(self.method == "eagle3")
         hash_str = hashlib.md5(str(factors).encode(),
                                usedforsecurity=False).hexdigest()
         return hash_str
@@ -2339,9 +2340,10 @@ class SpeculativeConfig:
                 )
 
                 # Automatically detect the method
-                if self.method == 'eagle':
+                if self.method in ('eagle', 'eagle3'):
                     pass
-                elif "eagle-" in self.draft_model_config.model.lower():
+                elif "eagle-" in self.draft_model_config.model.lower() or \
+                        "eagle3-" in self.draft_model_config.model.lower():
                     self.method = "eagle"
                 elif self.draft_model_config.hf_config.model_type == "medusa":
                     self.method = "medusa"
@@ -2352,7 +2354,7 @@ class SpeculativeConfig:
                     self.method = "draft_model"
 
                 # Replace hf_config for EAGLE draft_model
-                if self.method == "eagle":
+                if self.method in ("eagle", "eagle3"):
                     if self.enable_chunked_prefill and not envs.VLLM_USE_V1:
                         raise ValueError(
                             "Chunked prefill and EAGLE are not compatible "
@@ -2549,6 +2551,12 @@ class SpeculativeConfig:
                              "speculative decoding is > 1, but got "
                              f"{self.disable_by_batch_size=}")
 
+        if self.method == "eagle3" and self.target_model_config and \
+            "llama" not in self.target_model_config.hf_text_config.model_type:
+            raise ValueError(
+                "Eagle3 is only supported for Llama models. "
+                f"Got {self.target_model_config.hf_text_config.model_type=}")
+
     @property
     def num_lookahead_slots(self) -> int:
         """The number of additional slots the scheduler should allocate per
@@ -2558,6 +2566,9 @@ class SpeculativeConfig:
         token must be scored.
         """
         return self.num_speculative_tokens
+
+    def use_eagle(self) -> bool:
+        return self.method in ("eagle", "eagle3")
 
     def __repr__(self) -> str:
         method = self.method
