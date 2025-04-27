@@ -1131,5 +1131,6 @@ class Qwen2_5_VLForConditionalGeneration(nn.Module, SupportsMultiModal,
         """
         return MultiModelKeys.from_string_field(
             language_model="language_model",
-            connector="visual.",
-            tower_model="visual.merger.")
+            connector="visual.merger.",
+            tower_model="visual.",
+        )
