@@ -381,7 +381,6 @@ class repackage_wheel(build_ext):
                 "vllm/cumem_allocator.abi3.so",
                 # "vllm/_version.py", # not available in nightly wheels yet
             ]
-            import re
 
             file_members = list(
                 filter(lambda x: x.filename in files_to_copy, wheel.filelist))
@@ -389,6 +388,7 @@ class repackage_wheel(build_ext):
             # vllm_flash_attn python code:
             # Regex from
             #  `glob.translate('vllm/vllm_flash_attn/**/*.py', recursive=True)`
+            import re
             compiled_regex = re.compile(
                 r"vllm/vllm_flash_attn/(?:[^/.][^/]*/)*(?!\.)[^/]*\.py")
             file_members += list(
