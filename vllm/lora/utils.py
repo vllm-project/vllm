@@ -124,7 +124,7 @@ def parse_fine_tuned_lora_name(
         name = "base_model.model." + name
 
     # In some situations, we may not start with `base_model.model.`.
-    # If we don't, we should keep the prefix intact.
+    # If we don't (e.g., ibm-granite/granite-speech-3.3-8b), we should keep the prefix intact.
     start_index = 2 if "base_model.model." in name else 0
 
     parts = name.split(".")
