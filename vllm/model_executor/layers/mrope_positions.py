@@ -47,7 +47,8 @@ def mrope_get_input_positions_and_delta(
         if second_per_grid_ts is None:
             second_per_grid_ts_np = np.empty((0, ), dtype=np.float64)
         else:
-            second_per_grid_ts_np = np.array(second_per_grid_ts, dtype=np.float64)
+            second_per_grid_ts_np = np.array(second_per_grid_ts,
+                                             dtype=np.float64)
 
         if len(second_per_grid_ts_np) < len(video_grid_thw):
             raise ValueError(
@@ -169,7 +170,7 @@ def vl_get_input_positions_torch(
     hf_config: PretrainedConfig,
     image_grid_thw: Union[list[list[int]], torch.Tensor],
     video_grid_thw: Union[list[list[int]], torch.Tensor],
-    second_per_grid_ts: list[float],
+    second_per_grid_ts: Optional[list[float]],
     context_len: int = 0,
     seq_len: Optional[int] = None,
 ) -> Tuple[torch.Tensor, int]:
