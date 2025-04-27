@@ -96,10 +96,6 @@ class KVCacheManager:
 
         Args:
             request: The request to get the computed blocks.
-            use_eagle: Whether to enable eagle spec decode. If True,
-                we will drop the last matched block so that we can recompute
-                the last block to get the required hidden states for eagle 
-                drafting head.
 
         Returns:
             A tuple containing:
