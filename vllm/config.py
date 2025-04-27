@@ -2901,6 +2901,20 @@ def _get_and_verify_dtype(
                             "is not supported. Setting dtype to float16.")
                 torch_dtype = torch.float16
 
+            if (current_platform.is_cuda()
+                    and not current_platform.has_device_capability(80)
+                ) and config_dtype == torch.bfloat16:
+                gpu_name = current_platform.get_device_name()
+                capability = current_platform.get_device_capability()
+                assert capability is not None
+                version_str = capability.as_version_str()
+                logger.info(
+                    "Bfloat16 is only supported on GPUs with compute " \
+                    "capability of at least 8.0. Your %s GPU has compute " \
+                    "capability %s. Falling back to float16 for compatibility.",
+                    gpu_name, version_str)
+                torch_dtype = torch.float16
+
             if current_platform.is_hpu() and config_dtype == torch.float16:
                 logger.info(
                     "For HPU, we cast models to bfloat16 instead of "
