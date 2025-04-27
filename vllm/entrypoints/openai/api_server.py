@@ -579,25 +579,6 @@ async def create_pooling(request: PoolingRequest, raw_request: Request):
     assert_never(generator)
 
 
-@router.post("/score", dependencies=[Depends(validate_json_request)])
-@with_cancellation
-@load_aware_call
-async def create_score(request: ScoreRequest, raw_request: Request):
-    handler = score(raw_request)
-    if handler is None:
-        return base(raw_request).create_error_response(
-            message="The model does not support Score API")
-
-    generator = await handler.create_score(request, raw_request)
-    if isinstance(generator, ErrorResponse):
-        return JSONResponse(content=generator.model_dump(),
-                            status_code=generator.code)
-    elif isinstance(generator, ScoreResponse):
-        return JSONResponse(content=generator.model_dump())
-
-    assert_never(generator)
-
-
 @router.post("/classify", dependencies=[Depends(validate_json_request)])
 @with_cancellation
 @load_aware_call
@@ -614,6 +595,25 @@ async def create_classify(request: ClassificationRequest,
                             status_code=generator.code)
 
     elif isinstance(generator, ClassificationResponse):
+        return JSONResponse(content=generator.model_dump())
+
+    assert_never(generator)
+
+
+@router.post("/score", dependencies=[Depends(validate_json_request)])
+@with_cancellation
+@load_aware_call
+async def create_score(request: ScoreRequest, raw_request: Request):
+    handler = score(raw_request)
+    if handler is None:
+        return base(raw_request).create_error_response(
+            message="The model does not support Score API")
+
+    generator = await handler.create_score(request, raw_request)
+    if isinstance(generator, ErrorResponse):
+        return JSONResponse(content=generator.model_dump(),
+                            status_code=generator.code)
+    elif isinstance(generator, ScoreResponse):
         return JSONResponse(content=generator.model_dump())
 
     assert_never(generator)
