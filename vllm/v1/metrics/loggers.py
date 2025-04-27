@@ -233,8 +233,8 @@ class PrometheusStatLogger(StatLoggerBase):
                 name="vllm:iteration_tokens_total",
                 documentation="Histogram of number of tokens per engine_step.",
                 buckets=[
-                    1, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8096,
-                    16192
+                    1, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192,
+                    16384
                 ],
                 labelnames=labelnames).labels(*labelvalues)
 
