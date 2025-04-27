@@ -16,7 +16,8 @@ from transformers.models.phi4_multimodal.modeling_phi4_multimodal import (
     Phi4MultimodalAudioRelativeAttentionBias, adaptive_enc_mask, unfold_tensor)
 
 from vllm.config import VllmConfig
-from vllm.distributed import divide, get_tensor_model_parallel_world_size, get_tensor_model_parallel_rank
+from vllm.distributed import (divide, get_tensor_model_parallel_rank,
+                              get_tensor_model_parallel_world_size)
 from vllm.model_executor.layers.activation import MulAndSilu, get_act_fn
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                MergedColumnParallelLinear,
@@ -225,7 +226,7 @@ class Phi4MMImageEmbedding(nn.Module):
             output_img = output_img.to(device=target_device,
                                        dtype=target_dtype)
             img_feature_proj = self.img_projection(output_img)
-            img_set_tensor.append(img_feature_proj)
+            img_set_tensor.append(img_feature_proj.flatten(0, 1))
 
         return img_set_tensor
 
@@ -271,7 +272,7 @@ class Phi4MultimodalAudioAttention(nn.Module):
         super().__init__()
         self.config = config
         self.embed_dim = config.hidden_size
-        self.num_heads = config.num_attention_heads
+        self.total_num_heads = config.num_attention_heads
         self.head_dim = self.embed_dim // self.num_heads
         if self.head_dim * self.num_heads != self.embed_dim:
             raise ValueError(
@@ -283,7 +284,7 @@ class Phi4MultimodalAudioAttention(nn.Module):
         self.qkv_proj = QKVParallelLinear(
             hidden_size=self.embed_dim,
             head_size=self.head_dim,
-            total_num_heads=self.num_heads,
+            total_num_heads=self.total_num_heads,
             quant_config=quant_config,
             prefix=f"{prefix}.qkv_proj",
         )
@@ -297,12 +298,12 @@ class Phi4MultimodalAudioAttention(nn.Module):
 
         self.tp_size = get_tensor_model_parallel_world_size()
         self.tp_rank = get_tensor_model_parallel_rank()
-        self.num_heads_per_partition = divide(self.num_heads, self.tp_size)
-    
+        self.num_heads = divide(self.total_num_heads, self.tp_size)
+
     def split_attn_mask(self, attention_mask: torch.Tensor) -> torch.Tensor:
-        start_idx = self.num_heads_per_partition * self.tp_rank
-        end_idx = self.num_heads_per_partition * (self.tp_rank + 1)
-        return attention_mask[:, start_idx: end_idx]
+        start_idx = self.num_heads * self.tp_rank
+        end_idx = self.num_heads * (self.tp_rank + 1)
+        return attention_mask[:, start_idx:end_idx]
 
     def forward(
         self,
@@ -313,9 +314,9 @@ class Phi4MultimodalAudioAttention(nn.Module):
         query, key, value = qkv_states.chunk(3, dim=-1)
 
         bsz, seq_len, _ = query.size()
-        query = query.view(bsz, seq_len, self.num_heads_per_partition, self.head_dim)
-        key = key.view(bsz, seq_len, self.num_heads_per_partition, self.head_dim)
-        value = value.view(bsz, seq_len, self.num_heads_per_partition, self.head_dim)
+        query = query.view(bsz, seq_len, self.num_heads, self.head_dim)
+        key = key.view(bsz, seq_len, self.num_heads, self.head_dim)
+        value = value.view(bsz, seq_len, self.num_heads, self.head_dim)
         query, key, value = (x.transpose(1, 2) for x in (query, key, value))
 
         attention_mask = self.split_attn_mask(attention_mask)
@@ -582,7 +583,7 @@ class Phi4MMAudioEmbedding(nn.Module):
                                                    audio_attention_mask)
         audio_embeds = audio_projection(audio_encoder_hidden_states)
 
-        return audio_embeds
+        return audio_embeds.flatten(0, 1)
 
     def load_weights(self, weights: Iterable[Tuple[str,
                                                    torch.Tensor]]) -> set[str]:
