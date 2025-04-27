@@ -239,7 +239,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 RUN --mount=type=bind,from=build,src=/workspace/dist,target=/vllm-workspace/dist \
     --mount=type=cache,target=/root/.cache/uv \
     uv pip install --system dist/*.whl --verbose \
-    --extra-index-url https://download.pytorch.org/whl/cu128
+    --extra-index-url https://download.pytorch.org/whl/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.')
 
 # TESTING: install xformers from source until it's updated to work
 # with 2.7.0. Also pin it to the current main commit to avoid the issue
