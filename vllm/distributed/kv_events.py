@@ -106,7 +106,8 @@ class ZmqEventPublisher(EventPublisher):
     topic:
         Topic to publish events to.
     """
-    TIMEOUT: float = 1.0
+    SHUTDOWN_TIMEOUT: float = 1.0
+    END_SEQ = (-1).to_bytes(8, "big", signed=True)
 
     def __init__(
         self,
@@ -154,7 +155,7 @@ class ZmqEventPublisher(EventPublisher):
         start = time.time()
 
         pending_items = True
-        while pending_items and (time.time() - start < self.TIMEOUT):
+        while pending_items and (time.time() - start < self.SHUTDOWN_TIMEOUT):
             pending_items = not self._event_queue.empty()
             if pending_items:
                 time.sleep(0.1)
@@ -163,11 +164,11 @@ class ZmqEventPublisher(EventPublisher):
             logger.warning(
                 "Warning: Queue still has %s items after %s seconds timeout",
                 self._event_queue.qsize(),
-                self.TIMEOUT,
+                self.SHUTDOWN_TIMEOUT,
             )
 
         if self._thread.is_alive():
-            self._thread.join(timeout=1.0)
+            self._thread.join(timeout=self.SHUTDOWN_TIMEOUT)
 
         # Clean up ZMQ resources
         try:
@@ -254,10 +255,13 @@ class ZmqEventPublisher(EventPublisher):
         for seq, buf in self._buffer:
             if seq >= start_seq:
                 # [identity, empty_delim, seq_bytes, payload]
+                # (identity, empty_delim) are stripped off by the router
+                # receiving payload is (seq_bytes, payload)
                 self._replay.send_multipart(
                     (client_id, b"", seq.to_bytes(8, "big"), buf))
         # Send end of sequence marker
-        self._replay.send_multipart((client_id, b"", b""))
+        # receiving payload is (-1, b""")
+        self._replay.send_multipart((client_id, b"", self.END_SEQ, b""))
 
 
 class EventPublisherFactory:
