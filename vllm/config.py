@@ -782,8 +782,10 @@ class ModelConfig:
             quantization_methods = [
                 q for q in supported_quantization if q not in overrides
             ]
-            # We check the overrides first
-            quantization_methods = overrides + quantization_methods
+            # Any custom overrides will be in quantization_methods so we place
+            # them at the start of the list so custom overrides have preference
+            # over the built in ones.
+            quantization_methods = quantization_methods + overrides
 
             # Detect which checkpoint is it
             for name in quantization_methods:
