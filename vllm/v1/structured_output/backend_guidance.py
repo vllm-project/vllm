@@ -108,6 +108,9 @@ class GuidanceBackend(StructuredOutputBackend):
         return llguidance_torch.allocate_token_bitmask(
             max_num_seqs, self.ll_tokenizer.vocab_size)
 
+    def destroy(self):
+        pass
+
 
 @dataclass
 class GuidanceGrammar(StructuredOutputGrammar):
@@ -191,6 +194,9 @@ def serialize_guidance_grammar(
             tp = "grammar"
         elif request_type == StructuredOutputOptions.CHOICE:
             tp = "choice"
+        elif request_type == StructuredOutputOptions.STRUCTURAL_TAG:
+            raise ValueError("Structural tag is not supported "
+                             "for guidance backend yet")
         else:
             logger.error("Validation should have already occurred. "
                          "Please file an issue.")

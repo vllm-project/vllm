@@ -108,6 +108,16 @@ class XgrammarBackend(StructuredOutputBackend):
             ctx = self.compiler.compile_grammar(grammar_spec)
         elif request_type == StructuredOutputOptions.REGEX:
             ctx = self.compiler.compile_regex(grammar_spec)
+        elif request_type == StructuredOutputOptions.STRUCTURAL_TAG:
+            s_tag = json.loads(grammar_spec)
+            tags = [
+                xgr.StructuralTagItem(
+                    begin=s["begin"],
+                    schema=json.dumps(s["schema"]),
+                    end=s["end"],
+                ) for s in s_tag["structures"]
+            ]
+            ctx = self.compiler.compile_structural_tag(tags, s_tag["triggers"])
         else:
             logger.error(
                 "Validation should have already occurred. Please file an issue."
@@ -123,6 +133,9 @@ class XgrammarBackend(StructuredOutputBackend):
 
     def allocate_token_bitmask(self, max_num_seqs: int):
         return xgr.allocate_token_bitmask(max_num_seqs, self.vocab_size)
+
+    def destroy(self):
+        del self.compiler
 
 
 @dataclass
@@ -176,15 +189,8 @@ def has_xgrammar_unsupported_json_features(schema: dict[str, Any]) -> bool:
         if not isinstance(obj, dict):
             return False
 
-        # Check for pattern restrictions
-        if "pattern" in obj:
-            return True
-
         # Check for numeric ranges
-        if obj.get("type") in ("integer", "number") and any(
-                key in obj
-                for key in ("minimum", "maximum", "exclusiveMinimum",
-                            "exclusiveMaximum", "multipleOf")):
+        if obj.get("type") in ("integer", "number") and ("multipleOf" in obj):
             return True
 
         # Check for array unsupported keywords
@@ -276,3 +282,18 @@ def validate_xgrammar_grammar(sampling_params: SamplingParams) -> None:
             xgr.Grammar.from_ebnf(gd_params.grammar)
         except Exception as e:
             raise ValueError("Invalid grammar specification.") from e
+        return
+
+    if gd_params.structural_tag:
+        try:
+            s_tag = json.loads(gd_params.structural_tag)
+            tags = [
+                xgr.StructuralTagItem(
+                    begin=s["begin"],
+                    schema=json.dumps(s["schema"]),
+                    end=s["end"],
+                ) for s in s_tag["structures"]
+            ]
+            xgr.Grammar.from_structural_tag(tags, s_tag["triggers"])
+        except Exception as e:
+            raise ValueError("Invalid structural tag specification.") from e
