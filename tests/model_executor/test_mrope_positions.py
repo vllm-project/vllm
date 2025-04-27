@@ -157,7 +157,7 @@ vl_test_cases = [
 
 
 @pytest.mark.parametrize("test_case", vl_test_cases)
-def test_vl_get_input_positions_and_delta_correctness(test_case, ):
+def test_vl_get_input_positions_and_delta_correctness(test_case):
     input = test_case["input"]
     spatial_merge_size = test_case["spatial_merge_size"]
     tokens_per_second = test_case.get("tokens_per_second", 1.0)
@@ -363,7 +363,7 @@ omni_test_cases = [
 
 
 @pytest.mark.parametrize("test_case", omni_test_cases)
-def test_omni_get_input_positions_and_delta_correctness(test_case, ):
+def test_omni_get_input_positions_and_delta_correctness(test_case):
     input = test_case["input"]
     spatial_merge_size = test_case["spatial_merge_size"]
     use_audio_with_video = test_case.get("use_audio_with_video", False)
