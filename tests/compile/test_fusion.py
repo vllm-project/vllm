@@ -77,12 +77,13 @@ def test_fusion_rmsnorm_quant(dtype, hidden_size, num_tokens, eps, static,
 
     vllm_config = VllmConfig(compilation_config=CompilationConfig(
         level=CompilationLevel.PIECEWISE, custom_ops=["+rms_norm"]))
+    vllm_config.compilation_config.pass_config = \
+            CompilationConfig.PassConfig(enable_fusion=True,
+                                              enable_noop=True)
     with vllm.config.set_current_vllm_config(vllm_config):
         # Reshape pass is needed for the fusion pass to work
-        config = CompilationConfig.PassConfig(enable_fusion=True,
-                                              enable_noop=True)
-        noop_pass = NoOpEliminationPass(config)
-        fusion_pass = FusionPass.instance(config)
+        noop_pass = NoOpEliminationPass(vllm_config)
+        fusion_pass = FusionPass.instance(vllm_config)
 
         backend = TestBackend(noop_pass, fusion_pass)
         model = TestModel(hidden_size, eps, static, cutlass_fp8_enabled)
