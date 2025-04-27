@@ -150,7 +150,7 @@ __global__ void LLGemm1_kernel(const scalar_t* in_a, const scalar_t* in_b,
   colB_elem4w = bf4[threadid * 4 + 3];
 
   scalar2_t Af2;
-  scalar2_t Bf2;
+  [[maybe_unused]] scalar2_t Bf2;
   float2 S;
 
   auto Ah2ptr = reinterpret_cast<scalar2_t*>(&rowA_elem4);
