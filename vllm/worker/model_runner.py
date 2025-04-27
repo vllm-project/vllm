@@ -35,7 +35,7 @@ from vllm.lora.request import LoRARequest
 from vllm.lora.worker_manager import LRUCacheWorkerLoRAManager
 from vllm.model_executor import SamplingMetadata, SamplingMetadataCache
 from vllm.model_executor.layers.rotary_embedding import MRotaryEmbedding
-from vllm.model_executor.layers.sampler import SamplerOutput
+from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.model_loader import get_model
 from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
 from vllm.model_executor.models import supports_lora, supports_multimodal
@@ -1082,6 +1082,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
         # Set after load_model.
         self.lora_manager: Optional[LRUCacheWorkerLoRAManager] = None
         self.prompt_adapter_manager: LRUCacheWorkerPromptAdapterManager = None
+        self.sampler = get_sampler()
 
         set_cpu_offload_max_bytes(
             int(self.cache_config.cpu_offload_gb * 1024**3))
@@ -1117,14 +1118,9 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                     logger.warning(
                         "Regarding multimodal models, vLLM currently "
                         "only supports adding LoRA to language model.")
-                # It's necessary to distinguish between the
-                # max_position_embeddings of VLMs and LLMs.
-                if hasattr(self.model.config, "max_position_embeddings"):
-                    max_pos_embeddings = (
-                        self.model.config.max_position_embeddings)
-                else:
-                    max_pos_embeddings = (
-                        self.model.config.text_config.max_position_embeddings)
+
+                # Use get_text_config() in case of multimodal models
+                text_config = self.model_config.hf_config.get_text_config()
 
                 self.lora_manager = LRUCacheWorkerLoRAManager(
                     self.scheduler_config.max_num_seqs,
@@ -1134,7 +1130,8 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                     self.device,
                     self.model.embedding_modules,
                     self.model.embedding_padding_modules,
-                    max_position_embeddings=max_pos_embeddings,
+                    max_position_embeddings=text_config.
+                    max_position_embeddings,
                 )
                 self.model = self.lora_manager.create_lora_manager(self.model)
             time_after_load = time.perf_counter()
@@ -1820,7 +1817,7 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
             model_input.async_callback()
 
         # Sample the next token.
-        output: SamplerOutput = self.model.sample(
+        output: SamplerOutput = self.sampler(
             logits=logits,
             sampling_metadata=model_input.sampling_metadata,
         )

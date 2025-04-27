@@ -22,7 +22,7 @@
 """Inference-only Qwen2.5-Omni model (thinker part)."""
 
 from copy import copy
-from functools import cached_property, partial
+from functools import partial
 from typing import (Any, Dict, Iterable, List, Mapping, Optional, Sequence,
                     Set, Tuple, Union)
 
@@ -40,7 +40,6 @@ from transformers.models.whisper import WhisperFeatureExtractor
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.model_executor.layers.rotary_embedding import MRotaryEmbedding
-from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.models.qwen2_5_vl import (
     Qwen2_5_VisionTransformer, Qwen2_5_VLImageEmbeddingInputs,
     Qwen2_5_VLImageInputs, Qwen2_5_VLImagePixelInputs,
@@ -172,25 +171,8 @@ class Qwen2_5OmniThinkerProcessingInfo(Qwen2AudioProcessingInfo,
         assert isinstance(feature_extractor, WhisperFeatureExtractor)
         return feature_extractor
 
-    def get_max_audio_tokens(self) -> int:
-        hf_config = self.get_hf_config()
-        max_source_position = hf_config.audio_config.max_source_positions
-        output_lengths = (max_source_position - 2) // 2 + 1
-        return output_lengths
-
     def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
         return {"audio": None, "image": None, "video": None}
-
-    def get_mm_max_tokens_per_item(
-        self,
-        seq_len: int,
-        mm_counts: Mapping[str, int],
-    ) -> Mapping[str, int]:
-        return {
-            "audio": self.get_max_audio_tokens(),
-            "image": self.get_max_image_tokens(),
-            "video": self.get_max_video_tokens(seq_len, mm_counts),
-        }
 
 
 class Qwen2_5OmniThinkerDummyInputsBuilder(
@@ -210,7 +192,6 @@ class Qwen2_5OmniThinkerDummyInputsBuilder(
         return (audio_token * num_audios + image_token * num_images +
                 video_token * num_videos)
 
-    # TODO: @abstractmethod after transition
     def get_dummy_mm_data(
         self,
         seq_len: int,
@@ -518,9 +499,6 @@ class Qwen2_5OmniThinkerMultiModalProcessor(
         """
         Qwen2.5-Omni reimplements this function to handle text only.
         """
-        print(prompt)
-        print(hf_processor_mm_kwargs)
-        print(mm_items)
         if isinstance(prompt, str):
             if enable_hf_prompt_update:
                 return self._apply_hf_processor_text_mm(
@@ -811,13 +789,6 @@ class Qwen2_5OmniThinkerForConditionalGeneration(
         self.make_empty_intermediate_tensors = (
             self.language_model.make_empty_intermediate_tensors)
 
-    @cached_property
-    def sampler(self):
-        if hasattr(self.language_model, "sampler"):
-            return self.language_model.sampler
-
-        return get_sampler()
-
     def _parse_and_validate_multimodal_inputs(self, **kwargs: object) -> dict:
         mm_input_by_modality = {}
 
@@ -957,13 +928,6 @@ class Qwen2_5OmniThinkerForConditionalGeneration(
     ) -> Optional[torch.Tensor]:
         return self.language_model.compute_logits(hidden_states,
                                                   sampling_metadata)
-
-    def sample(
-        self,
-        logits: torch.Tensor,
-        sampling_metadata: SamplingMetadata,
-    ) -> Optional[SamplerOutput]:
-        return self.language_model.sample(logits, sampling_metadata)
 
     def load_weights(self, weights: Iterable[Tuple[str,
                                                    torch.Tensor]]) -> Set[str]:

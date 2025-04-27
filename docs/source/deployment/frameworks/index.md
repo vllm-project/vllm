@@ -3,6 +3,7 @@
 :::{toctree}
 :maxdepth: 1
 
+anything-llm
 bentoml
 cerebrium
 dstack

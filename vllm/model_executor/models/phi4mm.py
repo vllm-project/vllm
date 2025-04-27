@@ -13,7 +13,6 @@ from vllm.config import VllmConfig
 from vllm.distributed import get_pp_group
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     DEFAULT_VOCAB_PADDING_SIZE, ParallelLMHead)
 from vllm.model_executor.models.llama import LlamaModel
@@ -503,26 +502,6 @@ class Phi4MMProcessingInfo(BaseProcessingInfo):
     def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
         return {"audio": None, "image": None}
 
-    def get_mm_max_tokens_per_item(
-        self,
-        seq_len: int,
-        mm_counts: Mapping[str, int],
-    ) -> Mapping[str, int]:
-        return {
-            "image": self.get_max_image_tokens(),
-            "audio": self.get_max_audio_tokens(),
-        }
-
-    def get_max_audio_tokens(self) -> int:
-        sr = self.get_feature_extractor().sampling_rate
-        num_frames = self.get_audio_num_frames(_AUDIO_MAX_SOUNDFILE_SIZE, sr)
-        return self._compute_audio_embed_size(num_frames)
-
-    def get_max_image_tokens(self) -> int:
-        target_width, target_height = self.get_image_size_with_most_features()
-        return self.get_num_image_tokens(image_width=target_width,
-                                         image_height=target_height)
-
     def _find_target_aspect_ratio(
         self,
         orig_width: int,
@@ -767,9 +746,6 @@ class Phi4MMDummyInputsBuilder(BaseDummyInputsBuilder[Phi4MMProcessingInfo]):
         target_width, target_height = \
             self.info.get_image_size_with_most_features()
 
-        target_width, target_height = \
-            self.info.get_image_size_with_most_features()
-
         mm_data = {
             "image":
             self._get_dummy_images(width=target_width,
@@ -991,7 +967,6 @@ class Phi4MMForCausalLM(nn.Module, SupportsLoRA, SupportsMultiModal):
         logit_scale = getattr(config, "logit_scale", 1.0)
         self.logits_processor = LogitsProcessor(self.unpadded_vocab_size,
                                                 config.vocab_size, logit_scale)
-        self.sampler = get_sampler()
 
     def _parse_and_validate_audio_input(
             self, **kwargs: object) -> Optional[Phi4MMAudioInputs]:
@@ -1266,14 +1241,6 @@ class Phi4MMForCausalLM(nn.Module, SupportsLoRA, SupportsMultiModal):
         logits = self.logits_processor(self.lm_head, hidden_states,
                                        sampling_metadata)
         return logits
-
-    def sample(
-        self,
-        logits: torch.Tensor,
-        sampling_metadata: SamplingMetadata,
-    ) -> Optional[SamplerOutput]:
-        next_tokens = self.sampler(logits, sampling_metadata)
-        return next_tokens
 
     def load_weights(self, weights: Iterable[Tuple[str,
                                                    torch.Tensor]]) -> None:
