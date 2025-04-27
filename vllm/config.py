@@ -762,7 +762,8 @@ class ModelConfig:
         quant_cfg = self._parse_quant_hf_config()
 
         if quant_cfg is not None:
-            quant_method = quant_cfg.get("quant_method", "").lower()
+            quant_method = quant_cfg.get("quant_method", "")
+            quant_method = quant_method.replace("-", "_").lower()
 
             # Detect which checkpoint is it
             for name in QUANTIZATION_METHODS:
