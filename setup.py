@@ -394,7 +394,6 @@ class repackage_wheel(build_ext):
             file_members += list(
                 filter(lambda x: compiled_regex.match(x.filename),
                        wheel.filelist))
-            print(f"Extracting {len(file_members)} files from {wheel_path}")
 
             for file in file_members:
                 print(f"Extracting and including {file.filename} "
