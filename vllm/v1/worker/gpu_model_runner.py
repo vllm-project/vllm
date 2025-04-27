@@ -19,7 +19,6 @@ from vllm.distributed.kv_transfer import (get_kv_transfer_group,
 from vllm.distributed.parallel_state import get_pp_group, graph_capture
 from vllm.forward_context import set_forward_context
 from vllm.logger import init_logger
-from vllm.model_executor.layers.rotary_embedding import MRotaryEmbedding
 from vllm.model_executor.model_loader import get_model
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import MultiModalKwargs, PlaceholderRange
@@ -357,43 +356,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 lora_request=new_req_data.lora_request,
             )
 
-            # Only relevant for models using M-RoPE (e.g, Qwen2-VL)
-            if self.uses_mrope:
-                image_grid_thw = []
-                video_grid_thw = []
-                second_per_grid_ts = []
-                audio_feature_lengths = []
-                use_audio_in_video = False
-                for mm_input in self.requests[req_id].mm_inputs:
-                    if mm_input.get("image_grid_thw") is not None:
-                        image_grid_thw.extend(
-                            mm_input["image_grid_thw"].tolist())
-                    if mm_input.get("video_grid_thw") is not None:
-                        video_grid_thw.extend(
-                            mm_input["video_grid_thw"].tolist())
-                    if mm_input.get("second_per_grid_ts") is not None:
-                        second_per_grid_ts.extend(
-                            mm_input["second_per_grid_ts"])
-                    if mm_input.get("audio_feature_lengths") is not None:
-                        audio_feature_lengths.extend(
-                            mm_input["audio_feature_lengths"])
-                    if mm_input.get("use_audio_in_video") is True:
-                        use_audio_in_video = True
-
-                hf_config = self.model_config.hf_config
-
-                self.requests[req_id].mrope_positions, \
-                    self.requests[req_id].mrope_position_delta = \
-                    MRotaryEmbedding.get_input_positions_tensor(
-                        self.requests[req_id].prompt_token_ids,
-                        hf_config=hf_config,
-                        image_grid_thw=image_grid_thw,
-                        video_grid_thw=video_grid_thw,
-                        second_per_grid_ts=second_per_grid_ts,
-                        audio_feature_lengths=audio_feature_lengths,
-                        use_audio_in_video=use_audio_in_video,
-                    )
-
             req_ids_to_add.append(req_id)
 
         # Update the states of the running/resumed requests.
@@ -715,16 +677,54 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         return common_prefix_len if use_cascade else 0
 
     def _calc_mrope_positions(self, scheduler_output: "SchedulerOutput"):
+        from vllm.model_executor.layers.mrope_positions import (
+            mrope_get_input_positions_and_delta,
+            mrope_get_next_input_positions_tensor)
+
         mrope_pos_ptr = 0
         for index, req_id in enumerate(self.input_batch.req_ids):
             req = self.requests[req_id]
-            assert req.mrope_positions is not None
 
             num_computed_tokens = \
                 self.input_batch.num_computed_tokens_cpu[index]
             num_scheduled_tokens = \
                 scheduler_output.num_scheduled_tokens[req_id]
             num_prompt_tokens = len(req.prompt_token_ids)
+
+            if req.mrope_positions is None:
+                image_grid_thw = []
+                video_grid_thw = []
+                second_per_grid_ts = []
+                audio_feature_lengths = []
+                use_audio_in_video = False
+                for mm_input in self.requests[req_id].mm_inputs:
+                    if mm_input.get("image_grid_thw") is not None:
+                        image_grid_thw.extend(
+                            mm_input["image_grid_thw"].tolist())
+                    if mm_input.get("video_grid_thw") is not None:
+                        video_grid_thw.extend(
+                            mm_input["video_grid_thw"].tolist())
+                    if mm_input.get("second_per_grid_ts") is not None:
+                        second_per_grid_ts.extend(
+                            mm_input["second_per_grid_ts"])
+                    if mm_input.get("audio_feature_lengths") is not None:
+                        audio_feature_lengths.extend(
+                            mm_input["audio_feature_lengths"])
+                    if mm_input.get("use_audio_in_video") is True:
+                        use_audio_in_video = True
+
+                req.mrope_positions, \
+                    req.mrope_position_delta = \
+                    mrope_get_input_positions_and_delta(
+                        input_tokens=self.input_batch.token_ids_cpu[
+                            index, :num_prompt_tokens],
+                        hf_config=self.model_config.hf_config,
+                        image_grid_thw=image_grid_thw,
+                        video_grid_thw=video_grid_thw,
+                        second_per_grid_ts=second_per_grid_ts,
+                        audio_feature_lengths=audio_feature_lengths,
+                        use_audio_in_video=use_audio_in_video,
+                    )
 
             if num_computed_tokens + num_scheduled_tokens > num_prompt_tokens:
                 prompt_part_len = max(0,
@@ -755,7 +755,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 dst_end = mrope_pos_ptr + completion_part_len
 
                 self.mrope_positions_cpu[:, dst_start:dst_end] = \
-                    MRotaryEmbedding.get_next_input_positions_tensor(
+                    mrope_get_next_input_positions_tensor(
                         req.mrope_position_delta,
                         context_len=num_computed_tokens +
                         prompt_part_len,
