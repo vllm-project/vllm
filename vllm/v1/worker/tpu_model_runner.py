@@ -34,8 +34,7 @@ from vllm.v1.kv_cache_interface import (AttentionSpec, FullAttentionSpec,
                                         KVCacheConfig, KVCacheSpec,
                                         SlidingWindowSpec)
 from vllm.v1.outputs import (EMPTY_MODEL_RUNNER_OUTPUT, LogprobsTensors,
-                             ModelRunnerOutput,
-                             ModelRunnerStructuredOutputMetadata)
+                             ModelRunnerOutput)
 from vllm.v1.sample.tpu.metadata import TPUSupportedSamplingMetadata
 from vllm.v1.sample.tpu.sampler import Sampler as TPUSampler
 from vllm.v1.utils import bind_kv_cache
@@ -784,19 +783,6 @@ class TPUModelRunner:
         if scheduler_output.grammar_bitmask is not None:
             require_struct_decoding, grammar_bitmask_padded, arange = \
                 self.prepare_structured_decoding_input(logits, scheduler_output)
-            # Reconstruct the reordered numpy bitmask and index map for output
-            # We can reuse the grammar_bitmask_cpu buffer populated above.
-            num_reqs = logits.shape[0]  # Get actual number of reqs
-            grammar_bitmask_np = self.grammar_bitmask_cpu[:num_reqs].numpy()
-            # Calculate the index map needed for the output
-            struct_out_req_batch_indices = {}
-            for req_id in self.input_batch.req_ids[:num_reqs]:
-                mask_idx = scheduler_output.structured_output_request_ids.get(
-                    req_id)
-                if mask_idx is None:
-                    continue
-                batch_idx = self.input_batch.req_id_to_index[req_id]
-                struct_out_req_batch_indices[req_id] = batch_idx
             logits = self.structured_decode(require_struct_decoding,
                                             grammar_bitmask_padded, logits,
                                             arange)
@@ -875,10 +861,6 @@ class TPUModelRunner:
             spec_token_ids=None,
             logprobs=None,
             prompt_logprobs_dict=prompt_logprobs_dict,
-            structured_output_metadata=ModelRunnerStructuredOutputMetadata(
-                grammar_bitmask=grammar_bitmask_np,
-                struct_out_req_batch_indices=struct_out_req_batch_indices,
-            ),
         )
 
         # Check there are no new graphs compiled - all the graphs should be

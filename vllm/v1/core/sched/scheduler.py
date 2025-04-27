@@ -631,7 +631,6 @@ class Scheduler(SchedulerInterface):
         spec_token_ids = model_runner_output.spec_token_ids
         logprobs = model_runner_output.logprobs
         prompt_logprobs_dict = model_runner_output.prompt_logprobs_dict
-        so_metadata = model_runner_output.structured_output_metadata  # noqa: E501
         num_scheduled_tokens = scheduler_output.num_scheduled_tokens
 
         new_running: list[Request] = []
@@ -711,18 +710,23 @@ class Scheduler(SchedulerInterface):
                 # the outer lists can be of length > 1.
                 new_logprobs = logprobs.slice(req_index, req_index + 1)
 
-            grammar_bitmask = so_metadata['grammar_bitmask']
-            so_req_batch_indices = so_metadata['struct_out_req_batch_indices']
-            if new_token_ids and request.use_structured_output and grammar_bitmask is not None and so_req_batch_indices is not None and req_id in so_req_batch_indices:  # noqa: E501
+            if new_token_ids and request.use_structured_output:
+                grammar_bitmask = scheduler_output.grammar_bitmask
+                batch_index = scheduler_output.structured_output_request_ids.get(  # noqa: E501
+                    req_id,
+                    0,
+                )
                 if TYPE_CHECKING:
                     assert request.structured_output_request is not None
                     assert request.structured_output_request.grammar is not None
+                    assert grammar_bitmask is not None
                 jump_tokens = self.structured_output_manager.jump_forward_tokens(  # noqa: E501
                     request,
                     bitmask=grammar_bitmask,
-                    batch_index=so_req_batch_indices[req_id],
+                    batch_index=batch_index,
                 )
                 if jump_tokens:
+                    print(jump_tokens)
                     new_token_ids.extend(jump_tokens)
                 request.structured_output_request.grammar.accept_tokens(
                     req_id,

@@ -1,10 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from dataclasses import dataclass
-from typing import NamedTuple, Optional, TypedDict
+from typing import NamedTuple, Optional
 
-import numpy as np
-import numpy.typing as npt
 import torch
 
 
@@ -72,11 +70,6 @@ class SamplerOutput:
     logprobs_tensors: Optional[LogprobsTensors]
 
 
-class ModelRunnerStructuredOutputMetadata(TypedDict):
-    grammar_bitmask: Optional[npt.NDArray[np.int32]]
-    struct_out_req_batch_indices: Optional[dict[str, int]]
-
-
 # ModelRunnerOutput is serialized and sent to the scheduler process.
 # This is expensive for torch.Tensor so prefer to use list instead.
 @dataclass
@@ -106,7 +99,6 @@ class ModelRunnerOutput:
     # [prompt_len, num_prompt_logprobs]
     # [prompt_len]
     prompt_logprobs_dict: dict[str, Optional[LogprobsTensors]]
-    structured_output_metadata: ModelRunnerStructuredOutputMetadata
 
 
 EMPTY_MODEL_RUNNER_OUTPUT = ModelRunnerOutput(
@@ -116,8 +108,4 @@ EMPTY_MODEL_RUNNER_OUTPUT = ModelRunnerOutput(
     spec_token_ids=None,
     logprobs=None,
     prompt_logprobs_dict={},
-    structured_output_metadata=ModelRunnerStructuredOutputMetadata(
-        grammar_bitmask=None,
-        struct_out_req_batch_indices=None,
-    ),
 )

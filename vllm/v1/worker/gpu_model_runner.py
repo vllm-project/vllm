@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+
 import gc
 import time
 import weakref
@@ -34,8 +35,7 @@ from vllm.v1.kv_cache_interface import (AttentionSpec, FullAttentionSpec,
                                         KVCacheConfig, KVCacheSpec,
                                         SlidingWindowSpec)
 from vllm.v1.outputs import (EMPTY_MODEL_RUNNER_OUTPUT, LogprobsTensors,
-                             ModelRunnerOutput,
-                             ModelRunnerStructuredOutputMetadata)
+                             ModelRunnerOutput)
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.rejection_sampler import RejectionSampler
 from vllm.v1.sample.sampler import Sampler
@@ -956,13 +956,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self,
         scheduler_output: "SchedulerOutput",
         logits: torch.Tensor,
-    ) -> tuple[Optional[np.ndarray], dict[str, int]]:
+    ):
         # Serialization of np.ndarray is much more efficient than a tensor,
         # so we receive it in that format.
         grammar_bitmask = scheduler_output.grammar_bitmask
         if grammar_bitmask is None:
-            # Should not happen if called correctly, but return empty for safety
-            return None, {}
+            return
 
         # We receive the structured output bitmask from the scheduler, but the
         # indices of the requests in the batch may not match the indices of
@@ -990,26 +989,20 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     req_id]
                 sorted_bitmask[batch_index] = grammar_bitmask[orig_index]
             grammar_bitmask = sorted_bitmask
-        # Keep a reference before converting to tensor, as the original numpy
-        # array might be needed for return
-        grammar_bitmask_np = grammar_bitmask
 
-        grammar_bitmask_tensor = torch.from_numpy(grammar_bitmask).to(
-            self.device, non_blocking=True)
+        grammar_bitmask = torch.from_numpy(grammar_bitmask)
 
         # TODO: compatibility with spec decode
         xgr.apply_token_bitmask_inplace(
             logits,
-            grammar_bitmask_tensor,
+            grammar_bitmask.to(self.device, non_blocking=True),
             indices=list(struct_out_req_batch_indices.values()),
         )
-        # Return the potentially reordered numpy array and the index mapping
-        return grammar_bitmask_np, struct_out_req_batch_indices
 
     @torch.inference_mode()
     def execute_model(
         self,
-        scheduler_output: SchedulerOutput,
+        scheduler_output: "SchedulerOutput",
         intermediate_tensors: Optional[IntermediateTensors] = None,
     ) -> Union[ModelRunnerOutput, torch.Tensor]:
         # Update KVConnector with the KVConnector metadata forward().
@@ -1117,13 +1110,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         logits = self.model.compute_logits(sample_hidden_states, None)
 
         # Apply structured output bitmasks if present
-        grammar_bitmask_np: Optional[np.ndarray] = None
-        struct_out_req_batch_indices: Optional[dict[str, int]] = None
         if scheduler_output.grammar_bitmask is not None:
-            grammar_bitmask_np, struct_out_req_batch_indices = self.apply_grammar_bitmask(  # noqa: E501
-                scheduler_output,
-                logits,
-            )
+            self.apply_grammar_bitmask(scheduler_output, logits)
 
         # Sample the next token and get logprobs if needed.
         sampling_metadata = self.input_batch.sampling_metadata
@@ -1297,10 +1285,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             spec_token_ids=spec_token_ids,
             logprobs=logprobs_lists,
             prompt_logprobs_dict=prompt_logprobs_dict,
-            structured_output_metadata=ModelRunnerStructuredOutputMetadata(
-                grammar_bitmask=grammar_bitmask_np,
-                struct_out_req_batch_indices=struct_out_req_batch_indices,
-            ),
         )
 
     def generate_draft_token_ids(
@@ -1367,7 +1351,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
     def _get_prompt_logprobs_dict(
         self,
         hidden_states: torch.Tensor,
-        scheduler_output: SchedulerOutput,
+        scheduler_output: "SchedulerOutput",
     ) -> dict[str, Optional[LogprobsTensors]]:
         num_prompt_logprobs_dict = self.input_batch.num_prompt_logprobs
         if not num_prompt_logprobs_dict:
