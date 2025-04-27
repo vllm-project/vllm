@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import ctypes
+import glob
 import importlib.util
 import json
 import logging
@@ -8,6 +9,7 @@ import os
 import re
 import subprocess
 import sys
+import zipfile
 from pathlib import Path
 from shutil import which
 
@@ -271,12 +273,14 @@ class cmake_build_ext(build_ext):
 
         # copy vllm/vllm_flash_attn/*.py from self.build_lib to current
         # directory so that they can be included in the editable build
-        import glob
+        # but ignore __init__.py files
         files = glob.glob(
             os.path.join(self.build_lib, "vllm", "vllm_flash_attn", "*.py"))
         for file in files:
-            dst_file = os.path.join("vllm/vllm_flash_attn",
-                                    os.path.basename(file))
+            # Skip __init__.py files
+            if (basename := os.path.basename(file)) == "__init__.py":
+                continue
+            dst_file = os.path.join("vllm/vllm_flash_attn", basename)
             print(f"Copying {file} to {dst_file}")
             self.copy_file(file, dst_file)
 
@@ -341,8 +345,6 @@ class repackage_wheel(build_ext):
             # in this rare case, the nightly release CI hasn't finished on main.
             if not is_url_available(wheel_location):
                 wheel_location = "https://wheels.vllm.ai/nightly/vllm-1.0.0.dev-cp38-abi3-manylinux1_x86_64.whl"
-
-        import zipfile
 
         if os.path.isfile(wheel_location):
             wheel_path = wheel_location
