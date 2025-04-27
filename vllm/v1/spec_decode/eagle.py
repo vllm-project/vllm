@@ -161,6 +161,7 @@ class EagleProposer:
                     positions=clamped_positions,
                 )
             logits = self.model.compute_logits(hidden_states_logits, None)
+            # TODO(wenlong): get more than one token for tree attention
             draft_token_ids = logits.argmax(dim=-1)
             draft_token_ids_list.append(draft_token_ids)
 
