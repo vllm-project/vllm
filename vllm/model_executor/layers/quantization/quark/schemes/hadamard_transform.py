@@ -1,10 +1,11 @@
+# SPDX-License-Identifier: Apache-2.0
 #from fast_hadamard_transform import (FHT_512,FHT_1024)
-from vllm.model_executor.layers.linear import RowParallelLinear
 from vllm.distributed import (divide, get_tensor_model_parallel_rank,
                                 get_tensor_model_parallel_world_size,
                                 split_tensor_along_last_dim,
                                 tensor_model_parallel_all_gather,
                                 tensor_model_parallel_all_reduce)
+from vllm.model_executor.layers.linear import RowParallelLinear
 from torch import nn
 import torch
 
