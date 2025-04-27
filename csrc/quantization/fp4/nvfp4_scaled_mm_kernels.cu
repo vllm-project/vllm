@@ -134,7 +134,7 @@ typename T::Gemm::Arguments args_from_options(
   using StrideB = typename T::StrideB;
   using StrideD = typename T::StrideD;
   using Sm100BlkScaledConfig =
-      typename T::Gemm::GemmKernel::CollectiveMainloop::Sm100BlkScaledConfig;
+      typename T::Gemm::GemmKernel::CollectiveMainloop::Sm1xxBlkScaledConfig;
 
   int m = static_cast<int>(M);
   int n = static_cast<int>(N);
