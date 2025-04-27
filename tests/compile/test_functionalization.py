@@ -10,7 +10,7 @@ from vllm.compilation.fusion import (FUSED_OPS, FusionPass, QuantKey,
                                      kFp8DynamicTokenSym, kFp8StaticTensorSym)
 from vllm.compilation.fx_utils import find_auto_fn, find_auto_fn_maybe, is_func
 from vllm.compilation.noop_elimination import NoOpEliminationPass
-from vllm.config import CompilationConfig
+from vllm.config import CompilationConfig, VllmConfig
 
 from .backend import TestBackend
 
@@ -49,13 +49,15 @@ def test_fix_functionalization(model: str, quant_key: QuantKey,
                                do_fusion: bool):
     torch.set_default_device("cuda")
 
-    config = CompilationConfig.PassConfig(enable_fusion=do_fusion,
-                                          enable_noop=True)
-    noop_pass = NoOpEliminationPass(config)
-    fusion_pass = FusionPass.instance(config)
+    vllm_config = VllmConfig()
+    vllm_config.compilation_config = CompilationConfig(pass_config= \
+        CompilationConfig.PassConfig(enable_fusion=do_fusion,
+                                          enable_noop=True))
+    noop_pass = NoOpEliminationPass(vllm_config)
+    fusion_pass = FusionPass.instance(vllm_config)
 
     passes = [noop_pass, fusion_pass] if do_fusion else [noop_pass]
-    func_pass = FixFunctionalizationPass(config)
+    func_pass = FixFunctionalizationPass(vllm_config)
     backend_func = TestBackend(*passes, func_pass)
     backend_no_func = TestBackend(*passes)
 
