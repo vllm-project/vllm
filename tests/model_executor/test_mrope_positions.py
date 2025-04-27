@@ -35,11 +35,36 @@ def create_audio(audio_feature_length: int):
     return [AUDIO_START] + [AUDIO] * audio_token_num + [AUDIO_END]
 
 
-def create_video_with_audio(t: int, h: int, w: int, merge_size: int,
-                            audio_feature_length: int):
+def create_video_with_audio(num_t: int, num_h: int, num_w: int,
+                            merge_size: int, audio_feature_length: int,
+                            t_ntoken_per_chunk: int, tokens_per_grid_t: float):
     audio_token_num = (((audio_feature_length - 1) // 2 + 1 - 2) // 2 + 1)
-    return [VISION_START, AUDIO_START] + [VIDEO] * t * (h // merge_size) * (
-        w // merge_size) + [VIDEO] * audio_token_num + [AUDIO_END, VISION_END]
+    added_audio_token_num = 0
+
+    ret = [VISION_START, AUDIO_START]
+    next_chunk_t = t_ntoken_per_chunk
+
+    for t in range(num_t):
+        video_t = int(t * tokens_per_grid_t)
+
+        # audio tokens
+        if video_t >= next_chunk_t:
+            next_chunk_t += t_ntoken_per_chunk
+            if added_audio_token_num < audio_token_num:
+                chunked_audio_token_num = min(
+                    t_ntoken_per_chunk,
+                    audio_token_num - added_audio_token_num)
+                ret.extend([AUDIO] * chunked_audio_token_num)
+                added_audio_token_num += chunked_audio_token_num
+
+        # video tokens
+        ret.extend([VIDEO] * (num_h // merge_size * num_w // merge_size))
+
+    # remaining audio tokens
+    if added_audio_token_num < audio_token_num:
+        ret.extend([AUDIO] * (audio_token_num - added_audio_token_num))
+
+    return ret + [AUDIO_END, VISION_END]
 
 
 vl_test_cases = [
@@ -368,6 +393,8 @@ def test_omni_get_input_positions_and_delta_correctness(test_case, ):
         "mrope_section": [16, 24, 24],
     }
 
+    t_ntoken_per_chunk = int(tokens_per_second * seconds_per_chunk)
+
     input_tokens = []
     image_grid_thw = []
     video_grid_thw = []
@@ -387,10 +414,14 @@ def test_omni_get_input_positions_and_delta_correctness(test_case, ):
             audio_feature_lengths.append(item["audio_feature_length"])
         elif item["type"] == "video":
             if use_audio_with_video:
+                tokens_per_grid_t = tokens_per_second * item[
+                    "second_per_grid_t"]
                 input_tokens.extend(
                     create_video_with_audio(item["t"], item["h"], item["w"],
                                             spatial_merge_size,
-                                            item["audio_feature_length"]))
+                                            item["audio_feature_length"],
+                                            t_ntoken_per_chunk,
+                                            tokens_per_grid_t))
                 audio_feature_lengths.append(item["audio_feature_length"])
             else:
                 input_tokens.extend(

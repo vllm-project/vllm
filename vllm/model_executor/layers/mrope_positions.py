@@ -31,25 +31,25 @@ def mrope_get_input_positions_and_delta(
         input_tokens = np.asarray(input_tokens, dtype=np.int64)
 
         if image_grid_thw is None or len(image_grid_thw) == 0:
-            image_grid_thw = np.empty((0, 3), dtype=np.int64)
+            image_grid_thw_np = np.empty((0, 3), dtype=np.int64)
         elif isinstance(image_grid_thw, torch.Tensor):
-            image_grid_thw = image_grid_thw.numpy()
+            image_grid_thw_np = image_grid_thw.numpy()
         else:
-            image_grid_thw = np.array(image_grid_thw, dtype=np.int64)
+            image_grid_thw_np = np.array(image_grid_thw, dtype=np.int64)
 
         if video_grid_thw is None or len(video_grid_thw) == 0:
-            video_grid_thw = np.empty((0, 3), dtype=np.int64)
+            video_grid_thw_np = np.empty((0, 3), dtype=np.int64)
         elif isinstance(video_grid_thw, torch.Tensor):
-            video_grid_thw = video_grid_thw.numpy()
+            video_grid_thw_np = video_grid_thw.numpy()
         else:
-            video_grid_thw = np.array(video_grid_thw, dtype=np.int64)
+            video_grid_thw_np = np.array(video_grid_thw, dtype=np.int64)
 
         if second_per_grid_ts is None:
             second_per_grid_ts = np.empty((0, ), dtype=np.float64)
         else:
             second_per_grid_ts = np.array(second_per_grid_ts, dtype=np.float64)
 
-        if len(second_per_grid_ts) < len(video_grid_thw):
+        if len(second_per_grid_ts) < len(video_grid_thw_np):
             raise ValueError(
                 "second_per_grid_ts is shorter than video_grid_thw")
 
@@ -78,8 +78,8 @@ def mrope_get_input_positions_and_delta(
                 tokens_per_second=float(
                     thinker_config.vision_config.tokens_per_second),
                 seconds_per_chunk=float(thinker_config.seconds_per_chunk),
-                image_grid_thw=image_grid_thw,
-                video_grid_thw=video_grid_thw,
+                image_grid_thw=image_grid_thw_np,
+                video_grid_thw=video_grid_thw_np,
                 second_per_grid_ts=second_per_grid_ts,
                 audio_feature_lengths=audio_feature_lengths,
                 use_audio_in_video=use_audio_in_video,
@@ -97,8 +97,8 @@ def mrope_get_input_positions_and_delta(
                 tokens_per_second=float(
                     getattr(hf_config.vision_config, "tokens_per_second",
                             1.0)),
-                image_grid_thw=image_grid_thw,
-                video_grid_thw=video_grid_thw,
+                image_grid_thw=image_grid_thw_np,
+                video_grid_thw=video_grid_thw_np,
                 second_per_grid_ts=second_per_grid_ts,
             )
 
@@ -169,7 +169,7 @@ def vl_get_input_positions_torch(
     hf_config: PretrainedConfig,
     image_grid_thw: Union[list[list[int]], torch.Tensor],
     video_grid_thw: Union[list[list[int]], torch.Tensor],
-    second_per_grid_ts: list[float],
+    second_per_grid_ts: Optional[list[float]],
     context_len: int = 0,
     seq_len: Optional[int] = None,
 ) -> Tuple[torch.Tensor, int]:
