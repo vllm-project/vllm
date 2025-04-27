@@ -297,6 +297,7 @@ RUN mv vllm test_docs/
 #################### OPENAI API SERVER ####################
 # base openai image with additional requirements, for any subsequent openai-style images
 FROM vllm-base AS vllm-openai-base
+ARG TARGETPLATFORM
 
 # This timeout (in seconds) is necessary when installing some dependencies via uv since it's likely to time out
 # Reference: https://github.com/astral-sh/uv/pull/1694
