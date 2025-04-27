@@ -711,12 +711,24 @@ class MLACommonMetadata(AttentionMetadata):
             self.seq_lens[i] += 1
         self.max_decode_seq_len = max(self.seq_lens)
 
+        self._ops_advance_step(num_seqs=num_seqs,
+                               num_queries=num_queries,
+                               block_size=block_size,
+                               input_tokens=model_input.input_tokens,
+                               sampled_token_ids=sampled_token_ids,
+                               input_positions=model_input.input_positions)
+
+    def _ops_advance_step(self, num_seqs: int, num_queries: int,
+                          block_size: int, input_tokens: torch.Tensor,
+                          sampled_token_ids: torch.Tensor,
+                          input_positions: torch.Tensor) -> None:
+        # here we use advance_step_flashinfo to update the paged_kv_* tensors
         ops.advance_step_flashattn(num_seqs=num_seqs,
                                    num_queries=num_queries,
                                    block_size=block_size,
-                                   input_tokens=model_input.input_tokens,
+                                   input_tokens=input_tokens,
                                    sampled_token_ids=sampled_token_ids,
-                                   input_positions=model_input.input_positions,
+                                   input_positions=input_positions,
                                    seq_lens=self.seq_lens_tensor,
                                    slot_mapping=self.slot_mapping,
                                    block_tables=self.block_tables)
@@ -727,6 +739,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[T], Generic[T]):
     NOTE: Please read the comment at the top of the file before trying to 
     understand this class
     """
+    BLOCK_TABLE_EXTENDER: list[list[int]] = []
 
     def __init__(self, input_builder: "ModelInputForGPUBuilder"):
         self.input_builder = input_builder
@@ -877,8 +890,10 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[T], Generic[T]):
         num_seqs = len(seq_lens)
         if use_captured_graph:
             self.slot_mapping.extend([PAD_SLOT_ID] * cuda_graph_pad_size)
-            self.block_tables.extend([] * cuda_graph_pad_size)
+            self.block_tables.extend(self.__class__.BLOCK_TABLE_EXTENDER *
+                                     cuda_graph_pad_size)
             num_decode_tokens = batch_size - self.num_prefill_tokens
+
             block_tables = self._get_graph_runner_block_tables(
                 num_seqs, self.block_tables)
         else:
@@ -1076,7 +1091,14 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
                 q,
                 k,
                 maybe_padded_v,
-                **kwargs,
+                None,  # output
+                kwargs["cu_seqlens_q"],
+                kwargs["cu_seqlens_k"],
+                kwargs["max_seqlen_q"],
+                kwargs["max_seqlen_k"],
+                kwargs["causal"],
+                softmax_scale,
+                None,  # bias
             )
         if is_vllm_fa:
             attn_out = self.flash_attn_varlen_func(
