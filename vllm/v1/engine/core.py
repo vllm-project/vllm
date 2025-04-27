@@ -5,6 +5,7 @@ import signal
 import sys
 import threading
 import time
+from collections import deque
 from concurrent.futures import Future
 from inspect import isclass, signature
 from logging import DEBUG
@@ -210,10 +211,10 @@ class EngineCore:
         Note that if nothing to output in this step, None is returned.
 
         The execution flow is as follows:
-        1. Try to schedule a new batch if there are unscheduled requests
-        and the job queue is not full. If a new batch is scheduled, directly
-        return an empty engine core output. In other words, we won't check
-        and return model outputs before the batch queue is full.
+        1. Try to schedule a new batch if the batch queue is not full.
+        If a new batch is scheduled, directly return an empty engine core
+        output. In other words, fulfilling the batch queue has a higher priority
+        than getting model outputs.
         2. If there is no new scheduled batch, meaning that the batch queue
         is full or no other requests can be scheduled, we block until the first
         batch in the job queue is finished.
@@ -223,10 +224,10 @@ class EngineCore:
 
         engine_core_outputs = None
         scheduler_output = None
-        # If there are unscheduled requests and the job queue
-        # is not full, schedule a new batch. Note that this is not blocking.
-        if (self.scheduler.get_num_unscheduled_requests() > 0
-                and not self.batch_queue.full()):
+        # Try to schedule a new batch if the batch queue is not full, but
+        # the scheduler may return an empty batch if all requests are scheduled.
+        # Note that this is not blocking.
+        if not self.batch_queue.full():
             scheduler_output = self.scheduler.schedule()
             if scheduler_output.total_num_scheduled_tokens > 0:
                 future = self.model_executor.execute_model(scheduler_output)
@@ -238,6 +239,10 @@ class EngineCore:
 
         # If no more requests can be scheduled and the job queue is not empty,
         # block until the first batch in the job queue is finished.
+        # TODO(comaniac): Ideally we should peek the first batch in the
+        # job queue to check if it's finished before scheduling a new batch,
+        # but peeking the first element in a queue is not thread-safe,
+        # so we need more work.
         if not scheduled_batch and not self.batch_queue.empty():
             future, scheduler_output = self.batch_queue.get_nowait()
             # Blocking until the first result is available.
@@ -249,6 +254,7 @@ class EngineCore:
         return engine_core_outputs
 
     def shutdown(self):
+        self.structured_output_manager.clear_backend()
         if self.model_executor:
             self.model_executor.shutdown()
         if self.scheduler:
@@ -524,8 +530,12 @@ class EngineCoreProc(EngineCore):
 
         # Msgpack serialization encoding.
         encoder = MsgpackEncoder()
-        # Reuse send buffer.
-        buffer = bytearray()
+        # Send buffers to reuse.
+        reuse_buffers: list[bytearray] = []
+        # Keep references to outputs and buffers until zmq is finished
+        # with them (outputs may contain tensors/np arrays whose
+        # backing buffers were extracted for zero-copy send).
+        pending = deque[tuple[zmq.MessageTracker, Any, bytearray]]()
 
         # We must set linger to ensure the ENGINE_CORE_DEAD
         # message is sent prior to closing the socket.
@@ -538,8 +548,22 @@ class EngineCoreProc(EngineCore):
                     break
                 assert not isinstance(outputs, bytes)
                 outputs.engine_index = engine_index
+
+                # Reclaim buffers that zmq is finished with.
+                while pending and pending[-1][0].done:
+                    reuse_buffers.append(pending.pop()[2])
+
+                buffer = reuse_buffers.pop() if reuse_buffers else bytearray()
                 buffers = encoder.encode_into(outputs, buffer)
-                socket.send_multipart(buffers, copy=False)
+                tracker = socket.send_multipart(buffers,
+                                                copy=False,
+                                                track=True)
+                if not tracker.done:
+                    ref = outputs if len(buffers) > 1 else None
+                    pending.appendleft((tracker, ref, buffer))
+                elif len(reuse_buffers) < 2:
+                    # Keep at most 2 buffers to reuse.
+                    reuse_buffers.append(buffer)
 
 
 class DPEngineCoreProc(EngineCoreProc):

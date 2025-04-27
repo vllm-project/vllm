@@ -46,8 +46,7 @@ vllm = "vllm.entrypoints.cli.main:main"
 
 [tool.setuptools.packages.find]
 where = ["."]
-exclude = ["benchmarks", "csrc", "docs", "examples", "tests*"]
-namespaces = false
+include = ["vllm*"]
 
 [tool.yapfignore]
 ignore_patterns = [
@@ -59,7 +58,8 @@ ignore_patterns = [
 line-length = 80
 exclude = [
     # External file, leaving license intact
-    "examples/other/fp8/quantizer/quantize.py"
+    "examples/other/fp8/quantizer/quantize.py",
+    "vllm/vllm_flash_attn/flash_attn_interface.pyi"
 ]
 
 [tool.ruff.lint.per-file-ignores]
