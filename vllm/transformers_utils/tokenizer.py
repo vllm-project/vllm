@@ -119,7 +119,7 @@ def get_cached_tokenizer(tokenizer: AnyTokenizer) -> AnyTokenizer:
             return tokenizer_len
 
         def __reduce__(self):
-            return (get_cached_tokenizer, (tokenizer, ))
+            return get_cached_tokenizer, (tokenizer, )
 
     CachedTokenizer.__name__ = f"Cached{tokenizer.__class__.__name__}"
 
