@@ -726,7 +726,6 @@ class Scheduler(SchedulerInterface):
                     batch_index=batch_index,
                 )
                 if jump_tokens:
-                    print(jump_tokens)
                     new_token_ids.extend(jump_tokens)
                 request.structured_output_request.grammar.accept_tokens(
                     req_id,
