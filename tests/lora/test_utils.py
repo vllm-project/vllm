@@ -39,6 +39,18 @@ def test_parse_fine_tuned_lora_name_valid():
             False,
             False,
         ),
+        (
+            "language_model.layers.9.mlp.down_proj.lora_A.weight",
+            "language_model.layers.9.mlp.down_proj",
+            True,
+            False,
+        ),
+        (
+            "language_model.layers.9.mlp.down_proj.lora_B.weight",
+            "language_model.layers.9.mlp.down_proj",
+            False,
+            False,
+        ),
     }
     for name, module_name, is_lora_a, is_bias in fixture:
         assert (module_name, is_lora_a,
