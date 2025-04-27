@@ -72,7 +72,7 @@ void run_cutlass_moe_mm_sm100(
   uint32_t const n = out_tensors.size(1);
   uint32_t const k = a_tensors.size(1);
 
-//TODO: add 2 sm config (@kushanam)
+  // TODO: add 2 sm config (@kushanam)
   cutlass_group_gemm_caller<Cutlass3xGemm1sm>(
       out_tensors, a_tensors, b_tensors, a_scales, b_scales, expert_offsets,
       problem_sizes, a_strides, b_strides, c_strides);
