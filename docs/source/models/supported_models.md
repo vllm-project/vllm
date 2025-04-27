@@ -221,6 +221,16 @@ output = llm.encode("Hello, my name is")
 print(output)
 ```
 
+(feature-status-legend)=
+
+## Feature Status Legend
+
+- ✅︎ indicates that the feature is supported for the model.
+
+- 🚧 indicates that the feature is planned but not yet supported for the model.
+
+- ⚠️ indicates that the feature is available but may have known issues or limitations.
+
 (supported-text-models)=
 
 ## List of Text-only Language Models

@@ -719,3 +719,60 @@ def test_prefix_cache_stats_disabled():
 
     # Ensure prefix_cache_stats remains None
     assert manager.prefix_cache_stats is None
+
+
+def test_eagle_enabled_removes_last_block():
+    """Verify Eagle does NOT remove blocks when request 
+    length is divisible by block size."""
+    block_size = 16
+    manager = KVCacheManager(
+        make_kv_cache_config(block_size, num_blocks=10),
+        max_model_len=8192,
+        enable_caching=True,
+        use_eagle=True,
+    )
+
+    # Request with 3 full blocks (48 tokens)
+    token_ids = [0] * (3 * block_size)
+    req = make_request("divisible_request", token_ids)
+
+    # Prime the cache
+    computed_blocks, _ = manager.get_computed_blocks(req)
+    manager.allocate_slots(req, len(token_ids), computed_blocks)
+    manager.free(req)
+
+    # New request with same tokens + Eagle enabled
+    req_eagle = make_request("eagle_divisible", token_ids)
+    computed_blocks, num_tokens = manager.get_computed_blocks(req_eagle)
+
+    # Should retain 2 blocks:
+    # 1. Original 3 blocks → pop last hash → 2 matched blocks
+    # 2. last_block_hash is not None → Eagle pop is not SKIPPED
+    assert len(computed_blocks) == 1
+    assert num_tokens == 1 * block_size  # 32 tokens
+
+
+def test_eagle_with_partial_blocks():
+    """Test Eagle behavior with requests containing partial blocks."""
+    block_size = 16
+    manager = KVCacheManager(
+        make_kv_cache_config(block_size, num_blocks=10),
+        max_model_len=8192,
+        enable_caching=True,
+        use_eagle=True,
+    )
+    # 2 full blocks + 5 tokens (non-divisible length)
+    token_ids = [0] * (2 * block_size + 5)
+    req = make_request("partial_block_test", token_ids)
+
+    # Prime the cache
+    computed_blocks, _ = manager.get_computed_blocks(req)
+    manager.allocate_slots(req, len(token_ids), computed_blocks)
+    manager.free(req)
+
+    # New request with Eagle enabled
+    req_eagle = make_request("partial_eagle", token_ids)
+    computed_blocks, num_tokens = manager.get_computed_blocks(req_eagle)
+    # Original match: 2 full blocks → Eagle removes 1 → 1 remaining
+    assert len(computed_blocks) == 1
+    assert num_tokens == 1 * block_size
