@@ -269,11 +269,12 @@ class cmake_build_ext(build_ext):
         # First, run the standard build_ext command to compile the extensions
         super().run()
 
-        # copy vllm/vllm_flash_attn/*.py from self.build_lib to current
+        # copy vllm/vllm_flash_attn/**/*.py from self.build_lib to current
         # directory so that they can be included in the editable build
         import glob
-        files = glob.glob(
-            os.path.join(self.build_lib, "vllm", "vllm_flash_attn", "*.py"))
+        files = glob.glob(os.path.join(self.build_lib, "vllm",
+                                       "vllm_flash_attn", "**", "*.py"),
+                          recursive=True)
         for file in files:
             dst_file = os.path.join("vllm/vllm_flash_attn",
                                     os.path.basename(file))
@@ -377,12 +378,23 @@ class repackage_wheel(build_ext):
                 "vllm/_flashmla_C.abi3.so",
                 "vllm/vllm_flash_attn/_vllm_fa2_C.abi3.so",
                 "vllm/vllm_flash_attn/_vllm_fa3_C.abi3.so",
-                "vllm/vllm_flash_attn/flash_attn_interface.py",
                 "vllm/cumem_allocator.abi3.so",
                 # "vllm/_version.py", # not available in nightly wheels yet
             ]
-            file_members = filter(lambda x: x.filename in files_to_copy,
-                                  wheel.filelist)
+            import re
+
+            file_members = list(
+                filter(lambda x: x.filename in files_to_copy, wheel.filelist))
+
+            # vllm_flash_attn python code:
+            # Regex from
+            #  `glob.translate('vllm/vllm_flash_attn/**/*.py', recursive=True)`
+            compiled_regex = re.compile(
+                r"vllm/vllm_flash_attn/(?:[^/.][^/]*/)*(?!\.)[^/]*\.py")
+            file_members += list(
+                filter(lambda x: compiled_regex.match(x.filename),
+                       wheel.filelist))
+            print(f"Extracting {len(file_members)} files from {wheel_path}")
 
             for file in file_members:
                 print(f"Extracting and including {file.filename} "
