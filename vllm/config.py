@@ -3441,7 +3441,8 @@ class CompilationConfig(BaseModel):
     compilation_time: float = PrivateAttr
 
     # Per-model forward context
-    # Map from layer name to the attention cls
+    # Map from layer name to layer objects that need to be accessed outside
+    # model code, e.g., Attention, FusedMOE when dp_size>1.
     static_forward_context: dict[str, Any] = PrivateAttr
 
     def compute_hash(self) -> str:
