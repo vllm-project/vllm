@@ -616,7 +616,10 @@ class HuggingFaceDataset(BenchmarkDataset):
     def is_available(cls, dataset_path: str):
         """Check if dataset_path is available depend on basename."""
         dataset_name = os.path.basename(dataset_path)
-        supported_datasets = {os.path.basename(path) for path in cls.SUPPORTED_DATASET_PATHS}
+        supported_datasets = {
+            os.path.basename(path)
+            for path in cls.SUPPORTED_DATASET_PATHS
+        }
         return dataset_name in supported_datasets
 
 
