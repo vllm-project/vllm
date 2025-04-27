@@ -154,7 +154,7 @@ class Scheduler(SchedulerInterface):
         # uses structured decoding.
         structured_output_request_ids: dict[str, int] = {}
 
-        req_to_new_block_ids: dict[str, list[int]] = {}
+        req_to_new_block_ids: dict[str, list[list[int]]] = {}
         num_scheduled_tokens: dict[str, int] = {}
         token_budget = self.max_num_scheduled_tokens
         # Encoder-related.
@@ -246,9 +246,8 @@ class Scheduler(SchedulerInterface):
                 # Therefore, we might introduce some additional
                 # cycle to fill in the bitmask, which could be a big no-op.
                 structured_output_request_ids[request.request_id] = req_index
-            req_to_new_block_ids[request.request_id] = [
-                b.block_id for b in new_blocks
-            ]
+            req_to_new_block_ids[request.request_id] = (
+                self.kv_cache_manager.to_block_ids(new_blocks))
             num_scheduled_tokens[request.request_id] = num_new_tokens
             token_budget -= num_new_tokens
             req_index += 1
@@ -318,6 +317,7 @@ class Scheduler(SchedulerInterface):
                 # Get already-cached tokens.
                 computed_blocks, num_computed_tokens = \
                     self.kv_cache_manager.get_computed_blocks(request)
+                print("num_computed_tokens", num_computed_tokens)
 
                 # Get externally-cached tokens if using a KVConnector.
                 num_external_tokens = (
@@ -357,6 +357,7 @@ class Scheduler(SchedulerInterface):
                     request,
                     num_new_tokens + num_external_tokens,
                     computed_blocks,
+                    num_computed_tokens,
                     num_lookahead_tokens=self.num_lookahead_tokens,
                 )
                 if new_blocks is None:
@@ -391,9 +392,9 @@ class Scheduler(SchedulerInterface):
 
                 if self.lora_config and request.lora_request:
                     scheduled_loras.add(request.lora_request.lora_int_id)
-                req_to_new_block_ids[request.request_id] = [
-                    b.block_id for b in computed_blocks + new_blocks
-                ]
+                req_to_new_block_ids[request.request_id] = (
+                    self.kv_cache_manager.to_block_ids(computed_blocks +
+                                                       new_blocks))
                 num_scheduled_tokens[request.request_id] = num_new_tokens
                 token_budget -= num_new_tokens
                 request.status = RequestStatus.RUNNING
@@ -425,7 +426,9 @@ class Scheduler(SchedulerInterface):
 
         # Get the longest common prefix among all requests in the running queue.
         # This can be potentially used for cascade attention.
-        num_common_prefix_blocks = 0
+        num_common_prefix_blocks: list[int] = [0] * len(
+            self.kv_cache_config.kv_cache_groups)
+
         if self.running:
             any_request = self.running[0]
             num_common_prefix_blocks = (
@@ -507,7 +510,7 @@ class Scheduler(SchedulerInterface):
         request: Request,
         num_scheduled_tokens: int,
         num_scheduled_spec_tokens: int,
-        new_block_ids: list[int],
+        new_block_ids: list[list[int]],
         resumed_from_preemption: bool,
     ) -> CachedRequestData:
         # OPTIMIZATION: Cache the CachedRequestData objects to avoid creating

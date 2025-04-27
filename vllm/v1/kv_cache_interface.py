@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from dataclasses import dataclass
+from typing import Optional
 
 import torch
 
@@ -56,8 +57,9 @@ class KVCacheSpec:
 
 @dataclass
 class AttentionSpec(KVCacheSpec):
-    num_kv_heads: int
     head_size: int
+    num_query_heads: int
+    num_kv_heads: int
     dtype: torch.dtype
     use_mla: bool
 
@@ -71,6 +73,11 @@ class AttentionSpec(KVCacheSpec):
 
 @dataclass
 class FullAttentionSpec(AttentionSpec):
+    # Some layers may be regarded as full attention layers in KV cache manager (
+    # blocks are allocated for all tokens), while computed as sliding window
+    # attention. In this case, we use FullAttentionSpec and record the
+    # sliding window size.
+    sliding_window: Optional[int] = None
 
     @property
     def type_id(self) -> str:
@@ -112,13 +119,28 @@ class SlidingWindowSpec(AttentionSpec):
 
 
 @dataclass
-class KVCacheTensor:
+class KVCacheTensorBase:
     """
     A dataclass for specifying how the workers should initialize the KV cache
-    for a layer. Only contains the size of KV cache for that layer for now. Will
-    be extended to support multiple layers sharing the same memory pool.
+    for a layer.
+    """
+    pass
+
+
+@dataclass
+class KVCacheNewTensor(KVCacheTensorBase):
+    """
+    Initialize the KV cache with a tensor of `size` bytes.
     """
     size: int  # The size of KV cache Tensor in bytes
+
+
+@dataclass
+class KVCacheReuseTensor(KVCacheTensorBase):
+    """
+    Reuse the KV cache tensor of `layer_name` for the current layer.
+    """
+    reused_layer_name: str
 
 
 @dataclass
@@ -141,7 +163,7 @@ class KVCacheConfig:
     """The number of KV cache blocks"""
     num_blocks: int
     """layer_name -> how to initialize KV cache for that layer"""
-    tensors: dict[str, KVCacheTensor]
+    tensors: dict[str, KVCacheTensorBase]
     """
     The kv cache groups of the model.
     The layers in the models are repeated with some patterns, e.g., a model

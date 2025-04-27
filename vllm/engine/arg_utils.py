@@ -254,6 +254,7 @@ class EngineArgs:
     model_impl: str = "auto"
 
     calculate_kv_scales: bool = CacheConfig.calculate_kv_scales
+    disable_hybrid_allocator: bool = False
 
     additional_config: Optional[Dict[str, Any]] = None
     enable_reasoning: Optional[bool] = None
@@ -949,6 +950,12 @@ class EngineArgs:
                             "(only cuda platform is supported)")
 
         parser.add_argument(
+            "--disable-hybrid-allocator",
+            action="store_true",
+            default=False,
+            help="Disable the hybrid allocator. This only affects v1.")
+
+        parser.add_argument(
             "--additional-config",
             type=json.loads,
             default=None,
@@ -1148,6 +1155,7 @@ class EngineArgs:
             prefix_caching_hash_algo=self.prefix_caching_hash_algo,
             cpu_offload_gb=self.cpu_offload_gb,
             calculate_kv_scales=self.calculate_kv_scales,
+            disable_hybrid_allocator=self.disable_hybrid_allocator,
         )
 
         # Get the current placement group if Ray is initialized and

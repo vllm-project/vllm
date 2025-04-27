@@ -1,9 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 
+from typing import Callable, Concatenate, ParamSpec
+
 import numpy as np
 import torch
 
 from vllm.logger import init_logger
+from vllm.utils import cdiv
+from vllm.v1.kv_cache_interface import KVCacheConfig
 
 logger = init_logger(__name__)
 
@@ -14,11 +18,13 @@ class BlockTable:
         self,
         max_num_reqs: int,
         max_num_blocks_per_req: int,
+        max_num_batched_tokens: int,
         pin_memory: bool,
         device: torch.device,
     ):
         self.max_num_reqs = max_num_reqs
         self.max_num_blocks_per_req = max_num_blocks_per_req
+        self.max_num_batched_tokens = max_num_batched_tokens
         self.pin_memory = pin_memory
         self.device = device
 
@@ -35,6 +41,12 @@ class BlockTable:
         )
         self.block_table_np = self.block_table_cpu.numpy()
         self.num_blocks_per_row = np.zeros(max_num_reqs, dtype=np.int32)
+
+        self.slot_mapping_cpu = torch.zeros(self.max_num_batched_tokens,
+                                            dtype=torch.int32,
+                                            device="cpu",
+                                            pin_memory=self.pin_memory)
+        self.slot_mapping_np = self.slot_mapping_cpu.numpy()
 
     def append_row(
         self,
@@ -85,3 +97,57 @@ class BlockTable:
     def get_numpy_array(self) -> np.ndarray:
         """Returns the numpy array of the block table."""
         return self.block_table_np
+
+
+P = ParamSpec("P")
+
+
+class MultiGroupBlockTable:
+    move_row: Callable[P, None]
+    swap_row: Callable[P, None]
+    commit: Callable[P, None]
+    clear: Callable[P, None]
+
+    append_row: Callable[Concatenate[list[list[int]], P], None]
+    add_row: Callable[Concatenate[list[list[int]], P], None]
+
+    def __init__(self, max_num_reqs: int, max_model_len: int,
+                 max_num_batched_tokens: int, pin_memory: bool,
+                 device: torch.device, kv_cache_config: KVCacheConfig) -> None:
+        max_num_blocks_per_req = [
+            cdiv(max_model_len, g.kv_cache_spec.block_size)
+            for g in kv_cache_config.kv_cache_groups
+        ]
+        self.block_tables = [
+            BlockTable(max_num_reqs, max_num_blocks_per_req[i],
+                       max_num_batched_tokens, pin_memory, device)
+            for i in range(len(kv_cache_config.kv_cache_groups))
+        ]
+        # For methods that just pass the arguments to each BlockTable.
+        for f_name in ("move_row", "swap_row", "commit", "clear"):
+            setattr(self, f_name, self._make_broadcast_func(f_name))
+        # For methods that require a block_ids as the first argument.
+        for f_name in ("append_row", "add_row"):
+            setattr(self, f_name,
+                    self._make_broadcast_func_with_block_ids(f_name))
+
+    def _make_broadcast_func(self, f_name: str) -> Callable[P, None]:
+
+        def broadcast_func(*args: P.args, **kwargs: P.kwargs) -> None:
+            for block_table in self.block_tables:
+                getattr(block_table, f_name)(*args, **kwargs)
+
+        return broadcast_func
+
+    def _make_broadcast_func_with_block_ids(
+            self, f_name: str) -> Callable[Concatenate[list[int], P], None]:
+
+        def broadcast_func(block_ids: list[int], *args: P.args,
+                           **kwargs: P.kwargs) -> None:
+            for i, block_table in enumerate(self.block_tables):
+                getattr(block_table, f_name)(block_ids[i], *args, **kwargs)
+
+        return broadcast_func
+
+    def __getitem__(self, idx: int) -> "BlockTable":
+        return self.block_tables[idx]

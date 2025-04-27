@@ -204,6 +204,9 @@ from vllm.model_executor.layers.linear import (ColumnParallelLinear,
 from vllm.model_executor.layers.rotary_embedding import RotaryEmbedding
 from vllm.platforms import current_platform
 from vllm.utils import cdiv, round_down
+from vllm.v1.attention.backends.utils import CommonAttentionMetadata
+from vllm.v1.kv_cache_interface import AttentionSpec
+from vllm.v1.worker.block_table import BlockTable
 from vllm.vllm_flash_attn.fa_utils import get_flash_attn_version
 
 try:
@@ -341,6 +344,8 @@ class MLACommonMetadataBuilder(Generic[M]):
 
     def __init__(self,
                  runner: "GPUModelRunner",
+                 kv_cache_spec: AttentionSpec,
+                 block_table: BlockTable,
                  metadata_cls: Optional[type[M]] = None):
         self.metadata_cls = metadata_cls \
             if metadata_cls is not None else MLACommonMetadata
@@ -353,10 +358,11 @@ class MLACommonMetadataBuilder(Generic[M]):
             runner.parallel_config)
         self.mla_dims = get_mla_dims(model_config)
         self.aot_schedule = is_vllm_fa and (get_flash_attn_version() == 3)
+        self.kv_cache_spec = kv_cache_spec
 
         # Dont try to access the runner on AMD
         if self.aot_schedule:
-            self.page_size = self.runner.block_size
+            self.page_size = self.kv_cache_spec.block_size
 
         if self.chunked_prefill_enabled:
             self.chunked_prefill_workspace_size = min(
@@ -382,6 +388,8 @@ class MLACommonMetadataBuilder(Generic[M]):
                 dtype=model_config.dtype,
                 device=runner.device,
             )
+            self.page_size = kv_cache_spec.block_size
+        self.block_table = block_table
 
     def reorder_batch(self, input_batch: "InputBatch",
                       scheduler_output: "SchedulerOutput") -> bool:
@@ -444,32 +452,32 @@ class MLACommonMetadataBuilder(Generic[M]):
         return modified_batch
 
     def _build_decode(self, input_positions: torch.Tensor,
-                      block_table: torch.Tensor, seq_lens: torch.Tensor):
+                      block_table_tensor: torch.Tensor,
+                      seq_lens: torch.Tensor):
         return MLACommonDecodeMetadata(
             input_positions=input_positions,
-            block_table=block_table,
+            block_table=block_table_tensor,
             seq_lens=seq_lens,
         )
 
     def build(self, num_reqs: int, num_actual_tokens: int, max_query_len: int,
-              common_prefix_len: int) -> M:
+              common_prefix_len: int,
+              common_attn_metadata: CommonAttentionMetadata) -> M:
         assert self._num_decodes + self._num_prefills == num_reqs
 
         # Note(simon): be careful about the CPU <> GPU memory movement in this
         # function. We should avoid GPU -> CPU sync as much as possible because
         # it blocks on all previous kernels.
         device = self.runner.device
-        block_table = (
-            self.runner.input_batch.block_table.get_device_tensor()[:num_reqs])
-        query_start_loc = self.runner.query_start_loc_cpu[:num_reqs + 1].to(
-            device, non_blocking=True)
-        slot_mapping = self.runner.slot_mapping_cpu[:num_actual_tokens].to(
-            device, non_blocking=True).long()
+        block_table_tensor = (self.block_table.get_device_tensor()[:num_reqs])
+        query_start_loc = common_attn_metadata.query_start_loc
+        slot_mapping = (
+            self.block_table.slot_mapping_cpu[:num_actual_tokens].to(
+                device, non_blocking=True).long())
         input_positions = self.runner.positions_cpu[:num_actual_tokens].to(
             device, non_blocking=True).long()
 
-        seq_lens_cpu = self.runner.seq_lens_cpu[:num_reqs]
-        seq_lens = seq_lens_cpu.to(device, non_blocking=True)
+        seq_lens = common_attn_metadata.seq_lens
 
         prefill_metadata = None
         if self._num_prefills > 0:
@@ -543,7 +551,7 @@ class MLACommonMetadataBuilder(Generic[M]):
 
             prefill_metadata = MLACommonPrefillMetadata(
                 input_positions=input_positions[tokens_start:],
-                block_table=block_table[reqs_start:, ...],
+                block_table=block_table_tensor[reqs_start:, ...],
                 query_start_loc=prefill_query_start_loc,
                 max_query_len=max_query_len,
                 chunked_context=chunked_context_metadata,
@@ -553,7 +561,7 @@ class MLACommonMetadataBuilder(Generic[M]):
         if self._num_decodes > 0:
             decode_metadata = self._build_decode(
                 input_positions=input_positions[:self._num_decode_tokens],
-                block_table=block_table[:self._num_decodes, ...],
+                block_table_tensor=block_table_tensor[:self._num_decodes, ...],
                 seq_lens=seq_lens[:self._num_decodes],
             )
 
