@@ -28,6 +28,7 @@ import vllm.envs as envs
 from vllm.compilation.inductor_pass import CallableInductorPass, InductorPass
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import (QUANTIZATION_METHODS,
+                                                     QuantizationMethods,
                                                      get_quantization_config)
 from vllm.model_executor.models import ModelRegistry
 from vllm.platforms import CpuArchEnum, current_platform
@@ -779,7 +780,7 @@ class ModelConfig:
                 "moe_wna16",
             ]
             quantization_methods = [
-                q for q in QUANTIZATION_METHODS if q not in overrides
+                q for q in supported_quantization if q not in overrides
             ]
             # We check the overrides first
             quantization_methods = overrides + quantization_methods
@@ -790,7 +791,11 @@ class ModelConfig:
                 quantization_override = method.override_quantization_method(
                     quant_cfg, self.quantization)
                 if quantization_override is not None:
-                    if name not in overrides:
+                    # Raise error if the override is not custom (custom would
+                    # be in QUANTIZATION_METHODS but not QuantizationMethods)
+                    # and hasn't been added to the overrides list.
+                    if (name in get_args(QuantizationMethods)
+                            and name not in overrides):
                         raise ValueError(
                             f"Quantization method {name} is an override but "
                             "is has not been added to the `overrides` list "
