@@ -277,8 +277,9 @@ class cmake_build_ext(build_ext):
                           recursive=True)
         for file in files:
             dst_file = os.path.join("vllm/vllm_flash_attn",
-                                    os.path.basename(file))
+                                    file.split("vllm/vllm_flash_attn/")[-1])
             print(f"Copying {file} to {dst_file}")
+            os.makedirs(os.path.dirname(dst_file), exist_ok=True)
             self.copy_file(file, dst_file)
 
 
