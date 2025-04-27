@@ -4,6 +4,7 @@ from functools import cached_property
 from importlib.util import find_spec
 from typing import Dict, Optional, Tuple
 
+import os
 import torch
 import torch.jit
 
@@ -58,6 +59,10 @@ class RejectionSampler(SpecDecodeStochasticBaseSampler):
             logger.info("Use flashinfer for rejection sampling.")
         else:
             logger.info("Use pytorch for rejection sampling.")
+
+        if os.environ.get('VLLM_MTP_PRINT_ACCPET_RATE', '0').lower() in ('true', '1'):
+            self.total_true = 0
+            self.total_false = 0
 
     def forward(
         self,
@@ -297,6 +302,15 @@ class RejectionSampler(SpecDecodeStochasticBaseSampler):
             selected_target_probs / selected_draft_probs,
             torch.full((1, ), 1, device=target_probs.device))
         accepted = uniform_rand < capped_ratio
+
+        if os.environ.get('VLLM_MTP_PRINT_ACCPET_RATE', '0').lower() in ('true', '1'):
+            current_true = accepted.sum().item()
+            current_false = accepted.numel() - current_true
+            self.total_true += current_true
+            self.total_false += current_false
+            total = self.total_true + self.total_false
+            ratio_true = self.total_true / total if total != 0 else 0.0
+            print(f"Accepted ratio: {ratio_true:.2%} ({self.total_true}/{total})")
 
         return accepted
 
