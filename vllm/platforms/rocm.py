@@ -10,6 +10,7 @@ import vllm.envs as envs
 from vllm.logger import init_logger
 
 from .interface import DeviceCapability, Platform, PlatformEnum, _Backend
+from .utils import device_id_to_physical_device_id
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig, VllmConfig
@@ -93,15 +94,6 @@ def with_amdsmi_context(fn):
             amdsmi_shut_down()
 
     return wrapper
-
-
-def device_id_to_physical_device_id(device_id: int) -> int:
-    if "CUDA_VISIBLE_DEVICES" in os.environ:
-        device_ids = os.environ["CUDA_VISIBLE_DEVICES"].split(",")
-        physical_device_id = device_ids[device_id]
-        return int(physical_device_id)
-    else:
-        return device_id
 
 
 @cache
@@ -233,7 +225,8 @@ class RocmPlatform(Platform):
     @with_amdsmi_context
     @lru_cache(maxsize=8)
     def get_device_name(cls, device_id: int = 0) -> str:
-        physical_device_id = device_id_to_physical_device_id(device_id)
+        physical_device_id = device_id_to_physical_device_id(
+            device_id, cls.device_control_env_var)
         handle = amdsmi_get_processor_handles()[physical_device_id]
         asic_info = amdsmi_get_gpu_asic_info(handle)
         device_name: str = asic_info["device_id"]
