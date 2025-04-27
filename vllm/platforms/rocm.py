@@ -13,9 +13,6 @@ from .interface import DeviceCapability, Platform, PlatformEnum, _Backend
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig, VllmConfig
-else:
-    ModelConfig = None
-    VllmConfig = None
 
 logger = init_logger(__name__)
 
@@ -243,7 +240,7 @@ class RocmPlatform(Platform):
         return True
 
     @classmethod
-    def check_and_update_config(cls, vllm_config: VllmConfig) -> None:
+    def check_and_update_config(cls, vllm_config: "VllmConfig") -> None:
         cache_config = vllm_config.cache_config
         if cache_config and cache_config.block_size is None:
             cache_config.block_size = 16
@@ -332,7 +329,7 @@ class RocmPlatform(Platform):
             return torch.float8_e4m3fn
 
     @classmethod
-    def supports_v1(cls, model_config: ModelConfig) -> bool:
+    def supports_v1(cls, model_config: "ModelConfig") -> bool:
         # V1 support on AMD gpus is experimental
         return True
 
