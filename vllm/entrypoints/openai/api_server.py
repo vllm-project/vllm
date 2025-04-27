@@ -598,17 +598,6 @@ async def create_score(request: ScoreRequest, raw_request: Request):
     assert_never(generator)
 
 
-@router.post("/v1/score", dependencies=[Depends(validate_json_request)])
-@with_cancellation
-@load_aware_call
-async def create_score_v1(request: ScoreRequest, raw_request: Request):
-    logger.warning(
-        "To indicate that Score API is not part of standard OpenAI API, we "
-        "have moved it to `/score`. Please update your client accordingly.")
-
-    return await create_score(request, raw_request)
-
-
 @router.post("/classify", dependencies=[Depends(validate_json_request)])
 @with_cancellation
 @load_aware_call
@@ -628,6 +617,17 @@ async def create_classify(request: ClassificationRequest,
         return JSONResponse(content=generator.model_dump())
 
     assert_never(generator)
+
+
+@router.post("/v1/score", dependencies=[Depends(validate_json_request)])
+@with_cancellation
+@load_aware_call
+async def create_score_v1(request: ScoreRequest, raw_request: Request):
+    logger.warning(
+        "To indicate that Score API is not part of standard OpenAI API, we "
+        "have moved it to `/score`. Please update your client accordingly.")
+
+    return await create_score(request, raw_request)
 
 
 @router.post("/v1/audio/transcriptions")
