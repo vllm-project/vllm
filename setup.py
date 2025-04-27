@@ -272,6 +272,7 @@ class cmake_build_ext(build_ext):
         # copy vllm/vllm_flash_attn/*.py from self.build_lib to current
         # directory so that they can be included in the editable build
         import glob
+        import shutil
         files = glob.glob(
             os.path.join(self.build_lib, "vllm", "vllm_flash_attn", "*.py"))
         for file in files:
@@ -279,6 +280,26 @@ class cmake_build_ext(build_ext):
                                     os.path.basename(file))
             print(f"Copying {file} to {dst_file}")
             self.copy_file(file, dst_file)
+
+        # copy vllm_flash_attn/layers dir
+        src_layers = os.path.join(self.build_lib, "vllm", "vllm_flash_attn",
+                                  "layers")
+        dst_layers = os.path.join("vllm", "vllm_flash_attn", "layers")
+        if os.path.exists(src_layers):
+            print(f"Copying directory {src_layers} to {dst_layers}")
+            if os.path.exists(dst_layers):
+                shutil.rmtree(dst_layers)
+            shutil.copytree(src_layers, dst_layers)
+
+        # copy vllm_flash_attn/ops dir
+        src_ops = os.path.join(self.build_lib, "vllm", "vllm_flash_attn",
+                               "ops")
+        dst_ops = os.path.join("vllm", "vllm_flash_attn", "ops")
+        if os.path.exists(src_ops):
+            print(f"Copying directory {src_ops} to {dst_ops}")
+            if os.path.exists(dst_ops):
+                shutil.rmtree(dst_ops)
+            shutil.copytree(src_ops, dst_ops)
 
 
 class repackage_wheel(build_ext):
@@ -371,6 +392,7 @@ class repackage_wheel(build_ext):
                     f"Failed to get vLLM wheel from {wheel_location}") from e
 
         with zipfile.ZipFile(wheel_path) as wheel:
+
             files_to_copy = [
                 "vllm/_C.abi3.so",
                 "vllm/_moe_C.abi3.so",
@@ -378,10 +400,24 @@ class repackage_wheel(build_ext):
                 "vllm/vllm_flash_attn/_vllm_fa2_C.abi3.so",
                 "vllm/vllm_flash_attn/_vllm_fa3_C.abi3.so",
                 "vllm/vllm_flash_attn/flash_attn_interface.py",
+                "vllm/vllm_flash_attn/layers/*.py",
+                "vllm/vllm_flash_attn/ops/*.py",
                 "vllm/cumem_allocator.abi3.so",
                 # "vllm/_version.py", # not available in nightly wheels yet
             ]
-            file_members = filter(lambda x: x.filename in files_to_copy,
+            all_files = []
+            for pattern in files_to_copy:
+                if "*" in pattern:
+                    base_pattern = pattern.replace("*", "")
+                    matching_files = [
+                        f for f in wheel.namelist()
+                        if f.startswith(base_pattern.rsplit("/", 1)[0])
+                    ]
+                    all_files.extend(matching_files)
+                else:
+                    all_files.append(pattern)
+
+            file_members = filter(lambda x: x.filename in all_files,
                                   wheel.filelist)
 
             for file in file_members:
