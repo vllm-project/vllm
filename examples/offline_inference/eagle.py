@@ -52,8 +52,8 @@ def main():
 
     args = parse_args()
 
-    model_dir = "meta-llama/Meta-Llama-3-8B-Instruct"
-    eagle_dir = "abhigoyal/EAGLE-LLaMA3-Instruct-8B-vllm"
+    model_dir = "meta-llama/Llama-3.1-8B-Instruct"
+    eagle_dir = "yuhuili/EAGLE3-LLaMA3.1-Instruct-8B"
 
     max_model_len = 2048
 
@@ -81,7 +81,7 @@ def main():
         max_num_seqs=args.max_num_seqs,
         gpu_memory_utilization=0.8,
         speculative_config={
-            "method": "eagle",
+            "method": "eagle3" if "eagle3" in eagle_dir.lower() else "eagle",
             "model": eagle_dir,
             "num_speculative_tokens": args.num_spec_tokens,
             "draft_tensor_parallel_size": args.draft_tp,
@@ -94,6 +94,9 @@ def main():
 
     outputs = llm.generate(prompt_token_ids=prompt_ids,
                            sampling_params=sampling_params)
+
+    if not hasattr(outputs, "metrics") or outputs.metrics is None:
+        return
 
     # calculate the average number of accepted tokens per forward pass, +1 is
     # to account for the token from the target model that's always going to be
@@ -108,6 +111,11 @@ def main():
     print(f"mean acceptance length: \
         {sum(acceptance_counts) / acceptance_counts[0]:.2f}")
     print("-" * 50)
+
+    # print acceptance at each token position
+    for i in range(len(acceptance_counts)):
+        print(f"acceptance at token {i}:"
+              f"{acceptance_counts[i] / (acceptance_counts[0]):.2f}")
 
 
 if __name__ == "__main__":

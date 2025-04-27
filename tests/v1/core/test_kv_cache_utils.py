@@ -37,7 +37,6 @@ def make_request(request_id,
 
     return Request(
         request_id=request_id,
-        prompt=None,
         prompt_token_ids=prompt_token_ids,
         multi_modal_inputs=multi_modal_inputs,
         multi_modal_hashes=mm_hashes,
@@ -311,7 +310,7 @@ def test_metrics():
     def stats(requests, queries, hits):
         return PrefixCacheStats(requests=requests, queries=queries, hits=hits)
 
-    metrics = PrefixCachingMetrics(interval=5)
+    metrics = PrefixCachingMetrics(max_recent_requests=5)
     assert metrics.hit_rate == 0.0
 
     metrics.observe(stats(1, 20, 9))
@@ -496,8 +495,7 @@ def test_allocate_with_lookahead():
 
     # Test case 1: Requires additional lookahead tokens
     kv_cache_manager = KVCacheManager(kv_cache_config=config,
-                                      max_model_len=100,
-                                      num_preallocate_tokens=0)
+                                      max_model_len=100)
     blocks = kv_cache_manager.allocate_slots(
         request,
         num_tokens=3,
@@ -507,25 +505,19 @@ def test_allocate_with_lookahead():
 
     # Test case 2: With precomputed blocks
     kv_cache_manager = KVCacheManager(kv_cache_config=config,
-                                      max_model_len=100,
-                                      num_preallocate_tokens=4)
-    # num_preallocate_blocks = 4 // 4 - 2 // 4 = 1
+                                      max_model_len=100)
     # required_blocks = ceil((3 + 2) /4) = 2
-    # total_blocks = 1 + 2 = 3
     blocks = kv_cache_manager.allocate_slots(
         request,
         num_tokens=3,
         num_lookahead_tokens=2,
     )
-    assert len(blocks) == 3
+    assert len(blocks) == 2
 
     # Test case 3: With precomputed blocks
-    # num_preallocate_blocks = 4 // 4 - 4 // 4 = 0
     # required_blocks = ceil((3 + 4) / 4) = 2
-    # total_blocks = 0 + 2 = 2
     kv_cache_manager = KVCacheManager(kv_cache_config=config,
-                                      max_model_len=100,
-                                      num_preallocate_tokens=4)
+                                      max_model_len=100)
     blocks = kv_cache_manager.allocate_slots(
         request,
         num_tokens=3,

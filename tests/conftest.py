@@ -23,7 +23,7 @@ from tests.models.utils import (TokensTextLogprobs,
 from vllm import LLM, SamplingParams
 from vllm.assets.image import ImageAsset
 from vllm.assets.video import VideoAsset
-from vllm.config import TaskOption, TokenizerPoolConfig, _get_and_verify_dtype
+from vllm.config import TaskOption, _get_and_verify_dtype
 from vllm.connections import global_http_connection
 from vllm.distributed import (cleanup_dist_env_and_memory,
                               init_distributed_environment,
@@ -531,7 +531,10 @@ class HfRunner:
         for _, hidden_state in enumerate(hidden_states):
             last_hidden_states = hidden_state[-1][0]
             logits = torch.matmul(
-                last_hidden_states.to(output_embeddings.weight.device),
+                last_hidden_states.to(
+                    device=output_embeddings.weight.device,
+                    dtype=output_embeddings.weight.dtype,
+                ),
                 output_embeddings.weight.t(),
             )
             if getattr(output_embeddings, "bias", None) is not None:
@@ -925,6 +928,7 @@ class VllmRunner:
         max_tokens: int,
         num_logprobs: int,
         num_prompt_logprobs: Optional[int] = None,
+        skip_special_tokens: bool = True,
     ) -> Union[list[TokensTextLogprobs],
                list[TokensTextLogprobsPromptLogprobs]]:
         greedy_logprobs_params = SamplingParams(
@@ -932,6 +936,7 @@ class VllmRunner:
             max_tokens=max_tokens,
             logprobs=num_logprobs,
             prompt_logprobs=(num_prompt_logprobs),
+            skip_special_tokens=skip_special_tokens,
         )
         '''
         Greedy logprobs generation for vLLM encoder/decoder models
@@ -1006,20 +1011,6 @@ class VllmRunner:
 @pytest.fixture(scope="session")
 def vllm_runner():
     return VllmRunner
-
-
-def get_tokenizer_pool_config(tokenizer_group_type):
-    if tokenizer_group_type is None:
-        return None
-    if tokenizer_group_type == "ray":
-        return TokenizerPoolConfig(pool_size=1,
-                                   pool_type="ray",
-                                   extra_config={})
-    if isinstance(tokenizer_group_type, type):
-        return TokenizerPoolConfig(pool_size=1,
-                                   pool_type=tokenizer_group_type,
-                                   extra_config={})
-    raise ValueError(f"Unknown tokenizer_group_type: {tokenizer_group_type}")
 
 
 @pytest.fixture()
