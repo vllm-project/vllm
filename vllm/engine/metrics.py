@@ -145,7 +145,7 @@ class Metrics:
             documentation="Histogram of number of tokens per engine_step.",
             labelnames=labelnames,
             buckets=[
-                1, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8096, 16192
+                1, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384
             ])
         self.histogram_time_to_first_token = self._histogram_cls(
             name="vllm:time_to_first_token_seconds",
