@@ -27,7 +27,7 @@ from transformers import PretrainedConfig
 import vllm.envs as envs
 from vllm.compilation.inductor_pass import CallableInductorPass, InductorPass
 from vllm.logger import init_logger
-from vllm.model_executor.layers.quantization import (QuantizationMethods,
+from vllm.model_executor.layers.quantization import (QUANTIZATION_METHODS,
                                                      get_quantization_config)
 from vllm.model_executor.models import ModelRegistry
 from vllm.platforms import CpuArchEnum, current_platform
@@ -749,7 +749,7 @@ class ModelConfig:
         return quant_cfg
 
     def _verify_quantization(self) -> None:
-        supported_quantization = get_args(QuantizationMethods)
+        supported_quantization = QUANTIZATION_METHODS
         optimized_quantization_methods = [
             "fp8", "marlin", "modelopt", "gptq_marlin_24", "gptq_marlin",
             "awq_marlin", "fbgemm_fp8", "compressed_tensors",
@@ -779,7 +779,7 @@ class ModelConfig:
                 "moe_wna16",
             ]
             quantization_methods = [
-                q for q in get_args(QuantizationMethods) if q not in overrides
+                q for q in QUANTIZATION_METHODS if q not in overrides
             ]
             # We check the overrides first
             quantization_methods = overrides + quantization_methods

@@ -28,7 +28,7 @@ from vllm.config import (BlockSize, CacheConfig, CacheDType, CompilationConfig,
                          get_attr_docs, get_field)
 from vllm.executor.executor_base import ExecutorBase
 from vllm.logger import init_logger
-from vllm.model_executor.layers.quantization import QuantizationMethods
+from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS
 from vllm.plugins import load_general_plugins
 from vllm.reasoning import ReasoningParserManager
 from vllm.test_utils import MODEL_WEIGHTS_S3_BUCKET, MODELS_ON_S3
@@ -613,7 +613,7 @@ class EngineArgs:
         parser.add_argument('--quantization',
                             '-q',
                             type=optional_str,
-                            choices=[*get_args(QuantizationMethods), None],
+                            choices=[*QUANTIZATION_METHODS, None],
                             default=EngineArgs.quantization,
                             help='Method used to quantize the weights. If '
                             'None, we first check the `quantization_config` '

@@ -1,11 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 
-from typing import Literal, Type, get_args
+from typing import Type
 
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
 
-QuantizationMethods = Literal[
+QUANTIZATION_METHODS: list[str] = [
     "aqlm",
     "awq",
     "deepspeedfp",
@@ -34,7 +34,6 @@ QuantizationMethods = Literal[
     "moe_wna16",
     "torchao",
 ]
-QUANTIZATION_METHODS: list[str] = list(get_args(QuantizationMethods))
 
 # The customized quantization methods which will be added to this dict.
 _CUSTOMIZED_METHOD_TO_QUANT_CONFIG = {}
@@ -147,6 +146,6 @@ def get_quantization_config(quantization: str) -> Type[QuantizationConfig]:
 
 __all__ = [
     "QuantizationConfig",
-    "QuantizationMethods",
     "get_quantization_config",
+    "QUANTIZATION_METHODS",
 ]
