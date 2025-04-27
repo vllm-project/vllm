@@ -14,11 +14,11 @@ TODO: Implement CustomDataset to parse a JSON file and convert its contents into
 SampleRequest instances, similar to the approach used in ShareGPT.
 """
 
-import os
 import base64
 import io
 import json
 import logging
+import os
 import random
 from abc import ABC, abstractmethod
 from collections.abc import Mapping
