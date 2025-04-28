@@ -22,13 +22,13 @@ from vllm.attention.backends.utils import (
     compute_slot_mapping_start_idx, get_num_prefill_decode_query_kv_tokens,
     get_seq_len_block_table_args, is_all_cross_attn_metadata_set,
     is_all_encoder_attn_metadata_set, is_block_tables_empty)
+from vllm.attention.utils.fa_utils import (flash_attn_supports_fp8,
+                                           get_flash_attn_version)
 from vllm.logger import init_logger
 from vllm.multimodal import MultiModalPlaceholderMap
 from vllm.utils import async_tensor_h2d, make_tensor_with_pad
 from vllm.vllm_flash_attn import (flash_attn_varlen_func,
                                   flash_attn_with_kvcache)
-from vllm.vllm_flash_attn.fa_utils import (flash_attn_supports_fp8,
-                                           get_flash_attn_version)
 
 if TYPE_CHECKING:
     from vllm.worker.model_runner import (ModelInputForGPUBuilder,
@@ -689,7 +689,7 @@ class FlashAttentionImpl(AttentionImpl):
         assert output is not None, "Output tensor must be provided."
 
         # NOTE(woosuk): FlashAttention2 does not support FP8 KV cache.
-        if self.vllm_flash_attn_version < 3 or output.dtype != torch.bfloat16:
+        if not flash_attn_supports_fp8() or output.dtype != torch.bfloat16:
             assert (
                 layer._k_scale_float == 1.0 and layer._v_scale_float == 1.0), (
                     "key/v_scale is only supported in FlashAttention 3 with "
