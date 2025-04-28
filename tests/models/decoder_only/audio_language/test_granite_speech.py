@@ -116,7 +116,7 @@ def run_test(
 @pytest.mark.parametrize("max_model_len", [2048])
 @pytest.mark.parametrize("max_tokens", [128])
 @pytest.mark.parametrize("num_logprobs", [10])
-def test_models(hf_runner, vllm_runner, model, audio_assets: _AudioAssets,
+def test_models(hf_runner, vllm_runner, model: str, audio_assets: _AudioAssets,
                 dtype: str, max_model_len: int, max_tokens: int,
                 num_logprobs: int) -> None:
     model_info = HF_EXAMPLE_MODELS.find_hf_info(model)
@@ -131,7 +131,9 @@ def test_models(hf_runner, vllm_runner, model, audio_assets: _AudioAssets,
     run_test(
         hf_runner,
         vllm_runner,
-        [[[HF_AUDIO_PROMPT], [audio]]],
+        [
+            ([HF_AUDIO_PROMPT], [audio]),
+        ],
         model,
         dtype=dtype,
         max_model_len=max_model_len,
