@@ -44,7 +44,7 @@ There are no pre-built wheels for this device, so you must either use the pre-bu
 
 You can provision Cloud TPUs using the [Cloud TPU API](https://cloud.google.com/tpu/docs/reference/rest)
 or the [queued resources](https://cloud.google.com/tpu/docs/queued-resources)
-API. This section shows how to create TPUs using the queued resource API. For
+API (preferred). This section shows how to create TPUs using the queued resource API. For
 more information about using the Cloud TPU API, see [Create a Cloud TPU using the Create Node API](https://cloud.google.com/tpu/docs/managing-tpus-tpu-vm#create-node-api).
 Queued resources enable you to request Cloud TPU resources in a queued manner.
 When you request queued resources, the request is added to a queue maintained by
@@ -97,10 +97,10 @@ gcloud alpha compute tpus queued-resources create QUEUED_RESOURCE_ID \
     `TPU regions and zones <https://cloud.google.com/tpu/docs/regions-zones>`_
 - * ACCELERATOR_TYPE
   * The TPU version you want to use. Specify the TPU version, for example
-    `v5litepod-4` specifies a v5e TPU with 4 cores. For more information,
-    see `TPU versions <https://cloud.devsite.corp.google.com/tpu/docs/system-architecture-tpu-vm#versions>`_.
+    `v5litepod-4` specifies a v5e TPU with 4 cores, `v6e-1` specifies a v6e TPU with 1 core. For more information,
+    see [TPU versions](https://cloud.devsite.corp.google.com/tpu/docs/system-architecture-tpu-vm#versions).
 - * RUNTIME_VERSION
-  * The TPU VM runtime version to use. For more information see `TPU VM images <https://cloud.google.com/tpu/docs/runtimes>`_.
+  * The TPU VM runtime version to use. For example, use `v2-alpha-tpuv6e` for a VM loaded with one or more v6e TPU(s). For more information see [TPU VM images](https://cloud.google.com/tpu/docs/runtimes).
 - * SERVICE_ACCOUNT
   * The email address for your service account. You can find it in the IAM
     Cloud Console under *Service Accounts*. For example:
