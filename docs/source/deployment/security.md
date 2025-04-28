@@ -23,7 +23,7 @@ The following options control inter-node communications in vLLM:
    - `data_parallel_master_ip`: IP of the data parallel master (default: 127.0.0.1)
    - `data_parallel_master_port`: Port of the data parallel master (default: 29500)
 
-### PyTorch Distributed Security
+### Notes on PyTorch Distributed
 
 vLLM uses PyTorch's distributed features for some inter-node communication. For
 detailed information about PyTorch Distributed security considerations, please
