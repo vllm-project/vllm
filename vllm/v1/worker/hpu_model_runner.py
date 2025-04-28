@@ -309,6 +309,7 @@ class HpuModelAdapter:
         self.block_size = vllm_config.cache_config.block_size
         self.dtype = vllm_config.model_config.dtype
         self.layer_names = layer_names
+        self.sampler = get_sampler()
         enforce_eager = vllm_config.model_config.enforce_eager
         if not is_fake_hpu() and not htorch.utils.internal.is_lazy(
         ) and not enforce_eager:
