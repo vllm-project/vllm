@@ -18,6 +18,14 @@ releases** following semantic versioning (X.Y.Z), where:
 - **Y** is a minor version (used for significant changes, including deprecations/removals)
 - **Z** is a patch version (used for fixes and safer enhancements)
 
+Features that fall under this policy include (at a minimum) the following:
+
+- CLI flags
+- Environment variables
+- Configuration files
+- APIs in the OpenAI-compatible API server
+- Public Python APIs for the `vllm` library
+
 ## Deprecation Pipeline
 
 The deprecation process consists of several clearly defined stages that span
@@ -36,6 +44,7 @@ warning (e.g., "This will be removed in v0.10.0").
   - User-facing documentation
   - Release notes
   - GitHub Issue (RFC) for feedback
+  - Documentation for Python APIs
 
 **2.Deprecated (Off By Default)**
 
