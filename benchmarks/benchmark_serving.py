@@ -52,10 +52,9 @@ except ImportError:
 
 from benchmark_dataset import (AIMODataset, ASRDataset, BurstGPTDataset,
                                ConversationDataset, HuggingFaceDataset,
-                               InstructCoderDataset, MTBenchDataset, 
-                               RandomDataset,
-                               SampleRequest, ShareGPTDataset, SonnetDataset,
-                               VisionArenaDataset)
+                               InstructCoderDataset, MTBenchDataset,
+                               RandomDataset, SampleRequest, ShareGPTDataset,
+                               SonnetDataset, VisionArenaDataset)
 from benchmark_utils import convert_to_pytorch_benchmark_format, write_to_json
 
 MILLISECONDS_TO_SECONDS_CONVERSION = 1000

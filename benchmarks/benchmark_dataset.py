@@ -805,12 +805,14 @@ class MTBenchDataset(HuggingFaceDataset):
             if len(sampled_requests) >= num_requests:
                 break
             prompt = item['turns'][0]
-            
+
             # apply template
-            prompt=tokenizer.apply_chat_template([{
+            prompt = tokenizer.apply_chat_template([{
                 "role": "user",
                 "content": prompt
-            }], add_generation_prompt=True, tokenize=False)
+            }],
+                                                   add_generation_prompt=True,
+                                                   tokenize=False)
 
             prompt_len = len(tokenizer(prompt).input_ids)
             sampled_requests.append(
