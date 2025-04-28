@@ -17,7 +17,6 @@
 # limitations under the License.
 import math
 from collections.abc import Iterable, Mapping
-from functools import cached_property
 from itertools import tee
 from typing import List, Literal, Optional, Set, Tuple, TypedDict, Union
 
@@ -38,7 +37,6 @@ from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
-from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.model_loader.loader import _initialize_model
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
@@ -682,13 +680,6 @@ class Llama4ForConditionalGeneration(nn.Module, SupportsMultiModal,
         self.make_empty_intermediate_tensors = (
             self.language_model.make_empty_intermediate_tensors)
 
-    @cached_property
-    def sampler(self):
-        if hasattr(self.language_model, "sampler"):
-            return self.language_model.sampler
-
-        return get_sampler()
-
     def _parse_and_validate_image_input(
             self, **kwargs: object) -> Optional[Llama4ImagePatchInputs]:
         # num_images, 1, num_chunks, channel, image_size, image_size
@@ -784,10 +775,6 @@ class Llama4ForConditionalGeneration(nn.Module, SupportsMultiModal,
     ) -> Optional[torch.Tensor]:
         return self.language_model.compute_logits(hidden_states,
                                                   sampling_metadata)
-
-    def sample(self, logits: torch.Tensor,
-               sampling_metadata: SamplingMetadata) -> Optional[SamplerOutput]:
-        return self.language_model.sample(logits, sampling_metadata)
 
     def separate_weights(
         self,

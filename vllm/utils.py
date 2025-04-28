@@ -38,11 +38,13 @@ from asyncio import FIRST_COMPLETED, AbstractEventLoop, Task
 from collections import UserDict, defaultdict
 from collections.abc import (AsyncGenerator, Awaitable, Generator, Hashable,
                              Iterable, Iterator, KeysView, Mapping)
+from concurrent.futures.process import ProcessPoolExecutor
 from dataclasses import dataclass, field
 from functools import cache, lru_cache, partial, wraps
 from types import MappingProxyType
 from typing import (TYPE_CHECKING, Any, Callable, Generic, Literal, NamedTuple,
-                    Optional, Tuple, Type, TypeVar, Union, cast, overload)
+                    Optional, Sequence, Tuple, Type, TypeVar, Union, cast,
+                    overload)
 from uuid import uuid4
 
 import cachetools
@@ -61,6 +63,9 @@ from torch.library import Library
 from typing_extensions import Never, ParamSpec, TypeIs, assert_never
 
 import vllm.envs as envs
+# NOTE: import triton_utils to make TritonPlaceholderModule work
+#       if triton is unavailable
+import vllm.triton_utils  # noqa: F401
 from vllm.logger import enable_trace_function_call, init_logger
 
 if TYPE_CHECKING:
@@ -628,12 +633,12 @@ def get_open_port() -> int:
     process. Currently it uses 2 ports.
     """
     if "VLLM_DP_MASTER_PORT" in os.environ:
-        dp_port = envs.VLLM_DP_MASTER_PORT
+        dp_master_port = envs.VLLM_DP_MASTER_PORT
+        reserved_port_range = range(dp_master_port, dp_master_port + 10)
         while True:
-            port = _get_open_port()
-            if dp_port <= port < dp_port + 10:
-                continue
-            return port
+            candidate_port = _get_open_port()
+            if candidate_port not in reserved_port_range:
+                return candidate_port
     return _get_open_port()
 
 
@@ -760,21 +765,28 @@ def create_kv_caches_with_random_flash(
     model_dtype: Optional[Union[str, torch.dtype]] = None,
     seed: Optional[int] = None,
     device: Optional[str] = "cuda",
+    cache_layout: Optional[str] = "NHD",
 ) -> tuple[list[torch.Tensor], list[torch.Tensor]]:
     from vllm.platforms import current_platform
     current_platform.seed_everything(seed)
 
     torch_dtype = get_kv_cache_torch_dtype(cache_dtype, model_dtype)
-    key_value_cache_shape = (num_blocks, 2, block_size, num_heads, head_size)
+    generic_kv_cache_shape = (num_blocks, 2, block_size, num_heads, head_size)
+    assert cache_layout in ("NHD", "HND")
+    stride_order = (0, 1, 2, 3, 4) if cache_layout == "NHD" else (0, 1, 3, 2,
+                                                                  4)
+
+    kv_cache_allocation_shape = tuple(generic_kv_cache_shape[i]
+                                      for i in stride_order)
     scale = head_size**-0.5
 
     key_caches: list[torch.Tensor] = []
     value_caches: list[torch.Tensor] = []
 
     for _ in range(num_layers):
-        key_value_cache = torch.empty(size=key_value_cache_shape,
+        key_value_cache = torch.empty(size=kv_cache_allocation_shape,
                                       dtype=torch_dtype,
-                                      device=device)
+                                      device=device).permute(*stride_order)
         if cache_dtype in ["auto", "half", "bfloat16", "float"]:
             key_value_cache.uniform_(-scale, scale)
         elif cache_dtype == 'fp8':
@@ -1233,6 +1245,22 @@ def cuda_is_initialized() -> bool:
     if not torch.cuda._is_compiled():
         return False
     return torch.cuda.is_initialized()
+
+
+def cuda_get_device_properties(device,
+                               names: Sequence[str],
+                               init_cuda=False) -> tuple[Any, ...]:
+    """Get specified CUDA device property values without initializing CUDA in
+    the current process."""
+    if init_cuda or cuda_is_initialized():
+        props = torch.cuda.get_device_properties(device)
+        return tuple(getattr(props, name) for name in names)
+
+    # Run in subprocess to avoid initializing CUDA as a side effect.
+    mp_ctx = multiprocessing.get_context("fork")
+    with ProcessPoolExecutor(max_workers=1, mp_context=mp_ctx) as executor:
+        return executor.submit(cuda_get_device_properties, device, names,
+                               True).result()
 
 
 def weak_bind(bound_method: Callable[..., Any], ) -> Callable[..., None]:

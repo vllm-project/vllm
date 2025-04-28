@@ -143,7 +143,7 @@ class NeuronModelRunner(ModelRunnerBase[ModelInputForNeuron]):
         input_block_ids: List[int] = []
 
         seq_lens: List[int] = []
-        multi_modal_inputs_list: List[MultiModalKwargs] = []
+        multi_modal_kwargs_list: List[MultiModalKwargs] = []
         for seq_group_metadata in seq_group_metadata_list:
             assert seq_group_metadata.is_prompt
             seq_ids = list(seq_group_metadata.seq_data.keys())
@@ -163,10 +163,9 @@ class NeuronModelRunner(ModelRunnerBase[ModelInputForNeuron]):
             assert len(block_table) == 1
             input_block_ids.append(block_table[0])
 
-            # mm_data = seq_group_metadata.multi_modal_data
-            # if mm_data:
-            #     # Process multi-modal data
-            #     multi_modal_inputs_list.append(mm_data)
+            mm_kwargs = seq_group_metadata.multi_modal_data
+            if mm_kwargs:
+                multi_modal_kwargs_list.append(mm_kwargs)
 
         max_seq_len = max(seq_lens)
         assert max_seq_len > 0
@@ -184,7 +183,7 @@ class NeuronModelRunner(ModelRunnerBase[ModelInputForNeuron]):
                                        dtype=torch.long,
                                        device=self.device)
 
-        multi_modal_kwargs = MultiModalKwargs.batch(multi_modal_inputs_list)
+        multi_modal_kwargs = MultiModalKwargs.batch(multi_modal_kwargs_list)
 
         return (input_tokens, input_positions, input_block_ids, seq_lens,
                 multi_modal_kwargs)
