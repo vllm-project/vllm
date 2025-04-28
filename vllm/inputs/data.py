@@ -176,7 +176,7 @@ class EmbedsInputs(TypedDict):
     """The embeddings of the prompt."""
 
 
-def embeds_inputs(prompt_embeds: torch.Tensor, ) -> EmbedsInputs:
+def embeds_inputs(prompt_embeds: torch.Tensor) -> EmbedsInputs:
     """Construct :class:`EmbedsInputs` from optional values."""
     inputs = EmbedsInputs(
         type="embeds",

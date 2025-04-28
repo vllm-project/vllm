@@ -37,7 +37,7 @@ def create_dummy_prompt(
     inputs = token_inputs(
         prompt_token_ids=prompt_tokens,
         prompt=prompt_str) if prompt_embeds is None else embeds_inputs(
-            prompt_embeds=prompt_embeds, prompt=prompt_str)
+            prompt_embeds=prompt_embeds)
     prompt = Sequence(
         int(request_id),
         inputs=inputs,
