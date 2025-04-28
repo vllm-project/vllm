@@ -110,13 +110,6 @@ class Platform:
     # https://github.com/ray-project/ray/tree/master/python/ray/_private/accelerators # noqa
     device_control_env_var: str = "VLLM_DEVICE_CONTROL_ENV_VAR_PLACEHOLDER"
 
-    # The torch.compile backend for compiling simple and
-    # standalone functions. The default value is "inductor" to keep
-    # the same behavior as PyTorch.
-    # NOTE: for the forward part of the model, vLLM has another separate
-    # compilation strategy.
-    simple_compile_backend: str = "inductor"
-
     supported_quantization: list[str] = []
 
     additional_env_vars: list[str] = []
@@ -151,6 +144,21 @@ class Platform:
 
     def is_sleep_mode_available(self) -> bool:
         return self._enum == PlatformEnum.CUDA
+
+    @classmethod
+    def get_simple_compile_backend(cls) -> str:
+        """Get the torch.compile backend for compiling simple and standalone
+        functions.
+        """
+        # The torch.compile backend for compiling simple and
+        # standalone functions. The default value is "inductor" to keep
+        # the same behavior as PyTorch.
+        # NOTE: for the forward part of the model, vLLM has another separate
+        # compilation strategy.
+        print(f'xw32 {cls._enum=}')
+        if cls._enum == PlatformEnum.TPU:
+            return "openxla"
+        return cls.simple_compile_backend
 
     @classmethod
     def get_attn_backend_cls(cls, selected_backend: _Backend, head_size: int,
