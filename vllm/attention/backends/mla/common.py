@@ -663,6 +663,9 @@ class MLACommonMetadata(AttentionMetadata):
                      num_seqs: int,
                      num_queries: int,
                      turn_prefills_into_decodes: bool = False):
+        """
+        Update metadata in-place to advance one decode step.
+        """
         # When using cudagraph, the num_seqs is padded to the next captured
         # batch sized, but num_queries tracks the actual number of requests in
         # the batch. For --enforce-eager mode, num_seqs == num_queries
@@ -1104,7 +1107,14 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
                 q,
                 k,
                 maybe_padded_v,
-                **kwargs,
+                None,  # output
+                kwargs["cu_seqlens_q"],
+                kwargs["cu_seqlens_k"],
+                kwargs["max_seqlen_q"],
+                kwargs["max_seqlen_k"],
+                kwargs["causal"],
+                softmax_scale,
+                None,  # bias
             )
         if is_vllm_fa:
             attn_out = self.flash_attn_varlen_func(
@@ -1219,41 +1229,6 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
         self.W_UV = W_UV.transpose(0, 1)
         # Convert from (L, N, P) to (N, P, L)
         self.W_UK_T = W_UK.permute(1, 2, 0)
-
-    def _get_prefill_ctx_attn_output(
-            self, index: int, q: torch.Tensor, k: torch.Tensor,
-            v: torch.Tensor,
-            metadata: MLACommonMetadata) -> Tuple[torch.Tensor, ...]:
-        assert metadata.context_chunk_cu_seq_lens is not None
-        assert metadata.context_chunk_max_seq_lens is not None
-
-        if is_vllm_fa:
-            attn_output, attn_softmax_lse = self.flash_attn_varlen_func(
-                q=q,
-                k=k,
-                v=v,
-                cu_seqlens_q=metadata.query_start_loc,
-                cu_seqlens_k=metadata.context_chunk_cu_seq_lens[index],
-                max_seqlen_q=metadata.max_query_len,
-                max_seqlen_k=metadata.context_chunk_max_seq_lens[index],
-                softmax_scale=self.scale,
-                causal=False,  # Context is unmasked
-                return_softmax_lse=True,
-            )
-        else:
-            attn_output, attn_softmax_lse, _ = self.flash_attn_varlen_func(
-                q=q,
-                k=k,
-                v=v,
-                cu_seqlens_q=metadata.query_start_loc,
-                cu_seqlens_k=metadata.context_chunk_cu_seq_lens[index],
-                max_seqlen_q=metadata.max_query_len,
-                max_seqlen_k=metadata.context_chunk_max_seq_lens[index],
-                softmax_scale=self.scale,
-                causal=False,  # Context is unmasked
-                return_attn_probs=True,
-            )
-        return attn_output, attn_softmax_lse
 
     def _compute_prefill_context(
         self,

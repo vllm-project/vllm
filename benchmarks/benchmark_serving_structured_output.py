@@ -51,7 +51,7 @@ try:
 except ImportError:
     from argparse import ArgumentParser as FlexibleArgumentParser
 
-from vllm.v1.structured_output.utils import (
+from vllm.v1.structured_output.backend_xgrammar import (
     has_xgrammar_unsupported_json_features)
 
 MILLISECONDS_TO_SECONDS_CONVERSION = 1000
@@ -150,17 +150,17 @@ def sample_requests(tokenizer: PreTrainedTokenizerBase,
 
     elif args.dataset == "grammar":
         schema = """
-            ?start: select_statement
+        root ::= select_statement
 
-            ?select_statement: "SELECT " column_list " FROM " table_name
+        select_statement ::= "SELECT " column " from " table " where " condition
 
-            ?column_list: column_name ("," column_name)*
+        column ::= "col_1 " | "col_2 "
 
-            ?table_name: identifier
+        table ::= "table_1 " | "table_2 "
 
-            ?column_name: identifier
+        condition ::= column "= " number
 
-            ?identifier: /[a-zA-Z_][a-zA-Z0-9_]*/
+        number ::= "1 " | "2 "
         """
         prompt = "Generate an SQL query to show the 'username' \
             and 'email' from the 'users' table."

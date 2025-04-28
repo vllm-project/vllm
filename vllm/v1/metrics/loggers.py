@@ -12,7 +12,7 @@ from vllm.logger import init_logger
 from vllm.v1.core.kv_cache_utils import PrefixCachingMetrics
 from vllm.v1.engine import FinishReason
 from vllm.v1.metrics.stats import IterationStats, SchedulerStats
-from vllm.v1.spec_decode.metrics import SpecDecodingMetrics
+from vllm.v1.spec_decode.metrics import SpecDecodingLogging, SpecDecodingProm
 
 logger = init_logger(__name__)
 
@@ -39,7 +39,7 @@ class LoggingStatLogger(StatLoggerBase):
         # Prefix cache metrics. This cannot be reset.
         # TODO: Make the interval configurable.
         self.prefix_caching_metrics = PrefixCachingMetrics()
-        self.spec_decoding_metrics = SpecDecodingMetrics()
+        self.spec_decoding_logging = SpecDecodingLogging()
         self.last_prompt_throughput: float = 0.0
         self.last_generation_throughput: float = 0.0
 
@@ -70,7 +70,7 @@ class LoggingStatLogger(StatLoggerBase):
         self.prefix_caching_metrics.observe(scheduler_stats.prefix_cache_stats)
 
         if scheduler_stats.spec_decoding_stats is not None:
-            self.spec_decoding_metrics.observe(
+            self.spec_decoding_logging.observe(
                 scheduler_stats.spec_decoding_stats)
 
         self.last_scheduler_stats = scheduler_stats
@@ -112,7 +112,7 @@ class LoggingStatLogger(StatLoggerBase):
         )
 
         if scheduler_stats.spec_decoding_stats is not None:
-            self.spec_decoding_metrics.log(log_fn=log_fn)
+            self.spec_decoding_logging.log(log_fn=log_fn)
 
 
 class PrometheusStatLogger(StatLoggerBase):
@@ -132,6 +132,9 @@ class PrometheusStatLogger(StatLoggerBase):
         ]
 
         max_model_len = vllm_config.model_config.max_model_len
+
+        self.spec_decoding_prom = SpecDecodingProm(
+            vllm_config.speculative_config, labelnames, labelvalues)
 
         #
         # Scheduler state
@@ -324,24 +327,6 @@ class PrometheusStatLogger(StatLoggerBase):
                     ])
 
         #
-        # Speculative Decoding metrics
-        # The acceptance rate can be calculated using a PromQL query:
-        #
-        #   rate(vllm:spec_decode_num_accepted_tokens_total[$interval]) /
-        #   rate(vllm:spec_decode_num_draft_tokens_total[$interval])
-        #
-        self.counter_spec_decode_num_draft_tokens = \
-            prometheus_client.Counter(
-                name="vllm:spec_decode_num_draft_tokens_total",
-                documentation="Number of draft tokens.",
-                labelnames=labelnames).labels(*labelvalues)
-        self.counter_spec_decode_num_accepted_tokens = \
-            prometheus_client.Counter(
-                name="vllm:spec_decode_num_accepted_tokens_total",
-                documentation="Number of accepted tokens.",
-                labelnames=labelnames).labels(*labelvalues)
-
-        #
         # Cache config info metric
         #
         self.log_metrics_info("cache_config", vllm_config.cache_config)
@@ -378,10 +363,8 @@ class PrometheusStatLogger(StatLoggerBase):
             scheduler_stats.prefix_cache_stats.hits)
 
         if scheduler_stats.spec_decoding_stats is not None:
-            self.counter_spec_decode_num_draft_tokens.inc(
-                scheduler_stats.spec_decoding_stats.num_draft_tokens)
-            self.counter_spec_decode_num_accepted_tokens.inc(
-                scheduler_stats.spec_decoding_stats.num_accepted_tokens)
+            self.spec_decoding_prom.observe(
+                scheduler_stats.spec_decoding_stats)
 
         if iteration_stats is None:
             return
