@@ -46,19 +46,18 @@ class EAGLEConfig(PretrainedConfig):
         if not envs.VLLM_USE_V1:
             kwargs["architectures"] = ["EAGLEModel"]
         else:
-            # Eagle model name should follow naming convention of 
+            # Eagle model name should follow naming convention of
             # LlamaForCausalLM -> EagleLlamaForCausalLM
             if method == "eagle":
                 kwargs["architectures"] = [
                     f"Eagle{arch}" for arch in self.model.architectures
-                    ]
+                ]
             elif method == "eagle3":
                 kwargs["architectures"] = [
                     f"Eagle3{arch}" for arch in self.model.architectures
-                    ]
+                ]
             else:
-                raise ValueError(
-                    f"Invalid method {method}. \
+                raise ValueError(f"Invalid method {method}. \
                     Supported methods are eagle and eagle3.")
 
         super().__init__(**kwargs)
