@@ -1288,8 +1288,8 @@ class TPUModelRunner:
         if sampling_metadata.all_greedy:
             out_tokens = torch.argmax(logits, dim=-1, keepdim=True)
         else:
-            sampler_out = self.sampler(logits, sampling_metadata)
-            out_tokens = sampler_out.sampled_token_ids
+            out_tokens = self.sampler(logits,
+                                      sampling_metadata).sampled_token_ids
         return out_tokens
 
     @torch.compile(backend="openxla", fullgraph=True, dynamic=False)
