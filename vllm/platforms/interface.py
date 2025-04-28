@@ -155,10 +155,9 @@ class Platform:
         # the same behavior as PyTorch.
         # NOTE: for the forward part of the model, vLLM has another separate
         # compilation strategy.
-        print(f'xw32 {cls._enum=}')
         if cls._enum == PlatformEnum.TPU:
             return "openxla"
-        return cls.simple_compile_backend
+        return "inductor"
 
     @classmethod
     def get_attn_backend_cls(cls, selected_backend: _Backend, head_size: int,

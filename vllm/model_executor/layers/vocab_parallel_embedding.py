@@ -137,11 +137,11 @@ class VocabParallelEmbeddingShardIndices:
         assert self.num_added_elements <= self.num_added_elements_padded
 
 
-# @torch.compile(dynamic=True, backend=current_platform.simple_compile_backend)  # original
+# @torch.compile(dynamic=True, backend="inductor")  # original
 # @support_torch_compile
 # @torch.compile(backend="openxla", fullgraph=True, dynamic=False)  # works
 # @torch.compile(dynamic=True, backend="openxla")
-@torch.compile(dynamic=True, backend=current_platform.get_simple_compile_backend())  # original
+@torch.compile(dynamic=True, backend=current_platform.get_simple_compile_backend())
 def get_masked_input_and_mask(
         input_: torch.Tensor, org_vocab_start_index: int,
         org_vocab_end_index: int, num_org_vocab_padding: int,
