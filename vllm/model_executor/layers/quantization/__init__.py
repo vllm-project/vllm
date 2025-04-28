@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
-from typing import Dict, Literal, Type, get_args
+from typing import Literal, Type, get_args
 
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
@@ -110,7 +110,7 @@ def get_quantization_config(quantization: str) -> Type[QuantizationConfig]:
     from .torchao import TorchAOConfig
     from .tpu_int8 import Int8TpuConfig
 
-    method_to_config: Dict[str, Type[QuantizationConfig]] = {
+    method_to_config: dict[str, Type[QuantizationConfig]] = {
         "aqlm": AQLMConfig,
         "awq": AWQConfig,
         "deepspeedfp": DeepSpeedFPConfig,

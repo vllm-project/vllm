@@ -8,10 +8,10 @@ import re
 import threading
 from dataclasses import MISSING, dataclass, fields
 from typing import (Any, Callable, Dict, List, Literal, Optional, Type,
-                    TypeVar, Union, get_args, get_origin)
+                    TypeVar, Union, cast, get_args, get_origin)
 
 import torch
-from typing_extensions import TypeIs
+from typing_extensions import TypeIs, deprecated
 
 import vllm.envs as envs
 from vllm import version
@@ -55,6 +55,8 @@ def optional_type(
         if val == "" or val == "None":
             return None
         try:
+            if return_type is json.loads and not re.match("^{.*}$", val):
+                return cast(T, nullable_kvs(val))
             return return_type(val)
         except ValueError as e:
             raise argparse.ArgumentTypeError(
@@ -63,11 +65,12 @@ def optional_type(
     return _optional_type
 
 
-def nullable_kvs(val: str) -> Optional[dict[str, int]]:
-    """NOTE: This function is deprecated, args should be passed as JSON
-    strings instead.
-    
-    Parses a string containing comma separate key [str] to value [int]
+@deprecated(
+    "Passing a JSON argument as a string containing comma separated key=value "
+    "pairs is deprecated. This will be removed in v0.10.0. Please use a JSON "
+    "string instead.")
+def nullable_kvs(val: str) -> dict[str, int]:
+    """Parses a string containing comma separate key [str] to value [int]
     pairs into a dictionary.
 
     Args:
@@ -76,10 +79,7 @@ def nullable_kvs(val: str) -> Optional[dict[str, int]]:
     Returns:
         Dictionary with parsed values.
     """
-    if len(val) == 0:
-        return None
-
-    out_dict: Dict[str, int] = {}
+    out_dict: dict[str, int] = {}
     for item in val.split(","):
         kv_parts = [part.lower().strip() for part in item.split("=")]
         if len(kv_parts) != 2:
@@ -101,15 +101,103 @@ def nullable_kvs(val: str) -> Optional[dict[str, int]]:
     return out_dict
 
 
-def optional_dict(val: str) -> Optional[dict[str, int]]:
-    if re.match("^{.*}$", val):
-        return optional_type(json.loads)(val)
+def is_type(type_hint: TypeHint, type: TypeHintT) -> TypeIs[TypeHintT]:
+    """Check if the type hint is a specific type."""
+    return type_hint is type or get_origin(type_hint) is type
 
-    logger.warning(
-        "Failed to parse JSON string. Attempting to parse as "
-        "comma-separated key=value pairs. This will be deprecated in a "
-        "future release.")
-    return nullable_kvs(val)
+
+def contains_type(type_hints: set[TypeHint], type: TypeHintT) -> bool:
+    """Check if the type hints contain a specific type."""
+    return any(is_type(type_hint, type) for type_hint in type_hints)
+
+
+def get_type(type_hints: set[TypeHint], type: TypeHintT) -> TypeHintT:
+    """Get the specific type from the type hints."""
+    return next((th for th in type_hints if is_type(th, type)), None)
+
+
+def is_not_builtin(type_hint: TypeHint) -> bool:
+    """Check if the class is not a built-in type."""
+    return type_hint.__module__ != "builtins"
+
+
+def get_kwargs(cls: ConfigType) -> dict[str, Any]:
+    cls_docs = get_attr_docs(cls)
+    kwargs = {}
+    for field in fields(cls):
+        # Get the default value of the field
+        default = field.default
+        if field.default_factory is not MISSING:
+            default = field.default_factory()
+
+        # Get the help text for the field
+        name = field.name
+        help = cls_docs[name]
+        # Escape % for argparse
+        help = help.replace("%", "%%")
+
+        # Initialise the kwargs dictionary for the field
+        kwargs[name] = {"default": default, "help": help}
+
+        # Get the set of possible types for the field
+        type_hints: set[TypeHint] = set()
+        if get_origin(field.type) is Union:
+            type_hints.update(get_args(field.type))
+        else:
+            type_hints.add(field.type)
+
+        # Set other kwargs based on the type hints
+        if contains_type(type_hints, bool):
+            # Creates --no-<name> and --<name> flags
+            kwargs[name]["action"] = argparse.BooleanOptionalAction
+        elif contains_type(type_hints, Literal):
+            # Creates choices from Literal arguments
+            type_hint = get_type(type_hints, Literal)
+            choices = sorted(get_args(type_hint))
+            kwargs[name]["choices"] = choices
+            choice_type = type(choices[0])
+            assert all(type(c) is choice_type for c in choices), (
+                "All choices must be of the same type. "
+                f"Got {choices} with types {[type(c) for c in choices]}")
+            kwargs[name]["type"] = choice_type
+        elif contains_type(type_hints, tuple):
+            type_hint = get_type(type_hints, tuple)
+            types = get_args(type_hint)
+            tuple_type = types[0]
+            assert all(t is tuple_type for t in types if t is not Ellipsis), (
+                "All non-Ellipsis tuple elements must be of the same "
+                f"type. Got {types}.")
+            kwargs[name]["type"] = tuple_type
+            kwargs[name]["nargs"] = "+" if Ellipsis in types else len(types)
+        elif contains_type(type_hints, list):
+            type_hint = get_type(type_hints, list)
+            types = get_args(type_hint)
+            assert len(types) == 1, (
+                "List type must have exactly one type. Got "
+                f"{type_hint} with types {types}")
+            kwargs[name]["type"] = types[0]
+            kwargs[name]["nargs"] = "+"
+        elif contains_type(type_hints, int):
+            kwargs[name]["type"] = int
+        elif contains_type(type_hints, float):
+            kwargs[name]["type"] = float
+        elif contains_type(type_hints, dict):
+            # Dict arguments will always be optional
+            kwargs[name]["type"] = optional_type(json.loads)
+        elif (contains_type(type_hints, str)
+              or any(is_not_builtin(th) for th in type_hints)):
+            kwargs[name]["type"] = str
+        else:
+            raise ValueError(
+                f"Unsupported type {type_hints} for argument {name}.")
+
+        # If None is in type_hints, make the argument optional.
+        # But not if it's a bool, argparse will handle this better.
+        if type(None) in type_hints and not contains_type(type_hints, bool):
+            kwargs[name]["type"] = optional_type(kwargs[name]["type"])
+            if kwargs[name].get("choices"):
+                kwargs[name]["choices"].append("None")
+    return kwargs
 
 
 @dataclass
@@ -274,121 +362,6 @@ class EngineArgs:
     @staticmethod
     def add_cli_args(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
         """Shared CLI arguments for vLLM engine."""
-
-        def is_type_in_union(cls: TypeHint, type: TypeHint) -> bool:
-            """Check if the class is a type in a union type."""
-            is_union = get_origin(cls) is Union
-            type_in_union = type in [get_origin(a) or a for a in get_args(cls)]
-            return is_union and type_in_union
-
-        def get_type_from_union(cls: TypeHint, type: TypeHintT) -> TypeHintT:
-            """Get the type in a union type."""
-            for arg in get_args(cls):
-                if (get_origin(arg) or arg) is type:
-                    return arg
-            raise ValueError(f"Type {type} not found in union type {cls}.")
-
-        def is_optional(cls: TypeHint) -> TypeIs[Union[Any, None]]:
-            """Check if the class is an optional type."""
-            return is_type_in_union(cls, type(None))
-
-        def can_be_type(cls: TypeHint, type: TypeHintT) -> TypeIs[TypeHintT]:
-            """Check if the class can be of type."""
-            return cls is type or get_origin(cls) is type or is_type_in_union(
-                cls, type)
-
-        def is_custom_type(cls: TypeHint) -> bool:
-            """Check if the class is a custom type."""
-            return cls.__module__ != "builtins"
-
-        def get_kwargs(cls: ConfigType) -> dict[str, Any]:
-            cls_docs = get_attr_docs(cls)
-            kwargs = {}
-            for field in fields(cls):
-                # Get the default value of the field
-                default = field.default
-                if field.default_factory is not MISSING:
-                    default = field.default_factory()
-
-                # Get the help text for the field
-                name = field.name
-                help = cls_docs[name]
-                # Escape % for argparse
-                help = help.replace("%", "%%")
-
-                # Initialise the kwargs dictionary for the field
-                kwargs[name] = {"default": default, "help": help}
-
-                # Get the type of the field. If it's optional,
-                # retrieve the contained type
-                type_hint: TypeHint = field.type
-                optional = is_optional(type_hint)
-                if optional:
-                    args = get_args(type_hint)
-                    args = tuple(arg for arg in args if arg is not type(None))
-                    type_hint = Union[*args] if len(args) > 1 else args[0]
-
-                # Set type, action and choices for the field depending on the
-                # type of the field
-                if can_be_type(type_hint, bool):
-                    # Creates --no-<name> and --<name> flags
-                    kwargs[name]["action"] = argparse.BooleanOptionalAction
-                    kwargs[name]["type"] = bool
-                elif can_be_type(type_hint, Literal):
-                    # Creates choices from Literal arguments
-                    if is_type_in_union(type_hint, Literal):
-                        type_hint = get_type_from_union(type_hint, Literal)
-                    choices = get_args(type_hint)
-                    kwargs[name]["choices"] = choices
-                    choice_type = type(choices[0])
-                    assert all(type(c) is choice_type for c in choices), (
-                        "All choices must be of the same type. "
-                        f"Got {choices} with types {[type(c) for c in choices]}"
-                    )
-                    kwargs[name]["type"] = choice_type
-                elif can_be_type(type_hint, tuple):
-                    if is_type_in_union(type_hint, tuple):
-                        type_hint = get_type_from_union(type_hint, tuple)
-                    dtypes = get_args(type_hint)
-                    dtype = dtypes[0]
-                    nargs = "+" if Ellipsis in dtypes else len(dtypes)
-                    assert all(
-                        d is dtype for d in dtypes if d is not Ellipsis
-                    ), ("All non-Ellipsis tuple elements must be of the same "
-                        f"type. Got {dtypes}.")
-                    kwargs[name]["type"] = dtype
-                    kwargs[name]["nargs"] = nargs
-                elif can_be_type(type_hint, list):
-                    if is_type_in_union(type_hint, list):
-                        type_hint = get_type_from_union(type_hint, list)
-                    dtypes = get_args(type_hint)
-                    assert len(dtypes) == 1, (
-                        "List type must have exactly one type. Got "
-                        f"{type_hint} with types {dtypes}")
-                    kwargs[name]["type"] = dtypes[0]
-                    kwargs[name]["nargs"] = "+"
-                elif can_be_type(type_hint, int):
-                    kwargs[name]["type"] = int
-                    # Some int fields can use human-readable int
-                    if name in {"max_model_len"}:
-                        kwargs[name]["type"] = human_readable_int
-                elif can_be_type(type_hint, float):
-                    kwargs[name]["type"] = float
-                elif can_be_type(type_hint, dict):
-                    kwargs[name]["type"] = optional_dict
-                elif (can_be_type(type_hint, str)
-                      or is_custom_type(type_hint)):
-                    kwargs[name]["type"] = str
-                else:
-                    raise ValueError(
-                        f"Unsupported type {type_hint} for argument {name}. ")
-
-                # Wrap valid types in optional_type if the field is optional
-                if optional and kwargs[name]["type"] in {
-                        int, float, str, human_readable_int
-                }:
-                    kwargs[name]["type"] = optional_type(kwargs[name]["type"])
-            return kwargs
 
         # Model arguments
         model_kwargs = get_kwargs(ModelConfig)
