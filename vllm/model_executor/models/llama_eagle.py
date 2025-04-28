@@ -139,7 +139,7 @@ class EagleLlamaForCausalLM(LlamaForCausalLM):
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
         loader = AutoWeightsLoader(
             self,
-            skip_prefixes=(["lm_head."]
+            skip_prefixes=(["lm_head.", "model.embed_tokens."]
                            if self.config.tie_word_embeddings else None),
         )
 
