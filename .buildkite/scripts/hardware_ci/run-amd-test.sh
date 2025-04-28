@@ -86,6 +86,7 @@ if [[ $commands == *" kernels/attention"* ]]; then
   --ignore=kernels/attention/stest_attention_selector.py \
   --ignore=kernels/attention/test_blocksparse_attention.py \
   --ignore=kernels/attention/test_encoder_decoder_attn.py \
+  --ignore=kernels/attention/test_attention_selector.py \
   --ignore=kernels/attention/test_flash_attn.py \
   --ignore=kernels/attention/test_flashinfer.py \
   --ignore=kernels/attention/test_prefix_prefill.py \
