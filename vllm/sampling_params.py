@@ -437,6 +437,10 @@ class SamplingParams(
                 and self.truncate_prompt_tokens < 1):
             raise ValueError(f"truncate_prompt_tokens must be >= 1, "
                              f"got {self.truncate_prompt_tokens}")
+        assert isinstance(self.stop_token_ids, list)
+        if not all(isinstance(st_id, int) for st_id in self.stop_token_ids):
+            raise ValueError(f"stop_token_ids must contain only integers, "
+                             f"got {self.stop_token_ids}.")
         assert isinstance(self.stop, list)
         if any(not stop_str for stop_str in self.stop):
             raise ValueError("stop cannot contain an empty string.")
