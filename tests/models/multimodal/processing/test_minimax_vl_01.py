@@ -3,7 +3,7 @@
 import pytest
 
 from vllm.multimodal import MULTIMODAL_REGISTRY
-
+from PIL import Image
 from ....conftest import _ImageAssets
 from ...utils import build_model_context
 
@@ -38,8 +38,9 @@ def test_processor_override(
     hf_processor_mm_kwargs = {} if kwargs_on_init else mm_processor_kwargs
 
     # Build the image str / prompt based on the number of images we pass
-    prompt = "<|vision_start|><|image_pad|><|vision_end|>" * num_imgs
-    mm_data = {"image": [image_assets[0].pil_image] * num_imgs}
+    prompt = "<image>" * num_imgs
+    image = Image.new("RGB", size=image_size)
+    mm_data = {"image": [image] * num_imgs}
 
     processed_inputs = processor.apply(prompt, mm_data, hf_processor_mm_kwargs)
 
