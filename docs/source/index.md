@@ -68,7 +68,6 @@ getting_started/examples/examples_index
 getting_started/troubleshooting
 getting_started/faq
 getting_started/v1_user_guide
-getting_started/security
 
 :::
 
@@ -133,6 +132,7 @@ serving/integrations/index
 :caption: Deployment
 :maxdepth: 1
 
+deployment/security
 deployment/docker
 deployment/k8s
 deployment/nginx
