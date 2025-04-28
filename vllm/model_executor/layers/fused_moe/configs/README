@@ -9,5 +9,4 @@ The example configurations provided are for the Mixtral model for TP2 on H100
 and TP4 on A100. Mixtral has intermediate size N = 14336, i.e. for TP2 we have
 N = 7168 and for TP4 we have N = 3584.
 
-Please feel free to tune the configurations using scripts in `benchmarks/kernels/benchmark_moe.py`
-Some of the configurations files are copied from the SGLang repository. Thank you!
+See `benchmark/kernels/benchmark_moe.py` on how to generate these config files.
