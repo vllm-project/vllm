@@ -36,7 +36,6 @@ REQUIRES_V0_MODELS = [
     "qwen_vl",
     # V1 Test: not enough KV cache space in C1.
     "fuyu",
-    "minimax_vl_01",
 ]
 
 # yapf: disable

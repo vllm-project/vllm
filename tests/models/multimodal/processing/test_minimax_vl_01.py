@@ -8,7 +8,7 @@ from ....conftest import _ImageAssets
 from ...utils import build_model_context
 
 
-@pytest.mark.parametrize("model_id", ["MiniMaxAi/MiniMax-VL-01"])
+@pytest.mark.parametrize("model_id", ["MiniMaxAI/MiniMax-VL-01"])
 # yapf: disable
 @pytest.mark.parametrize(
     ("mm_processor_kwargs", "expected_toks_per_img", "expected_pixels_shape"), [
