@@ -110,10 +110,14 @@ class CompilerManager:
         compiled_graph = self.load(graph, example_inputs, graph_index,
                                    runtime_shape)
         if compiled_graph is not None:
-            if graph_index == 0:
-                # adds some info logging for the first graph
-                logger.info("Directly load the compiled graph for shape %s "
-                            "from the cache", str(runtime_shape))  # noqa
+            if graph_index == num_graphs - 1:
+                # after loading the last graph for this shape, record the time.
+                # there can be multiple graphs due to piecewise compilation.
+                now = time.time()
+                elapsed = now - compilation_start_time
+                logger.info(
+                    "Directly load the compiled graph(s) for shape %s "
+                    "from the cache, took %.3f s", str(runtime_shape), elapsed)
             return compiled_graph
 
         # no compiler cached the graph, or the cache is disabled,
@@ -335,7 +339,7 @@ class VllmBackend:
 
     def configure_post_pass(self):
         config = self.compilation_config
-        self.post_grad_pass_manager.configure(config.pass_config)
+        self.post_grad_pass_manager.configure(self.vllm_config)
 
         # Post-grad custom passes are run using the post_grad_custom_post_pass
         # hook. If a pass for that hook exists, add it to the pass manager.

@@ -11,7 +11,7 @@ On the client side, run:
         --model <your_model> \
         --dataset json \
         --structured-output-ratio 1.0 \
-        --structured-output-backend xgrammar \
+        --structured-output-backend auto \
         --request-rate 10 \
         --num-prompts 1000
 
@@ -51,7 +51,7 @@ try:
 except ImportError:
     from argparse import ArgumentParser as FlexibleArgumentParser
 
-from vllm.v1.structured_output.utils import (
+from vllm.v1.structured_output.backend_xgrammar import (
     has_xgrammar_unsupported_json_features)
 
 MILLISECONDS_TO_SECONDS_CONVERSION = 1000
@@ -150,17 +150,17 @@ def sample_requests(tokenizer: PreTrainedTokenizerBase,
 
     elif args.dataset == "grammar":
         schema = """
-            ?start: select_statement
+        root ::= select_statement
 
-            ?select_statement: "SELECT " column_list " FROM " table_name
+        select_statement ::= "SELECT " column " from " table " where " condition
 
-            ?column_list: column_name ("," column_name)*
+        column ::= "col_1 " | "col_2 "
 
-            ?table_name: identifier
+        table ::= "table_1 " | "table_2 "
 
-            ?column_name: identifier
+        condition ::= column "= " number
 
-            ?identifier: /[a-zA-Z_][a-zA-Z0-9_]*/
+        number ::= "1 " | "2 "
         """
         prompt = "Generate an SQL query to show the 'username' \
             and 'email' from the 'users' table."
@@ -997,12 +997,14 @@ if __name__ == "__main__":
                         type=float,
                         default=1.0,
                         help="Ratio of Structured Outputs requests")
-    parser.add_argument(
-        "--structured-output-backend",
-        type=str,
-        choices=["outlines", "lm-format-enforcer", "xgrammar", "guidance"],
-        default="xgrammar",
-        help="Backend to use for structured outputs")
+    parser.add_argument("--structured-output-backend",
+                        type=str,
+                        choices=[
+                            "outlines", "lm-format-enforcer", "xgrammar",
+                            "guidance", "auto"
+                        ],
+                        default="auto",
+                        help="Backend to use for structured outputs")
 
     args = parser.parse_args()
     main(args)
