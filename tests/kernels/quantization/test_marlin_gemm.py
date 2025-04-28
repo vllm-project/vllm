@@ -372,8 +372,7 @@ def test_awq_marlin_gemm(
     sort_indices = torch.empty(0, dtype=torch.int, device=marlin_q_w.device)
     is_k_full = True
 
-    workspace = MarlinWorkspace(size_n, GPTQ_MARLIN_MIN_THREAD_N,
-                                GPTQ_MARLIN_MAX_PARALLEL)
+    workspace = marlin_make_workspace_new(a_input.device)
 
     output = ops.gptq_marlin_gemm(
         a_input,
@@ -383,7 +382,7 @@ def test_awq_marlin_gemm(
         marlin_zp,
         g_idx,
         sort_indices,
-        workspace.scratch,
+        workspace,
         quant_type,
         a_input.shape[0],
         b_weight.shape[1],
@@ -558,17 +557,17 @@ def test_marlin_gemm_subset_input():
         b_weight, quant_type, group_size, False)
 
     marlin_zp = marlin_make_empty_g_idx(marlin_s.device)
-    workspace = MarlinWorkspace(size_n, GPTQ_MARLIN_MIN_THREAD_N,
-                                GPTQ_MARLIN_MAX_PARALLEL)
+    workspace = marlin_make_workspace_new(a_input.device)
 
     output = ops.gptq_marlin_gemm(
         a_input,
+        None,
         marlin_q_w,
         marlin_s,
         marlin_zp,
         g_idx,
         sort_indices,
-        workspace.scratch,
+        workspace,
         quant_type,
         a_input.shape[0],
         b_weight.shape[1],

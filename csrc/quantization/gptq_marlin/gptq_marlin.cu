@@ -516,16 +516,17 @@ void marlin_mm(const void* A, const void* B, void* C, void* C_tmp, void* s,
   if (prob_n <= 4096) max_par = 16 * 8;
   int max_shared_mem_new = max_shared_mem;
   int rest_m = prob_m;
+  int max_thread_m_blocks = 4;
   while (rest_m) {
-    int par_count = rest_m / 64;
+    int par_count = rest_m / (max_thread_m_blocks * 16);
     if (par_count > max_par) par_count = max_par;
-    int prob_m_split = par_count > 0 ? (par_count * 64) : rest_m;
-    rest_m -= prob_m_split;
+    int prob_m_split =
+        par_count > 0 ? (par_count * (max_thread_m_blocks * 16)) : rest_m;
 
     int thread_k = thread_k_init;
     int thread_n = thread_n_init;
 
-    int thread_m_blocks = prob_m_split > 48 ? 4 : div_ceil(prob_m_split, 16);
+    int thread_m_blocks = min(div_ceil(prob_m_split, 16), max_thread_m_blocks);
     int m_block_size_8 = prob_m_split <= 8;
 
     // Set thread config
@@ -545,6 +546,10 @@ void marlin_mm(const void* A, const void* B, void* C, void* C_tmp, void* s,
           num_bits, group_size, has_act_order, is_k_full, has_zp, is_zp_float,
           max_shared_mem, sms);
       thread_tfg = exec_cfg.tb_cfg;
+      if (thread_tfg.thread_k == -1 && max_thread_m_blocks > 1) {
+        max_thread_m_blocks--;
+        continue;
+      }
     }
 
     int num_threads = thread_tfg.num_threads;
@@ -603,6 +608,7 @@ void marlin_mm(const void* A, const void* B, void* C, void* C_tmp, void* s,
 
     A_ptr += prob_m_split * (lda / 8);
     C_ptr += prob_m_split * (prob_n / 8);
+    rest_m -= prob_m_split;
   }
 }
 
