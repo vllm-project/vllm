@@ -3110,6 +3110,18 @@ GuidedDecodingBackend = Union[GuidedDecodingBackendV0, GuidedDecodingBackendV1]
 class DecodingConfig:
     """Dataclass which contains the decoding strategy of the engine."""
 
+    @property
+    @deprecated(
+        "`guided_decoding_backend` is deprecated and has been renamed to "
+        "`backend`. This will be removed in v0.10.0. Please use the "
+        "`backend` argument instead.")
+    def guided_decoding_backend(self) -> GuidedDecodingBackend:
+        return self.backend
+
+    @guided_decoding_backend.setter
+    def guided_decoding_backend(self, value: GuidedDecodingBackend):
+        self.backend = value
+
     backend: GuidedDecodingBackend = "auto" if envs.VLLM_USE_V1 else "xgrammar"
     """Which engine will be used for guided decoding (JSON schema / regex etc)
     by default. With "auto", we will make opinionated choices based on request
