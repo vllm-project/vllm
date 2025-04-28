@@ -107,7 +107,7 @@ def use_rocm_custom_paged_attention(qtype: torch.dtype, head_size: int,
     # custom paged attn always supported on V0. On V1, requires sliding window
     # disabled due to observed numerical discrepancy.
     return (ON_GFX9 and (not envs.VLLM_USE_V1 or sliding_window == 0
-                                  or sliding_window == (-1, -1))
+                         or sliding_window == (-1, -1))
             and (qtype == torch.half or qtype == torch.bfloat16)
             and (head_size == 64 or head_size == 128)
             and (block_size == 16 or block_size == 32)
