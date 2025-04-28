@@ -310,7 +310,7 @@ class HpuModelAdapter:
         self.block_size = vllm_config.cache_config.block_size
         self.dtype = vllm_config.model_config.dtype
         self.layer_names = layer_names
-        self.sampler = get_sampler()
+        
         enforce_eager = vllm_config.model_config.enforce_eager
         if not is_fake_hpu() and not htorch.utils.internal.is_lazy(
         ) and not enforce_eager:
@@ -489,17 +489,17 @@ class HpuModelAdapter:
     def compute_logits(self, *args, **kwargs):
         return self.model.compute_logits(*args, **kwargs)
 
-    def sample(self, *args, **kwargs):
-        return self.sampler(*args, **kwargs)
+    # def sample(self, *args, **kwargs):
+    #    return self.sampler(*args, **kwargs)
 
     def generate_proposals(self, *args, **kwargs):
         return self.model.generate_proposals(*args, **kwargs)
 
     # sampler property will be used by spec_decode_worker
     # don't rename
-    @property
-    def sampler(self):
-        return self.model.sampler
+    # @property
+    # def sampler(self):
+    #    return self.model.sampler
 
 
 def _maybe_wrap_in_hpu_graph(*args, **kwargs):
@@ -593,6 +593,8 @@ class HPUModelRunner:
         self.speculative_config = vllm_config.speculative_config
         self.prompt_adapter_config = vllm_config.prompt_adapter_config
         self.observability_config = vllm_config.observability_config
+
+        self.sampler = get_sampler()
 
         # NOTE(kzawora) update_env is a hack to work around VLLMKVCache in
         # hpu-extension which selects fetch_from_cache implementation based
@@ -1545,8 +1547,8 @@ class HPUModelRunner:
             tgt_token_ids = prompt_token_ids[start_tok:start_tok + num_logits]
 
             # Compute prompt logprobs.
-            logprobs = self.model.sampler.compute_logprobs(logits)
-            token_ids, logprobs, ranks = self.model.sampler.gather_logprobs(
+            logprobs = self.sampler.compute_logprobs(logits)
+            token_ids, logprobs, ranks = self.sampler.gather_logprobs(
                 logprobs, num_prompt_logprobs, tgt_token_ids)
 
             # Transfer GPU->CPU async.
@@ -1669,7 +1671,7 @@ class HPUModelRunner:
                 htorch.core.mark_step()
                 sampling_metadata = self._prepare_sampling(
                     batch_changed, req_id, pad_to=logits_device.shape[0])
-                sampler_output = self.model.sample(
+                sampler_output = self.sampler(
                     logits=logits_device, sampling_metadata=sampling_metadata)
                 htorch.core.mark_step()
                 prefill_sampler_outputs.append(sampler_output)
@@ -1700,7 +1702,7 @@ class HPUModelRunner:
                 batch_changed,
                 pd_info.decode_req_ids,
                 pad_to=logits_device.shape[0])
-            sampler_output = self.model.sample(
+            sampler_output = self.sampler(
                 logits=logits_device, sampling_metadata=sampling_metadata)
             decode_sampler_outputs.append(sampler_output)
             decode_output_tokens_device = sampler_output.sampled_token_ids
@@ -1933,7 +1935,7 @@ class HPUModelRunner:
             generators=generators,
             max_num_logprobs=max_num_logprobs,
         )
-        tokens_all_random = self.model.sample(logits, sampling_metadata)
+        tokens_all_random = self.sampler(logits, sampling_metadata)
         htorch.core.mark_step()
         sampling_metadata = SamplingMetadata(
             temperature=temperature_device,
@@ -1946,7 +1948,7 @@ class HPUModelRunner:
             generators=generators,
             max_num_logprobs=max_num_logprobs,
         )
-        tokens_all_greedy = self.model.sample(logits, sampling_metadata)
+        tokens_all_greedy = self.sampler(logits, sampling_metadata)
         htorch.core.mark_step()
         sampling_metadata = SamplingMetadata(
             temperature=temperature_device,
@@ -1959,7 +1961,7 @@ class HPUModelRunner:
             generators=generators,
             max_num_logprobs=max_num_logprobs,
         )
-        tokens_mixed = self.model.sample(logits, sampling_metadata)
+        tokens_mixed = self.sampler(logits, sampling_metadata)
         htorch.core.mark_step()
         return tokens_all_random, tokens_all_greedy, tokens_mixed
 
