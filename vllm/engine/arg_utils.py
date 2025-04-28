@@ -495,10 +495,10 @@ class EngineArgs:
         guided_decoding_group.add_argument("--guided-decoding-backend",
                                            **guided_decoding_kwargs["backend"])
         guided_decoding_group.add_argument(
-            "--disable-guided-decoding-fallback",
+            "--guided-decoding-disable-fallback",
             **guided_decoding_kwargs["disable_fallback"])
         guided_decoding_group.add_argument(
-            "--disable-guided-decoding-any-whitespace",
+            "--guided-decoding-disable-any-whitespace",
             **guided_decoding_kwargs["disable_any_whitespace"])
         guided_decoding_group.add_argument(
             "--reasoning-parser",
