@@ -772,6 +772,60 @@ class InstructCoderDataset(HuggingFaceDataset):
 
 
 # -----------------------------------------------------------------------------
+# MT-Bench Dataset Implementation
+# -----------------------------------------------------------------------------
+
+
+class MTBenchDataset(HuggingFaceDataset):
+    """
+    MT-Bench Dataset.
+    https://huggingface.co/datasets/philschmid/mt-bench
+
+    We create a single turn dataset for MT-Bench. 
+    This is similar to Spec decoding benchmark setup in vLLM
+    https://github.com/vllm-project/vllm/blob/9d98ab5ec/examples/offline_inference/eagle.py#L14-L18
+    """ # noqa: E501
+
+    DEFAULT_OUTPUT_LEN = 256  # avg len used in SD bench in vLLM
+    SUPPORTED_DATASET_PATHS = {
+        "philschmid/mt-bench",
+    }
+
+    def sample(self,
+               tokenizer: PreTrainedTokenizerBase,
+               num_requests: int,
+               output_len: Optional[int] = None,
+               enable_multimodal_chat: bool = False,
+               **kwargs) -> list:
+        output_len = (output_len
+                      if output_len is not None else self.DEFAULT_OUTPUT_LEN)
+        sampled_requests = []
+
+        for item in self.data:
+            if len(sampled_requests) >= num_requests:
+                break
+            prompt = item['turns'][0]
+
+            # apply template
+            prompt = tokenizer.apply_chat_template([{
+                "role": "user",
+                "content": prompt
+            }],
+                                                   add_generation_prompt=True,
+                                                   tokenize=False)
+
+            prompt_len = len(tokenizer(prompt).input_ids)
+            sampled_requests.append(
+                SampleRequest(
+                    prompt=prompt,
+                    prompt_len=prompt_len,
+                    expected_output_len=output_len,
+                ))
+        self.maybe_oversample_requests(sampled_requests, num_requests)
+        return sampled_requests
+
+
+# -----------------------------------------------------------------------------
 # AIMO Dataset Implementation
 # -----------------------------------------------------------------------------
 
