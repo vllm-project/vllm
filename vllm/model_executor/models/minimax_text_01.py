@@ -1058,6 +1058,9 @@ class MiniMaxText01ForCausalLM(nn.Module, HasInnerState, IsHybrid,
 
         return logits
 
+    def get_language_model(self) -> torch.nn.Module:
+        return self.model
+
     def make_empty_intermediate_tensors(
             self, batch_size: int, dtype: torch.dtype,
             device: torch.device) -> IntermediateTensors:

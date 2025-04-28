@@ -462,6 +462,9 @@ class MiniMaxVL01ForConditionalGeneration(nn.Module, SupportsMultiModal,
             )
         return inputs_embeds
 
+    def get_language_model(self) -> torch.nn.Module:
+        return self.language_model
+
     def _select_image_features(self, image_features: torch.Tensor, *,
                                strategy: str) -> torch.Tensor:
         if strategy == "default":
