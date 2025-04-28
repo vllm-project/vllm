@@ -336,29 +336,12 @@ class InputPreprocessor:
         * :class:`SingletonInputs` instance
         """
         parsed = parse_singleton_prompt(prompt)
+        prompt_text, prompt_token_ids, token_type_ids, cache_salt = \
+            self._get_prompt_data(parsed)
 
-        if parsed["type"] == "str":
-            prompt_text = parsed["content"]
-            prompt_token_ids = self._tokenize_prompt(
-                prompt_text,
-                lora_request=lora_request,
-                tokenization_kwargs=tokenization_kwargs,
-            )
-
-            return token_inputs(
-                prompt=prompt_text,
-                prompt_token_ids=prompt_token_ids,
-            )
-
-        prompt_text, prompt_token_ids, token_type_ids = self._get_prompt_data(
-            parsed)
-
-        content = parsed["content"]
-        multi_modal_data = content.get("multi_modal_data")
-        mm_processor_kwargs = content.get("mm_processor_kwargs")
-        cache_salt = content.get("cache_salt")
-
-        if multi_modal_data is not None:
+        # If multimodal data is present, process and return immediately
+        if parsed["type"] != "str" and parsed["content"].get(
+                "multi_modal_data") is not None:
             return self._process_multimodal(
                 prompt_text if prompt_text is not None else prompt_token_ids,
                 parsed["content"]["multi_modal_data"],
@@ -408,8 +391,8 @@ class InputPreprocessor:
         prompt_text, prompt_token_ids, token_type_ids = self._get_prompt_data(
             parsed)
 
-        if parsed["type"] != "str" and "multi_modal_data" in parsed[
-                "content"] is not None:
+        if parsed["type"] != "str" and parsed["content"].get(
+                "multi_modal_data") is not None:
             return await self._process_multimodal_async(
                 prompt_token_ids if prompt_text is None else prompt_text,
                 parsed["content"]["multi_modal_data"],
