@@ -322,6 +322,8 @@ def moe_awq_to_marlin_zero_points(q_zp_packed: torch.Tensor, size_k: int,
 
 
 def maybe_warn_marlin_atomic_add(device, dtype):
+    if torch.compiler.is_dynamo_compiling():
+        return
     device_capability = torch.cuda.get_device_capability(device)
     if device_capability[0] < 9 and dtype == torch.bfloat16:
         logger.info_once(
@@ -331,6 +333,8 @@ def maybe_warn_marlin_atomic_add(device, dtype):
 
 
 def maybe_warn_marlin_atomic_add_env():
+    if torch.compiler.is_dynamo_compiling():
+        return
     if envs.VLLM_MARLIN_USE_ATOMIC_ADD:
         return
     logger.info_once(

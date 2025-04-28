@@ -340,13 +340,13 @@ class Fp8LinearMethod(LinearMethodBase):
                 layer.input_scale = torch.nn.Parameter(layer.input_scale.data,
                                                        requires_grad=False)
 
+            weight = layer.weight
+            weight_scale = layer.weight_scale
+
             # If using w8a8, torch._scaled_mm needs per tensor, so
             # requantize the logical shards as a single weight.
-            else:
+            if not self.use_marlin:
                 # Dequant -> Quant with max scale so we can run per tensor.
-                weight = layer.weight
-                weight_scale = layer.weight_scale
-
                 if current_platform.is_fp8_fnuz():
                     weight, weight_scale, input_scale = \
                         normalize_e4m3fn_to_e4m3fnuz(

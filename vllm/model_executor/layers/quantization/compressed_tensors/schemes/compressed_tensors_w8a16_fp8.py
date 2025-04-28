@@ -68,6 +68,7 @@ class CompressedTensorsW8A16Fp8(CompressedTensorsScheme):
         layer.input_size_per_partition = input_size_per_partition
         layer.output_size_per_partition = output_size_per_partition
         layer.orig_dtype = params_dtype
+        layer.weight_block_size = None
 
         # WEIGHT
         weight = ModelWeightParameter(data=torch.empty(
