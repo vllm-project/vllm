@@ -377,6 +377,7 @@ def test_awq_marlin_gemm(
 
     output = ops.gptq_marlin_gemm(
         a_input,
+        None,
         marlin_q_w,
         marlin_s,
         marlin_zp,
