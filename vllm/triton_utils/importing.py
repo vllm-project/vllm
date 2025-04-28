@@ -48,7 +48,7 @@ if not HAS_TRITON:
             self.constexpr = None
             self.dtype = None
 
-    def init_torch_inductor():
+    def init_torch_inductor_runtime():
         name = "torch._inductor.runtime"
         torch_runtime = importlib.import_module(name)
         path = torch_runtime.__path__
@@ -63,7 +63,7 @@ if not HAS_TRITON:
                     continue
 
     # initialize torch inductor without triton placeholder
-    init_torch_inductor()
+    init_torch_inductor_runtime()
     # Replace the triton module in sys.modules with the placeholder
     sys.modules['triton'] = TritonPlaceholder()
     sys.modules['triton.language'] = TritonLanguagePlaceholder()
