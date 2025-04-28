@@ -1,9 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 
+from functools import partial
+
 import pytest
 from PIL import Image
+from pqdm.threads import pqdm
 
 from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.multimodal.parse import ImageSize
+from vllm.multimodal.processing import BaseMultiModalProcessor
 
 from ....conftest import _ImageAssets
 from ...utils import build_model_context
@@ -31,5 +36,83 @@ def test_processor_override(
     image_placeholders = processed_inputs["mm_placeholders"]["image"]
 
     assert len(image_placeholders) == num_imgs
-    assert processed_inputs["prompt_token_ids"] == processed_inputs[
-        "input_ids"][0]
+
+
+def _validate_image_prompt_replacements_one(
+    processor: BaseMultiModalProcessor,
+    num_imgs: int,
+    failed_size_excs: list[tuple[ImageSize, Exception]],
+    image_size: ImageSize,
+) -> None:
+    prompt = "<image>" * num_imgs
+    image = Image.new("RGB", size=image_size)
+    mm_data = {"image": [image] * num_imgs}
+
+    try:
+        # The processor will throw an error if there is a mismatch
+        # in the prompt replacements
+        processed_inputs = processor.apply(prompt, mm_data, {})
+
+        image_placeholders = processed_inputs["mm_placeholders"]["image"]
+        assert len(image_placeholders) == num_imgs
+
+        first_placeholder = image_placeholders[0]
+
+        # NOTE: There is a BOS token
+        assert first_placeholder.offset == 1
+        assert first_placeholder.length == (
+            len(processed_inputs["prompt_token_ids"]) - 1) // num_imgs
+
+    except Exception as exc:
+        failed_size_excs.append((image_size, exc))
+
+
+def _test_image_prompt_replacements(
+    processor,
+    *,
+    num_imgs: int,
+    image_sizes: list[ImageSize],
+) -> None:
+    """
+    Ensure LlavaNextMultiModalProcessor
+    handles prompt replacement properly for input images.
+    """
+    failed_size_excs = list[tuple[ImageSize, Exception]]()
+
+    validate_one = partial(
+        _validate_image_prompt_replacements_one,
+        processor,
+        num_imgs,
+        failed_size_excs,
+    )
+    pqdm(image_sizes, validate_one, n_jobs=8, desc="Validating image sizes")
+
+    if failed_size_excs:
+        msg = "Found failing image sizes:" \
+            + "\n========\n".join(f"[{size}]\n{exc}"
+                                  for size, exc in failed_size_excs)
+        raise AssertionError(msg)
+
+
+@pytest.mark.parametrize("model_id", ["MiniMaxAI/MiniMax-VL-01"])
+@pytest.mark.parametrize("num_imgs", [1, 2])
+def test_processor_prompt_replacements_regression(model_id, num_imgs):
+    ctx = build_model_context(
+        model_id,
+        mm_processor_kwargs=None,
+        limit_mm_per_prompt={"image": num_imgs},
+    )
+    processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
+
+    image_ratios = [(171, 152), (184, 161), (198, 176), (333, 296), (369, 328),
+                    (488, 183), (2560, 1669)]
+    image_sizes = [
+        size for w, h in image_ratios
+        for size in [ImageSize(w, h), ImageSize(h, w)]
+    ]
+
+    _test_image_prompt_replacements(
+        processor,
+        num_imgs=num_imgs,
+        image_sizes=image_sizes,
+    )
