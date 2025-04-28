@@ -94,6 +94,7 @@ def device_id_to_physical_device_id(device_id: int) -> int:
     else:
         return device_id
 
+
 @cache
 def use_rocm_custom_paged_attention(qtype: torch.dtype, head_size: int,
                                     block_size: int, gqa_ratio: int,
