@@ -239,12 +239,12 @@ class EagleProposer:
             loader.get_all_weights(
                 self.vllm_config.speculative_config.draft_model_config,
                 self.model))
-        
+
         # EAGLE-1/3 reuses the same embedding layer for draft and target models
         self.model.model.embed_tokens = target_model.model.embed_tokens
 
         if self.vllm_config.speculative_config.method != "eagle3":
-            # some model definition do not define lm_head explicitly 
+            # some model definition do not define lm_head explicitly
             # and reuse embed_tokens for lm_head, e.g., CohereForCausalLM
             if hasattr(target_model, "lm_head"):
                 self.model.lm_head = target_model.lm_head

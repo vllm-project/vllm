@@ -94,7 +94,7 @@ def main():
 
     outputs = llm.generate(prompt_token_ids=prompt_ids,
                            sampling_params=sampling_params)
-    
+
     # print the generated text
     for output in outputs:
         print("-" * 50)
