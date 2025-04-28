@@ -228,28 +228,6 @@ class InputPreprocessor:
                                             lora_request=lora_request,
                                             **tokenization_kwargs)
 
-    def _can_process_multimodal(self) -> bool:
-        model_config = self.model_config
-
-        if not model_config.is_multimodal_model:
-            raise ValueError("Your model does not support multi-modal inputs")
-
-        # Interim measure so we can handle models that have yet to be
-        # updated to use the new multi-modal processor
-        can_process_multimodal = self.mm_registry.has_processor(model_config)
-        if not can_process_multimodal:
-            from vllm.model_executor.models.registry import _VLLM_MODELS
-            if not any(arch in _VLLM_MODELS
-                       for arch in model_config.architectures):
-                logger.warning_once(
-                    "Your model uses the legacy input pipeline, which will be "
-                    "removed in an upcoming release. "
-                    "Please upgrade to the new multi-modal processing pipeline "
-                    "(https://docs.vllm.ai/en/latest/design/mm_processing.html)"
-                )
-
-        return can_process_multimodal
-
     def _process_multimodal(
         self,
         prompt: Union[str, list[int]],
@@ -263,8 +241,7 @@ class InputPreprocessor:
         returning the corresponding token IDs and metadata.
         """
         # At the moment on model (PrithviGeoSpatialMAE) requires to be
-        # initialized without a tokenizer while using also multi-modal
-        # input.
+        # initialized without a tokenizer while using also multi-modal input
         if not self.tokenizer:
             tokenizer = object()  # Dummy
         else:
@@ -290,8 +267,7 @@ class InputPreprocessor:
     ) -> MultiModalInputs:
         """Async version of :meth:`_process_multimodal`."""
         # At the moment on model (PrithviGeoSpatialMAE) requires to be
-        # initialized without a tokenizer while using also multi-modal
-        # input.
+        # initialized without a tokenizer while using also multi-modal input
         if not self.tokenizer:
             tokenizer = object()  # Dummy
         else:
@@ -350,7 +326,7 @@ class InputPreprocessor:
             multi_modal_data = tokens_content.get("multi_modal_data")
             mm_processor_kwargs = tokens_content.get("mm_processor_kwargs")
 
-            if multi_modal_data is not None and self._can_process_multimodal():
+            if multi_modal_data is not None:
                 return self._process_multimodal(
                     prompt_token_ids,
                     multi_modal_data,
@@ -362,8 +338,6 @@ class InputPreprocessor:
             return token_inputs(
                 prompt_token_ids=prompt_token_ids,
                 token_type_ids=token_type_ids,
-                multi_modal_data=multi_modal_data,
-                mm_processor_kwargs=mm_processor_kwargs,
             )
 
         if parsed["type"] == "text":
@@ -373,7 +347,7 @@ class InputPreprocessor:
             multi_modal_data = text_content.get("multi_modal_data")
             mm_processor_kwargs = text_content.get("mm_processor_kwargs")
 
-            if multi_modal_data is not None and self._can_process_multimodal():
+            if multi_modal_data is not None:
                 return self._process_multimodal(
                     prompt_text,
                     multi_modal_data,
@@ -391,8 +365,6 @@ class InputPreprocessor:
             return token_inputs(
                 prompt=prompt_text,
                 prompt_token_ids=prompt_token_ids,
-                multi_modal_data=multi_modal_data,
-                mm_processor_kwargs=mm_processor_kwargs,
             )
 
         assert_never(parsed)
@@ -427,7 +399,7 @@ class InputPreprocessor:
             multi_modal_data = tokens_content.get("multi_modal_data")
             mm_processor_kwargs = tokens_content.get("mm_processor_kwargs")
 
-            if multi_modal_data is not None and self._can_process_multimodal():
+            if multi_modal_data is not None:
                 return await self._process_multimodal_async(
                     prompt_token_ids,
                     multi_modal_data,
@@ -436,11 +408,7 @@ class InputPreprocessor:
                     return_mm_hashes=return_mm_hashes,
                 )
 
-            return token_inputs(
-                prompt_token_ids=prompt_token_ids,
-                multi_modal_data=multi_modal_data,
-                mm_processor_kwargs=mm_processor_kwargs,
-            )
+            return token_inputs(prompt_token_ids=prompt_token_ids)
 
         if parsed["type"] == "text":
             text_content = parsed["content"]
@@ -449,7 +417,7 @@ class InputPreprocessor:
             multi_modal_data = text_content.get("multi_modal_data")
             mm_processor_kwargs = text_content.get("mm_processor_kwargs")
 
-            if multi_modal_data is not None and self._can_process_multimodal():
+            if multi_modal_data is not None:
                 return await self._process_multimodal_async(
                     prompt_text,
                     multi_modal_data,
@@ -466,8 +434,6 @@ class InputPreprocessor:
             return token_inputs(
                 prompt=prompt_text,
                 prompt_token_ids=prompt_token_ids,
-                multi_modal_data=multi_modal_data,
-                mm_processor_kwargs=mm_processor_kwargs,
             )
 
         assert_never(parsed)
@@ -604,14 +570,10 @@ class InputPreprocessor:
             if (decoder_input := prompt["decoder_prompt"]) is None:
                 decoder_inputs = None
             else:
-                decoder_inputs = self._prompt_to_llm_inputs(
-                    decoder_input,
-                    tokenization_kwargs=tokenization_kwargs,
-                )
+                decoder_inputs = self._prompt_to_llm_inputs(decoder_input)
             # For multimodal model, override decoder prompt from processor
             # with explicit decoder prompt.
-            if self.model_config.is_multimodal_model and (
-                    self._can_process_multimodal()):
+            if self.model_config.is_multimodal_model:
                 encoder_inputs, decoder_inputs = (
                     self._separate_enc_dec_inputs_from_mm_processor_outputs(
                         encoder_inputs, decoder_inputs))
@@ -620,8 +582,7 @@ class InputPreprocessor:
                 prompt,
                 tokenization_kwargs=tokenization_kwargs,
             )
-            if self.model_config.is_multimodal_model and (
-                    self._can_process_multimodal()):
+            if self.model_config.is_multimodal_model:
                 # Encoder-Decoder Multimodal model
                 encoder_inputs, decoder_inputs = (
                     self._separate_enc_dec_inputs_from_mm_processor_outputs(
@@ -662,8 +623,7 @@ class InputPreprocessor:
 
             # For multimodal model, override decoder prompt from processor
             # with explicit decoder prompt.
-            if self.model_config.is_multimodal_model and (
-                    self._can_process_multimodal()):
+            if self.model_config.is_multimodal_model:
                 encoder_inputs, decoder_inputs = (
                     self._separate_enc_dec_inputs_from_mm_processor_outputs(
                         encoder_inputs, decoder_inputs))
@@ -672,8 +632,7 @@ class InputPreprocessor:
                 prompt,
                 tokenization_kwargs=tokenization_kwargs,
             )
-            if self.model_config.is_multimodal_model and (
-                    self._can_process_multimodal()):
+            if self.model_config.is_multimodal_model:
                 # Encoder-Decoder Multimodal model
                 encoder_inputs, decoder_inputs = (
                     self._separate_enc_dec_inputs_from_mm_processor_outputs(

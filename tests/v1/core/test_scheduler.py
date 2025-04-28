@@ -132,7 +132,6 @@ def create_requests(num_requests: int,
             mm_inputs = None
         request = Request(
             request_id=f"{i}",
-            prompt=None,
             prompt_token_ids=[i] * num_tokens,
             sampling_params=sampling_params,
             multi_modal_inputs=mm_inputs,

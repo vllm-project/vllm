@@ -63,6 +63,9 @@ from torch.library import Library
 from typing_extensions import Never, ParamSpec, TypeIs, assert_never
 
 import vllm.envs as envs
+# NOTE: import triton_utils to make TritonPlaceholderModule work
+#       if triton is unavailable
+import vllm.triton_utils  # noqa: F401
 from vllm.logger import enable_trace_function_call, init_logger
 
 if TYPE_CHECKING:
@@ -762,21 +765,28 @@ def create_kv_caches_with_random_flash(
     model_dtype: Optional[Union[str, torch.dtype]] = None,
     seed: Optional[int] = None,
     device: Optional[str] = "cuda",
+    cache_layout: Optional[str] = "NHD",
 ) -> tuple[list[torch.Tensor], list[torch.Tensor]]:
     from vllm.platforms import current_platform
     current_platform.seed_everything(seed)
 
     torch_dtype = get_kv_cache_torch_dtype(cache_dtype, model_dtype)
-    key_value_cache_shape = (num_blocks, 2, block_size, num_heads, head_size)
+    generic_kv_cache_shape = (num_blocks, 2, block_size, num_heads, head_size)
+    assert cache_layout in ("NHD", "HND")
+    stride_order = (0, 1, 2, 3, 4) if cache_layout == "NHD" else (0, 1, 3, 2,
+                                                                  4)
+
+    kv_cache_allocation_shape = tuple(generic_kv_cache_shape[i]
+                                      for i in stride_order)
     scale = head_size**-0.5
 
     key_caches: list[torch.Tensor] = []
     value_caches: list[torch.Tensor] = []
 
     for _ in range(num_layers):
-        key_value_cache = torch.empty(size=key_value_cache_shape,
+        key_value_cache = torch.empty(size=kv_cache_allocation_shape,
                                       dtype=torch_dtype,
-                                      device=device)
+                                      device=device).permute(*stride_order)
         if cache_dtype in ["auto", "half", "bfloat16", "float"]:
             key_value_cache.uniform_(-scale, scale)
         elif cache_dtype == 'fp8':
