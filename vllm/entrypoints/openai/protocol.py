@@ -744,8 +744,8 @@ class ChatCompletionRequest(OpenAIBaseModel):
                 raise ValueError(
                     "Parameter 'cache_salt' is not supported with "
                     "this instance of vLLM, which uses engine V0.")
-            if not isinstance(data["cache_salt"], str) or len(
-                    data["cache_salt"]) == 0:
+            if not isinstance(data["cache_salt"],
+                              str) or not data["cache_salt"]:
                 raise ValueError("Parameter 'cache_salt' must be a "
                                  "non-empty string if provided.")
         return data
