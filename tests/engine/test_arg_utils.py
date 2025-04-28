@@ -1,12 +1,116 @@
 # SPDX-License-Identifier: Apache-2.0
 
+import json
 from argparse import ArgumentError, ArgumentTypeError
+from contextlib import nullcontext
+from dataclasses import dataclass, field
+from typing import Literal, Optional
 
 import pytest
 
-from vllm.config import PoolerConfig
-from vllm.engine.arg_utils import EngineArgs, nullable_kvs
+from vllm.config import PoolerConfig, config
+from vllm.engine.arg_utils import (EngineArgs, contains_type, get_kwargs,
+                                   get_type, is_not_builtin, is_type,
+                                   nullable_kvs, optional_type)
 from vllm.utils import FlexibleArgumentParser
+
+
+@pytest.mark.parametrize(("type", "value", "expected"), [
+    (int, "42", 42),
+    (int, "None", None),
+    (float, "3.14", 3.14),
+    (float, "None", None),
+    (str, "Hello World!", "Hello World!"),
+    (str, "None", None),
+    (json.loads, '{"foo":1,"bar":2}', {
+        "foo": 1,
+        "bar": 2
+    }),
+    (json.loads, "foo=1,bar=2", {
+        "foo": 1,
+        "bar": 2
+    }),
+    (json.loads, "None", None),
+])
+def test_optional_type(type, value, expected):
+    optional_type_func = optional_type(type)
+    context = nullcontext()
+    if value == "foo=1,bar=2":
+        context = pytest.warns(DeprecationWarning)
+    with context:
+        assert optional_type_func(value) == expected
+
+
+@pytest.mark.parametrize(("type_hint", "type", "expected"), [
+    (int, int, True),
+    (int, float, False),
+    (list[int], list, True),
+    (list[int], tuple, False),
+    (Literal[0, 1], Literal, True),
+])
+def test_is_type(type_hint, type, expected):
+    assert is_type(type_hint, type) == expected
+
+
+@pytest.mark.parametrize(("type_hints", "type", "expected"), [
+    ({float, int}, int, True),
+    ({int, tuple[int]}, int, True),
+    ({int, tuple[int]}, float, False),
+    ({str, Literal["x", "y"]}, Literal, True),
+])
+def test_contains_type(type_hints, type, expected):
+    assert contains_type(type_hints, type) == expected
+
+
+@pytest.mark.parametrize(("type_hints", "type", "expected"), [
+    ({int, float}, int, int),
+    ({int, float}, str, None),
+    ({str, Literal["x", "y"]}, Literal, Literal["x", "y"]),
+])
+def test_get_type(type_hints, type, expected):
+    assert get_type(type_hints, type) == expected
+
+
+@config
+@dataclass
+class DummyConfigClass:
+    regular_bool: bool = True
+    """Regular bool with default True"""
+    optional_bool: Optional[bool] = None
+    """Optional bool with default None"""
+    optional_literal: Optional[Literal["x", "y"]] = None
+    """Optional literal with default None"""
+    tuple_n: tuple[int, ...] = field(default_factory=lambda: (1, 2, 3))
+    """Tuple with default (1, 2, 3)"""
+    tuple_2: tuple[int, int] = field(default_factory=lambda: (1, 2))
+    """Tuple with default (1, 2)"""
+    list_n: list[int] = field(default_factory=lambda: [1, 2, 3])
+    """List with default [1, 2, 3]"""
+
+
+@pytest.mark.parametrize(("type_hint", "expected"), [
+    (int, False),
+    (DummyConfigClass, True),
+])
+def test_is_not_builtin(type_hint, expected):
+    assert is_not_builtin(type_hint) == expected
+
+
+def test_get_kwargs():
+    kwargs = get_kwargs(DummyConfigClass)
+    print(kwargs)
+
+    # bools should not have their type set
+    assert kwargs["regular_bool"].get("type") is None
+    assert kwargs["optional_bool"].get("type") is None
+    # optional literals should have None as a choice
+    assert kwargs["optional_literal"]["choices"] == ["x", "y", "None"]
+    # tuples should have the correct nargs
+    assert kwargs["tuple_n"]["nargs"] == "+"
+    assert kwargs["tuple_2"]["nargs"] == 2
+    # lists should work
+    assert kwargs["list_n"]["type"] is int
+    assert kwargs["list_n"]["nargs"] == "+"
 
 
 @pytest.mark.parametrize(("arg", "expected"), [

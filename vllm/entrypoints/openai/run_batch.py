@@ -12,7 +12,7 @@ import torch
 from prometheus_client import start_http_server
 from tqdm import tqdm
 
-from vllm.engine.arg_utils import AsyncEngineArgs, optional_str
+from vllm.engine.arg_utils import AsyncEngineArgs, optional_type
 from vllm.engine.async_llm_engine import AsyncLLMEngine
 from vllm.entrypoints.logger import RequestLogger, logger
 # yapf: disable
@@ -61,7 +61,7 @@ def parse_args():
         "to the output URL.",
     )
     parser.add_argument("--response-role",
-                        type=optional_str,
+                        type=optional_type(str),
                         default="assistant",
                         help="The role name to return if "
                         "`request.add_generation_prompt=True`.")
