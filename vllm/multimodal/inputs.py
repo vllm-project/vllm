@@ -826,7 +826,7 @@ class MultiModalInputs(TypedDict):
     :code:`prompt_token_ids`.
     """
 
-    cache_salt: Optional[str]
+    cache_salt: NotRequired[str]
     """
     Optional cache salt to be used for prefix caching.
     """
