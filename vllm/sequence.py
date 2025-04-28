@@ -14,9 +14,9 @@ from typing import Any, Callable, Optional, Union
 import msgspec
 import torch
 
-from vllm.inputs import SingletonInputs, SingletonInputsAdapter
+from vllm.inputs import SingletonInputs
 from vllm.lora.request import LoRARequest
-from vllm.multimodal import MultiModalDataDict, MultiModalPlaceholderDict
+from vllm.multimodal import MultiModalKwargs, MultiModalPlaceholderDict
 from vllm.pooling_params import PoolingParams
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import RequestOutputKind, SamplingParams
@@ -475,14 +475,15 @@ class Sequence:
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
     ) -> None:
         self.seq_id = seq_id
-        self.inputs = SingletonInputsAdapter(inputs)
+        self.inputs = inputs
         self.block_size = block_size
         self.eos_token_id = eos_token_id
         self.lora_request = lora_request
         self.prompt_adapter_request = prompt_adapter_request
 
         self.data = SequenceData.from_seqs(
-            self.prompt_token_ids, prompt_embeds=self.inputs.prompt_embeds)
+            self.prompt_token_ids,
+            prompt_embeds=self.inputs.get("prompt_embeds"))
         self.output_logprobs: SampleLogprobs = []
         self.output_text = ""
 
@@ -505,31 +506,31 @@ class Sequence:
 
     @property
     def prompt(self) -> Optional[str]:
-        return self.inputs.prompt
+        return self.inputs.get("prompt")
 
     @property
     def prompt_token_ids(self) -> list[int]:
-        return self.inputs.prompt_token_ids
-
-    @property
-    def prompt_embeds(self) -> Optional[torch.Tensor]:
-        return self.inputs.prompt_embeds
+        if self.inputs["type"] == "embeds":
+            return [0] * len(self.inputs["prompt_embeds"])
+        return self.inputs["prompt_token_ids"]
 
     @property
     def token_type_ids(self) -> list[int]:
-        return self.inputs.token_type_ids
+        return self.inputs.get("token_type_ids", [])
 
     @property
-    def multi_modal_data(self) -> "MultiModalDataDict":
-        return self.inputs.multi_modal_data
+    def multi_modal_data(self) -> MultiModalKwargs:
+        if self.inputs["type"] == "multimodal":
+            return self.inputs["mm_kwargs"]
+
+        return MultiModalKwargs({})
 
     @property
     def multi_modal_placeholders(self) -> MultiModalPlaceholderDict:
-        return self.inputs.multi_modal_placeholders
+        if self.inputs["type"] == "multimodal":
+            return self.inputs["mm_placeholders"]
 
-    @property
-    def mm_processor_kwargs(self) -> dict[str, Any]:
-        return self.inputs.mm_processor_kwargs
+        return {}
 
     @property
     def lora_int_id(self) -> int:
@@ -783,12 +784,12 @@ class SequenceGroup:
         return self.first_seq.token_type_ids
 
     @property
-    def multi_modal_data(self) -> MultiModalDataDict:
+    def multi_modal_data(self) -> MultiModalKwargs:
         if self.first_seq.multi_modal_data:
             return self.first_seq.multi_modal_data
         elif self.encoder_seq is not None:
             return self.encoder_seq.multi_modal_data
-        return {}
+        return MultiModalKwargs({})
 
     @property
     def multi_modal_placeholders(self) -> MultiModalPlaceholderDict:
@@ -796,14 +797,6 @@ class SequenceGroup:
             return self.first_seq.multi_modal_placeholders
         elif self.encoder_seq is not None:
             return self.encoder_seq.multi_modal_placeholders
-        return {}
-
-    @property
-    def mm_processor_kwargs(self) -> dict[str, Any]:
-        if self.first_seq.multi_modal_data:
-            return self.first_seq.mm_processor_kwargs
-        elif self.encoder_seq is not None:
-            return self.encoder_seq.mm_processor_kwargs
         return {}
 
     @property
@@ -1033,12 +1026,9 @@ class SequenceGroupMetadata(
     computed_block_nums: Optional[list[int]] = None
     state: Optional[SequenceGroupState] = msgspec.field(
         default_factory=lambda: SequenceGroupState())
-    # "MultiModalDataDict" types. We have to use Any due to msgspec
-    # doesn't allow to have union of 2 different dicts.
     token_type_ids: Optional[list[int]] = None
-    multi_modal_data: Optional[Any] = None
+    multi_modal_data: Optional[MultiModalKwargs] = None
     multi_modal_placeholders: Optional[MultiModalPlaceholderDict] = None
-    mm_processor_kwargs: Optional[dict[str, Any]] = None
     encoder_seq_data: Optional[SequenceData] = None
     cross_block_table: Optional[list[int]] = None
     prompt_adapter_request: Optional[PromptAdapterRequest] = None

@@ -197,6 +197,7 @@ from vllm.attention.backends.abstract import (AttentionBackend, AttentionLayer,
                                               MLAAttentionImpl)
 from vllm.attention.backends.utils import get_mla_dims
 from vllm.attention.ops.merge_attn_states import merge_attn_states
+from vllm.attention.utils.fa_utils import get_flash_attn_version
 from vllm.logger import init_logger
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                LinearBase, RowParallelLinear,
@@ -204,7 +205,6 @@ from vllm.model_executor.layers.linear import (ColumnParallelLinear,
 from vllm.model_executor.layers.rotary_embedding import RotaryEmbedding
 from vllm.platforms import current_platform
 from vllm.utils import cdiv, round_down
-from vllm.vllm_flash_attn.fa_utils import get_flash_attn_version
 
 try:
     from vllm.vllm_flash_attn import flash_attn_varlen_func
@@ -250,10 +250,6 @@ class MLACommonBackend(AttentionBackend):
     @staticmethod
     def get_supported_head_sizes() -> list[int]:
         return [576]
-
-    @staticmethod
-    def use_cascade_attention(*args, **kwargs) -> bool:
-        return False
 
 
 @dataclass
@@ -573,6 +569,9 @@ class MLACommonMetadataBuilder(Generic[M]):
             prefill=prefill_metadata,
             decode=decode_metadata,
         )
+
+    def use_cascade_attention(self, *args, **kwargs) -> bool:
+        return False
 
 
 class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
