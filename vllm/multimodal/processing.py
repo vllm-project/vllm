@@ -1777,7 +1777,6 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
             mm_kwargs=mm_kwargs,
             mm_hashes=mm_hashes,
             mm_placeholders=mm_placeholder_ranges,
-            cache_salt=cache_salt,
         )
 
 

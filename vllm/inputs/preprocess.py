@@ -256,11 +256,10 @@ class InputPreprocessor:
         if mm_processor_kwargs is None:
             mm_processor_kwargs = {}
 
-        return mm_processor.apply(prompt,
-                                  mm_data,
-                                  mm_processor_kwargs,
-                                  return_mm_hashes,
-                                  cache_salt=cache_salt)
+        inputs = mm_processor.apply(prompt, mm_data, mm_processor_kwargs,
+                                    return_mm_hashes)
+        inputs["cache_salt"] = cache_salt
+        return inputs
 
     async def _process_multimodal_async(
         self,
@@ -286,11 +285,10 @@ class InputPreprocessor:
         if mm_processor_kwargs is None:
             mm_processor_kwargs = {}
 
-        return mm_processor.apply(prompt,
-                                  mm_data,
-                                  mm_processor_kwargs,
-                                  return_mm_hashes,
-                                  cache_salt=cache_salt)
+        inputs = mm_processor.apply(prompt, mm_data, mm_processor_kwargs,
+                                    return_mm_hashes)
+        inputs["cache_salt"] = cache_salt
+        return inputs
 
     def _get_prompt_data(self, parsed_prompt: Union[ParsedStrPrompt,
                                                     ParsedTextPrompt,
@@ -303,13 +301,13 @@ class InputPreprocessor:
         if parsed_prompt["type"] == "str":
             prompt_text = parsed_prompt["content"]
         else:
-            content = parsed_prompt["content"]
-            cache_salt = content.get("cache_salt")
+            cache_salt = parsed_prompt["content"].get("cache_salt")
             if parsed_prompt["type"] == "text":
-                prompt_text = content["prompt"]
+                prompt_text = parsed_prompt["content"]["prompt"]
             elif parsed_prompt["type"] == "tokens":
-                prompt_token_ids = content.get("prompt_token_ids")
-                token_type_ids = content.get("token_type_ids")
+                prompt_token_ids = parsed_prompt["content"].get(
+                    "prompt_token_ids")
+                token_type_ids = parsed_prompt["content"].get("token_type_ids")
             else:
                 assert_never(parsed_prompt)
 
