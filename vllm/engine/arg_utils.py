@@ -501,6 +501,9 @@ class EngineArgs:
             "--guided-decoding-disable-any-whitespace",
             **guided_decoding_kwargs["disable_any_whitespace"])
         guided_decoding_group.add_argument(
+            "--guided-decoding-disable-additional-properties",
+            **guided_decoding_kwargs["disable_additional_properties"])
+        guided_decoding_group.add_argument(
             "--reasoning-parser",
             # This choices is a special case because it's not static
             choices=list(ReasoningParserManager.reasoning_parsers),
@@ -1254,6 +1257,8 @@ class EngineArgs:
             backend=self.guided_decoding_backend,
             disable_fallback=self.guided_decoding_disable_fallback,
             disable_any_whitespace=self.guided_decoding_disable_any_whitespace,
+            disable_additional_properties=\
+                self.guided_decoding_disable_additional_properties,
             reasoning_backend=self.reasoning_parser
             if self.enable_reasoning else None,
         )
