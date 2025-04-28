@@ -72,7 +72,7 @@ class CompressedTensorsConfig(QuantizationConfig):
         return 70
 
     def get_name(self) -> str:
-        return "compressed_tensors"
+        return "compressed-tensors"
 
     def get_quant_method(
         self,

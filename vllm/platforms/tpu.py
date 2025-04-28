@@ -30,9 +30,7 @@ class TpuPlatform(Platform):
     ray_device_key: str = "TPU"
     device_control_env_var: str = "TPU_VISIBLE_CHIPS"
 
-    supported_quantization: list[str] = [
-        "tpu_int8", "compressed-tensors", "compressed_tensors"
-    ]
+    supported_quantization: list[str] = ["tpu_int8", "compressed-tensors"]
 
     additional_env_vars: list[str] = [
         "TPU_CHIPS_PER_HOST_BOUNDS", "TPU_HOST_BOUNDS"
