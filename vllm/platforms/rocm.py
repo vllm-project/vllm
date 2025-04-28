@@ -130,7 +130,7 @@ class RocmPlatform(Platform):
     device_control_env_var: str = "CUDA_VISIBLE_DEVICES"
 
     supported_quantization: list[str] = [
-        "awq", "gptq", "fp8", "compressed_tensors", "fbgemm_fp8", "gguf",
+        "awq", "gptq", "fp8", "compressed-tensors", "fbgemm_fp8", "gguf",
         "quark", "ptpc_fp8"
     ]
 

@@ -752,7 +752,7 @@ class ModelConfig:
         supported_quantization = QUANTIZATION_METHODS
         optimized_quantization_methods = [
             "fp8", "marlin", "modelopt", "gptq_marlin_24", "gptq_marlin",
-            "awq_marlin", "fbgemm_fp8", "compressed_tensors", "experts_int8",
+            "awq_marlin", "fbgemm_fp8", "compressed-tensors", "experts_int8",
             "quark", "nvfp4", "bitblas", "gptq_bitblas"
         ]
         if self.quantization is not None:
@@ -762,8 +762,10 @@ class ModelConfig:
         quant_cfg = self._parse_quant_hf_config()
 
         if quant_cfg is not None:
-            quant_method = quant_cfg.get("quant_method", "")
-            quant_method = quant_method.replace("-", "_").lower()
+            quant_method = quant_cfg.get("quant_method", "").lower()
+            quant_method = quant_method.replace("compressed_tensors",
+                                                "compressed-tensors")
+            quant_cfg["quant_method"] = quant_method
 
             # Detect which checkpoint is it
             for name in QUANTIZATION_METHODS:
