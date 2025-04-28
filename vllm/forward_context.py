@@ -45,6 +45,20 @@ class ForwardContext:
     # set dynamically for each forward pass
     dp_metadata: Optional[DPMetadata] = None
 
+    def get_virtual_engine(self):
+        return self.virtual_engine
+
+    def get_kv_cache_attn_layers(self) -> dict[str, Any]:
+        attn_layers = {}
+        for layer_name in self.no_compile_layers:
+            attn_layer = self.no_compile_layers[layer_name]
+            if not hasattr(attn_layer, "kv_cache"):
+                logger.debug("The layer %s does not have kv_cache, skip it",
+                             layer_name)
+                continue
+            attn_layers[layer_name] = attn_layer
+
+        return attn_layers
 
 _forward_context: Optional[ForwardContext] = None
 
