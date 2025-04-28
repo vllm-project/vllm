@@ -312,6 +312,8 @@ class EngineArgs:
     guided_decoding_disable_fallback: bool = DecodingConfig.disable_fallback
     guided_decoding_disable_any_whitespace: bool = \
         DecodingConfig.disable_any_whitespace
+    guided_decoding_disable_additional_properties: bool = \
+        DecodingConfig.disable_additional_properties
     logits_processor_pattern: Optional[str] = None
 
     speculative_config: Optional[Dict[str, Any]] = None
