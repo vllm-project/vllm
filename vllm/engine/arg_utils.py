@@ -266,30 +266,21 @@ class EngineArgs:
     def add_cli_args(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
         """Shared CLI arguments for vLLM engine."""
 
-        def is_type_in_union(cls: TypeHint, type: TypeHint) -> bool:
-            """Check if the class is a type in a union type."""
-            is_union = get_origin(cls) is Union
-            type_in_union = type in [get_origin(a) or a for a in get_args(cls)]
-            return is_union and type_in_union
+        def is_type(type_hint: TypeHint, type: TypeHintT) -> TypeIs[TypeHintT]:
+            """Check if the type hint is a specific type."""
+            return type_hint is type or get_origin(type_hint) is type
 
-        def get_type_from_union(cls: TypeHint, type: TypeHintT) -> TypeHintT:
-            """Get the type in a union type."""
-            for arg in get_args(cls):
-                if (get_origin(arg) or arg) is type:
-                    return arg
-            raise ValueError(f"Type {type} not found in union type {cls}.")
+        def contains_type(type_hints: set[TypeHint],
+                          type: TypeHintT) -> TypeIs[TypeHintT]:
+            """Check if the type hints contain a specific type."""
+            return any(is_type(type_hint, type) for type_hint in type_hints)
 
-        def is_optional(cls: TypeHint) -> TypeIs[Union[Any, None]]:
-            """Check if the class is an optional type."""
-            return is_type_in_union(cls, type(None))
+        def get_type(type_hints: set[TypeHint], type: TypeHintT) -> TypeHintT:
+            """Get the specific type from the type hints."""
+            return next(th for th in type_hints if is_type(th, type))
 
-        def can_be_type(cls: TypeHint, type: TypeHintT) -> TypeIs[TypeHintT]:
-            """Check if the class can be of type."""
-            return cls is type or get_origin(cls) is type or is_type_in_union(
-                cls, type)
-
-        def is_custom_type(cls: TypeHint) -> bool:
-            """Check if the class is a custom type."""
+        def is_not_builtin(cls: TypeHint) -> bool:
+            """Check if the class is not a built-in type."""
             return cls.__module__ != "builtins"
 
         def get_kwargs(cls: ConfigType) -> dict[str, Any]:
@@ -310,23 +301,22 @@ class EngineArgs:
                 # Initialise the kwargs dictionary for the field
                 kwargs[name] = {"default": default, "help": help}
 
-                # Make note of if the field is optional and get the actual
-                # type of the field if it is
-                optional = is_optional(field.type)
-                field_type = get_args(
-                    field.type)[0] if optional else field.type
+                # Get the set of possible types for the field
+                type_hints: set[TypeHint] = set()
+                if get_origin(field.type) is Union:
+                    type_hints.update(get_args(field.type))
+                else:
+                    type_hints.add(field.type)
 
-                # Set type, action and choices for the field depending on the
-                # type of the field
-                if can_be_type(field_type, bool):
+                # Set other kwargs based on the type hints
+                if contains_type(type_hints, bool):
                     # Creates --no-<name> and --<name> flags
                     kwargs[name]["action"] = argparse.BooleanOptionalAction
                     kwargs[name]["type"] = bool
-                elif can_be_type(field_type, Literal):
+                elif contains_type(type_hints, Literal):
                     # Creates choices from Literal arguments
-                    if is_type_in_union(field_type, Literal):
-                        field_type = get_type_from_union(field_type, Literal)
-                    choices = get_args(field_type)
+                    type_hint = get_type(type_hints, Literal)
+                    choices = sorted(get_args(type_hint))
                     kwargs[name]["choices"] = choices
                     choice_type = type(choices[0])
                     assert all(type(c) is choice_type for c in choices), (
@@ -334,32 +324,46 @@ class EngineArgs:
                         f"Got {choices} with types {[type(c) for c in choices]}"
                     )
                     kwargs[name]["type"] = choice_type
-                elif can_be_type(field_type, tuple):
-                    if is_type_in_union(field_type, tuple):
-                        field_type = get_type_from_union(field_type, tuple)
-                    dtypes = get_args(field_type)
-                    dtype = dtypes[0]
+                elif contains_type(type_hints, tuple):
+                    type_hint = get_type(type_hints, tuple)
+                    types = get_args(type_hint)
+                    tuple_type = types[0]
                     assert all(
-                        d is dtype for d in dtypes if d is not Ellipsis
+                        t is tuple_type for t in types if t is not Ellipsis
                     ), ("All non-Ellipsis tuple elements must be of the same "
-                        f"type. Got {dtypes}.")
-                    kwargs[name]["type"] = dtype
+                        f"type. Got {types}.")
+                    kwargs[name]["type"] = tuple_type
+                    nargs = "+" if Ellipsis in types else len(types)
+                    kwargs[name]["nargs"] = nargs
+                elif contains_type(type_hints, list):
+                    type_hint = get_type(type_hints, list)
+                    types = get_args(type_hint)
+                    assert len(types) == 1, (
+                        "List type must have exactly one type. Got "
+                        f"{type_hint} with types {types}")
+                    kwargs[name]["type"] = types[0]
                     kwargs[name]["nargs"] = "+"
-                elif can_be_type(field_type, int):
-                    kwargs[name]["type"] = optional_type(
-                        int) if optional else int
-                elif can_be_type(field_type, float):
-                    kwargs[name]["type"] = optional_type(
-                        float) if optional else float
-                elif can_be_type(field_type, dict):
+                elif contains_type(type_hints, int):
+                    kwargs[name]["type"] = int
+                elif contains_type(type_hints, float):
+                    kwargs[name]["type"] = float
+                elif contains_type(type_hints, dict):
+                    # Dict arguments will always be optional
                     kwargs[name]["type"] = optional_type(dict)
-                elif (can_be_type(field_type, str)
-                      or is_custom_type(field_type)):
-                    kwargs[name]["type"] = optional_type(
-                        str) if optional else str
+                elif (contains_type(type_hints, str)
+                      or any(is_not_builtin(th) for th in type_hints)):
+                    kwargs[name]["type"] = str
                 else:
                     raise ValueError(
-                        f"Unsupported type {field.type} for argument {name}. ")
+                        f"Unsupported type {type_hints} for argument {name}.")
+
+                # If None is in type_hints, make the argument optional.
+                # But not if it's a bool, argparse will handle this better.
+                if type(None) in type_hints and not contains_type(
+                        type_hints, bool):
+                    kwargs[name]["type"] = optional_type(kwargs[name]["type"])
+                    if kwargs[name].get("choices"):
+                        kwargs[name]["choices"].append("None")
             return kwargs
 
         # Model arguments
