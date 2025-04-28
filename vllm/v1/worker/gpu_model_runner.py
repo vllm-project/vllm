@@ -1215,15 +1215,14 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
             if spec_decode_metadata is None:
                 # input_ids can be None for multimodal models.
-                num_actual_draft_tokens = num_scheduled_tokens
-                target_token_ids = self.input_ids[:num_input_tokens]
-                target_positions = positions[:num_input_tokens]
+                target_token_ids = self.input_ids[:num_scheduled_tokens]
+                target_positions = positions[:num_scheduled_tokens]
                 if self.use_aux_hidden_state_outputs:
                     target_hidden_states = torch.cat(
-                        [h[:num_input_tokens] for h in aux_hidden_states],
+                        [h[:num_scheduled_tokens] for h in aux_hidden_states],
                         dim=-1)
                 else:
-                    target_hidden_states = hidden_states[:num_input_tokens]
+                    target_hidden_states = hidden_states[:num_scheduled_tokens]
                 target_slot_mapping = attn_metadata.slot_mapping
                 cu_num_tokens = attn_metadata.query_start_loc
             else:
@@ -1242,19 +1241,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     attn_metadata.query_start_loc,
                     num_rejected_tokens,
                 )
-
-                num_actual_draft_tokens = len(token_indices)
-                if self.use_cuda_graph and \
-                    num_actual_draft_tokens <= self.cudagraph_batch_sizes[-1]:
-                    num_padded_draft_tokens = self.vllm_config. \
-                        pad_for_cudagraph(num_actual_draft_tokens)
-
-                    if num_padded_draft_tokens > num_actual_draft_tokens:
-                        token_indices = torch.cat((
-                            token_indices,
-                            token_indices[-1].repeat(num_padded_draft_tokens -
-                                                     num_actual_draft_tokens)))
-
                 target_token_ids = self.input_ids[token_indices]
                 target_positions = positions[token_indices]
                 if self.use_aux_hidden_state_outputs:
@@ -1273,7 +1259,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 cu_num_tokens=cu_num_tokens,
                 block_table=attn_metadata.block_table,
                 sampling_metadata=sampling_metadata,
-                num_actual_draft_tokens=num_actual_draft_tokens,
             )
             spec_token_ids = draft_token_ids.tolist()
 

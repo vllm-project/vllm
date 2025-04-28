@@ -86,7 +86,6 @@ class EagleProposer:
         # [batch_size, max_num_blocks_per_req]
         block_table: torch.Tensor,
         sampling_metadata: SamplingMetadata,
-        num_actual_draft_tokens: int,
     ) -> torch.Tensor:
         num_tokens = target_token_ids.shape[0]
         batch_size = next_token_ids.shape[0]
@@ -106,7 +105,7 @@ class EagleProposer:
         max_seq_len = seq_lens.max().item()
         max_num_tokens = (cu_num_tokens[1:] - cu_num_tokens[:-1]).max().item()
         attn_metadata = FlashAttentionMetadata(
-            num_actual_tokens=num_actual_draft_tokens,
+            num_actual_tokens=num_tokens,
             max_query_len=max_num_tokens,
             query_start_loc=cu_num_tokens,
             max_seq_len=max_seq_len,
@@ -120,23 +119,28 @@ class EagleProposer:
             prefix_kv_lens=None,
             suffix_kv_lens=None,
         )
-        attn_metadata.num_input_tokens = num_tokens
+        if self.use_cuda_graph and \
+            num_tokens <= self.cudagraph_batch_sizes[-1]:
+            num_input_tokens = self.vllm_config.pad_for_cudagraph(num_tokens)
+        else:
+            num_input_tokens = num_tokens
+        attn_metadata.num_input_tokens = num_input_tokens
 
         # copy inputs to buffer for cudagraph
         self.positions[:num_tokens] = target_positions
 
         if self.method == 'eagle':
             self.hidden_states[:num_tokens] = target_hidden_states
-            hidden_states = self.hidden_states[:num_tokens]
+            hidden_states = self.hidden_states
         else:
             # TODO: make eagle3 compatible with cuda graph
-            hidden_states = target_hidden_states[:num_tokens]
+            hidden_states = target_hidden_states
 
         with set_forward_context(attn_metadata, self.vllm_config):
             last_hidden_states, hidden_states = self.model(
-                input_ids=self.input_ids[:num_tokens],
-                positions=self.positions[:num_tokens],
-                hidden_states=hidden_states,
+                input_ids=self.input_ids[:num_input_tokens],
+                positions=self.positions[:num_input_tokens],
+                hidden_states=hidden_states[:num_input_tokens],
             )
         sample_hidden_states = last_hidden_states[last_token_indices]
         logits = self.model.compute_logits(sample_hidden_states, None)
@@ -155,13 +159,12 @@ class EagleProposer:
 
         if self.use_cuda_graph and \
             batch_size <= self.cudagraph_batch_sizes[-1]:
-            padded_batch_size = self.vllm_config. \
-                pad_for_cudagraph(batch_size)
+            input_batch_size = self.vllm_config.pad_for_cudagraph(batch_size)
         else:
-            padded_batch_size = batch_size
+            input_batch_size = batch_size
 
         attn_metadata.num_actual_tokens = batch_size
-        attn_metadata.num_input_tokens = padded_batch_size
+        attn_metadata.num_input_tokens = input_batch_size
         attn_metadata.max_query_len = 1
         attn_metadata.query_start_loc = self.arange[:batch_size + 1]
         for _ in range(self.num_speculative_tokens - 1):
@@ -218,9 +221,9 @@ class EagleProposer:
             # Run the model.
             with set_forward_context(attn_metadata, self.vllm_config):
                 last_hidden_states, hidden_states = self.model(
-                    input_ids=self.input_ids[:padded_batch_size],
-                    positions=self.positions[:padded_batch_size],
-                    hidden_states=hidden_states[:padded_batch_size],
+                    input_ids=self.input_ids[:input_batch_size],
+                    positions=self.positions[:input_batch_size],
+                    hidden_states=hidden_states[:input_batch_size],
                 )
             hidden_states = hidden_states[:batch_size]
             logits = self.model.compute_logits(last_hidden_states[:batch_size],
