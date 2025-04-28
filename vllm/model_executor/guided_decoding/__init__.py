@@ -26,8 +26,8 @@ def maybe_backend_fallback(
     def fallback_or_error(guided_params: GuidedDecodingParams, message: str,
                           fallback: str) -> None:
         """Change the backend to the specified fallback with a warning log,
-        or raise a ValueError if the `no-fallback` option is specified."""
-        if guided_params.no_fallback():
+        or raise a ValueError if the `disable_fallback` option is specified."""
+        if guided_params.disable_fallback:
             raise ValueError(message)
 
         logger.warning("%s Falling back to use %s instead.", message, fallback)

@@ -37,15 +37,8 @@ class XgrammarBackend(StructuredOutputBackend):
             scheduler_config=vllm_config.scheduler_config,
             lora_config=vllm_config.lora_config)  # type: ignore[arg-type]
 
-        self.disable_any_whitespace = False
-        backend_options = \
-            vllm_config.decoding_config.guided_decoding_backend_options
-        for option in backend_options:
-            if option == "disable-any-whitespace":
-                self.disable_any_whitespace = True
-            else:
-                raise ValueError(
-                    f"Unsupported option for the xgrammar backend: {option}")
+        self.disable_any_whitespace = \
+            vllm_config.guided_decoding.disable_any_whitespace
 
         tokenizer = tokenizer_group.get_lora_tokenizer(None)
         self.vocab_size = vllm_config.model_config.get_vocab_size()

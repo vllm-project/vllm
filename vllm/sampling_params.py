@@ -1,13 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 """Sampling parameters for text generation."""
 import copy
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from enum import Enum, IntEnum
 from functools import cached_property
 from typing import Annotated, Any, Optional, Union
 
 import msgspec
 from pydantic import BaseModel
+from typing_extensions import deprecated
 
 from vllm.logger import init_logger
 from vllm.logits_process import LogitsProcessor
@@ -37,7 +38,10 @@ class GuidedDecodingParams:
     json_object: Optional[bool] = None
     """These are other options that can be set"""
     backend: Optional[str] = None
-    backend_options: set[str] = field(default_factory=set)
+    backend_was_auto: bool = False
+    disable_fallback: bool = False
+    disable_any_whitespace: bool = False
+    disable_additional_properties: bool = False
     whitespace_pattern: Optional[str] = None
     structural_tag: Optional[str] = None
 
@@ -69,11 +73,6 @@ class GuidedDecodingParams:
             structural_tag=structural_tag,
         )
 
-    def no_fallback(self) -> bool:
-        """Returns True if the "no-fallback" option is supplied for the guided
-        decoding backend"""
-        return "no-fallback" in self.backend_options
-
     def __post_init__(self):
         """Validate that some fields are mutually exclusive."""
         guide_count = sum([
@@ -84,6 +83,27 @@ class GuidedDecodingParams:
             raise ValueError(
                 "You can only use one kind of guided decoding but multiple are "
                 f"specified: {self.__dict__}")
+
+        if self.backend is not None and ":" in self.backend:
+            self._extract_backend_options()
+
+    @deprecated(
+        "Passing guided decoding backend options inside backend in the format "
+        "'backend:...' is deprecated. This will be removed in v0.10.0. Please "
+        "use the dedicated arguments '--disable-fallback', "
+        "'--disable-any-whitespace' and '--disable-additional-properties' "
+        "instead.")
+    def _extract_backend_options(self):
+        """Extract backend options from the backend string."""
+        assert isinstance(self.backend, str)
+        self.backend, options = self.backend.split(":")
+        options_set = set(options.strip().split(","))
+        if "no-fallback" in options_set:
+            self.disable_fallback = True
+        if "disable-any-whitespace" in options_set:
+            self.disable_any_whitespace = True
+        if "no-additional-properties" in options_set:
+            self.disable_additional_properties = True
 
 
 class RequestOutputKind(Enum):

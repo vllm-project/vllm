@@ -17,12 +17,13 @@ from dataclasses import (MISSING, dataclass, field, fields, is_dataclass,
 from importlib.util import find_spec
 from pathlib import Path
 from typing import (TYPE_CHECKING, Any, Callable, ClassVar, Final, Literal,
-                    Optional, Protocol, TypeVar, Union, get_args)
+                    Optional, Protocol, TypeVar, Union, cast, get_args)
 
 import torch
 from pydantic import BaseModel, Field, PrivateAttr
 from torch.distributed import ProcessGroup, ReduceOp
 from transformers import PretrainedConfig
+from typing_extensions import deprecated
 
 import vllm.envs as envs
 from vllm.compilation.inductor_pass import CallableInductorPass, InductorPass
@@ -3101,7 +3102,7 @@ def get_served_model_name(model: str,
 GuidedDecodingBackendV0 = Literal["auto", "outlines", "lm-format-enforcer",
                                   "xgrammar", "guidance"]
 GuidedDecodingBackendV1 = Literal["auto", "xgrammar", "guidance"]
-GuidedDecodingBackendOptions = Literal["no-fallback", "disable-any-whitespace"]
+GuidedDecodingBackend = Union[GuidedDecodingBackendV0, GuidedDecodingBackendV1]
 
 
 @config
@@ -3109,22 +3110,23 @@ GuidedDecodingBackendOptions = Literal["no-fallback", "disable-any-whitespace"]
 class DecodingConfig:
     """Dataclass which contains the decoding strategy of the engine."""
 
-    guided_decoding_backend: Union[
-        GuidedDecodingBackendV0,
-        GuidedDecodingBackendV1] = "auto" if envs.VLLM_USE_V1 else "xgrammar"
+    backend: GuidedDecodingBackend = "auto" if envs.VLLM_USE_V1 else "xgrammar"
     """Which engine will be used for guided decoding (JSON schema / regex etc)
     by default. With "auto", we will make opinionated choices based on request
     contents and what the backend libraries currently support, so the behavior
     is subject to change in each release."""
 
-    guided_decoding_backend_options: set[GuidedDecodingBackendOptions] = \
-        field(default_factory=set)
-    """Backend-specific options to pass to the specified guided decoding
-    backend:\n
-    - "no-fallback" will not allow vLLM to fallback to a different backend on
-    error.\n
-    - "disable-any-whitespace" prevents the model from generating whitespace.
-    """
+    disable_fallback: bool = False
+    """If `True`, vLLM will not fallback to a different backend on error."""
+
+    disable_any_whitespace: bool = False
+    """If `True`, the model will not generate any whitespace during guided
+    decoding. This is only supported for xgrammar and guidance backends."""
+
+    disable_additional_properties: bool = False
+    """If `True`, the `guidance` backend will not use `additionalProperties`
+    in the JSON schema. This is only supported for the `guidance` backend and
+    is used to better align its behaviour with `outlines` and `xgrammar`."""
 
     reasoning_backend: Optional[str] = None
     """Select the reasoning parser depending on the model that you're using.
@@ -3151,26 +3153,38 @@ class DecodingConfig:
         return hash_str
 
     def __post_init__(self):
-        backend = self.guided_decoding_backend
-        if ":" in backend:
-            self.guided_decoding_backend, options = backend.split(":")
-            self.guided_decoding_backend_options = set(options.split(","))
-            logger.warning(
-                "Passing guided decoding backend options via "
-                "guided_decoding_backend (or --guided-decoding-backend) is "
-                "deprecated. Please use guided_decoding_backend_options (or "
-                "--guided-decoding-backend-options) instead.")
+        if ":" in self.backend:
+            self._extract_backend_options()
+
         if envs.VLLM_USE_V1:
             valid_guided_backends = get_args(GuidedDecodingBackendV1)
         else:
             valid_guided_backends = get_args(GuidedDecodingBackendV0)
-        if backend not in valid_guided_backends:
-            raise ValueError(f"Invalid guided_decoding_backend '{backend}',"
+        if self.backend not in valid_guided_backends:
+            raise ValueError(f"Invalid backend '{self.backend}',"
                              f" must be one of {valid_guided_backends}")
-        if ("disable-any-whitespace" in self.guided_decoding_backend_options
-                and backend not in ("xgrammar", "guidance")):
-            raise ValueError("disable-any-whitespace is only supported for "
+        if (self.disable_any_whitespace
+                and self.backend not in ("xgrammar", "guidance")):
+            raise ValueError("disable_any_whitespace is only supported for "
                              "xgrammar and guidance backends.")
+
+    @deprecated(
+        "Passing guided decoding backend options inside backend in the format "
+        "'backend:...' is deprecated. This will be removed in v0.10.0. Please "
+        "use the dedicated arguments '--disable-fallback', "
+        "'--disable-any-whitespace' and '--disable-additional-properties' "
+        "instead.")
+    def _extract_backend_options(self):
+        """Extract backend options from the backend string."""
+        backend, options = self.backend.split(":")
+        self.backend = cast(GuidedDecodingBackend, backend)
+        options_set = set(options.strip().split(","))
+        if "no-fallback" in options_set:
+            self.disable_fallback = True
+        if "disable-any-whitespace" in options_set:
+            self.disable_any_whitespace = True
+        if "no-additional-properties" in options_set:
+            self.disable_additional_properties = True
 
 
 @dataclass
