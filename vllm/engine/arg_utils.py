@@ -55,10 +55,8 @@ def optional_type(
         if val == "" or val == "None":
             return None
         try:
-            if return_type is dict:
-                if not re.match("^{.*}$", val):
-                    return nullable_kvs(val)
-                return json.loads(val)
+            if return_type is json.loads and not re.match("^{.*}$", val):
+                return cast(T, nullable_kvs(val))
             return return_type(val)
         except ValueError as e:
             raise argparse.ArgumentTypeError(
@@ -71,7 +69,7 @@ def optional_type(
     "Passing a JSON argument as a string containing comma separated key=value "
     "pairs is deprecated. This will be removed in v0.10.0. Please use a JSON "
     "string instead.")
-def nullable_kvs(val: str) -> Optional[dict[str, int]]:
+def nullable_kvs(val: str) -> dict[str, int]:
     """Parses a string containing comma separate key [str] to value [int]
     pairs into a dictionary.
 
@@ -81,10 +79,7 @@ def nullable_kvs(val: str) -> Optional[dict[str, int]]:
     Returns:
         Dictionary with parsed values.
     """
-    if len(val) == 0:
-        return None
-
-    out_dict: Dict[str, int] = {}
+    out_dict: dict[str, int] = {}
     for item in val.split(","):
         kv_parts = [part.lower().strip() for part in item.split("=")]
         if len(kv_parts) != 2:
@@ -270,8 +265,7 @@ class EngineArgs:
             """Check if the type hint is a specific type."""
             return type_hint is type or get_origin(type_hint) is type
 
-        def contains_type(type_hints: set[TypeHint],
-                          type: TypeHintT) -> TypeIs[TypeHintT]:
+        def contains_type(type_hints: set[TypeHint], type: TypeHintT) -> bool:
             """Check if the type hints contain a specific type."""
             return any(is_type(type_hint, type) for type_hint in type_hints)
 
@@ -349,7 +343,7 @@ class EngineArgs:
                     kwargs[name]["type"] = float
                 elif contains_type(type_hints, dict):
                     # Dict arguments will always be optional
-                    kwargs[name]["type"] = optional_type(dict)
+                    kwargs[name]["type"] = optional_type(json.loads)
                 elif (contains_type(type_hints, str)
                       or any(is_not_builtin(th) for th in type_hints)):
                     kwargs[name]["type"] = str
