@@ -931,6 +931,8 @@ class QKVParallelLinear(ColumnParallelLinear):
 
         # Note(simon): This is needed for Qwen3's fp8 quantization.
         if isinstance(param, BlockQuantScaleParameter):
+            assert self.quant_method is not None
+            assert hasattr(self.quant_method, "quant_config")
             weight_block_size = self.quant_method.quant_config.weight_block_size
             block_n, _ = weight_block_size[0], weight_block_size[1]
             shard_offset = (shard_offset + block_n - 1) // block_n
