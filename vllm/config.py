@@ -28,6 +28,7 @@ import vllm.envs as envs
 from vllm.compilation.inductor_pass import CallableInductorPass, InductorPass
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import (QUANTIZATION_METHODS,
+                                                     QuantizationMethods,
                                                      get_quantization_config)
 from vllm.model_executor.models import ModelRegistry
 from vllm.platforms import CpuArchEnum, current_platform
@@ -767,12 +768,43 @@ class ModelConfig:
                                                 "compressed-tensors")
             quant_cfg["quant_method"] = quant_method
 
+            # Quantization methods which are overrides (i.e. they have a
+            # `override_quantization_method` method) must be checked in order
+            # of preference (this is particularly important for GPTQ).
+            overrides = [
+                "marlin",
+                "bitblas",
+                "gptq_marlin_24",
+                "gptq_marlin",
+                "gptq_bitblas",
+                "awq_marlin",
+                "ipex",
+                "moe_wna16",
+            ]
+            quantization_methods = [
+                q for q in supported_quantization if q not in overrides
+            ]
+            # Any custom overrides will be in quantization_methods so we place
+            # them at the start of the list so custom overrides have preference
+            # over the built in ones.
+            quantization_methods = quantization_methods + overrides
+
             # Detect which checkpoint is it
-            for name in QUANTIZATION_METHODS:
+            for name in quantization_methods:
                 method = get_quantization_config(name)
                 quantization_override = method.override_quantization_method(
                     quant_cfg, self.quantization)
-                if quantization_override:
+                if quantization_override is not None:
+                    # Raise error if the override is not custom (custom would
+                    # be in QUANTIZATION_METHODS but not QuantizationMethods)
+                    # and hasn't been added to the overrides list.
+                    if (name in get_args(QuantizationMethods)
+                            and name not in overrides):
+                        raise ValueError(
+                            f"Quantization method {name} is an override but "
+                            "is has not been added to the `overrides` list "
+                            "above. This is necessary to ensure that the "
+                            "overrides are checked in order of preference.")
                     quant_method = quantization_override
                     self.quantization = quantization_override
                     break
