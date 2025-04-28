@@ -185,6 +185,10 @@ class LinearMethodBase(QuantizeMethodBase):
 class UnquantizedLinearMethod(LinearMethodBase):
     """Linear method without quantization."""
 
+    def __init__(self):
+        super().__init__()
+        self._gemm_func = dispatch_unquantized_gemm()
+
     def create_weights(self, layer: torch.nn.Module,
                        input_size_per_partition: int,
                        output_partition_sizes: list[int], input_size: int,
@@ -224,7 +228,7 @@ class UnquantizedLinearMethod(LinearMethodBase):
               x: torch.Tensor,
               bias: Optional[torch.Tensor] = None) -> torch.Tensor:
 
-        return dispatch_unquantized_gemm()(layer, x, layer.weight, bias)
+        return self._gemm_func(x, layer.weight, bias)
 
 
 class LinearBase(CustomOp):

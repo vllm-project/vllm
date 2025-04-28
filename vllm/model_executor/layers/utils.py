@@ -5,10 +5,10 @@ from typing import Callable, Optional
 
 import torch
 
+import vllm._aiter_ops as aiter_ops
+import vllm.envs as envs
 from vllm import _custom_ops as ops
-from vllm import envs
 from vllm.platforms import current_platform
-from vllm.utils import direct_register_custom_op
 
 
 def shuffle_weight(w: torch.Tensor) -> torch.Tensor:
@@ -92,56 +92,6 @@ def default_unquantized_gemm(layer: torch.nn.Module,
     return torch.nn.functional.linear(x, weight, bias)
 
 
-def rocm_unquantized_gemm_impl(
-        x: torch.Tensor,
-        weight: torch.Tensor,
-        bias: Optional[torch.Tensor] = None) -> torch.Tensor:
-    from vllm.platforms.rocm import on_gfx9
-    k = weight.shape[1]
-    use_skinny = (envs.VLLM_ROCM_USE_SKINNY_GEMM and on_gfx9() and \
-                    x.dtype in [torch.float16, torch.bfloat16] \
-                    and k % 8 == 0 and bias is None)
-
-    if use_skinny is not True:
-        return torch.nn.functional.linear(x, weight, bias)
-
-    x_view = x.view(-1, x.size(-1))
-    n = x_view.shape[0]
-    m = weight.shape[0]
-    cu_count = current_platform.get_cu_count()
-
-    if m > 8 and 0 < n <= 4:
-        out = ops.wvSplitK(weight, x_view, cu_count)
-        return out.view(*x.shape[:-1], weight.shape[0])
-    elif m % 4 == 0 and n == 1 and k <= 8192:
-        out = ops.LLMM1(weight, x_view, 4)
-        return out.view(*x.shape[:-1], weight.shape[0])
-    return torch.nn.functional.linear(x, weight, bias)
-
-
-def rocm_unquantized_gemm_impl_fake(
-        x: torch.Tensor,
-        weight: torch.Tensor,
-        bias: Optional[torch.Tensor] = None) -> torch.Tensor:
-    return x.new_empty((*x.shape[:-1], weight.shape[0]))
-
-
-def rocm_unquantized_gemm(layer: torch.nn.Module,
-                          x: torch.Tensor,
-                          weight: torch.Tensor,
-                          bias: Optional[torch.Tensor] = None) -> torch.Tensor:
-    return torch.ops.vllm.rocm_unquantized_gemm_impl(x, weight, bias)
-
-
-direct_register_custom_op(
-    op_name="rocm_unquantized_gemm_impl",
-    op_func=rocm_unquantized_gemm_impl,
-    mutates_args=[],
-    fake_impl=rocm_unquantized_gemm_impl_fake,
-    dispatch_key=current_platform.dispatch_key,
-)
-
-
 def check_cpu_sgl_kernel(n: int, k: int, dtype: torch.dtype):
     return (torch._C._cpu._is_amx_tile_supported()
             and (dtype in (torch.bfloat16, torch.int8)) and k % 32 == 0
@@ -158,10 +108,49 @@ def cpu_unquantized_gemm(layer: torch.nn.Module,
         return torch.nn.functional.linear(x, weight, bias)
 
 
-def dispatch_unquantized_gemm() -> Callable[..., torch.Tensor]:
+def rocm_unquantized_gemm(layer: torch.nn.Module,
+                          x: torch.Tensor,
+                          weight: torch.Tensor,
+                          bias: Optional[torch.Tensor] = None):
+    # Get configuration from environment variables
+    from vllm.platforms.rocm import on_gfx9
+    ON_MI300 = on_gfx9()
+    use_skinny = envs.VLLM_ROCM_USE_SKINNY_GEMM and ON_MI300
+    use_aiter = (envs.VLLM_ROCM_USE_AITER and envs.VLLM_ROCM_USE_AITER_LINEAR
+                 and ON_MI300)
+
+    k = weight.shape[1]
+    _use_skinny = (use_skinny and \
+                    x.dtype in [torch.float16, torch.bfloat16] \
+                    and k % 8 == 0 and bias is None)
+
+    if not _use_skinny:
+        if use_aiter:
+            return aiter_ops.rocm_aiter_tuned_gemm(x, weight, bias)
+        return default_unquantized_gemm(x, weight, bias)
+
+    x_view = x.view(-1, x.size(-1))
+    n = x_view.shape[0]
+    m = weight.shape[0]
+    cu_count = current_platform.get_cu_count()
+
+    if m > 8 and 0 < n <= 4:
+        out = ops.wvSplitK(weight, x_view, cu_count)
+        return out.view(*x.shape[:-1], weight.shape[0])
+    elif m % 4 == 0 and n == 1 and k <= 8192:
+        out = ops.LLMM1(weight, x_view, 4)
+        return out.view(*x.shape[:-1], weight.shape[0])
+
+    if use_aiter:
+        return aiter_ops.rocm_aiter_tuned_gemm(x, weight, bias)
+    return default_unquantized_gemm(x, weight, bias)
+
+
+def dispatch_unquantized_gemm() -> Callable[
+    [torch.nn.Module, torch.Tensor, torch.Tensor, Optional[torch.Tensor]],
+    torch.Tensor]:
     if current_platform.is_rocm():
         return rocm_unquantized_gemm
-    elif current_platform.is_cpu():
+    if current_platform.is_cpu():
         return cpu_unquantized_gemm
-    else:
-        return default_unquantized_gemm
+    return default_unquantized_gemm
