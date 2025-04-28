@@ -63,6 +63,8 @@ if not HAS_TRITON:
                     continue
 
     # initialize torch inductor without triton placeholder
+    # FIXME(Isotr0py): See if we can remove this after bumping torch version 
+    # to 2.7.0, because torch 2.7.0 has a better triton check.
     init_torch_inductor_runtime()
     # Replace the triton module in sys.modules with the placeholder
     sys.modules['triton'] = TritonPlaceholder()
