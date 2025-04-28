@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
-from typing import Callable, List, Optional, Set, Tuple
+from typing import Callable, List, Optional, Set
 
 import torch
 
