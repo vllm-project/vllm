@@ -241,7 +241,10 @@ class QuarkConfig(QuantizationConfig):
             rv = global_quant_config
 
         if "online_rotations" in self.quant_config:
-            rot_info = next((value for key, value in self.quant_config['online_rotations'].items() if layer_name.endswith(key)), None)
+            quant_config_online_rot=self.quant_config['online_rotations']
+            rot_info = next((value 
+                             for key, value in quant_config_online_rot.items()
+                             if layer_name.endswith(key)), None)
             rv['online_rotations']=rot_info
             
         return rv
@@ -255,14 +258,17 @@ class QuarkConfig(QuantizationConfig):
         input_config = cast(Dict[str, Any], config.get("input_tensors"))
         
         """for QuaRot and other techniques that involve online rotations"""
-        online_rotation_config = cast(Dict[str, Any], config.get("online_rotations"))
+        online_rotation_config = cast(Dict[str, Any], 
+                                      config.get("online_rotations"))
         if online_rotation_config:
-            func_name,func_args=online_rotation_config['func_name'],online_rotation_config['func_args']
+            func_name=online_rotation_config['func_name']
+            func_args=online_rotation_config['func_args']
             if func_name in hadamard_transform_registry:
                 func_name=hadamard_transform_registry[func_name]
                 online_rotation_method=func_name,func_args
             else:
-                raise ValueError("hadamard rotation func_name is not found in registry")
+                raise ValueError("hadamard rotation func_name"
+                                 " is not found in registry")
         else:
             online_rotation_method = None
 

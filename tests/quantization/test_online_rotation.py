@@ -12,12 +12,13 @@ import pytest
 import ray
 import torch
 
-from vllm.model_executor.layers.quantization\
-.quark.schemes.hadamard_transform import (
-    hadamard_sizes, hadamard_transform_registry)
+import vllm.model_executor.layers.quantization.quark.schemes as schemes
 
 from ..utils import init_test_distributed_environment, multi_process_parallel
 
+hadamard_transform = schemes.hadamard_transform
+hadamard_sizes = hadamard_transform.hadamard_sizes.hadamard_sizes
+hadamard_transform_registry = hadamard_transform.hadamard_transform_registry
 
 @ray.remote(num_gpus=1, max_calls=1)
 def test_quarot_r4(
