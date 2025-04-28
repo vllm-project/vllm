@@ -125,7 +125,7 @@ class MockSubscriber:
                     break
 
                 frames = self.replay.recv_multipart()
-                if not frames or (not frames[-1]):
+                if not frames or not frames[-1]:
                     # End of replay marker
                     break
 

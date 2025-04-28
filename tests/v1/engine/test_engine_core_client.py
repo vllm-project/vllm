@@ -290,46 +290,50 @@ def test_kv_cache_events(
                                     topic=publisher_config.topic,
                                     decode_type=KVEventBatch)
 
-        custom_tokens = list(range(num_blocks * block_size))
-        request = EngineCoreRequest(
-            request_id=str(uuid.uuid4()),
-            prompt_token_ids=custom_tokens,
-            mm_inputs=None,
-            mm_hashes=None,
-            mm_placeholders=None,
-            sampling_params=SamplingParams(
-                max_tokens=1),  # Short completion for speed
-            eos_token_id=None,
-            arrival_time=time.time(),
-            lora_request=None,
-        )
-        client.add_request(request)
+        try:
+            custom_tokens = list(range(num_blocks * block_size))
+            request = EngineCoreRequest(
+                request_id=str(uuid.uuid4()),
+                prompt_token_ids=custom_tokens,
+                mm_inputs=None,
+                mm_hashes=None,
+                mm_placeholders=None,
+                sampling_params=SamplingParams(
+                    max_tokens=1),  # Short completion for speed
+                eos_token_id=None,
+                arrival_time=time.time(),
+                lora_request=None,
+            )
+            client.add_request(request)
 
-        outputs: dict[str, list] = {request.request_id: []}
-        loop_until_done(client, outputs)
+            outputs: dict[str, list] = {request.request_id: []}
+            loop_until_done(client, outputs)
 
-        result = subscriber.receive_one(timeout=1000)
-        assert result is not None, "No message received"
+            result = subscriber.receive_one(timeout=1000)
+            assert result is not None, "No message received"
 
-        seq, received = result
+            seq, received = result
 
-        assert seq == 0, "Sequence number mismatch"
-        assert len(received.events) == 1, (
-            "We should have exactly one BlockStored event")
-        event = received.events[0]
-        assert isinstance(event,
-                          BlockStored), ("We should have a BlockStored event")
-        assert len(event.block_hashes) == num_blocks, (
-            "We should have a BlockStored event with 2 block_hashes")
-        assert event.block_size == block_size, (
-            "Block size should be the same as the block size")
-        assert event.parent_block_hash is None, (
-            "Parent block hash should be None")
-        assert event.lora_id is None, "Lora id should be None"
-        assert len(event.token_ids) == num_blocks * block_size, (
-            "Token ids should be the same as the custom tokens")
-        assert event.token_ids == custom_tokens, (
-            "Token ids should be the same as the custom tokens")
+            assert seq == 0, "Sequence number mismatch"
+            assert len(received.events) == 1, (
+                "We should have exactly one BlockStored event")
+            event = received.events[0]
+            assert isinstance(
+                event, BlockStored), ("We should have a BlockStored event")
+            assert len(event.block_hashes) == num_blocks, (
+                "We should have a BlockStored event with 2 block_hashes")
+            assert event.block_size == block_size, (
+                "Block size should be the same as the block size")
+            assert event.parent_block_hash is None, (
+                "Parent block hash should be None")
+            assert event.lora_id is None, "Lora id should be None"
+            assert len(event.token_ids) == num_blocks * block_size, (
+                "Token ids should be the same as the custom tokens")
+            assert event.token_ids == custom_tokens, (
+                "Token ids should be the same as the custom tokens")
+        finally:
+            subscriber.close()
+            client.shutdown()
         return
 
 

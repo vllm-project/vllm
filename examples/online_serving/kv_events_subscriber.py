@@ -83,7 +83,7 @@ def main():
                     replay.send((last_seq + 1).to_bytes(8, "big"))
 
                     while poller.poll(timeout=200):
-                        seq_bytes, replay_payload = (replay.recv_multipart())
+                        seq_bytes, replay_payload = replay.recv_multipart()
                         if not replay_payload:
                             # End of replay marker is sent as an empty frame
                             # for the payload
