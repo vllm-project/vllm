@@ -26,12 +26,6 @@ from vllm.model_executor.parameter import (BasevLLMParameter,
                                            RowvLLMParameter)
 # yapf: enable
 from vllm.model_executor.utils import set_weight_attrs
-from vllm.utils import aiter_linear_enabled
-
-if aiter_linear_enabled():
-    from aiter.tuned_gemm import tgemm
-else:
-    from vllm.model_executor.layers.tuned_gemm import tgemm
 
 logger = init_logger(__name__)
 
@@ -293,8 +287,8 @@ class ReplicatedLinear(LinearBase):
                          quant_config,
                          prefix=prefix,
                          return_bias=return_bias)
-
         self.out_dtype = out_dtype
+
         # All the linear layer supports quant method.
         assert self.quant_method is not None
         self.quant_method.create_weights(self,
@@ -341,11 +335,7 @@ class ReplicatedLinear(LinearBase):
     ) -> Union[torch.Tensor, tuple[torch.Tensor, Optional[Parameter]]]:
         bias = self.bias if not self.skip_bias_add else None
         assert self.quant_method is not None
-        if type(self.quant_method
-                ) is UnquantizedLinearMethod and aiter_linear_enabled():
-            output = tgemm.mm(x, self.weight, bias, self.out_dtype)
-        else:
-            output = self.quant_method.apply(self, x, bias)
+        output = self.quant_method.apply(self, x, bias)
         output_bias = self.bias if self.skip_bias_add else None
         if not self.return_bias:
             return output
