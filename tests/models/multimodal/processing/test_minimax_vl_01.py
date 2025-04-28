@@ -1,10 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
-from functools import partial
-
 import pytest
 from PIL import Image
-from pqdm.threads import pqdm
 
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.parse import ImageSize
@@ -73,19 +70,12 @@ def _test_image_prompt_replacements(
     num_imgs: int,
     image_sizes: list[ImageSize],
 ) -> None:
-    """
-    Ensure LlavaNextMultiModalProcessor
-    handles prompt replacement properly for input images.
-    """
+
     failed_size_excs = list[tuple[ImageSize, Exception]]()
 
-    validate_one = partial(
-        _validate_image_prompt_replacements_one,
-        processor,
-        num_imgs,
-        failed_size_excs,
-    )
-    pqdm(image_sizes, validate_one, n_jobs=8, desc="Validating image sizes")
+    for size in image_sizes:
+        _validate_image_prompt_replacements_one(processor, num_imgs,
+                                                failed_size_excs, size)
 
     if failed_size_excs:
         msg = "Found failing image sizes:" \
