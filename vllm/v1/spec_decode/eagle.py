@@ -235,7 +235,7 @@ class EagleProposer:
                     model_config=draft_model_config,
                     start_layer_id=target_layer_num).to(target_device)
 
-        loaded_weights = self.model.load_weights(
+        _ = self.model.load_weights(
             loader.get_all_weights(
                 self.vllm_config.speculative_config.draft_model_config,
                 self.model))
@@ -243,11 +243,11 @@ class EagleProposer:
         # EAGLE-1/3 reuses the same embedding layer for draft and target models
         self.model.model.embed_tokens = target_model.model.embed_tokens
 
-        if self.vllm_config.speculative_config.method != "eagle3":
-            # some model definition do not define lm_head explicitly
-            # and reuse embed_tokens for lm_head, e.g., CohereForCausalLM
-            if hasattr(target_model, "lm_head"):
-                self.model.lm_head = target_model.lm_head
+        # some model definition do not define lm_head explicitly
+        # and reuse embed_tokens for lm_head, e.g., CohereForCausalLM
+        if self.vllm_config.speculative_config.method != "eagle3" and \
+                hasattr(self.model, "lm_head"):
+            self.model.lm_head = target_model.lm_head
 
 
 # NOTE(woosuk): Currently, the below code is not used and we always use argmax
