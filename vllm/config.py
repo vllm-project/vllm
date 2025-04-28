@@ -752,9 +752,8 @@ class ModelConfig:
         supported_quantization = QUANTIZATION_METHODS
         optimized_quantization_methods = [
             "fp8", "marlin", "modelopt", "gptq_marlin_24", "gptq_marlin",
-            "awq_marlin", "fbgemm_fp8", "compressed_tensors",
-            "compressed-tensors", "experts_int8", "quark", "nvfp4", "bitblas",
-            "gptq_bitblas"
+            "awq_marlin", "fbgemm_fp8", "compressed-tensors", "experts_int8",
+            "quark", "nvfp4", "bitblas", "gptq_bitblas"
         ]
         if self.quantization is not None:
             self.quantization = self.quantization.lower()
@@ -764,6 +763,9 @@ class ModelConfig:
 
         if quant_cfg is not None:
             quant_method = quant_cfg.get("quant_method", "").lower()
+            quant_method = quant_method.replace("compressed_tensors",
+                                                "compressed-tensors")
+            quant_cfg["quant_method"] = quant_method
 
             # Detect which checkpoint is it
             for name in QUANTIZATION_METHODS:
