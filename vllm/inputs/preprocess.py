@@ -6,6 +6,7 @@ from typing import Optional, Union, cast
 
 from typing_extensions import assert_never
 
+from vllm import envs
 from vllm.config import ModelConfig
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
@@ -15,10 +16,11 @@ from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalEncDecInputs,
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.transformers_utils.tokenizer_group import TokenizerGroup
 
-from .data import (DecoderOnlyInputs, EncoderDecoderInputs, ProcessorInputs,
-                   PromptType, SingletonInputs, SingletonPrompt, embeds_inputs,
-                   token_inputs)
-from .parse import is_explicit_encoder_decoder_prompt, parse_singleton_prompt
+from .data import (DecoderOnlyInputs, EmbedsInputs, EncoderDecoderInputs,
+                   ProcessorInputs, PromptType, SingletonInputs,
+                   SingletonPrompt, TokenInputs, embeds_inputs, token_inputs)
+from .parse import (ParsedEmbedsPrompt, is_explicit_encoder_decoder_prompt,
+                    parse_singleton_prompt)
 
 logger = init_logger(__name__)
 
@@ -361,22 +363,7 @@ class InputPreprocessor:
             )
 
         if parsed["type"] == "embeds":
-            prompt_embeds_content = parsed["content"]
-
-            prompt_embeds = prompt_embeds_content["prompt_embeds"]
-
-            # prompt_embeds must be (seq_len, hidden_size), but if the user
-            # passes in a batch of size 1, i.e. (1, seq_len, hidden_size),
-            # we can unambiguously process the intent by squeezing the batch
-            # dimension.
-            if prompt_embeds.ndim == 3 and prompt_embeds.shape[0] == 1:
-                prompt_embeds = prompt_embeds.squeeze(dim=0)
-
-            if prompt_embeds.ndim != 2:
-                raise ValueError(
-                    "prompt_embeds must be of shape (seq_len, hidden_size).")
-
-            return embeds_inputs(prompt_embeds=prompt_embeds, )
+            return self._process_prompt_embeds(parsed)
 
         assert_never(parsed)
 
@@ -446,38 +433,45 @@ class InputPreprocessor:
             )
 
         if parsed["type"] == "embeds":
-            prompt_embeds_content = parsed["content"]
-
-            prompt_embeds = prompt_embeds_content["prompt_embeds"]
-
-            # prompt_embeds must be (seq_len, hidden_size), but if the user
-            # passes in a batch of size 1, i.e. (1, seq_len, hidden_size),
-            # we can unambiguously process the intent by squeezing the batch
-            # dimension.
-            if prompt_embeds.ndim == 3 and prompt_embeds.shape[0] == 1:
-                prompt_embeds = prompt_embeds.squeeze(dim=0)
-
-            if prompt_embeds.ndim != 2:
-                raise ValueError(
-                    "prompt_embeds must be of shape (seq_len, hidden_size).")
-
-            return embeds_inputs(
-                prompt_embeds=prompt_embeds,
-                prompt=prompt_embeds_content.get("prompt"),
-            )
+            return self._process_prompt_embeds(parsed)
 
         assert_never(parsed)
 
+    def _process_prompt_embeds(self,
+                               parsed: ParsedEmbedsPrompt) -> EmbedsInputs:
+        if envs.VLLM_USE_V1:
+            raise ValueError("prompt_embeds is only available in V0.")
+
+        prompt_embeds_content = parsed["content"]
+
+        prompt_embeds = prompt_embeds_content["prompt_embeds"]
+
+        # prompt_embeds must be (seq_len, hidden_size), but if the user
+        # passes in a batch of size 1, i.e. (1, seq_len, hidden_size),
+        # we can unambiguously process the intent by squeezing the batch
+        # dimension.
+        if prompt_embeds.ndim == 3 and prompt_embeds.shape[0] == 1:
+            prompt_embeds = prompt_embeds.squeeze(dim=0)
+
+        if prompt_embeds.ndim != 2:
+            raise ValueError(
+                "prompt_embeds must be of shape (seq_len, hidden_size).")
+
+        return embeds_inputs(prompt_embeds=prompt_embeds)
+
     def _build_enc_dec_llm_inputs(
         self,
-        encoder_inputs: SingletonInputs,
-        decoder_inputs: Optional[SingletonInputs],
+        encoder_inputs: Union[TokenInputs, MultiModalInputs],
+        decoder_inputs: Optional[Union[TokenInputs, MultiModalInputs]],
     ) -> EncoderDecoderInputs:
         if (encoder_inputs["type"] == "token"
                 or encoder_inputs["type"] == "multimodal"):
             pass
         else:
             assert_never(encoder_inputs)  # type: ignore[arg-type]
+
+        # Mypy does not correctly infer that EmbedsInputs is impossible
+        assert "prompt_token_ids" in encoder_inputs
 
         if decoder_inputs is None:
             if self.model_config.hf_config.model_type == "whisper":
@@ -510,7 +504,8 @@ class InputPreprocessor:
     def _separate_enc_dec_inputs_from_mm_processor_outputs(
         self,
         inputs: SingletonInputs,
-        decoder_inputs_to_override: Optional[SingletonInputs] = None,
+        decoder_inputs_to_override: Optional[Union[TokenInputs,
+                                                   MultiModalInputs]] = None,
     ) -> tuple[SingletonInputs, SingletonInputs]:
         """
         For encoder/decoder models only:

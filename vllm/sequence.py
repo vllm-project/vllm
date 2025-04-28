@@ -288,13 +288,12 @@ class SequenceData(msgspec.Struct,
         self._update_cached_all_tokens()
 
     @property
-    def output_token_embeds(self) -> tuple[int, ...]:
-        return tuple(self._output_token_ids)
+    def output_embeds(self) -> Optional[torch.Tensor]:
+        return self._output_embeds
 
-    @output_token_embeds.setter
-    def output_token_embeds(self,
-                            new_output_token_embeds: torch.Tensor) -> None:
-        self._output_token_ids = new_output_token_embeds
+    @output_embeds.setter
+    def output_embeds(self, new_output_token_embeds: torch.Tensor) -> None:
+        self._output_token_embeds = new_output_token_embeds
         self._update_cached_all_token_embeds()
 
     @property
@@ -483,7 +482,8 @@ class Sequence:
 
         self.data = SequenceData.from_seqs(
             self.prompt_token_ids,
-            prompt_embeds=self.inputs.get("prompt_embeds"))
+            prompt_embeds=self.inputs["prompt_embeds"]
+            if self.inputs["type"] == "embeds" else None)
         self.output_logprobs: SampleLogprobs = []
         self.output_text = ""
 
@@ -506,6 +506,8 @@ class Sequence:
 
     @property
     def prompt(self) -> Optional[str]:
+        if self.inputs["type"] == "embeds":
+            return None
         return self.inputs.get("prompt")
 
     @property
@@ -516,6 +518,8 @@ class Sequence:
 
     @property
     def token_type_ids(self) -> list[int]:
+        if self.inputs["type"] == "embeds":
+            return []
         return self.inputs.get("token_type_ids", [])
 
     @property
