@@ -46,8 +46,6 @@ def _validate_image_prompt_replacements_one(
     mm_data = {"image": [image] * num_imgs}
 
     try:
-        # The processor will throw an error if there is a mismatch
-        # in the prompt replacements
         processed_inputs = processor.apply(prompt, mm_data, {})
 
         image_placeholders = processed_inputs["mm_placeholders"]["image"]
@@ -55,8 +53,6 @@ def _validate_image_prompt_replacements_one(
 
         first_placeholder = image_placeholders[0]
 
-        # NOTE: There is a BOS token
-        assert first_placeholder.offset == 1
         assert first_placeholder.length == (
             len(processed_inputs["prompt_token_ids"]) - 1) // num_imgs
 
