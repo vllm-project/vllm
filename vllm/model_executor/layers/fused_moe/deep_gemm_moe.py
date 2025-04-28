@@ -73,15 +73,21 @@ class DeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         super().__init__()
         self.block_shape = deep_gemm_block_shape()
 
-    def workspace_shapes(self, a_dtype: torch.dtype, M: int, N: int, K: int,
-                         topk: int,
-                         num_experts: int) -> Tuple[int, int, torch.dtype]:
+    def workspace_shapes(
+        self,
+        a: torch.Tensor,
+        M: int,
+        N: int,
+        K: int,
+        topk: int,
+        num_experts: int,
+    ) -> Tuple[int, int, torch.dtype]:
         block_m = self.block_shape[0]
         M_sum = (M * topk) + num_experts * (block_m - 1)
         M_sum = round_up(M_sum, block_m)
         workspace1 = M_sum * max(N * 2, K)
         workspace2 = M_sum * N
-        return (workspace1, workspace2, a_dtype)
+        return (workspace1, workspace2, a.dtype)
 
     def apply(
         self,
@@ -100,6 +106,7 @@ class DeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         a2_scale: Optional[torch.Tensor],
         workspace13: torch.Tensor,
         workspace2: torch.Tensor,
+        expert_num_tokens: Optional[torch.Tensor],
     ) -> torch.Tensor:
         import deep_gemm as dg
 
@@ -126,12 +133,7 @@ class DeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         dg.m_grouped_gemm_fp8_fp8_bf16_nt_contiguous(
             (a1q, a1q_scale), (w1, w1_scale), workspace1, expert_ids)
 
-        if activation == "silu":
-            torch.ops._C.silu_and_mul(workspace2, workspace1.view(-1, N))
-        elif activation == "gelu":
-            torch.ops._C.gelu_and_mul(workspace2, workspace1.view(-1, N))
-        else:
-            raise ValueError(f"Unsupported FusedMoe activation: {activation}")
+        self.activation(activation, workspace2, workspace1.view(-1, N))
 
         a2q_scale: Optional[torch.Tensor] = None
 

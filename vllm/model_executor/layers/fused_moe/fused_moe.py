@@ -1259,7 +1259,8 @@ def fused_experts_impl(hidden_states: torch.Tensor,
         assert hidden_states.shape[1] // 2 == w1.shape[
             2], "Hidden size mismatch"
     else:
-        assert hidden_states.shape[1] == w1.shape[2], "Hidden size mismatch"
+        assert hidden_states.shape[1] == w1.shape[2], \
+            f"Hidden size mismatch {hidden_states.shape[1]} != {w1.shape[2]}"
 
     assert topk_weights.shape == topk_ids.shape, "topk shape mismatch"
     assert hidden_states.is_contiguous(), "Hidden_states must be contiguous"
@@ -1269,7 +1270,7 @@ def fused_experts_impl(hidden_states: torch.Tensor,
         torch.float32, torch.float16, torch.bfloat16
     ]
 
-    num_tokens, _ = hidden_states.shape
+    num_tokens = hidden_states.shape[0]
     E, N, _ = w1.shape
     K = w2.shape[1]
     if global_num_experts == -1:
@@ -1551,20 +1552,28 @@ class TritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
         use_fp8_w8a8: bool,
         use_int8_w8a16: bool,
         use_int4_w4a16: bool,
-        block_shape: Optional[List[int]],
+        block_shape: Optional[List[int]] = None,
+        block_m: Optional[int] = None,
     ):
         super().__init__()
         self.use_fp8_w8a8 = use_fp8_w8a8
         self.use_int4_w4a16 = use_int4_w4a16
         self.use_int8_w8a16 = use_int8_w8a16
         self.block_shape = block_shape
+        self.block_m = block_m
 
-    def workspace_shapes(self, a_dtype: torch.dtype, M: int, N: int, K: int,
-                         topk: int,
-                         num_experts: int) -> Tuple[int, int, torch.dtype]:
+    def workspace_shapes(
+        self,
+        a: torch.Tensor,
+        M: int,
+        N: int,
+        K: int,
+        topk: int,
+        num_experts: int,
+    ) -> Tuple[int, int, torch.dtype]:
         workspace1 = M * topk * max(N * 2, K)
         workspace2 = M * topk * N
-        return (workspace1, workspace2, a_dtype)
+        return (workspace1, workspace2, a.dtype)
 
     def apply(
         self,
@@ -1583,14 +1592,16 @@ class TritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
         a2_scale: Optional[torch.Tensor],
         workspace13: torch.Tensor,
         workspace2: torch.Tensor,
+        expert_num_tokens: Optional[torch.Tensor],
     ) -> torch.Tensor:
         # Check constraints.
         if self.use_int4_w4a16:
-            assert hidden_states.shape[1] // 2 == w1.shape[
+            assert hidden_states.shape[-1] // 2 == w1.shape[
                 2], "Hidden size mismatch"
         else:
-            assert hidden_states.shape[1] == w1.shape[
-                2], "Hidden size mismatch"
+            assert hidden_states.shape[-1] == w1.shape[2], \
+                (f"Hidden size mismatch {hidden_states.shape[-1]} "
+                 f"!= {w1.shape[2]}")
 
         assert hidden_states.is_contiguous(
         ), "Hidden_states must be contiguous"
@@ -1600,12 +1611,11 @@ class TritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
             torch.float32, torch.float16, torch.bfloat16, torch.float8_e4m3fn
         ]
 
-        num_tokens, _ = hidden_states.shape
-        E, N, _ = w1.shape
-        K = w2.shape[1]
+        E, num_tokens, N, K, top_k_num = mk._moe_problem_size(
+            hidden_states, w1, w2, topk_ids)
+
         if global_num_experts == -1:
             global_num_experts = E
-        top_k_num = topk_ids.shape[1]
 
         config_dtype = get_config_dtype_str(use_fp8_w8a8=self.use_fp8_w8a8,
                                             use_int8_w8a16=self.use_int8_w8a16,
@@ -1665,14 +1675,8 @@ class TritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
                                 use_int4_w4a16=self.use_int4_w4a16,
                                 block_shape=self.block_shape)
 
-        if activation == "silu":
-            torch.ops._C.silu_and_mul(intermediate_cache2,
-                                      intermediate_cache1.view(-1, N))
-        elif activation == "gelu":
-            torch.ops._C.gelu_and_mul(intermediate_cache2,
-                                      intermediate_cache1.view(-1, N))
-        else:
-            raise ValueError(f"Unsupported FusedMoe activation: {activation}")
+        self.activation(activation, intermediate_cache2,
+                        intermediate_cache1.view(-1, N))
 
         a2q_scale: Optional[torch.Tensor] = None
 
