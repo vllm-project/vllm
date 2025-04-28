@@ -517,7 +517,7 @@ class BaseMultiModalItemTracker(ABC, Generic[_T]):
 
             raise TypeError(f"Unknown {modality} model type: {model_type}")
         elif modality == "audio":
-            if model_type == "ultravox":
+            if model_type in ("ultravox", "granite_speech"):
                 return "<|audio|>"
             if model_type == "phi4mm":
                 return f"<|audio_{current_count}|>"
