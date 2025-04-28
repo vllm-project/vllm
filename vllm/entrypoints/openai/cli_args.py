@@ -11,7 +11,7 @@ import ssl
 from collections.abc import Sequence
 from typing import Optional, Union, get_args
 
-from vllm.engine.arg_utils import AsyncEngineArgs, optional_str
+from vllm.engine.arg_utils import AsyncEngineArgs, optional_type
 from vllm.entrypoints.chat_utils import (ChatTemplateContentFormatOption,
                                          validate_chat_template)
 from vllm.entrypoints.openai.serving_models import (LoRAModulePath,
@@ -79,7 +79,7 @@ class PromptAdapterParserAction(argparse.Action):
 
 def make_arg_parser(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
     parser.add_argument("--host",
-                        type=optional_str,
+                        type=optional_type(str),
                         default=None,
                         help="Host name.")
     parser.add_argument("--port", type=int, default=8000, help="Port number.")
@@ -108,13 +108,13 @@ def make_arg_parser(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
                         default=["*"],
                         help="Allowed headers.")
     parser.add_argument("--api-key",
-                        type=optional_str,
+                        type=optional_type(str),
                         default=None,
                         help="If provided, the server will require this key "
                         "to be presented in the header.")
     parser.add_argument(
         "--lora-modules",
-        type=optional_str,
+        type=optional_type(str),
         default=None,
         nargs='+',
         action=LoRAParserAction,
@@ -126,14 +126,14 @@ def make_arg_parser(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
         "\"base_model_name\": \"id\"}``")
     parser.add_argument(
         "--prompt-adapters",
-        type=optional_str,
+        type=optional_type(str),
         default=None,
         nargs='+',
         action=PromptAdapterParserAction,
         help="Prompt adapter configurations in the format name=path. "
         "Multiple adapters can be specified.")
     parser.add_argument("--chat-template",
-                        type=optional_str,
+                        type=optional_type(str),
                         default=None,
                         help="The file path to the chat template, "
                         "or the template in single-line form "
@@ -151,20 +151,20 @@ def make_arg_parser(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
         'similar to OpenAI schema. '
         'Example: ``[{"type": "text", "text": "Hello world!"}]``')
     parser.add_argument("--response-role",
-                        type=optional_str,
+                        type=optional_type(str),
                         default="assistant",
                         help="The role name to return if "
                         "``request.add_generation_prompt=true``.")
     parser.add_argument("--ssl-keyfile",
-                        type=optional_str,
+                        type=optional_type(str),
                         default=None,
                         help="The file path to the SSL key file.")
     parser.add_argument("--ssl-certfile",
-                        type=optional_str,
+                        type=optional_type(str),
                         default=None,
                         help="The file path to the SSL cert file.")
     parser.add_argument("--ssl-ca-certs",
-                        type=optional_str,
+                        type=optional_type(str),
                         default=None,
                         help="The CA certificates file.")
     parser.add_argument(
@@ -180,13 +180,13 @@ def make_arg_parser(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
     )
     parser.add_argument(
         "--root-path",
-        type=optional_str,
+        type=optional_type(str),
         default=None,
         help="FastAPI root_path when app is behind a path based routing proxy."
     )
     parser.add_argument(
         "--middleware",
-        type=optional_str,
+        type=optional_type(str),
         action="append",
         default=[],
         help="Additional ASGI middleware to apply to the app. "
