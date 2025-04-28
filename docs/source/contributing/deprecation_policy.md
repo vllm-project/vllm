@@ -15,7 +15,8 @@ We aim to strike a balance between continued innovation and respecting users’ 
 
 The deprecation process consists of several clearly defined stages that span multiple Y releases:
 
-### 1. **Deprecated (Still On By Default)**
+**1. Deprecated (Still On By Default)**
+
 - **Action**: Feature is marked as deprecated.
 - **Timeline**: A removal version is explicitly stated in the deprecation warning (e.g., "This will be removed in v0.10.0").
 - **Communication**: Deprecation is noted in the following, as applicable:
@@ -27,11 +28,13 @@ The deprecation process consists of several clearly defined stages that span mul
   - Release notes
   - GitHub Issue (RFC) for feedback
 
-### 2. **Deprecated (Off By Default)**
+**2.Deprecated (Off By Default)**
+
 - **Action**: Feature is disabled by default, but can still be re-enabled via a CLI flag or environment variable. Feature throws an error when used without re-enabling.
 - **Purpose**: Allows users who missed earlier warnings a temporary escape hatch while signaling imminent removal. Ensures any remaining usage is clearly surfaced and blocks silent breakage before full removal.
 
-### 3. **Removed**
+**3. Removed**
+
 - **Action**: Feature is completely removed from the codebase.
 - **Note**: Only features that have passed through the previous deprecation stages will be removed.
 
