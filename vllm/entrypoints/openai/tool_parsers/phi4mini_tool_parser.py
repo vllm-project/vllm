@@ -45,6 +45,7 @@ class Phi4MiniJsonToolParser(ToolParser):
         self.streamed_args_for_tool: list[str] = [
         ]  # map what has been streamed for each tool so far to a list
         self.bot_token: str = "<|tool_call|>"
+        self.bot_end_token: str = "<|/tool_call|>"
 
     def extract_tool_calls(
             self, model_output: str,
@@ -126,10 +127,10 @@ class Phi4MiniJsonToolParser(ToolParser):
         flags = Allow.ALL if self.current_tool_name_sent \
             else Allow.ALL & ~Allow.STR
         try:
-            # replace BOT token with empty string, and convert single quotes
-            # to double to allow parsing as JSON since mistral uses single
-            # quotes instead of double for tool calls
-            parsable_arr = current_text.split(self.bot_token)[-1]
+            parsable_arr = current_text[len(self.bot_token):]
+            if parsable_arr.endswith(self.bot_end_token):
+                # if the end token is present, remove it
+                parsable_arr = parsable_arr[:-len(self.bot_end_token)]
 
             # tool calls are generated in an array, so do partial JSON
             # parsing on the entire array
@@ -283,4 +284,5 @@ class Phi4MiniJsonToolParser(ToolParser):
             logger.debug(
                 "Skipping chunk as a result of tool streaming extraction "
                 "error")
+            logger.debug("Current raw response: %s", current_text)
             return None
