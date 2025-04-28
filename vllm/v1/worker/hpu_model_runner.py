@@ -488,7 +488,7 @@ class HpuModelAdapter:
         return self.model.compute_logits(*args, **kwargs)
 
     def sample(self, *args, **kwargs):
-        return self.model.sample(*args, **kwargs)
+        return self.sampler(*args, **kwargs)
 
     def generate_proposals(self, *args, **kwargs):
         return self.model.generate_proposals(*args, **kwargs)
