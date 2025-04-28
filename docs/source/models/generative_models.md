@@ -59,7 +59,7 @@ A code example can be found here: <gh-file:examples/offline_inference/basic/basi
 
 ### `LLM.beam_search`
 
-The {class}`~vllm.LLM.beam_search` method implements [beam search](https://huggingface.co/docs/transformers/en/generation_strategies#beam-search-decoding) on top of {class}`~vllm.LLM.generate`.
+The {class}`~vllm.LLM.beam_search` method implements [beam search](https://huggingface.co/docs/transformers/en/generation_strategies#beam-search) on top of {class}`~vllm.LLM.generate`.
 For example, to search using 5 beams and output at most 50 tokens:
 
 ```python
