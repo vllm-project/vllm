@@ -652,9 +652,9 @@ __global__ void Marlin(
   static_assert(thread_m_blocks * 16 * thread_n_blocks * 16 / 8 <=
                 stages * b_sh_stage);
   int4* sh_a = sh_s + sh_s_size;
-  constexpr int shm_size_used =
-      stages * (g_idx_stage + zp_sh_stage) + sh_s_size +
-      (sh_red_size > sh_b_size ? sh_red_size : sh_b_size);
+  // constexpr int shm_size_used =
+  //     stages * (g_idx_stage + zp_sh_stage) + sh_s_size +
+  //     (sh_red_size > sh_b_size ? sh_red_size : sh_b_size);
 
   // Register storage for double buffer of shared memory reads.
   FragA frag_a[2][thread_m_blocks];
