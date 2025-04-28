@@ -119,7 +119,8 @@ ENV SAFETENSORS_FAST_GPU=1
 
 # User-friendly environment setting for multi-processing to avoid below RuntimeError.
 # RuntimeError: Cannot re-initialize CUDA in forked subprocess. To use CUDA with multiprocessing,
-# you must use the 'spawn' start method
+# you must use the 'spawn' start method 
+# See https://pytorch.org/docs/stable/notes/multiprocessing.html#cuda-in-multiprocessing
 ENV VLLM_WORKER_MULTIPROC_METHOD=spawn
 
 # Performance environment variable.
