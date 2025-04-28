@@ -12,6 +12,7 @@ class StructuredOutputOptions(enum.Enum):
     REGEX = enum.auto()
     GRAMMAR = enum.auto()
     CHOICE = enum.auto()
+    STRUCTURAL_TAG = enum.auto()
 
 
 StructuredOutputKey = tuple[StructuredOutputOptions, str]
@@ -86,4 +87,10 @@ class StructuredOutputBackend(ABC):
         Args:
             max_num_seqs (int): The maximum number of sequences for which
               to allocate the bitmask.
+        """
+
+    @abstractmethod
+    def destroy(self):
+        """
+        Backend-specific cleanup.
         """

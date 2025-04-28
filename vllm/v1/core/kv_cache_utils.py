@@ -43,19 +43,19 @@ class BlockHashType(NamedTuple):
 # This aligns with the behavior of Python's hash() function, which also uses
 # a random seed if PYTHONHASHSEED is not set.
 NONE_HASH = int.from_bytes(os.urandom(32), byteorder="big") if os.getenv(
-    'PYTHONHASHSEED') is not None else sha256(os.getenv('PYTHONHASHSEED'))
+    'PYTHONHASHSEED') is None else sha256(os.getenv('PYTHONHASHSEED'))
 
 
 class PrefixCachingMetrics:
-    """Metrics for prefix caching with a hit rate of the most recent N requests.
+    """Metrics for prefix caching with a hit rate of the max recent N requests.
 
     Args:
-        interval: The number of the most recent requests to aggregate.
+        max_recent_requests: The number of the max recent requests to aggregate.
             Defaults to 1000.
     """
 
-    def __init__(self, interval: int = 1000):
-        self.interval = interval
+    def __init__(self, max_recent_requests: int = 1000):
+        self.max_recent_requests = max_recent_requests
         # The current aggregated values.
         self.aggregated_requests = 0
         self.aggregated_query_total = 0
@@ -70,7 +70,7 @@ class PrefixCachingMetrics:
         are being scheduled and are looking for computed blocks.
 
         When there are more than `interval` requests, the oldest set of
-        requestsare removed from the metrics.
+        requests are removed from the metrics.
 
         Args:
             stats: The prefix cache stats.
@@ -87,7 +87,7 @@ class PrefixCachingMetrics:
         self.aggregated_query_hit += stats.hits
 
         # Remove the oldest stats if the number of requests exceeds.
-        if self.aggregated_requests > self.interval:
+        if self.aggregated_requests > self.max_recent_requests:
             old_requests, old_queries, old_hits = self.query_queue.popleft()
             self.aggregated_requests -= old_requests
             self.aggregated_query_total -= old_queries

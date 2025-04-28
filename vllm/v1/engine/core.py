@@ -5,6 +5,7 @@ import signal
 import sys
 import threading
 import time
+from collections import deque
 from concurrent.futures import Future
 from inspect import isclass, signature
 from logging import DEBUG
@@ -210,10 +211,10 @@ class EngineCore:
         Note that if nothing to output in this step, None is returned.
 
         The execution flow is as follows:
-        1. Try to schedule a new batch if there are unscheduled requests
-        and the job queue is not full. If a new batch is scheduled, directly
-        return an empty engine core output. In other words, we won't check
-        and return model outputs before the batch queue is full.
+        1. Try to schedule a new batch if the batch queue is not full.
+        If a new batch is scheduled, directly return an empty engine core
+        output. In other words, fulfilling the batch queue has a higher priority
+        than getting model outputs.
         2. If there is no new scheduled batch, meaning that the batch queue
         is full or no other requests can be scheduled, we block until the first
         batch in the job queue is finished.
@@ -223,10 +224,10 @@ class EngineCore:
 
         engine_core_outputs = None
         scheduler_output = None
-        # If there are unscheduled requests and the job queue
-        # is not full, schedule a new batch. Note that this is not blocking.
-        if (self.scheduler.get_num_unscheduled_requests() > 0
-                and not self.batch_queue.full()):
+        # Try to schedule a new batch if the batch queue is not full, but
+        # the scheduler may return an empty batch if all requests are scheduled.
+        # Note that this is not blocking.
+        if not self.batch_queue.full():
             scheduler_output = self.scheduler.schedule()
             if scheduler_output.total_num_scheduled_tokens > 0:
                 future = self.model_executor.execute_model(scheduler_output)
@@ -238,6 +239,10 @@ class EngineCore:
 
         # If no more requests can be scheduled and the job queue is not empty,
         # block until the first batch in the job queue is finished.
+        # TODO(comaniac): Ideally we should peek the first batch in the
+        # job queue to check if it's finished before scheduling a new batch,
+        # but peeking the first element in a queue is not thread-safe,
+        # so we need more work.
         if not scheduled_batch and not self.batch_queue.empty():
             future, scheduler_output = self.batch_queue.get_nowait()
             # Blocking until the first result is available.
@@ -249,6 +254,7 @@ class EngineCore:
         return engine_core_outputs
 
     def shutdown(self):
+        self.structured_output_manager.clear_backend()
         if self.model_executor:
             self.model_executor.shutdown()
 
@@ -325,7 +331,7 @@ class EngineCoreProc(EngineCore):
 
         self.step_fn = (self.step if self.batch_queue is None else
                         self.step_with_batch_queue)
-        self.global_unfinished_reqs = False
+        self.engines_running = False
 
         # Background Threads and Queues for IO. These enable us to
         # overlap ZMQ socket IO with GPU since they release the GIL,
@@ -384,7 +390,7 @@ class EngineCoreProc(EngineCore):
 
         except SystemExit:
             logger.debug("EngineCore exiting.")
-
+            raise
         except Exception as e:
             if engine_core is None:
                 logger.exception("EngineCore failed to start.")
@@ -410,8 +416,7 @@ class EngineCoreProc(EngineCore):
         """Exits when an engine step needs to be performed."""
 
         waited = False
-        while not self.global_unfinished_reqs and not (
-                self.scheduler.has_requests()):
+        while not self.engines_running and not (self.scheduler.has_requests()):
             if logger.isEnabledFor(DEBUG) and self.input_queue.empty():
                 logger.debug("EngineCore waiting for work.")
                 waited = True
@@ -419,10 +424,7 @@ class EngineCoreProc(EngineCore):
             self._handle_client_request(*req)
 
         if waited:
-            logger.debug(
-                "EngineCore loop active - local unfinished: %s, finished: %s.",
-                self.scheduler.has_unfinished_requests(),
-                self.scheduler.has_finished_requests())
+            logger.debug("EngineCore loop active.")
 
         # Handle any more client requests.
         while not self.input_queue.empty():
@@ -446,10 +448,6 @@ class EngineCoreProc(EngineCore):
             self.add_request(request)
         elif request_type == EngineCoreRequestType.ABORT:
             self.abort_requests(request)
-        elif request_type == EngineCoreRequestType.START_DP:
-            if not self.global_unfinished_reqs:
-                logger.debug("EngineCore starting idle loop.")
-                self.global_unfinished_reqs = True
         elif request_type == EngineCoreRequestType.UTILITY:
             call_id, method_name, args = request
             output = UtilityOutput(call_id)
@@ -530,8 +528,12 @@ class EngineCoreProc(EngineCore):
 
         # Msgpack serialization encoding.
         encoder = MsgpackEncoder()
-        # Reuse send buffer.
-        buffer = bytearray()
+        # Send buffers to reuse.
+        reuse_buffers: list[bytearray] = []
+        # Keep references to outputs and buffers until zmq is finished
+        # with them (outputs may contain tensors/np arrays whose
+        # backing buffers were extracted for zero-copy send).
+        pending = deque[tuple[zmq.MessageTracker, Any, bytearray]]()
 
         # We must set linger to ensure the ENGINE_CORE_DEAD
         # message is sent prior to closing the socket.
@@ -544,11 +546,22 @@ class EngineCoreProc(EngineCore):
                     break
                 assert not isinstance(outputs, bytes)
                 outputs.engine_index = engine_index
+
+                # Reclaim buffers that zmq is finished with.
+                while pending and pending[-1][0].done:
+                    reuse_buffers.append(pending.pop()[2])
+
+                buffer = reuse_buffers.pop() if reuse_buffers else bytearray()
                 buffers = encoder.encode_into(outputs, buffer)
-                socket.send_multipart(buffers, copy=False)
-
-
-ENGINE_PAUSED_OUTPUTS = EngineCoreOutputs(engine_paused=True)
+                tracker = socket.send_multipart(buffers,
+                                                copy=False,
+                                                track=True)
+                if not tracker.done:
+                    ref = outputs if len(buffers) > 1 else None
+                    pending.appendleft((tracker, ref, buffer))
+                elif len(reuse_buffers) < 2:
+                    # Keep at most 2 buffers to reuse.
+                    reuse_buffers.append(buffer)
 
 
 class DPEngineCoreProc(EngineCoreProc):
@@ -587,7 +600,9 @@ class DPEngineCoreProc(EngineCoreProc):
                 for i in range(local_dp_rank * tp_size, (local_dp_rank + 1) *
                                tp_size))
 
+        self.local_dp_rank = local_dp_rank
         self.dp_group = vllm_config.parallel_config.stateless_init_dp_group()
+        self.current_wave = 0
 
         # Initialize the engine after setting up environment.
         super().__init__(input_path, output_path, vllm_config, executor_class,
@@ -601,6 +616,31 @@ class DPEngineCoreProc(EngineCoreProc):
         super().shutdown()
         if dp_group := getattr(self, "dp_group", None):
             stateless_destroy_torch_distributed_process_group(dp_group)
+
+    def add_request(self, request: EngineCoreRequest):
+        if request.current_wave != self.current_wave:
+            if request.current_wave > self.current_wave:
+                self.current_wave = request.current_wave
+            elif not self.engines_running:
+                # Request received for an already-completed wave, notify
+                # front-end that we need to start the next one.
+                self.output_queue.put_nowait(
+                    EngineCoreOutputs(start_wave=self.current_wave))
+
+        super().add_request(request)
+
+    def _handle_client_request(self, request_type: EngineCoreRequestType,
+                               request: Any) -> None:
+        if request_type == EngineCoreRequestType.START_DP_WAVE:
+            new_wave: int = request
+            if new_wave >= self.current_wave:
+                self.current_wave = new_wave
+                if not self.engines_running:
+                    logger.debug("EngineCore starting idle loop for wave %d.",
+                                 new_wave)
+                    self.engines_running = True
+        else:
+            super()._handle_client_request(request_type, request)
 
     def run_busy_loop(self):
         """Core busy loop of the EngineCore for data parallel case."""
@@ -628,7 +668,7 @@ class DPEngineCoreProc(EngineCoreProc):
                     # up-to-date state is returned in the engine outputs.
                     self._process_engine_step()
 
-                if not self.global_unfinished_reqs:
+                if not self.engines_running:
                     # All engines are idle.
                     continue
 
@@ -637,18 +677,23 @@ class DPEngineCoreProc(EngineCoreProc):
                 self.execute_dummy_batch()
 
             # 3) All-reduce operation to determine global unfinished reqs.
-            self.global_unfinished_reqs = self._has_global_unfinished_reqs(
+            self.engines_running = self._has_global_unfinished_reqs(
                 local_unfinished_reqs)
 
-            if not self.global_unfinished_reqs:
-                # Notify client that we are pausing the loop.
-                self.output_queue.put_nowait(ENGINE_PAUSED_OUTPUTS)
+            if not self.engines_running:
+                if self.local_dp_rank == 0:
+                    # Notify client that we are pausing the loop.
+                    logger.debug("Wave %d finished, pausing engine loop.",
+                                 self.current_wave)
+                    self.output_queue.put_nowait(
+                        EngineCoreOutputs(wave_complete=self.current_wave))
+                self.current_wave += 1
 
     def _has_global_unfinished_reqs(self, local_unfinished: bool) -> bool:
 
-        # Optimization - only perform finish-sync all-reduce every 16 steps.
+        # Optimization - only perform finish-sync all-reduce every 24 steps.
         self.counter += 1
-        if self.counter != 16:
+        if self.counter != 24:
             return True
         self.counter = 0
 
