@@ -47,7 +47,7 @@ def query_marlin_supported_quant_types(
 
     if has_zp:
         # AWQ style, unsigned + runtime zero-point
-        return [scalar_types.uint4, scalar_types.uint8]
+        return [scalar_types.uint4]
     else:
         # GPTQ style, unsigned + symmetric bias
         res = [scalar_types.uint4b8, scalar_types.uint8b128]
