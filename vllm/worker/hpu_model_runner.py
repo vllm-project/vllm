@@ -260,7 +260,7 @@ class HpuModelAdapter(torch.nn.Module):
         self.prefill_use_fusedsdpa = "fsdpa" in enabled_flags()
         self.recompute_cos_sin = os.getenv('VLLM_COS_SIN_RECOMPUTE',
                                            'false').lower() in ['1', 'true']
-        self.sampler = get_sampler()
+        # self.sampler = get_sampler()
         self.vllm_config = vllm_config
         self.block_size = vllm_config.cache_config.block_size
         self.dtype = vllm_config.model_config.dtype
@@ -457,8 +457,8 @@ class HpuModelAdapter(torch.nn.Module):
     def compute_logits(self, *args, **kwargs):
         return self.model.compute_logits(*args, **kwargs)
 
-    def sample(self, *args, **kwargs):
-        return self.sampler(*args, **kwargs)
+    # def sample(self, *args, **kwargs):
+    #    return self.sampler(*args, **kwargs)
 
     def make_empty_intermediate_tensors(self, *args, **kwargs):
         return self.model.make_empty_intermediate_tensors(*args, **kwargs)
@@ -468,9 +468,9 @@ class HpuModelAdapter(torch.nn.Module):
 
     # sampler property will be used by spec_decode_worker
     # don't rename
-    @property
-    def sampler(self):
-        return self.model.sampler
+    # @property
+    # def sampler(self):
+    #    return self.model.sampler
 
     # lm_head property will be used by spec_decode_worker
     # don't rename
@@ -747,6 +747,7 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
         # For delayed sampling
         self.cached_step_inputs: List[
             ModelInputForHPUWithSamplingMetadata] = []
+        self.sampler = get_sampler()
 
     def _set_gc_threshold(self) -> None:
         """
@@ -2799,7 +2800,7 @@ class HPUModelRunner(HPUModelRunnerBase[ModelInputForHPUWithSamplingMetadata]):
                                      f'bs{batch_size}_'
                                      f'seq{seq_len}'),
                         args=profiler_args):
-                    output = self.model.sample(
+                    output = self.sampler(
                         logits=logits,
                         sampling_metadata=sampling_metadata,
                     )
