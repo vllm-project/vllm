@@ -132,6 +132,7 @@ serving/integrations/index
 :caption: Deployment
 :maxdepth: 1
 
+deployment/security
 deployment/docker
 deployment/k8s
 deployment/nginx
