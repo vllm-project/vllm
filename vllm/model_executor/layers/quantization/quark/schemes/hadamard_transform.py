@@ -1,5 +1,4 @@
 # SPDX-License-Identifier: Apache-2.0
-#from fast_hadamard_transform import (FHT_512,FHT_1024)
 import torch
 from torch import nn
 
@@ -271,4 +270,4 @@ class QuaRotR4(HadamardTransform):
 
         return X
     
-hadamard_transform_registry = {'quarot_r4': QuaRotR4}(dev311) 
+hadamard_transform_registry = {'quarot_r4': QuaRotR4}
