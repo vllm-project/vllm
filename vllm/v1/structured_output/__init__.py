@@ -150,6 +150,10 @@ class StructuredOutputManager:
             vocab_size=self.backend.vocab_size,
             index=batch_index,
         )
+        s = request.structured_output_request.grammar.find_jf_string()
+        if s:
+            jf_tokens = self.tokenizer.encode(s, add_special_tokens=False)
+            print(jf_tokens)
         return [unique_token_id] if is_single else None
 
     def clear_backend(self) -> None:

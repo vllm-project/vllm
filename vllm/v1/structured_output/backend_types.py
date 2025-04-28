@@ -68,6 +68,10 @@ class StructuredOutputGrammar(ABC):
         Resets the state of the structured output grammar.
         """
 
+    @abstractmethod
+    def find_jf_string(self):
+        ...
+
 
 @dataclass
 class StructuredOutputBackend(ABC):

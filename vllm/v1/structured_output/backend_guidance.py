@@ -158,6 +158,9 @@ class GuidanceGrammar(StructuredOutputGrammar):
         # This method may be not needed anymore? TODO
         self.ll_matcher.reset()
 
+    def find_jf_string(self):
+        pass
+
 
 def serialize_guidance_grammar(
     request_type: StructuredOutputOptions,
