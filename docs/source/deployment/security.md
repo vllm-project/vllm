@@ -1,6 +1,6 @@
 # Security Guide
 
-## Inter-Node Communication Security
+## Inter-Node Communication
 
 All communications between nodes in a multi-node vLLM deployment are **insecure by default** and must be protected by placing the nodes on an isolated network. This includes:
 
