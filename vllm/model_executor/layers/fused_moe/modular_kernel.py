@@ -56,13 +56,19 @@ def _moe_problem_size(
     of w1 or w2.  Similarly, some kernels transpose the weights, so this needs
     to be kept in mind.
     """
-
-    # Make sure we are using the correct a1 (pre-permute).
-    assert topk_ids.shape[0] == a1.shape[0]
-    M, _ = a1.shape
+    assert w1.dim() == 3 and w2.dim() == 3
     E, N, _ = w1.shape
     K = w2.shape[1]
+
+    assert a1.dim() == 2
+    assert topk_ids.dim() == 2
+    # Make sure we are using the correct a1 (pre-permute).
+    assert topk_ids.shape[0] == a1.shape[
+        0], f"{topk_ids.shape[0]} != {a1.shape[0]}"
+
+    M = a1.shape[0]
     topk = topk_ids.shape[1]
+
     return E, M, N, K, topk
 
 
@@ -81,7 +87,7 @@ class FusedMoEQuantizeDispatchCombine(ABC):
         topk_ids: torch.Tensor,
         num_experts: int,
         expert_map: Optional[torch.Tensor],
-    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor]]:
         """
         Perform any quantization (and/or) dispatching needed
         for this kernel.
@@ -127,9 +133,15 @@ class FusedMoEPermuteExpertsUnpermute(ABC):
     """
 
     @abstractmethod
-    def workspace_shapes(self, a_dtype: torch.dtype, M: int, N: int, K: int,
-                         topk: int,
-                         num_experts: int) -> Tuple[int, int, torch.dtype]:
+    def workspace_shapes(
+        self,
+        a: torch.Tensor,
+        M: int,
+        N: int,
+        K: int,
+        topk: int,
+        num_experts: int,
+    ) -> Tuple[int, int, torch.dtype]:
         """
         Compute the number of elements for the temporary outputs of the two
         gemms and activation in the fused expert function.  Since the
@@ -144,6 +156,15 @@ class FusedMoEPermuteExpertsUnpermute(ABC):
         - Workspace type: The dtype to use for the workspace tensors.
         """
         raise NotImplementedError
+
+    def activation(self, activation: str, output: torch.Tensor,
+                   input: torch.Tensor) -> None:
+        if activation == "silu":
+            torch.ops._C.silu_and_mul(output, input)
+        elif activation == "gelu":
+            torch.ops._C.gelu_and_mul(output, input)
+        else:
+            raise ValueError(f"Unsupported FusedMoe activation: {activation}")
 
     @abstractmethod
     def apply(
@@ -163,6 +184,7 @@ class FusedMoEPermuteExpertsUnpermute(ABC):
         a2_scale: Optional[torch.Tensor],
         workspace13: torch.Tensor,
         workspace2: torch.Tensor,
+        expert_num_tokens: Optional[torch.Tensor],
     ) -> torch.Tensor:
         """
         This function computes the intermediate result of a Mixture of Experts
@@ -193,6 +215,8 @@ class FusedMoEPermuteExpertsUnpermute(ABC):
           must be large enough to hold output of either MoE gemm.
         - workspace2 (torch.Tensor): A scratch tensor used for the activation
           function.
+        - expert_num_tokens: An optional tensor containing the number of tokens
+          assigned to each expert when using batched experts format input.
 
         Returns:
         - torch.Tensor: The unweighted, unreduced output tensor
@@ -224,7 +248,7 @@ class FusedMoEModularKernel(torch.nn.Module):
 
     def forward(
         self,
-        a1: torch.Tensor,
+        hidden_states: torch.Tensor,
         w1: torch.Tensor,
         w2: torch.Tensor,
         topk_weights: torch.Tensor,
@@ -245,7 +269,7 @@ class FusedMoEModularKernel(torch.nn.Module):
         of weights, w1 and w2, and top-k gating mechanism.
 
         Parameters:
-        - a1: (torch.Tensor): The input tensor to the MoE layer.
+        - hidden_states: (torch.Tensor): The input tensor to the MoE layer.
         - w1 (torch.Tensor): The first set of expert weights.
         - w2 (torch.Tensor): The second set of expert weights.
         - topk_weights (torch.Tensor): The topk weights applied at the end of
@@ -272,6 +296,7 @@ class FusedMoEModularKernel(torch.nn.Module):
         Returns:
         - torch.Tensor: The output tensor after applying the MoE layer.
         """
+        a1 = hidden_states
         E, M, N, K, top_k = _moe_problem_size(a1, w1, w2, topk_ids)
 
         if global_num_experts == -1:
@@ -280,7 +305,7 @@ class FusedMoEModularKernel(torch.nn.Module):
         output = a1 if inplace else torch.empty_like(a1)
 
         workspace13_shape, workspace2_shape, workspace_dtype = (
-            self.fused_experts.workspace_shapes(a1.dtype, M, N, K, top_k,
+            self.fused_experts.workspace_shapes(a1, M, N, K, top_k,
                                                 global_num_experts))
 
         # We can reuse the memory between cache1 and cache3 because by the time
@@ -292,7 +317,7 @@ class FusedMoEModularKernel(torch.nn.Module):
                                  device=a1.device,
                                  dtype=workspace_dtype)
 
-        a1q, a1q_scale = self.dispatch_combine.dispatch(
+        a1q, a1q_scale, expert_num_tokens = self.dispatch_combine.dispatch(
             a1,
             a1_scale,
             a2_scale,
@@ -317,6 +342,7 @@ class FusedMoEModularKernel(torch.nn.Module):
             a2_scale,
             workspace13=workspace13,
             workspace2=workspace2,
+            expert_num_tokens=expert_num_tokens,
         )
 
         self.dispatch_combine.combine(output, fused_out, topk_weights,
