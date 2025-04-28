@@ -326,6 +326,44 @@ def load_llama4(question: str, image_urls: list[str]) -> ModelRequestData:
     )
 
 
+def load_kimi_vl(question: str, image_urls: list[str]) -> ModelRequestData:
+    model_name = "moonshotai/Kimi-VL-A3B-Instruct"
+
+    engine_args = EngineArgs(
+        model=model_name,
+        trust_remote_code=True,
+        max_model_len=4096,
+        max_num_seqs=4,
+        limit_mm_per_prompt={"image": len(image_urls)},
+    )
+
+    placeholders = [{"type": "image", "image": url} for url in image_urls]
+    messages = [{
+        "role":
+        "user",
+        "content": [
+            *placeholders,
+            {
+                "type": "text",
+                "text": question
+            },
+        ],
+    }]
+
+    processor = AutoProcessor.from_pretrained(model_name,
+                                              trust_remote_code=True)
+
+    prompt = processor.apply_chat_template(messages,
+                                           tokenize=False,
+                                           add_generation_prompt=True)
+
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompt=prompt,
+        image_data=[fetch_image(url) for url in image_urls],
+    )
+
+
 def load_mistral3(question: str, image_urls: list[str]) -> ModelRequestData:
     model_name = "mistralai/Mistral-Small-3.1-24B-Instruct-2503"
 
@@ -465,11 +503,13 @@ def load_phi4mm(question: str, image_urls: list[str]) -> ModelRequestData:
     engine_args = EngineArgs(
         model=model_path,
         trust_remote_code=True,
-        max_model_len=10000,
+        max_model_len=4096,
         max_num_seqs=2,
         limit_mm_per_prompt={"image": len(image_urls)},
         enable_lora=True,
         max_lora_rank=320,
+        # Note - mm_processor_kwargs can also be passed to generate/chat calls
+        mm_processor_kwargs={"dynamic_hd": 4},
     )
 
     placeholders = "".join(f"<|image_{i}|>"
@@ -640,6 +680,7 @@ model_example_map = {
     "h2ovl_chat": load_h2ovl,
     "idefics3": load_idefics3,
     "internvl_chat": load_internvl,
+    "kimi_vl": load_kimi_vl,
     "llama4": load_llama4,
     "mistral3": load_mistral3,
     "mllama": load_mllama,
@@ -727,22 +768,7 @@ def run_chat(model: str, question: str, image_urls: list[str],
         print("-" * 50)
 
 
-def main(args: Namespace):
-    model = args.model_type
-    method = args.method
-    seed = args.seed
-
-    image_urls = IMAGE_URLS[:args.num_images]
-
-    if method == "generate":
-        run_generate(model, QUESTION, image_urls, seed)
-    elif method == "chat":
-        run_chat(model, QUESTION, image_urls, seed)
-    else:
-        raise ValueError(f"Invalid method: {method}")
-
-
-if __name__ == "__main__":
+def parse_args():
     parser = FlexibleArgumentParser(
         description='Demo on using vLLM for offline inference with '
         'vision language models that support multi-image input for text '
@@ -765,9 +791,29 @@ if __name__ == "__main__":
     parser.add_argument(
         "--num-images",
         "-n",
-        choices=list(range(1, 13)),  # 12 is the max number of images
+        type=int,
+        choices=list(range(1,
+                           len(IMAGE_URLS) + 1)),  # the max number of images
         default=2,
         help="Number of images to use for the demo.")
+    return parser.parse_args()
 
-    args = parser.parse_args()
+
+def main(args: Namespace):
+    model = args.model_type
+    method = args.method
+    seed = args.seed
+
+    image_urls = IMAGE_URLS[:args.num_images]
+
+    if method == "generate":
+        run_generate(model, QUESTION, image_urls, seed)
+    elif method == "chat":
+        run_chat(model, QUESTION, image_urls, seed)
+    else:
+        raise ValueError(f"Invalid method: {method}")
+
+
+if __name__ == "__main__":
+    args = parse_args()
     main(args)

@@ -5,7 +5,7 @@ from typing import TYPE_CHECKING, Optional, Union
 import torch
 
 import vllm.envs as envs
-from vllm.inputs import PromptType
+from vllm.inputs import ProcessorInputs, PromptType
 from vllm.logger import init_logger
 from vllm.sampling_params import SamplingParams, SamplingType
 
@@ -97,6 +97,20 @@ class TpuPlatform(Platform):
                 "Using bfloat16 instead.", vllm_config.model_config.dtype)
             vllm_config.model_config.dtype = torch.bfloat16
 
+        if envs.VLLM_USE_V1:
+            from vllm.v1.attention.backends.pallas import (
+                PallasAttentionBackend)
+            min_page_size = PallasAttentionBackend.get_min_page_size(
+                vllm_config)
+            if min_page_size > vllm_config.cache_config.block_size:
+                logger.warning(
+                    "Increase the page size from %s to %s to make sure there's"
+                    "no SMEM OOM",
+                    vllm_config.cache_config.block_size,
+                    min_page_size,
+                )
+                vllm_config.cache_config.block_size = min_page_size
+
         parallel_config = vllm_config.parallel_config
         scheduler_config = vllm_config.scheduler_config
         if parallel_config.worker_cls == "auto":
@@ -150,12 +164,13 @@ class TpuPlatform(Platform):
         cls,
         prompt: PromptType,
         params: Union[SamplingParams, PoolingParams],
+        processed_inputs: ProcessorInputs,
     ) -> None:
         """Raises if this request is unsupported on this platform"""
         if isinstance(params, SamplingParams):
-            if params.guided_decoding is not None:
+            if params.guided_decoding is not None and not envs.VLLM_USE_V1:
                 raise ValueError("Structured output is not supported on "
-                                 f"{cls.device_name}.")
+                                 f"{cls.device_name} V0.")
             if params.sampling_type == SamplingType.RANDOM_SEED:
                 raise ValueError(
                     "Torch XLA does not support per-request seed.")

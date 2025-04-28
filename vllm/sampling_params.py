@@ -38,6 +38,7 @@ class GuidedDecodingParams:
     """These are other options that can be set"""
     backend: Optional[str] = None
     whitespace_pattern: Optional[str] = None
+    structural_tag: Optional[str] = None
 
     @staticmethod
     def from_optional(
@@ -48,9 +49,10 @@ class GuidedDecodingParams:
         json_object: Optional[bool] = None,
         backend: Optional[str] = None,
         whitespace_pattern: Optional[str] = None,
+        structural_tag: Optional[str] = None,
     ) -> Optional["GuidedDecodingParams"]:
-        if all(arg is None
-               for arg in (json, regex, choice, grammar, json_object)):
+        if all(arg is None for arg in (json, regex, choice, grammar,
+                                       json_object, structural_tag)):
             return None
         # Extract json schemas from pydantic models
         if isinstance(json, (BaseModel, type(BaseModel))):
@@ -63,6 +65,7 @@ class GuidedDecodingParams:
             json_object=json_object,
             backend=backend,
             whitespace_pattern=whitespace_pattern,
+            structural_tag=structural_tag,
         )
 
     @property
@@ -78,6 +81,17 @@ class GuidedDecodingParams:
         if not self.backend or ":" not in self.backend:
             return []
         return self.backend.split(":")[1].split(",")
+
+    def add_option(self, opt_name: str) -> None:
+        """Adds an option to the backend options."""
+        if not self.backend:
+            self.backend = f":{opt_name}"
+        elif ":" not in self.backend:
+            self.backend += f":{opt_name}"
+        else:
+            options = set(self.backend_options())
+            options.add(opt_name)
+            self.backend = f"{self.backend_name}:{','.join(sorted(options))}"
 
     def no_fallback(self) -> bool:
         """Returns True if the "no-fallback" option is supplied for the guided
@@ -423,6 +437,10 @@ class SamplingParams(
                 and self.truncate_prompt_tokens < 1):
             raise ValueError(f"truncate_prompt_tokens must be >= 1, "
                              f"got {self.truncate_prompt_tokens}")
+        assert isinstance(self.stop_token_ids, list)
+        if not all(isinstance(st_id, int) for st_id in self.stop_token_ids):
+            raise ValueError(f"stop_token_ids must contain only integers, "
+                             f"got {self.stop_token_ids}.")
         assert isinstance(self.stop, list)
         if any(not stop_str for stop_str in self.stop):
             raise ValueError("stop cannot contain an empty string.")

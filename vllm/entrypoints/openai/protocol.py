@@ -2,6 +2,7 @@
 
 # Adapted from
 # https://github.com/lm-sys/FastChat/blob/168ccc29d3f7edc50823016105c024fe2282732a/fastchat/protocol/openai_api_protocol.py
+import json
 import re
 import time
 from argparse import Namespace
@@ -139,10 +140,28 @@ class JsonSchemaResponseFormat(OpenAIBaseModel):
     strict: Optional[bool] = None
 
 
+class StructuralTag(OpenAIBaseModel):
+    begin: str
+    # schema is the field, but that causes conflicts with pydantic so
+    # instead use structural_tag_schema with an alias
+    structural_tag_schema: Optional[dict[str, Any]] = Field(default=None,
+                                                            alias="schema")
+    end: str
+
+
+class StructuralTagResponseFormat(OpenAIBaseModel):
+    type: Literal["structural_tag"]
+    structures: list[StructuralTag]
+    triggers: list[str]
+
+
 class ResponseFormat(OpenAIBaseModel):
-    # type must be "json_schema", "json_object" or "text"
+    # type must be "json_schema", "json_object", or "text"
     type: Literal["text", "json_object", "json_schema"]
     json_schema: Optional[JsonSchemaResponseFormat] = None
+
+
+AnyResponseFormat = Union[ResponseFormat, StructuralTagResponseFormat]
 
 
 class StreamOptions(OpenAIBaseModel):
@@ -227,7 +246,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
     max_completion_tokens: Optional[int] = None
     n: Optional[int] = 1
     presence_penalty: Optional[float] = 0.0
-    response_format: Optional[ResponseFormat] = None
+    response_format: Optional[AnyResponseFormat] = None
     seed: Optional[int] = Field(None, ge=_LONG_INFO.min, le=_LONG_INFO.max)
     stop: Optional[Union[str, list[str]]] = Field(default_factory=list)
     stream: Optional[bool] = False
@@ -339,6 +358,11 @@ class ChatCompletionRequest(OpenAIBaseModel):
         default=None,
         description=(
             "If specified, the output will follow the context free grammar."),
+    )
+    structural_tag: Optional[str] = Field(
+        default=None,
+        description=(
+            "If specified, the output will follow the structural tag schema."),
     )
     guided_decoding_backend: Optional[str] = Field(
         default=None,
@@ -476,6 +500,12 @@ class ChatCompletionRequest(OpenAIBaseModel):
                 json_schema = self.response_format.json_schema
                 assert json_schema is not None
                 self.guided_json = json_schema.json_schema
+            elif self.response_format.type == "structural_tag":
+                structural_tag = self.response_format
+                assert structural_tag is not None and isinstance(
+                    structural_tag, StructuralTagResponseFormat)
+                s_tag_obj = structural_tag.model_dump(by_alias=True)
+                self.structural_tag = json.dumps(s_tag_obj)
 
         guided_decoding = GuidedDecodingParams.from_optional(
             json=self._get_guided_json_from_tool() or self.guided_json,
@@ -485,6 +515,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
             json_object=guided_json_object,
             backend=self.guided_decoding_backend,
             whitespace_pattern=self.guided_whitespace_pattern,
+            structural_tag=self.structural_tag,
         )
 
         return SamplingParams.from_optional(
@@ -742,12 +773,13 @@ class CompletionRequest(OpenAIBaseModel):
             "If true (the default), special tokens (e.g. BOS) will be added to "
             "the prompt."),
     )
-    response_format: Optional[ResponseFormat] = Field(
+    response_format: Optional[AnyResponseFormat] = Field(
         default=None,
-        description=
-        ("Similar to chat completion, this parameter specifies the format of "
-         "output. Only {'type': 'json_object'}, {'type': 'json_schema'} or "
-         "{'type': 'text' } is supported."),
+        description=(
+            "Similar to chat completion, this parameter specifies the format "
+            "of output. Only {'type': 'json_object'}, {'type': 'json_schema'}"
+            ", {'type': 'structural_tag'}, or {'type': 'text' } is supported."
+        ),
     )
     guided_json: Optional[Union[str, dict, BaseModel]] = Field(
         default=None,
@@ -1577,14 +1609,6 @@ class TranscriptionRequest(OpenAIBaseModel):
     """
 
     ## TODO (varun) : Support if set to 0, certain thresholds are met !!
-    temperature: float = Field(default=0.0)
-    """The sampling temperature, between 0 and 1.
-
-    Higher values like 0.8 will make the output more random, while lower values
-    like 0.2 will make it more focused / deterministic. If set to 0, the model
-    will use [log probability](https://en.wikipedia.org/wiki/Log_probability)
-    to automatically increase the temperature until certain thresholds are hit.
-    """
 
     timestamp_granularities: list[Literal["word", "segment"]] = Field(
         alias="timestamp_granularities[]", default=[])
@@ -1596,6 +1620,7 @@ class TranscriptionRequest(OpenAIBaseModel):
     timestamps incurs additional latency.
     """
 
+    # doc: begin-transcription-extra-params
     stream: Optional[bool] = False
     """Custom field not present in the original OpenAI definition. When set, 
     it will enable output to be streamed in a similar fashion as the Chat
@@ -1604,10 +1629,51 @@ class TranscriptionRequest(OpenAIBaseModel):
     # Flattened stream option to simplify form data.
     stream_include_usage: Optional[bool] = False
     stream_continuous_usage_stats: Optional[bool] = False
+    # doc: end-transcription-extra-params
+
+    # doc: begin-transcription-sampling-params
+    temperature: float = Field(default=0.0)
+    """The sampling temperature, between 0 and 1.
+
+    Higher values like 0.8 will make the output more random, while lower values
+    like 0.2 will make it more focused / deterministic. If set to 0, the model
+    will use [log probability](https://en.wikipedia.org/wiki/Log_probability)
+    to automatically increase the temperature until certain thresholds are hit.
+    """
+
+    top_p: Optional[float] = None
+    """Enables nucleus (top-p) sampling, where tokens are selected from the 
+    smallest possible set whose cumulative probability exceeds `p`.
+    """
+
+    top_k: Optional[int] = None
+    """Limits sampling to the `k` most probable tokens at each step."""
+
+    min_p: Optional[float] = None
+    """Filters out tokens with a probability lower than `min_p`, ensuring a 
+    minimum likelihood threshold during sampling.
+    """
+
+    seed: Optional[int] = Field(None, ge=_LONG_INFO.min, le=_LONG_INFO.max)
+    """The seed to use for sampling."""
+
+    frequency_penalty: Optional[float] = 0.0
+    """The frequency penalty to use for sampling."""
+
+    repetition_penalty: Optional[float] = None
+    """The repetition penalty to use for sampling."""
+
+    presence_penalty: Optional[float] = 0.0
+    """The presence penalty to use for sampling."""
+    # doc: end-transcription-sampling-params
 
     # Default sampling parameters for transcription requests.
     _DEFAULT_SAMPLING_PARAMS: dict = {
-        "temperature": 0,
+        "repetition_penalty": 1.0,
+        "temperature": 1.0,
+        "top_p": 1.0,
+        "top_k": -1,
+        "min_p": 0.0,
     }
 
     def to_sampling_params(
@@ -1619,13 +1685,35 @@ class TranscriptionRequest(OpenAIBaseModel):
 
         if default_sampling_params is None:
             default_sampling_params = {}
+
         # Default parameters
         if (temperature := self.temperature) is None:
             temperature = default_sampling_params.get(
                 "temperature", self._DEFAULT_SAMPLING_PARAMS["temperature"])
+        if (top_p := self.top_p) is None:
+            top_p = default_sampling_params.get(
+                "top_p", self._DEFAULT_SAMPLING_PARAMS["top_p"])
+        if (top_k := self.top_k) is None:
+            top_k = default_sampling_params.get(
+                "top_k", self._DEFAULT_SAMPLING_PARAMS["top_k"])
+        if (min_p := self.min_p) is None:
+            min_p = default_sampling_params.get(
+                "min_p", self._DEFAULT_SAMPLING_PARAMS["min_p"])
+
+        if (repetition_penalty := self.repetition_penalty) is None:
+            repetition_penalty = default_sampling_params.get(
+                "repetition_penalty",
+                self._DEFAULT_SAMPLING_PARAMS["repetition_penalty"])
 
         return SamplingParams.from_optional(temperature=temperature,
                                             max_tokens=max_tokens,
+                                            seed=self.seed,
+                                            top_p=top_p,
+                                            top_k=top_k,
+                                            min_p=min_p,
+                                            frequency_penalty=self.frequency_penalty,
+                                            repetition_penalty=repetition_penalty,
+                                            presence_penalty=self.presence_penalty,
                                             output_kind=RequestOutputKind.DELTA
                                             if self.stream \
                                             else RequestOutputKind.FINAL_ONLY)

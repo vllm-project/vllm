@@ -2,7 +2,6 @@
 
 import math
 from collections.abc import Iterable, Mapping, Sequence
-from functools import cached_property
 from typing import (Final, List, Literal, Optional, Protocol, Set, Tuple,
                     TypedDict, Union)
 
@@ -16,7 +15,6 @@ from typing_extensions import NotRequired
 
 from vllm.config import VllmConfig
 from vllm.model_executor.layers.activation import get_act_fn
-from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig,
@@ -455,13 +453,6 @@ class LlavaOnevisionForConditionalGeneration(nn.Module, SupportsMultiModal,
         self.make_empty_intermediate_tensors = (
             self.language_model.model.make_empty_intermediate_tensors)
 
-    @cached_property
-    def sampler(self):
-        if hasattr(self.language_model, "sampler"):
-            return self.language_model.sampler
-
-        return get_sampler()
-
     def _validate_image_sizes(self, data: torch.Tensor) -> torch.Tensor:
         expected_dims = (2, )
 
@@ -583,21 +574,21 @@ class LlavaOnevisionForConditionalGeneration(nn.Module, SupportsMultiModal,
         )
 
     def _parse_and_validate_multimodal_inputs(self, **kwargs: object) -> dict:
-        modalities = {}
+        mm_input_by_modality = {}
 
         # Preserve the order of modalities if there are multiple of them
         # from the order of kwargs.
         for input_key in kwargs:
-            if input_key in ("pixel_values",
-                             "image_embeds") and "images" not in modalities:
-                modalities["images"] = self._parse_and_validate_image_input(
-                    **kwargs)
-            if input_key in ("pixel_values_videos",
-                             "video_embeds") and "videos" not in modalities:
-                modalities["videos"] = self._parse_and_validate_video_input(
-                    **kwargs)
+            if input_key in ("pixel_values", "image_embeds"
+                             ) and "image" not in mm_input_by_modality:
+                mm_input_by_modality[
+                    "image"] = self._parse_and_validate_image_input(**kwargs)
+            if input_key in ("pixel_values_videos", "video_embeds"
+                             ) and "video" not in mm_input_by_modality:
+                mm_input_by_modality[
+                    "video"] = self._parse_and_validate_video_input(**kwargs)
 
-        return modalities
+        return mm_input_by_modality
 
     def _select_image_features(self, image_features: torch.Tensor, *,
                                strategy: str) -> torch.Tensor:
@@ -848,8 +839,9 @@ class LlavaOnevisionForConditionalGeneration(nn.Module, SupportsMultiModal,
 
     def get_multimodal_embeddings(
             self, **kwargs: object) -> Optional[MultiModalEmbeddings]:
-        modalities = self._parse_and_validate_multimodal_inputs(**kwargs)
-        if not modalities:
+        mm_input_by_modality = self._parse_and_validate_multimodal_inputs(
+            **kwargs)
+        if not mm_input_by_modality:
             return None
 
         # The result multimodal_embeddings is tuple of tensors, with each
@@ -858,14 +850,13 @@ class LlavaOnevisionForConditionalGeneration(nn.Module, SupportsMultiModal,
 
         # NOTE: It is important to iterate over the keys in this dictionary
         # to preserve the order of the modalities.
-        for modality in modalities:
-            if modality == "images":
-                image_input = modalities["images"]
-                vision_embeddings = self._process_image_input(image_input)
+        for modality in mm_input_by_modality:
+            multimodal_input = mm_input_by_modality[modality]
+            if modality == "image":
+                vision_embeddings = self._process_image_input(multimodal_input)
                 multimodal_embeddings += tuple(vision_embeddings)
-            if modality == "videos":
-                video_input = modalities["videos"]
-                video_embeddings = self._process_video_pixels(video_input)
+            if modality == "video":
+                video_embeddings = self._process_video_pixels(multimodal_input)
                 multimodal_embeddings += tuple(video_embeddings)
 
         return multimodal_embeddings
@@ -956,13 +947,6 @@ class LlavaOnevisionForConditionalGeneration(nn.Module, SupportsMultiModal,
     ) -> Optional[torch.Tensor]:
         return self.language_model.compute_logits(hidden_states,
                                                   sampling_metadata)
-
-    def sample(
-        self,
-        logits: torch.Tensor,
-        sampling_metadata: SamplingMetadata,
-    ) -> Optional[SamplerOutput]:
-        return self.language_model.sample(logits, sampling_metadata)
 
     def load_weights(self, weights: Iterable[Tuple[str,
                                                    torch.Tensor]]) -> Set[str]:

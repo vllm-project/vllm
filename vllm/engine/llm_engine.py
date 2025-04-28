@@ -29,8 +29,7 @@ from vllm.engine.output_processor.util import create_output_by_sequence_group
 from vllm.entrypoints.openai.logits_processors import (
     get_logits_processors as get_openai_logits_processors)
 from vllm.executor.executor_base import ExecutorBase
-from vllm.inputs import (INPUT_REGISTRY, InputRegistry, ProcessorInputs,
-                         PromptType, SingletonInputs)
+from vllm.inputs import ProcessorInputs, PromptType, SingletonInputs
 from vllm.inputs.parse import is_token_prompt, split_enc_dec_inputs
 from vllm.inputs.preprocess import InputPreprocessor
 from vllm.logger import init_logger
@@ -55,7 +54,7 @@ from vllm.tracing import (SpanAttributes, SpanKind, extract_trace_context,
 from vllm.transformers_utils.detokenizer import Detokenizer
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.transformers_utils.tokenizer_group import (
-    BaseTokenizerGroup, init_tokenizer_from_configs)
+    TokenizerGroup, init_tokenizer_from_configs)
 from vllm.usage.usage_lib import (UsageContext, is_usage_stats_enabled,
                                   usage_message)
 from vllm.utils import (Counter, Device, deprecate_kwargs,
@@ -66,7 +65,6 @@ from vllm.worker.model_runner_base import InputProcessingError
 logger = init_logger(__name__)
 _LOCAL_LOGGING_INTERVAL_SEC = 5
 
-_G = TypeVar("_G", bound=BaseTokenizerGroup, default=BaseTokenizerGroup)
 _O = TypeVar("_O", RequestOutput, PoolingRequestOutput)
 _R = TypeVar("_R", default=Any)
 
@@ -205,7 +203,7 @@ class LLMEngine:
 
         return outputs_
 
-    tokenizer: Optional[BaseTokenizerGroup]
+    tokenizer: Optional[TokenizerGroup]
 
     def __init__(
         self,
@@ -214,7 +212,6 @@ class LLMEngine:
         log_stats: bool,
         usage_context: UsageContext = UsageContext.ENGINE_CONTEXT,
         stat_loggers: Optional[Dict[str, StatLoggerBase]] = None,
-        input_registry: InputRegistry = INPUT_REGISTRY,
         mm_registry: MultiModalRegistry = MULTIMODAL_REGISTRY,
         use_cached_outputs: bool = False,
     ) -> None:
@@ -275,11 +272,7 @@ class LLMEngine:
                                                     self.tokenizer,
                                                     mm_registry)
 
-        self.input_registry = input_registry
-        self.input_processor = input_registry.create_input_processor(
-            self.model_config)
-
-        self.model_executor = executor_class(vllm_config=vllm_config, )
+        self.model_executor = executor_class(vllm_config=vllm_config)
 
         if self.model_config.runner_type != "pooling":
             self._initialize_kv_caches()
@@ -320,11 +313,6 @@ class LLMEngine:
                     "disable_custom_all_reduce":
                     self.parallel_config.disable_custom_all_reduce,
                 })
-
-        if self.tokenizer:
-            # Ping the tokenizer to ensure liveness if it runs in a
-            # different process.
-            self.tokenizer.ping()
 
         self.cached_scheduler_outputs = [
             SchedulerOutputState()
@@ -537,21 +525,12 @@ class LLMEngine:
         if model_executor := getattr(self, "model_executor", None):
             model_executor.shutdown()
 
-    def get_tokenizer_group(
-        self,
-        group_type: Type[_G] = BaseTokenizerGroup,
-    ) -> _G:
-        tokenizer_group = self.tokenizer
-
-        if tokenizer_group is None:
+    def get_tokenizer_group(self) -> TokenizerGroup:
+        if self.tokenizer is None:
             raise ValueError("Unable to get tokenizer because "
                              "skip_tokenizer_init is True")
-        if not isinstance(tokenizer_group, group_type):
-            raise TypeError("Invalid type of tokenizer group. "
-                            f"Expected type: {group_type}, but "
-                            f"found type: {type(tokenizer_group)}")
 
-        return tokenizer_group
+        return self.tokenizer
 
     def get_tokenizer(
         self,
@@ -559,11 +538,10 @@ class LLMEngine:
     ) -> AnyTokenizer:
         return self.get_tokenizer_group().get_lora_tokenizer(lora_request)
 
-    def _init_tokenizer(self) -> BaseTokenizerGroup:
+    def _init_tokenizer(self) -> TokenizerGroup:
         return init_tokenizer_from_configs(
             model_config=self.model_config,
             scheduler_config=self.scheduler_config,
-            parallel_config=self.parallel_config,
             lora_config=self.lora_config)
 
     def _verify_args(self) -> None:
@@ -778,12 +756,11 @@ class LLMEngine:
                 prompt,
                 tokenizer=self.get_tokenizer(lora_request=lora_request))
 
-        preprocessed_inputs = self.input_preprocessor.preprocess(
+        processed_inputs = self.input_preprocessor.preprocess(
             prompt,
             lora_request=lora_request,
             prompt_adapter_request=prompt_adapter_request,
         )
-        processed_inputs = self.input_processor(preprocessed_inputs)
 
         self._add_processed_request(
             request_id=request_id,
@@ -913,6 +890,10 @@ class LLMEngine:
         for scheduler in self.scheduler:
             scheduler.abort_seq_group(
                 request_id, seq_id_to_seq_group=self.seq_id_to_seq_group)
+
+    def get_vllm_config(self) -> VllmConfig:
+        """Gets the vllm configuration."""
+        return self.vllm_config
 
     def get_model_config(self) -> ModelConfig:
         """Gets the model configuration."""
@@ -1948,8 +1929,6 @@ class LLMEngine:
         return self.model_executor.is_sleeping
 
     def check_health(self) -> None:
-        if self.tokenizer:
-            self.tokenizer.check_health()
         self.model_executor.check_health()
 
     def is_tracing_enabled(self) -> bool:
@@ -2058,7 +2037,7 @@ class LLMEngine:
                 raise ValueError(f"The {prompt_type} prompt cannot be empty")
 
         max_prompt_len = self.model_config.max_model_len
-        if len(prompt_ids) >= max_prompt_len:
+        if len(prompt_ids) > max_prompt_len:
             if prompt_type == "encoder" and model_config.is_multimodal_model:
                 mm_registry = self.input_preprocessor.mm_registry
                 mm_processor = mm_registry.create_processor(

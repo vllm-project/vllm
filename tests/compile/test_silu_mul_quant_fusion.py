@@ -6,7 +6,7 @@ import vllm.envs as envs
 from vllm._custom_ops import scaled_fp8_quant
 from vllm.compilation.activation_quant_fusion import ActivationQuantFusionPass
 from vllm.compilation.fx_utils import find_auto_fn, find_auto_fn_maybe
-from vllm.config import CompilationConfig
+from vllm.config import CompilationConfig, VllmConfig
 from vllm.model_executor.layers.activation import SiluAndMul
 
 from .backend import TestBackend
@@ -34,8 +34,10 @@ def test_fusion_silu_and_mul_quant(num_tokens, hidden_size):
     torch.set_default_dtype(torch.float16)
 
     # Reshape pass is needed for the fusion pass to work
-    config = CompilationConfig.PassConfig(enable_fusion=True,
-                                          enable_reshape=True)
+    config = VllmConfig()
+    config.compilation_config = CompilationConfig(
+        pass_config=CompilationConfig.PassConfig(enable_fusion=True,
+                                                 enable_reshape=True))
     fusion_pass = ActivationQuantFusionPass.instance(config)
 
     backend = TestBackend(fusion_pass)

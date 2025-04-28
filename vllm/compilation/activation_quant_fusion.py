@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 from typing import Optional
 
 import torch
@@ -5,7 +6,7 @@ from torch._higher_order_ops.auto_functionalize import auto_functionalized
 from torch._inductor.pattern_matcher import (PatternMatcherPass, fwd_only,
                                              register_replacement)
 
-from vllm.config import CompilationConfig
+from vllm.config import VllmConfig
 from vllm.logger import init_logger
 
 from .vllm_inductor_pass import VllmInductorPass
@@ -62,7 +63,7 @@ class ActivationQuantFusionPass(VllmInductorPass):
     _instance: 'Optional[ActivationQuantFusionPass]' = None
 
     @classmethod
-    def instance(cls, config: CompilationConfig.PassConfig):
+    def instance(cls, config: VllmConfig):
         """
         Get the singleton instance of the ActivationQuantFusionPass.
         If the instance exists, the config is updated but
@@ -74,7 +75,7 @@ class ActivationQuantFusionPass(VllmInductorPass):
             cls._instance.config = config
         return cls._instance
 
-    def __init__(self, config: CompilationConfig.PassConfig):
+    def __init__(self, config: VllmConfig):
         assert self.__class__._instance is None, \
             "ActivationQuantFusionPass singleton instance already exists"
         super().__init__(config)
