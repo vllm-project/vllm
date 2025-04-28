@@ -789,8 +789,16 @@ class TPUModelRunner:
             logits = self.structured_decode(require_struct_decoding,
                                             grammar_bitmask_padded, logits,
                                             arange)
-        selected_token_ids, logprobs = self.sample_from_logits(
-            logits, tpu_sampling_metadata)
+        selected_token_ids = self.sample_from_logits(logits,
+                                                     tpu_sampling_metadata)
+
+        # NOTE (NickLucche) Use the original logits (before any penalties or
+        # temperature scaling) for the top-k logprobs. We can't enforce it due
+        # to recompilations outside torch.compiled code, so just make sure
+        # `sample_from_logits` does not modify the logits in-place.
+        logprobs = self.gather_logprobs(logits, selected_token_ids) \
+            if tpu_sampling_metadata.logprobs else None
+
         # Remove padding on cpu and keep dynamic op outside of xla graph.
         selected_token_ids = selected_token_ids.cpu()[:num_reqs]
         logprobs_lists = logprobs.tolists() \
@@ -897,7 +905,7 @@ class TPUModelRunner:
         xm.mark_step()
         xm.wait_device_ops()
         self.model = model
-        self.sampler = TPUSampler(self.model_config.max_logprobs)
+        self.sampler = TPUSampler()
 
     @torch.no_grad()
     def _dummy_run(self, num_tokens: int) -> None:
@@ -1108,22 +1116,36 @@ class TPUModelRunner:
             # because some operations in the sampler require it to be static.
             for all_greedy in [False, True]:
                 generate_params_if_all_greedy = not all_greedy
-                for top_logprobs in [False, True]:
-                    sampling_metadata = (
-                        TPUSupportedSamplingMetadata.from_input_batch(
-                            self.input_batch,
-                            num_reqs,
-                            self.device,
-                            generate_params_if_all_greedy,
-                        ))
-                    sampling_metadata.logprobs = top_logprobs
-                    sampling_metadata.all_greedy = all_greedy
-                    self.sample_from_logits(dummy_logits, sampling_metadata)
+                sampling_metadata = (
+                    TPUSupportedSamplingMetadata.from_input_batch(
+                        self.input_batch,
+                        num_reqs,
+                        self.device,
+                        generate_params_if_all_greedy,
+                    ))
+                sampling_metadata.all_greedy = all_greedy
+                self.sample_from_logits(dummy_logits, sampling_metadata)
             logger.info("  -- num_seqs: %d", num_reqs)
         xm.wait_device_ops()
         end = time.perf_counter()
         logger.info("Compilation finished in %.2f [secs].", end - start)
         self._update_num_xla_graphs("sample_from_logits")
+
+    def _precompile_gather_logprobs(self) -> None:
+        logger.info("Compiling gather_logprobs with different input shapes.")
+        start = time.perf_counter()
+        for num_reqs in self.num_reqs_paddings:
+            dummy_logits = torch.zeros((num_reqs, self.vocab_size),
+                                       device=self.device,
+                                       dtype=self._hidden_states_dtype)
+            dummy_tokens = torch.zeros((num_reqs, 1),
+                                       dtype=torch.int64).to(self.device)
+            self.gather_logprobs(dummy_logits, dummy_tokens)
+            logger.info("  -- num_seqs: %d", num_reqs)
+        xm.wait_device_ops()
+        end = time.perf_counter()
+        logger.info("Compilation finished in %.2f [secs].", end - start)
+        self._update_num_xla_graphs("gather_logprobs")
 
     def capture_model(self) -> None:
         """
@@ -1135,6 +1157,7 @@ class TPUModelRunner:
         self._precompile_compute_logits()
         self._precompile_structured_decoding()
         self._precompile_sample_from_logits()
+        self._precompile_gather_logprobs()
 
     def profile_run(
         self,
@@ -1257,29 +1280,31 @@ class TPUModelRunner:
     @torch.compile(backend="openxla", fullgraph=True, dynamic=False)
     def sample_from_logits(
             self, logits: torch.Tensor,
-            sampling_metadata: TPUSupportedSamplingMetadata) -> \
-                tuple[torch.Tensor, Optional[LogprobsTensors]]:
+            sampling_metadata: TPUSupportedSamplingMetadata) -> torch.Tensor:
         """
         Sample with xla-friendly function. This function is to be traced 
         separately from `forward` for lighter compilation overhead.
-        Optionally (in a separate graph) returns top-logprobs too, by gathering
-        a fixed maximum number of logprobs for the whole batch, 20 by default.
         """
         if sampling_metadata.all_greedy:
             out_tokens = torch.argmax(logits, dim=-1, keepdim=True)
-            if sampling_metadata.logprobs:
-                logprobs = self.sampler.compute_logprobs(logits)
-                logprobs_tensors = self.sampler.gather_logprobs(
-                    logprobs,
-                    self.model_config.max_logprobs,
-                    token_ids=out_tokens.squeeze(-1))
-            else:
-                logprobs_tensors = None
         else:
             sampler_out = self.sampler(logits, sampling_metadata)
             out_tokens = sampler_out.sampled_token_ids
-            logprobs_tensors = sampler_out.logprobs_tensors
-        return out_tokens, logprobs_tensors
+        return out_tokens
+
+    @torch.compile(backend="openxla", fullgraph=True, dynamic=False)
+    def gather_logprobs(self, logits: torch.Tensor,
+                        sampled_tokens: torch.Tensor) -> LogprobsTensors:
+        """
+        Gather the top_logprobs with corresponding tokens. Use a fixed number
+        of logprobs as an alternative to having multiple pre-compiled graphs.
+        Select the number of logprobs actually demanded by each request on CPU.
+        """
+        logprobs = self.sampler.compute_logprobs(logits)
+        return self.sampler.gather_logprobs(
+            logprobs,
+            self.model_config.max_logprobs,
+            token_ids=sampled_tokens.squeeze(-1))
 
     @torch.compile(backend="openxla", fullgraph=True, dynamic=False)
     def structured_decode(self, require_struct_decoding: torch.Tensor,

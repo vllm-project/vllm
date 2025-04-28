@@ -13,41 +13,19 @@ _SAMPLING_EPS = 1e-5
 
 class Sampler(nn.Module):
 
-    def __init__(self, max_logprobs: int):
+    def __init__(self):
         super().__init__()
         self.topk_topp_sampler = TopKTopPSampler()
-        # Gather a fixed amount of top logprobs. Defaults to 20.
-        self.max_logprobs = max_logprobs
 
     def forward(
         self,
         logits: torch.Tensor,
         sampling_metadata: TPUSupportedSamplingMetadata,
     ) -> SamplerOutput:
-        # NOTE(woosuk): Use the original logits (before any penalties or
-        # temperature scaling) for the top-k logprobs.
-        # This is different from the V0 sampler, which uses the logits that
-        # is used for sampling (after penalties and temperature scaling).
-        if sampling_metadata.logprobs:
-            raw_logprobs = self.compute_logprobs(logits)
-
         # Use float32 for the logits.
         logits = logits.to(torch.float32)
         # Sample the next token.
         sampled = self.sample(logits, sampling_metadata)
-
-        # Gather the top_logprobs with corresponding tokens. Use a fixed number
-        # of logprobs as an alternative to having multiple pre-compiled graphs.
-        # Select the logprobs actually demanded by each request on CPU.
-        if sampling_metadata.logprobs:
-            logprobs_tensors = self.gather_logprobs(raw_logprobs,
-                                                    self.max_logprobs,
-                                                    token_ids=sampled)
-        else:
-            logprobs_tensors = None
-
-        # Use int32 to reduce the tensor size.
-        sampled = sampled.to(torch.int32)
 
         # These are TPU tensors.
         sampler_output = SamplerOutput(
@@ -55,8 +33,7 @@ class Sampler(nn.Module):
             # [num_requests, 1], where each row represents one generated
             # token per request.
             sampled_token_ids=sampled.unsqueeze(-1),
-            logprobs_tensors=logprobs_tensors,
-        )
+            logprobs_tensors=None)
         return sampler_output
 
     def apply_temperature(
@@ -64,7 +41,6 @@ class Sampler(nn.Module):
         logits: torch.Tensor,
         temp: torch.Tensor,
     ) -> torch.Tensor:
-        # Use in-place division to avoid creating a new tensor.
         return logits.div_(temp.unsqueeze(dim=1))
 
     def greedy_sample(self, logits: torch.Tensor) -> torch.Tensor:
