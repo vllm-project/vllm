@@ -2,7 +2,7 @@
 
 import asyncio
 from abc import ABC, abstractmethod
-from typing import AsyncGenerator, Mapping, Optional
+from typing import AsyncGenerator, Mapping, Optional, Union
 
 from vllm.beam_search import BeamSearchSequence, create_sort_beams_key_function
 from vllm.config import DecodingConfig, ModelConfig, VllmConfig
@@ -65,6 +65,7 @@ class EngineClient(ABC):
         prompt: PromptType,
         request_id: str,
         params: BeamSearchParams,
+        lora_request: Optional[Union[list[LoRARequest], LoRARequest]] = None,
     ) -> AsyncGenerator[RequestOutput, None]:
 
         beam_width = params.beam_width
@@ -126,7 +127,7 @@ class EngineClient(ABC):
                 task = asyncio.create_task(
                     collect_from_async_generator(
                         self.generate(individual_prompt, beam_search_params,
-                                      request_id_item)))
+                                      request_id_item, lora_request)))
                 tasks.append(task)
 
             output = await asyncio.gather(*tasks)
