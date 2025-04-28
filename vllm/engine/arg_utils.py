@@ -11,7 +11,7 @@ from typing import (Any, Callable, Dict, List, Literal, Optional, Type,
                     TypeVar, Union, cast, get_args, get_origin)
 
 import torch
-from typing_extensions import TypeIs
+from typing_extensions import TypeIs, deprecated
 
 import vllm.envs as envs
 from vllm import version
@@ -48,33 +48,31 @@ TypeHint = Union[type[Any], object]
 TypeHintT = Union[type[T], object]
 
 
-def optional_arg(val: str, return_type: Callable[[str], T]) -> Optional[T]:
-    if val == "" or val == "None":
-        return None
-    try:
-        return return_type(val)
-    except ValueError as e:
-        raise argparse.ArgumentTypeError(
-            f"Value {val} cannot be converted to {return_type}.") from e
+def optional_type(
+        return_type: Callable[[str], T]) -> Callable[[str], Optional[T]]:
+
+    def _optional_type(val: str) -> Optional[T]:
+        if val == "" or val == "None":
+            return None
+        try:
+            if return_type is dict:
+                if not re.match("^{.*}$", val):
+                    return nullable_kvs(val)
+                return json.loads(val)
+            return return_type(val)
+        except ValueError as e:
+            raise argparse.ArgumentTypeError(
+                f"Value {val} cannot be converted to {return_type}.") from e
+
+    return _optional_type
 
 
-def optional_str(val: str) -> Optional[str]:
-    return optional_arg(val, str)
-
-
-def optional_int(val: str) -> Optional[int]:
-    return optional_arg(val, int)
-
-
-def optional_float(val: str) -> Optional[float]:
-    return optional_arg(val, float)
-
-
+@deprecated(
+    "Passing a JSON argument as a string containing comma separated key=value "
+    "pairs is deprecated. This will be removed in v0.10.0. Please use a JSON "
+    "string instead.")
 def nullable_kvs(val: str) -> Optional[dict[str, int]]:
-    """NOTE: This function is deprecated, args should be passed as JSON
-    strings instead.
-    
-    Parses a string containing comma separate key [str] to value [int]
+    """Parses a string containing comma separate key [str] to value [int]
     pairs into a dictionary.
 
     Args:
@@ -106,17 +104,6 @@ def nullable_kvs(val: str) -> Optional[dict[str, int]]:
         out_dict[key] = parsed_value
 
     return out_dict
-
-
-def optional_dict(val: str) -> Optional[dict[str, int]]:
-    if re.match("^{.*}$", val):
-        return optional_arg(val, json.loads)
-
-    logger.warning(
-        "Failed to parse JSON string. Attempting to parse as "
-        "comma-separated key=value pairs. This will be deprecated in a "
-        "future release.")
-    return nullable_kvs(val)
 
 
 @dataclass
@@ -359,15 +346,17 @@ class EngineArgs:
                     kwargs[name]["type"] = dtype
                     kwargs[name]["nargs"] = "+"
                 elif can_be_type(field_type, int):
-                    kwargs[name]["type"] = optional_int if optional else int
+                    kwargs[name]["type"] = optional_type(
+                        int) if optional else int
                 elif can_be_type(field_type, float):
-                    kwargs[name][
-                        "type"] = optional_float if optional else float
+                    kwargs[name]["type"] = optional_type(
+                        float) if optional else float
                 elif can_be_type(field_type, dict):
-                    kwargs[name]["type"] = optional_dict
+                    kwargs[name]["type"] = optional_type(dict)
                 elif (can_be_type(field_type, str)
                       or is_custom_type(field_type)):
-                    kwargs[name]["type"] = optional_str if optional else str
+                    kwargs[name]["type"] = optional_type(
+                        str) if optional else str
                 else:
                     raise ValueError(
                         f"Unsupported type {field.type} for argument {name}. ")
@@ -390,13 +379,13 @@ class EngineArgs:
             'which task to use.')
         parser.add_argument(
             '--tokenizer',
-            type=optional_str,
+            type=optional_type(str),
             default=EngineArgs.tokenizer,
             help='Name or path of the huggingface tokenizer to use. '
             'If unspecified, model name or path will be used.')
         parser.add_argument(
             "--hf-config-path",
-            type=optional_str,
+            type=optional_type(str),
             default=EngineArgs.hf_config_path,
             help='Name or path of the huggingface config to use. '
             'If unspecified, model name or path will be used.')
@@ -408,21 +397,21 @@ class EngineArgs:
             'the input. The generated output will contain token ids.')
         parser.add_argument(
             '--revision',
-            type=optional_str,
+            type=optional_type(str),
             default=None,
             help='The specific model version to use. It can be a branch '
             'name, a tag name, or a commit id. If unspecified, will use '
             'the default version.')
         parser.add_argument(
             '--code-revision',
-            type=optional_str,
+            type=optional_type(str),
             default=None,
             help='The specific revision to use for the model code on '
             'Hugging Face Hub. It can be a branch name, a tag name, or a '
             'commit id. If unspecified, will use the default version.')
         parser.add_argument(
             '--tokenizer-revision',
-            type=optional_str,
+            type=optional_type(str),
             default=None,
             help='Revision of the huggingface tokenizer to use. '
             'It can be a branch name, a tag name, or a commit id. '
@@ -513,7 +502,7 @@ class EngineArgs:
 
         parser.add_argument(
             '--logits-processor-pattern',
-            type=optional_str,
+            type=optional_type(str),
             default=None,
             help='Optional regex pattern specifying valid logits processor '
             'qualified names that can be passed with the `logits_processors` '
@@ -612,7 +601,7 @@ class EngineArgs:
         # Quantization settings.
         parser.add_argument('--quantization',
                             '-q',
-                            type=optional_str,
+                            type=optional_type(str),
                             choices=[*QUANTIZATION_METHODS, None],
                             default=EngineArgs.quantization,
                             help='Method used to quantize the weights. If '
@@ -921,7 +910,7 @@ class EngineArgs:
             'class without changing the existing functions.')
         parser.add_argument(
             "--generation-config",
-            type=optional_str,
+            type=optional_type(str),
             default="auto",
             help="The folder path to the generation config. "
             "Defaults to 'auto', the generation config will be loaded from "
