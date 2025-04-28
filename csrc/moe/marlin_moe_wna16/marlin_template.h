@@ -834,12 +834,12 @@ __global__ void Marlin(
   // shared memory pipeline location.
   bool should_load_a = true;
   int max_num_stage_groups =
-      ((sh_a_max_row - moe_block_size) / block_num_valid_tokens + 1) / stages;
+      ((sh_a_max_row - moe_block_size) / moe_block_size + 1) / stages;
   auto fetch_to_shared = [&](int pipe, int a_off, bool pred = true,
                              int pipe_a = 0) {
     if (pred) {
       if (should_load_a) {
-        int4* sh_a_stage = sh_a + pipe_a * block_num_valid_tokens * a_sh_stride;
+        int4* sh_a_stage = sh_a + moe_block_size * a_sh_stride * pipe_a;
   #pragma unroll
         for (int i = 0; i < a_sh_wr_iters; i++) {
           int row = a_gl_rd_delta_i / a_gl_stride * i + a_gl_rd_row;
@@ -956,7 +956,7 @@ __global__ void Marlin(
   // Load the next sub-tile from the current location in the shared memory pipe
   // into the current register buffer.
   auto fetch_to_registers = [&](int k, int pipe, int pipe_a = 0) {
-    int4* sh_a_stage = sh_a + pipe_a * block_num_valid_tokens * a_sh_stride;
+    int4* sh_a_stage = sh_a + moe_block_size * a_sh_stride * pipe_a;
   #pragma unroll
     for (int i = 0; i < thread_m_blocks; i++)
       ldsm<m_block_size_8 ? 2 : 4, scalar_t>(
@@ -1817,12 +1817,6 @@ __global__ void Marlin(
       slice_col++;
       is_first_matmul_in_slice = true;
       init_slice();
-
-      if (slice_col == 0) {
-        max_num_stage_groups =
-            ((sh_a_max_row - moe_block_size) / block_num_valid_tokens + 1) /
-            stages;
-      }
 
       if (slice_col == 0 || old_slice_row ||
           prob_k > thread_k_blocks * 16 * stages * max_num_stage_groups) {
