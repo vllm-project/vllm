@@ -310,6 +310,20 @@ class EagleProposer:
             logger.info("Loading EAGLE LM head weights from the target model.")
             self.model.lm_head = target_model.lm_head
 
+    @torch.inference_mode()
+    def dummy_run(
+        self,
+        num_tokens: int,
+    ) -> None:
+        with set_forward_context(None, self.vllm_config,
+                                 num_tokens=num_tokens):
+            if self.method == 'eagle':
+                self.model(
+                    input_ids=self.input_ids[:num_tokens],
+                    positions=self.positions[:num_tokens],
+                    hidden_states=self.hidden_states[:num_tokens],
+                )
+
 
 # NOTE(woosuk): Currently, the below code is not used and we always use argmax
 # to sample the draft tokens. We will use this after we find a way to manage
