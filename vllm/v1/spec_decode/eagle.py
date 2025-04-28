@@ -224,7 +224,8 @@ class EagleProposer:
         with set_default_torch_dtype(
                 draft_model_config.dtype), set_current_vllm_config(
                     self.vllm_config):
-            draft_model_cls, arch = ModelRegistry.resolve_model_cls(draft_model_config.architectures)
+            draft_model_cls, arch = ModelRegistry.resolve_model_cls(
+                draft_model_config.architectures)
             self.model = draft_model_cls(
                 model_config=draft_model_config,
                 start_layer_id=target_layer_num).to(target_device)
