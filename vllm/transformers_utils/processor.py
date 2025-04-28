@@ -208,38 +208,3 @@ def cached_image_processor_from_config(
         trust_remote_code=model_config.trust_remote_code,
         **_merge_mm_kwargs(model_config, **kwargs),
     )
-
-
-def get_video_processor(
-    processor_name: str,
-    *args: Any,
-    trust_remote_code: bool = False,
-    **kwargs: Any,
-):
-    """Load a video processor for the given model name via HuggingFace."""
-    # don't put this import at the top level
-    # it will call torch.cuda.device_count()
-    from transformers.image_processing_utils import BaseImageProcessor
-
-    processor = get_processor(
-        processor_name,
-        *args,
-        trust_remote_code=trust_remote_code,
-        **kwargs,
-    )
-
-    return cast(BaseImageProcessor, processor.video_processor)
-
-
-cached_get_video_processor = lru_cache(get_video_processor)
-
-
-def cached_video_processor_from_config(
-    model_config: "ModelConfig",
-    **kwargs: Any,
-):
-    return cached_get_video_processor(
-        model_config.model,
-        trust_remote_code=model_config.trust_remote_code,
-        **_merge_mm_kwargs(model_config, **kwargs),
-    )

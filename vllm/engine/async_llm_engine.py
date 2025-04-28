@@ -493,12 +493,11 @@ class _AsyncLLMEngine(LLMEngine):
             tokenizer = await self.get_tokenizer_async(lora_request)
             self._validate_token_prompt(prompt, tokenizer=tokenizer)
 
-        preprocessed_inputs = await self.input_preprocessor.preprocess_async(
+        processed_inputs = await self.input_preprocessor.preprocess_async(
             prompt,
             lora_request=lora_request,
             prompt_adapter_request=prompt_adapter_request,
         )
-        processed_inputs = self.input_processor(preprocessed_inputs)
 
         if isinstance(params, SamplingParams) and \
             params.guided_decoding is not None:
