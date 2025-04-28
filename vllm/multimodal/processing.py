@@ -1432,26 +1432,26 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
 
         merged_items = defaultdict[str, list[ProcessingCacheItem]](list)
         for modality, cache_items in mm_cache_items.items():
-            for idx, cache_item in enumerate(cache_items):
+            for cache_item in cache_items:
                 if cache_item.value is None:
                     kw_item = mm_missing_kwargs.get_item(
                         modality,
                         mm_missing_next_idx[modality],
                     )
-                    cache_item = ProcessingCacheItem(
+                    cache_item_new = ProcessingCacheItem(
                         key=cache_item.key,
                         value=kw_item,
                     )
 
-                    cache.put_item(cache_item)
+                    cache.put_item(cache_item_new)
                     mm_missing_next_idx[modality] += 1
                 else:
-                    cache_item = ProcessingCacheItem(
+                    cache_item_new = ProcessingCacheItem(
                         key=cache_item.key,
                         value=cache_item.value,
                     )
 
-                merged_items[modality].append(cache_item)
+                merged_items[modality].append(cache_item_new)
 
         return dict(merged_items)
 
@@ -1525,7 +1525,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
             enable_hf_prompt_update=False,
         )
 
-        mm_cache_items = self._merge_mm_kwargs(
+        mm_cache_items_merged = self._merge_mm_kwargs(
             cache,
             mm_cache_items=mm_cache_items,
             mm_missing_data=mm_missing_data,
@@ -1533,13 +1533,13 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         )
 
         mm_kwargs = MultiModalKwargs.from_items([
-            item.value for cache_items in mm_cache_items.values()
+            item.value for cache_items in mm_cache_items_merged.values()
             for item in cache_items
         ])
 
         mm_hashes = {
             modality: [item.key for item in cache_items]
-            for modality, cache_items in mm_cache_items.items()
+            for modality, cache_items in mm_cache_items_merged.items()
         } if return_mm_hashes else None
 
         return prompt_ids, mm_kwargs, mm_hashes, is_update_applied
