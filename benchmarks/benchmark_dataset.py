@@ -18,6 +18,7 @@ import base64
 import io
 import json
 import logging
+import os
 import random
 from abc import ABC, abstractmethod
 from collections.abc import Mapping
@@ -610,6 +611,16 @@ class HuggingFaceDataset(BenchmarkDataset):
             streaming=True,
         )
         self.data = self.data.shuffle(seed=self.random_seed)
+
+    @classmethod
+    def is_available(cls, dataset_path: str):
+        """Check if dataset_path is available depend on basename."""
+        dataset_name = os.path.basename(dataset_path)
+        supported_datasets = {
+            os.path.basename(path)
+            for path in cls.SUPPORTED_DATASET_PATHS
+        }
+        return dataset_name in supported_datasets
 
 
 # -----------------------------------------------------------------------------
