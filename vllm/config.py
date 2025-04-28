@@ -2679,6 +2679,8 @@ class LoRAConfig:
 @config
 @dataclass
 class PromptAdapterConfig:
+    """Configuration for PromptAdapters."""
+
     max_prompt_adapters: int = 1
     """Max number of PromptAdapters in a batch."""
     max_prompt_adapter_token: int = 0
