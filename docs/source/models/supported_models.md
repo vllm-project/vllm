@@ -793,6 +793,8 @@ or `--limit-mm-per-prompt` (online serving). For example, to enable passing up t
 Offline inference:
 
 ```python
+from vllm import LLM
+
 llm = LLM(
     model="Qwen/Qwen2-VL-7B-Instruct",
     limit_mm_per_prompt={"image": 4},
