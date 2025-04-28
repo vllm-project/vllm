@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
+import importlib
+import pkgutil
 import sys
 import types
 from importlib.util import find_spec
@@ -46,6 +48,23 @@ if not HAS_TRITON:
             self.constexpr = None
             self.dtype = None
 
+    def init_torch_inductor():
+        name = "torch._inductor.runtime"
+        torch_runtime = importlib.import_module(name)
+        path = torch_runtime.__path__
+        for module_info in pkgutil.iter_modules(path, name + "."):
+            if not module_info.ispkg:
+                try:
+                    importlib.import_module(module_info.name)
+                except Exception as e:
+                    logger.warning(
+                        "Ignore import error when loading " \
+                        "torch._inductor.runtime module: %s", e)
+                    continue
+
+    # initialize torch inductor without triton placeholder
+    init_torch_inductor()
+    # Replace the triton module in sys.modules with the placeholder
     sys.modules['triton'] = TritonPlaceholder()
     sys.modules['triton.language'] = TritonLanguagePlaceholder()
 
