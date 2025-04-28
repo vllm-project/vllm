@@ -362,22 +362,7 @@ class InputPreprocessor:
                 cache_salt=cache_salt,
             )
 
-        if parsed["type"] == "text":
-            text_content = parsed["content"]
-
-            prompt_text = text_content["prompt"]
-            multi_modal_data = text_content.get("multi_modal_data")
-            mm_processor_kwargs = text_content.get("mm_processor_kwargs")
-
-            if multi_modal_data is not None:
-                return self._process_multimodal(
-                    prompt_text,
-                    multi_modal_data,
-                    mm_processor_kwargs,
-                    lora_request=lora_request,
-                    return_mm_hashes=return_mm_hashes,
-                )
-
+        if prompt_token_ids is None:
             prompt_token_ids = self._tokenize_prompt(
                 prompt_text,
                 lora_request=lora_request,
