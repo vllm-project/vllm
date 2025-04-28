@@ -17,7 +17,7 @@ from vllm.transformers_utils.tokenizer_group import TokenizerGroup
 
 from .data import (DecoderOnlyInputs, EncoderDecoderInputs, ProcessorInputs,
                    PromptType, SingletonInputs, SingletonPrompt, token_inputs)
-from .parse import (ParsedTextPrompt, ParsedTokensPrompt,
+from .parse import (ParsedStrPrompt, ParsedTextPrompt, ParsedTokensPrompt,
                     is_explicit_encoder_decoder_prompt, parse_singleton_prompt)
 
 logger = init_logger(__name__)
@@ -292,22 +292,28 @@ class InputPreprocessor:
                                   return_mm_hashes,
                                   cache_salt=cache_salt)
 
-    def _get_prompt_data(self, parsed_prompt: Union[ParsedTextPrompt,
+    def _get_prompt_data(self, parsed_prompt: Union[ParsedStrPrompt,
+                                                    ParsedTextPrompt,
                                                     ParsedTokensPrompt]):
         prompt_text = None
         prompt_token_ids = None
         token_type_ids = None
+        cache_salt = None
 
-        if parsed_prompt["type"] == "tokens":
-            content = parsed_prompt["content"]
-            prompt_token_ids = content.get("prompt_token_ids")
-            token_type_ids = content.get("token_type_ids")
-        elif parsed_prompt["type"] == "text":
-            prompt_text = parsed_prompt["content"]["prompt"]
+        if parsed_prompt["type"] == "str":
+            prompt_text = parsed_prompt["content"]
         else:
-            assert_never(parsed_prompt)
+            content = parsed_prompt["content"]
+            cache_salt = content.get("cache_salt")
+            if parsed_prompt["type"] == "text":
+                prompt_text = content["prompt"]
+            elif parsed_prompt["type"] == "tokens":
+                prompt_token_ids = content.get("prompt_token_ids")
+                token_type_ids = content.get("token_type_ids")
+            else:
+                assert_never(parsed_prompt)
 
-        return prompt_text, prompt_token_ids, token_type_ids
+        return prompt_text, prompt_token_ids, token_type_ids, cache_salt
 
     def _prompt_to_llm_inputs(
         self,
@@ -354,9 +360,9 @@ class InputPreprocessor:
 
         if multi_modal_data is not None:
             return self._process_multimodal(
-                prompt_token_ids if prompt_text is None else prompt_text,
-                multi_modal_data,
-                mm_processor_kwargs,
+                prompt_text if prompt_text is not None else prompt_token_ids,
+                parsed["content"].get("multi_modal_data"),
+                parsed["content"].get("mm_processor_kwargs"),
                 lora_request=lora_request,
                 return_mm_hashes=return_mm_hashes,
                 cache_salt=cache_salt,
@@ -402,16 +408,12 @@ class InputPreprocessor:
         prompt_text, prompt_token_ids, token_type_ids = self._get_prompt_data(
             parsed)
 
-        content = parsed["content"]
-        multi_modal_data = content.get("multi_modal_data")
-        mm_processor_kwargs = content.get("mm_processor_kwargs")
-        cache_salt = content.get("cache_salt")
-
-        if multi_modal_data is not None:
+        if parsed["type"] != "str" and "multi_modal_data" in parsed[
+                "content"] is not None:
             return await self._process_multimodal_async(
                 prompt_token_ids if prompt_text is None else prompt_text,
-                multi_modal_data,
-                mm_processor_kwargs,
+                parsed["content"].get("multi_modal_data"),
+                parsed["content"].get("mm_processor_kwargs"),
                 lora_request=lora_request,
                 return_mm_hashes=return_mm_hashes,
                 cache_salt=cache_salt,
