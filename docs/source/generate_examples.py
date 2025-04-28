@@ -17,6 +17,7 @@ def fix_case(text: str) -> str:
         "cli": "CLI",
         "cpu": "CPU",
         "llm": "LLM",
+        "mae": "MAE",
         "tpu": "TPU",
         "aqlm": "AQLM",
         "gguf": "GGUF",
@@ -24,6 +25,7 @@ def fix_case(text: str) -> str:
         "rlhf": "RLHF",
         "vllm": "vLLM",
         "openai": "OpenAI",
+        "lmcache": "LMCache",
         "multilora": "MultiLoRA",
         "mlpspeculator": "MLPSpeculator",
         r"fp\d+": lambda x: x.group(0).upper(),  # e.g. fp16, fp32

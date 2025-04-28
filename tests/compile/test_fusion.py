@@ -44,12 +44,17 @@ class TestModel(torch.nn.Module):
         resid = torch.sqrt(x)
         y = self.norm[0](x)
 
-        x2 = self.fp8_linear.apply(y, self.w[0], self.wscale[0], self.scale[0])
+        x2 = self.fp8_linear.apply(y,
+                                   self.w[0],
+                                   self.wscale[0],
+                                   input_scale=self.scale[0])
         # make sure resid is used for replacement to work
         y2, resid = self.norm[1](x2, resid)
 
-        x3 = self.fp8_linear.apply(y2, self.w[1], self.wscale[1],
-                                   self.scale[1])
+        x3 = self.fp8_linear.apply(y2,
+                                   self.w[1],
+                                   self.wscale[1],
+                                   input_scale=self.scale[1])
         y3, resid = self.norm[2](x3, resid)  # use resid here
         return y3
 
@@ -72,12 +77,13 @@ def test_fusion_rmsnorm_quant(dtype, hidden_size, num_tokens, eps, static,
 
     vllm_config = VllmConfig(compilation_config=CompilationConfig(
         level=CompilationLevel.PIECEWISE, custom_ops=["+rms_norm"]))
+    vllm_config.compilation_config.pass_config = \
+            CompilationConfig.PassConfig(enable_fusion=True,
+                                              enable_noop=True)
     with vllm.config.set_current_vllm_config(vllm_config):
         # Reshape pass is needed for the fusion pass to work
-        config = CompilationConfig.PassConfig(enable_fusion=True,
-                                              enable_noop=True)
-        noop_pass = NoOpEliminationPass(config)
-        fusion_pass = FusionPass.instance(config)
+        noop_pass = NoOpEliminationPass(vllm_config)
+        fusion_pass = FusionPass.instance(vllm_config)
 
         backend = TestBackend(noop_pass, fusion_pass)
         model = TestModel(hidden_size, eps, static, cutlass_fp8_enabled)

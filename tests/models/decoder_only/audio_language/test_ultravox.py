@@ -1,17 +1,19 @@
 # SPDX-License-Identifier: Apache-2.0
 
-from typing import Optional
+import json
+from typing import Any, Optional
 
 import numpy as np
 import pytest
 import pytest_asyncio
 from transformers import AutoModel, AutoTokenizer
 
-from vllm.multimodal.audio import resample_audio
+from vllm.multimodal.audio import resample_audio_librosa
 from vllm.sequence import SampleLogprobs
 
-from ....conftest import HfRunner, VllmRunner
+from ....conftest import HfRunner, VllmRunner, _AudioAssets
 from ....utils import RemoteOpenAIServer
+from ...registry import HF_EXAMPLE_MODELS
 from ...utils import check_logprobs_close
 
 MODEL_NAME = "fixie-ai/ultravox-v0_5-llama-3_2-1b"
@@ -29,33 +31,39 @@ CHUNKED_PREFILL_KWARGS = {
 }
 
 
-@pytest.fixture(scope="session")
-def audio_assets():
-    from vllm.assets.audio import AudioAsset
-    return [AudioAsset("mary_had_lamb"), AudioAsset("winning_call")]
-
-
 @pytest.fixture(scope="module", params=("mary_had_lamb", "winning_call"))
 def audio(request):
     from vllm.assets.audio import AudioAsset
     return AudioAsset(request.param)
 
 
+def params_kwargs_to_cli_args(params_kwargs: dict[str, Any]) -> list[str]:
+    """Convert kwargs to CLI args."""
+    args = []
+    for key, value in params_kwargs.items():
+        if isinstance(value, bool):
+            if value:
+                args.append(f"--{key.replace('_','-')}")
+        else:
+            args.append(f"--{key.replace('_','-')}={value}")
+    return args
+
+
 @pytest.fixture(params=[
     pytest.param({}, marks=pytest.mark.cpu_model),
     pytest.param(CHUNKED_PREFILL_KWARGS),
 ])
-def server(request, audio_assets):
+def server(request, audio_assets: _AudioAssets):
     args = [
-        "--dtype=bfloat16", "--max-model-len=4096", "--enforce-eager",
-        f"--limit-mm-per-prompt=audio={len(audio_assets)}",
-        "--trust-remote-code"
-    ] + [
-        f"--{key.replace('_','-')}={value}"
-        for key, value in request.param.items()
-    ]
+        "--dtype", "bfloat16", "--max-model-len", "4096", "--enforce-eager",
+        "--limit-mm-per-prompt",
+        json.dumps({"audio": len(audio_assets)}), "--trust-remote-code"
+    ] + params_kwargs_to_cli_args(request.param)
 
-    with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
+    with RemoteOpenAIServer(MODEL_NAME,
+                            args,
+                            env_dict={"VLLM_AUDIO_FETCH_TIMEOUT":
+                                      "30"}) as remote_server:
         yield remote_server
 
 
@@ -106,6 +114,10 @@ def run_test(
     **kwargs,
 ):
     """Inference result should be the same between hf and vllm."""
+    model_info = HF_EXAMPLE_MODELS.find_hf_info(model)
+    model_info.check_available_online(on_fail="skip")
+    model_info.check_transformers_version(on_fail="skip")
+
     # NOTE: take care of the order. run vLLM first, and then run HF.
     # vLLM needs a fresh new process without cuda initialization.
     # if we run HF first, the cuda initialization will be done and it
@@ -127,9 +139,9 @@ def run_test(
                 [hf_prompt],
                 max_tokens,
                 num_logprobs=num_logprobs,
-                audios=[(resample_audio(audio[0],
-                                        orig_sr=audio[1],
-                                        target_sr=16000), 16000)])
+                audios=[(resample_audio_librosa(audio[0],
+                                                orig_sr=audio[1],
+                                                target_sr=16000), 16000)])
             for _, hf_prompt, audio in prompts_and_audios
         ]
 
@@ -156,6 +168,10 @@ def run_multi_audio_test(
     num_logprobs: int,
     **kwargs,
 ):
+    model_info = HF_EXAMPLE_MODELS.find_hf_info(model)
+    model_info.check_available_online(on_fail="skip")
+    model_info.check_transformers_version(on_fail="skip")
+
     with vllm_runner(model,
                      dtype=dtype,
                      enforce_eager=True,
@@ -208,8 +224,9 @@ def test_models(hf_runner, vllm_runner, audio, dtype: str, max_tokens: int,
     pytest.param({}, marks=pytest.mark.cpu_model),
     pytest.param(CHUNKED_PREFILL_KWARGS),
 ])
-def test_models_with_multiple_audios(vllm_runner, audio_assets, dtype: str,
-                                     max_tokens: int, num_logprobs: int,
+def test_models_with_multiple_audios(vllm_runner, audio_assets: _AudioAssets,
+                                     dtype: str, max_tokens: int,
+                                     num_logprobs: int,
                                      vllm_kwargs: dict) -> None:
 
     vllm_prompt = _get_prompt(len(audio_assets),
@@ -228,7 +245,7 @@ def test_models_with_multiple_audios(vllm_runner, audio_assets, dtype: str,
 
 
 @pytest.mark.asyncio
-async def test_online_serving(client, audio_assets):
+async def test_online_serving(client, audio_assets: _AudioAssets):
     """Exercises online serving with/without chunked prefill enabled."""
 
     messages = [{

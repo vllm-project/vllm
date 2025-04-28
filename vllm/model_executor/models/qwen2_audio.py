@@ -22,7 +22,6 @@
 # limitations under the License.
 """Inference-only Qwen2-Audio model compatible with HuggingFace weights."""
 from collections.abc import Iterable, Mapping, Sequence
-from functools import cached_property
 from typing import Any, Optional, Set, Tuple, TypedDict, Union
 
 import torch
@@ -34,16 +33,16 @@ from transformers.models.qwen2_audio import (Qwen2AudioConfig,
 from transformers.models.whisper import WhisperFeatureExtractor
 
 from vllm.config import VllmConfig
-from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.inputs import MultiModalFieldConfig, MultiModalKwargs
+from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig,
+                                    MultiModalKwargs)
 from vllm.multimodal.parse import (AudioProcessorItems, MultiModalDataItems,
                                    MultiModalDataParser)
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
                                         BaseProcessingInfo, PromptReplacement,
                                         PromptUpdate, PromptUpdateDetails)
-from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
+from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
 
 from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsPP
@@ -109,41 +108,33 @@ class Qwen2AudioProcessingInfo(BaseProcessingInfo):
     def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
         return {"audio": None}
 
-    def get_mm_max_tokens_per_item(
-        self,
-        seq_len: int,
-        mm_counts: Mapping[str, int],
-    ) -> Mapping[str, int]:
-        hf_config = self.get_hf_config()
-        max_source_positions = hf_config.audio_config.max_source_positions
-        max_output_lengths = (max_source_positions - 2) // 2 + 1
-
-        return {"audio": max_output_lengths}
-
 
 class Qwen2AudioDummyInputsBuilder(
         BaseDummyInputsBuilder[Qwen2AudioProcessingInfo]):
 
-    def get_dummy_processor_inputs(
+    def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
+        num_audios = mm_counts.get("audio", 0)
+
+        hf_processor = self.info.get_hf_processor()
+        audio_token = hf_processor.audio_token
+
+        return audio_token * num_audios
+
+    def get_dummy_mm_data(
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-    ) -> ProcessorInputs:
+    ) -> MultiModalDataDict:
         feature_extractor = self.info.get_feature_extractor()
 
         sampling_rate = feature_extractor.sampling_rate
         audio_len = feature_extractor.chunk_length * sampling_rate
         num_audios = mm_counts.get("audio", 0)
 
-        mm_data = {
+        return {
             "audio":
             self._get_dummy_audios(length=audio_len, num_audios=num_audios)
         }
-
-        return ProcessorInputs(
-            prompt_text="<|AUDIO|>" * num_audios,
-            mm_data=mm_data,
-        )
 
 
 class Qwen2AudioMultiModalProcessor(
@@ -229,9 +220,9 @@ class Qwen2AudioMultiModalProcessor(
 
             audio_tokens = [audio_token_id] * num_features
 
-            return PromptUpdateDetails(
-                full=[audio_bos_id] + audio_tokens + [audio_eos_id],
-                features=audio_tokens,
+            return PromptUpdateDetails.select_token_id(
+                [audio_bos_id] + audio_tokens + [audio_eos_id],
+                embed_token_id=audio_token_id,
             )
 
         return [
@@ -273,13 +264,6 @@ class Qwen2AudioForConditionalGeneration(nn.Module, SupportsMultiModal,
 
         self.make_empty_intermediate_tensors = (
             self.language_model.make_empty_intermediate_tensors)
-
-    @cached_property
-    def sampler(self):
-        if hasattr(self.language_model, "sampler"):
-            return self.language_model.sampler
-
-        return get_sampler()
 
     def _validate_and_reshape_mm_tensor(self, mm_input: object,
                                         name: str) -> torch.Tensor:
@@ -355,6 +339,9 @@ class Qwen2AudioForConditionalGeneration(nn.Module, SupportsMultiModal,
         return torch.split(masked_audio_features,
                            audio_output_lengths.flatten().tolist())
 
+    def get_language_model(self) -> torch.nn.Module:
+        return self.language_model
+
     def get_multimodal_embeddings(
             self, **kwargs: object) -> Optional[MultiModalEmbeddings]:
         audio_input = self._parse_and_validate_audio_input(**kwargs)
@@ -408,13 +395,6 @@ class Qwen2AudioForConditionalGeneration(nn.Module, SupportsMultiModal,
     ) -> Optional[torch.Tensor]:
         return self.language_model.compute_logits(hidden_states,
                                                   sampling_metadata)
-
-    def sample(
-        self,
-        logits: torch.Tensor,
-        sampling_metadata: SamplingMetadata,
-    ) -> Optional[SamplerOutput]:
-        return self.language_model.sample(logits, sampling_metadata)
 
     def load_weights(self, weights: Iterable[Tuple[str,
                                                    torch.Tensor]]) -> Set[str]:

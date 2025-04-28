@@ -7,6 +7,8 @@ from transformers import PretrainedConfig
 
 from vllm import LLM
 from vllm.engine.llm_engine import LLMEngine as V0LLMEngine
+from vllm.utils import GiB_bytes
+from vllm.v1.core.kv_cache_utils import get_kv_cache_config
 from vllm.v1.engine.core import EngineCore as V1EngineCore
 
 from .registry import HF_EXAMPLE_MODELS
@@ -22,10 +24,7 @@ def test_can_initialize(model_arch):
     def hf_overrides(hf_config: PretrainedConfig) -> PretrainedConfig:
         hf_config.update(model_info.hf_overrides)
 
-        if hasattr(hf_config, "text_config"):
-            text_config: PretrainedConfig = hf_config.text_config
-        else:
-            text_config = hf_config
+        text_config = hf_config.get_text_config()
 
         text_config.update({
             "num_layers": 1,
@@ -42,14 +41,21 @@ def test_can_initialize(model_arch):
         self.cache_config.num_gpu_blocks = 0
         self.cache_config.num_cpu_blocks = 0
 
-    def _initalize_kv_caches_v1(self, vllm_config):
-        # gpu_blocks (> 0), cpu_blocks
-        return 1, 0
+    def _initialize_kv_caches_v1(self, vllm_config):
+        kv_cache_specs = self.model_executor.get_kv_cache_specs()
+        scheduler_kv_cache_config = get_kv_cache_config(
+            vllm_config,
+            kv_cache_specs[0],
+            20 * GiB_bytes,
+        )
+
+        # gpu_blocks (> 0), cpu_blocks, scheduler_kv_cache_config
+        return 1, 0, scheduler_kv_cache_config
 
     with (patch.object(V0LLMEngine, "_initialize_kv_caches",
                        _initialize_kv_caches_v0),
           patch.object(V1EngineCore, "_initialize_kv_caches",
-                       _initalize_kv_caches_v1)):
+                       _initialize_kv_caches_v1)):
         LLM(
             model_info.default,
             tokenizer=model_info.tokenizer,

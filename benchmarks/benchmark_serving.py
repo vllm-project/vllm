@@ -34,7 +34,8 @@ from datetime import datetime
 from typing import Any, Optional
 
 import numpy as np
-from backend_request_func import (ASYNC_REQUEST_FUNCS, RequestFuncInput,
+from backend_request_func import (ASYNC_REQUEST_FUNCS,
+                                  OPENAI_COMPATIBLE_BACKENDS, RequestFuncInput,
                                   RequestFuncOutput)
 from tqdm.asyncio import tqdm
 from transformers import PreTrainedTokenizerBase
@@ -49,10 +50,11 @@ try:
 except ImportError:
     from argparse import ArgumentParser as FlexibleArgumentParser
 
-from benchmark_dataset import (BurstGPTDataset, ConversationDataset,
-                               HuggingFaceDataset, InstructCoderDataset,
-                               RandomDataset, SampleRequest, ShareGPTDataset,
-                               SonnetDataset, VisionArenaDataset)
+from benchmark_dataset import (AIMODataset, ASRDataset, BurstGPTDataset,
+                               ConversationDataset, HuggingFaceDataset,
+                               InstructCoderDataset, RandomDataset,
+                               SampleRequest, ShareGPTDataset, SonnetDataset,
+                               VisionArenaDataset)
 from benchmark_utils import convert_to_pytorch_benchmark_format, write_to_json
 
 MILLISECONDS_TO_SECONDS_CONVERSION = 1000
@@ -154,7 +156,7 @@ def calculate_metrics(
         if outputs[i].success:
             output_len = outputs[i].output_tokens
 
-            if output_len is None:
+            if not output_len:
                 # We use the tokenizer to count the number of output tokens
                 # for some serving backends instead of looking at
                 # len(outputs[i].itl) since multiple output tokens may be
@@ -259,6 +261,7 @@ async def benchmark(
     goodput_config_dict: dict[str, float],
     max_concurrency: Optional[int],
     lora_modules: Optional[Iterable[str]],
+    extra_body: Optional[dict],
 ):
     if backend in ASYNC_REQUEST_FUNCS:
         request_func = ASYNC_REQUEST_FUNCS[backend]
@@ -271,10 +274,6 @@ async def benchmark(
         input_requests[0].expected_output_len, \
             input_requests[0].multi_modal_data
 
-    if backend != "openai-chat" and test_mm_content is not None:
-        # multi-modal benchmark is only available on OpenAI Chat backend.
-        raise ValueError(
-            "Multi-modal content is only supported on 'openai-chat' backend.")
     assert test_mm_content is None or isinstance(test_mm_content, dict)
     test_input = RequestFuncInput(
         model=model_id,
@@ -286,6 +285,7 @@ async def benchmark(
         logprobs=logprobs,
         multi_modal_content=test_mm_content,
         ignore_eos=ignore_eos,
+        extra_body=extra_body,
     )
 
     test_output = await request_func(request_func_input=test_input)
@@ -312,7 +312,8 @@ async def benchmark(
                                          output_len=test_output_len,
                                          logprobs=logprobs,
                                          multi_modal_content=test_mm_content,
-                                         ignore_eos=ignore_eos)
+                                         ignore_eos=ignore_eos,
+                                         extra_body=extra_body)
         profile_output = await request_func(request_func_input=profile_input)
         if profile_output.success:
             print("Profiler started")
@@ -362,7 +363,8 @@ async def benchmark(
                                               output_len=output_len,
                                               logprobs=logprobs,
                                               multi_modal_content=mm_content,
-                                              ignore_eos=ignore_eos)
+                                              ignore_eos=ignore_eos,
+                                              extra_body=extra_body)
         tasks.append(
             asyncio.create_task(
                 limited_request_func(request_func_input=request_func_input,
@@ -595,6 +597,12 @@ def main(args: argparse.Namespace):
             args.hf_split = "train"
         elif args.dataset_path in ConversationDataset.SUPPORTED_DATASET_PATHS:
             dataset_class = ConversationDataset
+        elif args.dataset_path in AIMODataset.SUPPORTED_DATASET_PATHS:
+            dataset_class = AIMODataset
+            args.hf_split = "train"
+        elif args.dataset_path in ASRDataset.SUPPORTED_DATASET_PATHS:
+            dataset_class = ASRDataset
+            args.hf_split = "train"
         else:
             supported_datasets = set([
                 dataset_name for cls in HuggingFaceDataset.__subclasses__()
@@ -606,14 +614,21 @@ def main(args: argparse.Namespace):
                 f" from one of following: {supported_datasets}. "
                 "Please consider contributing if you would "
                 "like to add support for additional dataset formats.")
+
+        if (dataset_class.IS_MULTIMODAL and backend not in \
+            ["openai-chat", "openai-audio"]):
+            # multi-modal benchmark is only available on OpenAI Chat backend.
+            raise ValueError(
+                "Multi-modal content is only supported on 'openai-chat' and " \
+                "'openai-audio' backend.")
         input_requests = dataset_class(
             dataset_path=args.dataset_path,
             dataset_subset=args.hf_subset,
             dataset_split=args.hf_split,
+            random_seed=args.seed,
         ).sample(
             num_requests=args.num_prompts,
             tokenizer=tokenizer,
-            random_seed=args.seed,
             output_len=args.hf_output_len,
         )
 
@@ -648,6 +663,26 @@ def main(args: argparse.Namespace):
             raise ValueError(f"Unknown dataset: {args.dataset_name}") from err
     goodput_config_dict = check_goodput_args(args)
 
+    # Collect the sampling parameters.
+    sampling_params = {
+        k: v
+        for k, v in {
+            "top_p": args.top_p,
+            "top_k": args.top_k,
+            "min_p": args.min_p,
+            "temperature": args.temperature
+        }.items() if v is not None
+    }
+
+    # Sampling parameters are only supported by openai-compatible backend.
+    if sampling_params and args.backend not in OPENAI_COMPATIBLE_BACKENDS:
+        raise ValueError(
+            "Sampling parameters are only supported by openai-compatible "
+            "backends.")
+
+    if "temperature" not in sampling_params:
+        sampling_params["temperature"] = 0.0  # Default to greedy decoding.
+
     # Avoid GC processing "static" data - reduce pause times.
     gc.collect()
     gc.freeze()
@@ -674,10 +709,11 @@ def main(args: argparse.Namespace):
             goodput_config_dict=goodput_config_dict,
             max_concurrency=args.max_concurrency,
             lora_modules=args.lora_modules,
+            extra_body=sampling_params,
         ))
 
     # Save config and results to json
-    if args.save_result:
+    if args.save_result or args.append_result:
         result_json: dict[str, Any] = {}
 
         # Setup
@@ -698,6 +734,14 @@ def main(args: argparse.Namespace):
                     raise ValueError(
                         "Invalid metadata format. Please use KEY=VALUE format."
                     )
+        # Traffic
+        result_json["request_rate"] = (args.request_rate if args.request_rate
+                                       < float("inf") else "inf")
+        result_json["burstiness"] = args.burstiness
+        result_json["max_concurrency"] = args.max_concurrency
+
+        # Merge with benchmark result
+        result_json = {**result_json, **benchmark_result}
 
         if not args.save_detailed:
             # Remove fields with too many data points
@@ -708,15 +752,6 @@ def main(args: argparse.Namespace):
                 if field in result_json:
                     del result_json[field]
 
-        # Traffic
-        result_json["request_rate"] = (args.request_rate if args.request_rate
-                                       < float("inf") else "inf")
-        result_json["burstiness"] = args.burstiness
-        result_json["max_concurrency"] = args.max_concurrency
-
-        # Merge with benchmark result
-        result_json = {**result_json, **benchmark_result}
-
         # Save to file
         base_model_id = model_id.split("/")[-1]
         max_concurrency_str = (f"-concurrency{args.max_concurrency}"
@@ -726,7 +761,12 @@ def main(args: argparse.Namespace):
             file_name = args.result_filename
         if args.result_dir:
             file_name = os.path.join(args.result_dir, file_name)
-        with open(file_name, "w", encoding='utf-8') as outfile:
+        with open(file_name,
+                  mode="a+" if args.append_result else "w",
+                  encoding='utf-8') as outfile:
+            # Append a newline.
+            if args.append_result and outfile.tell() != 0:
+                outfile.write("\n")
             json.dump(result_json, outfile)
         save_to_pytorch_benchmark_format(args, result_json, file_name)
 
@@ -859,6 +899,11 @@ if __name__ == "__main__":
         "information such as response, error, ttfs, tpots, etc.",
     )
     parser.add_argument(
+        "--append-result",
+        action="store_true",
+        help="Append the benchmark result to the existing json file.",
+    )
+    parser.add_argument(
         "--metadata",
         metavar="KEY=VALUE",
         nargs="*",
@@ -891,7 +936,7 @@ if __name__ == "__main__":
         "--percentile-metrics",
         type=str,
         default="ttft,tpot,itl",
-        help="Comma-seperated list of selected metrics to report percentils. "
+        help="Comma-separated list of selected metrics to report percentils. "
         "This argument specifies the metrics to report percentiles. "
         "Allowed metric names are \"ttft\", \"tpot\", \"itl\", \"e2el\". "
         "Default value is \"ttft,tpot,itl\".")
@@ -899,7 +944,7 @@ if __name__ == "__main__":
         "--metric-percentiles",
         type=str,
         default="99",
-        help="Comma-seperated list of percentiles for selected metrics. "
+        help="Comma-separated list of percentiles for selected metrics. "
         "To report 25-th, 50-th, and 75-th percentiles, use \"25,50,75\". "
         "Default value is \"99\". "
         "Use \"--percentile-metrics\" to select metrics.",
@@ -966,18 +1011,23 @@ if __name__ == "__main__":
     random_group.add_argument(
         "--random-range-ratio",
         type=float,
-        default=1.0,
-        help="Range of sampled ratio of input/output length, "
-        "used only for random sampling.",
+        default=0.0,
+        help="Range ratio for sampling input/output length, "
+        "used only for random sampling. Must be in the range [0, 1) to define "
+        "a symmetric sampling range"
+        "[length * (1 - range_ratio), length * (1 + range_ratio)].",
     )
     random_group.add_argument(
         "--random-prefix-len",
         type=int,
         default=0,
-        help="Number of fixed prefix tokens before random "
-        " context. The length range of context in a random "
-        " request is [random-prefix-len, "
-        " random-prefix-len + random-prefix-len * random-range-ratio).")
+        help=("Number of fixed prefix tokens before the random context "
+              "in a request. "
+              "The total input length is the sum of `random-prefix-len` and "
+              "a random "
+              "context length sampled from [input_len * (1 - range_ratio), "
+              "input_len * (1 + range_ratio)]."),
+    )
 
     hf_group = parser.add_argument_group("hf dataset options")
     hf_group.add_argument("--hf-subset",
@@ -995,6 +1045,33 @@ if __name__ == "__main__":
         help="Output length for each request. Overrides the output lengths "
         "from the sampled HF dataset.",
     )
+
+    sampling_group = parser.add_argument_group("sampling parameters")
+    sampling_group.add_argument(
+        "--top-p",
+        type=float,
+        default=None,
+        help="Top-p sampling parameter. Only has effect on openai-compatible "
+        "backends.")
+    sampling_group.add_argument(
+        "--top-k",
+        type=int,
+        default=None,
+        help="Top-k sampling parameter. Only has effect on openai-compatible "
+        "backends.")
+    sampling_group.add_argument(
+        "--min-p",
+        type=float,
+        default=None,
+        help="Min-p sampling parameter. Only has effect on openai-compatible "
+        "backends.")
+    sampling_group.add_argument(
+        "--temperature",
+        type=float,
+        default=None,
+        help="Temperature sampling parameter. Only has effect on "
+        "openai-compatible backends. If not specified, default to greedy "
+        "decoding (i.e. temperature==0.0).")
 
     parser.add_argument(
         '--tokenizer-mode',

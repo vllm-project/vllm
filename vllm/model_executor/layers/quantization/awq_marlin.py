@@ -17,14 +17,13 @@ from vllm.model_executor.layers.quantization.awq import (AWQConfig,
                                                          is_layer_skipped_awq)
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig, QuantizeMethodBase)
-from vllm.model_executor.layers.quantization.moe_wna16 import MoeWNA16Config
 from vllm.model_executor.layers.quantization.utils import replace_parameter
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     apply_awq_marlin_linear, awq_to_marlin_zero_points, check_marlin_supported,
-    check_marlin_supports_layer, marlin_make_empty_g_idx,
-    marlin_make_workspace, marlin_moe_permute_scales, marlin_permute_scales,
-    moe_awq_to_marlin_zero_points, verify_marlin_supported,
-    verify_marlin_supports_shape)
+    check_marlin_supports_layer, check_moe_marlin_supports_layer,
+    marlin_make_empty_g_idx, marlin_make_workspace, marlin_moe_permute_scales,
+    marlin_permute_scales, moe_awq_to_marlin_zero_points,
+    verify_marlin_supported, verify_marlin_supports_shape)
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.model_executor.parameter import (GroupQuantScaleParameter,
                                            PackedvLLMParameter)
@@ -136,12 +135,15 @@ class AWQMarlinConfig(QuantizationConfig):
                     self.full_config).get_quant_method(layer, prefix)
             return AWQMarlinLinearMethod(self)
         elif isinstance(layer, FusedMoE):
-            if layer.local_num_experts > 32:
-                # For MoEs with many experts the moe_wna16 kernel is faster
+            from vllm.model_executor.layers.quantization.moe_wna16 import (
+                MoeWNA16Config)
+            if not check_moe_marlin_supports_layer(layer, self.group_size):
+                logger.warning_one(
+                    f"Layer '{prefix}' is not supported by AWQMoeMarlin. "
+                    "Falling back to Moe WNA16 kernels.")
                 return MoeWNA16Config.from_config(
                     self.full_config).get_quant_method(layer, prefix)
-            else:
-                return AWQMoEMethod(self)
+            return AWQMoEMethod(self)
         return None
 
     @classmethod
@@ -391,6 +393,13 @@ class AWQMoEMethod(FusedMoEMethodBase):
         layer.register_parameter("w2_qzeros", w2_qzeros)
         set_weight_attrs(w2_qzeros, extra_weight_attrs)
 
+        device = layer.w13_qweight.device
+        sms = torch.cuda.get_device_properties(device).multi_processor_count
+        layer.workspace = torch.zeros((sms * 4, ),
+                                      dtype=torch.int,
+                                      device=device,
+                                      requires_grad=False)
+
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         num_experts = layer.w13_qweight.shape[0]
         device = layer.w13_qweight.device
@@ -469,12 +478,14 @@ class AWQMoEMethod(FusedMoEMethodBase):
         custom_routing_function: Optional[Callable] = None,
         scoring_func: str = "softmax",
         e_score_correction_bias: Optional[torch.Tensor] = None,
+        apply_router_weight_on_input: bool = False,
         activation: str = "silu",
     ) -> torch.Tensor:
         assert activation == "silu", "Only SiLU activation is supported."
-        if expert_map is not None:
+
+        if apply_router_weight_on_input:
             raise NotImplementedError(
-                "Expert Parallelism is not supported for "
+                "Apply router weight on input is not supported for"
                 "fused Marlin MoE method.")
 
         topk_weights, topk_ids = FusedMoE.select_experts(
@@ -498,7 +509,10 @@ class AWQMoEMethod(FusedMoEMethodBase):
             router_logits,
             topk_weights,
             topk_ids,
+            global_num_experts=global_num_experts,
+            expert_map=expert_map,
             w1_zeros=layer.w13_qzeros,
             w2_zeros=layer.w2_qzeros,
+            workspace=layer.workspace,
             num_bits=self.quant_config.weight_bits,
         )

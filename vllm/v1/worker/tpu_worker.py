@@ -18,10 +18,10 @@ from vllm.logger import init_logger
 from vllm.model_executor import set_random_seed
 from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE
 from vllm.v1.core.sched.output import SchedulerOutput
-from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
+from vllm.v1.kv_cache_interface import (AttentionSpec, KVCacheConfig,
                                         KVCacheSpec)
 from vllm.v1.outputs import ModelRunnerOutput
-from vllm.v1.utils import bind_kv_cache
+from vllm.v1.utils import bind_kv_cache, report_usage_stats
 from vllm.v1.worker.tpu_model_runner import TPUModelRunner
 
 logger = init_logger(__name__)
@@ -84,6 +84,12 @@ class TPUWorker:
 
     def init_device(self):
         os.environ["PJRT_DEVICE"] = "TPU"
+        # Note: Currently the XLA compiler wrongly uses 2D ring strategy on 1D
+        # ring, the xla tpu compiler flag
+        # `xla_tpu_force_1d_allreduce_at_chunk_count` is a temporary solution to
+        # fix this. It will be removed after the bug in XLA compiler is fixed.
+        os.environ["LIBTPU_INIT_ARGS"] = (
+            "--xla_tpu_force_1d_allreduce_at_chunk_count=1")
         torch.set_grad_enabled(False)
         torch.set_default_dtype(self.model_config.dtype)
 
@@ -127,11 +133,15 @@ class TPUWorker:
         # Init ModelRunner here, so that we have access to self.device.
         self.model_runner = TPUModelRunner(self.vllm_config, self.device)
 
+        if rank == 0:
+            # If usage stat is enabled, collect relevant info.
+            report_usage_stats(self.vllm_config)
+
     def determine_available_memory(self) -> int:
         kv_caches: dict[str, torch.Tensor] = {}
         kv_cache_spec = self.model_runner.get_kv_cache_spec()
         for layer_name, layer_spec in kv_cache_spec.items():
-            if isinstance(layer_spec, FullAttentionSpec):
+            if isinstance(layer_spec, AttentionSpec):
                 dtype = layer_spec.dtype
 
                 # Use an empty tensor instead of `None`` to force Dynamo to pass
@@ -141,7 +151,8 @@ class TPUWorker:
                                             device=self.device)
                 kv_caches[layer_name] = tpu_kv_cache
             else:
-                raise NotImplementedError
+                raise NotImplementedError(
+                    f"Unsupported KV cache spec '{type(layer_spec)}'")
 
         runner_kv_caches: list[torch.Tensor] = []
         bind_kv_cache(
@@ -149,13 +160,19 @@ class TPUWorker:
             self.vllm_config.compilation_config.static_forward_context,
             runner_kv_caches)
 
-        self.model_runner._dummy_run(
-            runner_kv_caches,
-            num_tokens=self.scheduler_config.max_num_batched_tokens,
-        )
+        # `max_num_tokens >= max_num_batched_tokens` due to padding.
+        self.model_runner.profile_run(self.model_runner.max_num_tokens)
 
         # Synchronize before measuring the memory usage.
         xm.wait_device_ops()
+
+        # During the profiling run, the model runs without KV cache. After
+        # the profiling run, the model always runs with KV cache. Here we clear
+        # the dynamo cache and cached bytecode to ensure the model always has
+        # one compiled bytecode. Having one FX graph/cached bytecode per
+        # compiled model is required for `support_torch_compile` decorator to
+        # skip dynamo guard.
+        self.model_runner.reset_dynamo_cache()
 
         # Get the maximum amount of memory used by the model weights and
         # intermediate activations.

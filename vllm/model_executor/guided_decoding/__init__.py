@@ -33,6 +33,12 @@ def maybe_backend_fallback(
         logger.warning("%s Falling back to use %s instead.", message, fallback)
         guided_params.backend = fallback
 
+    # `auto` was added for V1 to explicitly declare a mode that has fallbacks
+    # in place. If that is specified with V0, treat it as `xgrammar`, as we have
+    # fallbacks enabled for that and it is the V0 default.
+    if guided_params.backend == "auto":
+        guided_params.backend = "xgrammar"
+
     # lm-format-enforce doesn't support grammar, fallback to xgrammar
     if guided_params.backend_name == "lm-format-enforcer":
         if guided_params.grammar is not None:
@@ -53,18 +59,13 @@ def maybe_backend_fallback(
         from vllm.model_executor.guided_decoding.xgrammar_decoding import (
             xgr_installed)
 
-        # xgrammar doesn't support regex, fallback to outlines
-        if guided_params.regex is not None:
-            fallback_or_error(
-                guided_params,
-                "xgrammar does not support regex guided decoding.", "outlines")
         # xgrammar doesn't support some JSON schema features
-        elif (guided_params.json is not None
-              and has_xgrammar_unsupported_json_features(guided_params.json)):
+        if (guided_params.json is not None and
+                has_xgrammar_unsupported_json_features(guided_params.json)):
             fallback_or_error(
                 guided_params,
                 "xgrammar does not support advanced JSON schema features like "
-                "enums, patterns or numeric ranges.", "outlines")
+                "string length, item limits, or property bounds.", "outlines")
 
         # xgrammar only supports GBNF grammars, so we must convert Lark.
         # We must check if the grammar is likely Lark and if that

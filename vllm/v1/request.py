@@ -3,17 +3,16 @@
 import enum
 from typing import TYPE_CHECKING, Optional, Union
 
+from vllm.multimodal.inputs import MultiModalKwargs, PlaceholderRange
 from vllm.sampling_params import SamplingParams
+from vllm.utils import is_list_of
 from vllm.v1.engine import (EngineCoreEvent, EngineCoreEventType,
                             EngineCoreRequest, FinishReason)
 from vllm.v1.structured_output.request import StructuredOutputRequest
 from vllm.v1.utils import ConstantList
 
 if TYPE_CHECKING:
-
     from vllm.lora.request import LoRARequest
-    from vllm.multimodal import MultiModalKwargs
-    from vllm.multimodal.inputs import PlaceholderRange
 
 
 class Request:
@@ -21,11 +20,10 @@ class Request:
     def __init__(
         self,
         request_id: str,
-        prompt: Optional[str],
         prompt_token_ids: list[int],
-        multi_modal_inputs: Optional[list["MultiModalKwargs"]],
+        multi_modal_inputs: Optional[list[MultiModalKwargs]],
         multi_modal_hashes: Optional[list[str]],
-        multi_modal_placeholders: Optional[list["PlaceholderRange"]],
+        multi_modal_placeholders: Optional[list[PlaceholderRange]],
         sampling_params: SamplingParams,
         eos_token_id: Optional[int],
         arrival_time: float,
@@ -47,7 +45,6 @@ class Request:
         assert sampling_params.max_tokens is not None
         self.max_tokens = sampling_params.max_tokens
 
-        self.prompt = prompt
         self.prompt_token_ids = prompt_token_ids
         self.num_prompt_tokens = len(self.prompt_token_ids)
         self._output_token_ids: list[int] = []
@@ -75,9 +72,13 @@ class Request:
 
     @classmethod
     def from_engine_core_request(cls, request: EngineCoreRequest) -> "Request":
+        if request.mm_inputs is not None:
+            assert isinstance(request.mm_inputs, list)
+            assert is_list_of(request.mm_inputs, MultiModalKwargs), (
+                "mm_inputs was not updated in EngineCore.add_request")
+
         return cls(
             request_id=request.request_id,
-            prompt=request.prompt,
             prompt_token_ids=request.prompt_token_ids,
             multi_modal_inputs=request.mm_inputs,
             multi_modal_hashes=request.mm_hashes,
@@ -121,7 +122,7 @@ class Request:
 
     def get_num_encoder_tokens(self, input_id: int) -> int:
         assert input_id < len(self.mm_positions)
-        num_tokens = self.mm_positions[input_id]["length"]
+        num_tokens = self.mm_positions[input_id].length
         return num_tokens
 
     @property

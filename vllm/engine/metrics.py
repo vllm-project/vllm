@@ -140,28 +140,27 @@ class Metrics:
             name="vllm:generation_tokens_total",
             documentation="Number of generation tokens processed.",
             labelnames=labelnames)
+
         self.counter_total_evicted_tokens = self._counter_cls(
             name="vllm:total_evicted_tokens_total",
             documentation="Total number of tokens evicted from KV cache",
             labelnames=labelnames)
 
-        buckets = [1, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8096]
-        if not vllm_config.model_config.enforce_eager:
-            buckets = vllm_config.compilation_config.\
-                cudagraph_capture_sizes.copy()
-            buckets.sort()
         self.histogram_iteration_tokens = self._histogram_cls(
             name="vllm:iteration_tokens_total",
             documentation="Histogram of number of tokens per engine_step.",
             labelnames=labelnames,
-            buckets=buckets)
+            buckets=[
+                1, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384
+            ])
         self.histogram_time_to_first_token = self._histogram_cls(
             name="vllm:time_to_first_token_seconds",
             documentation="Histogram of time to first token in seconds.",
             labelnames=labelnames,
             buckets=[
                 0.001, 0.005, 0.01, 0.02, 0.04, 0.06, 0.08, 0.1, 0.25, 0.5,
-                0.75, 1.0, 2.5, 5.0, 7.5, 10.0
+                0.75, 1.0, 2.5, 5.0, 7.5, 10.0, 20.0, 40.0, 80.0, 160.0, 640.0,
+                2560.0
             ])
         self.histogram_time_per_output_token = self._histogram_cls(
             name="vllm:time_per_output_token_seconds",
@@ -169,14 +168,14 @@ class Metrics:
             labelnames=labelnames,
             buckets=[
                 0.01, 0.025, 0.05, 0.075, 0.1, 0.15, 0.2, 0.3, 0.4, 0.5, 0.75,
-                1.0, 2.5
+                1.0, 2.5, 5.0, 7.5, 10.0, 20.0, 40.0, 80.0
             ])
 
         # Request stats
         #   Latency
         request_latency_buckets = [
             0.3, 0.5, 0.8, 1.0, 1.5, 2.0, 2.5, 5.0, 10.0, 15.0, 20.0, 30.0,
-            40.0, 50.0, 60.0
+            40.0, 50.0, 60.0, 120.0, 240.0, 480.0, 960.0, 1920.0, 7680.0
         ]
         self.histogram_e2e_time_request = self._histogram_cls(
             name="vllm:e2e_request_latency_seconds",
