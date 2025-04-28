@@ -44,6 +44,16 @@ logger = init_logger(__name__)
 
 ALLOWED_DETAILED_TRACE_MODULES = ["model", "worker", "all"]
 
+DEVICE_OPTIONS = [
+    "auto",
+    "cuda",
+    "neuron",
+    "cpu",
+    "tpu",
+    "xpu",
+    "hpu",
+]
+
 # object is used to allow for special typing forms
 T = TypeVar("T")
 TypeHint = Union[type[Any], object]
