@@ -51,11 +51,10 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, rocm_ops) {
       "                Tensor k_scale, Tensor v_scale) -> ()");
   rocm_ops.impl("paged_attention", torch::kCUDA, &paged_attention);
 
-  
   // Register fast Hadamard transforms
   rocm_ops.def("fast_hadamard_transform(Tensor x, float scale) -> Tensor");
-  rocm_ops.impl("fast_hadamard_transform", torch::kCUDA, &fast_hadamard_transform);
-
+  rocm_ops.impl("fast_hadamard_transform", torch::kCUDA,
+                &fast_hadamard_transform);
 }
 
 REGISTER_EXTENSION(TORCH_EXTENSION_NAME)

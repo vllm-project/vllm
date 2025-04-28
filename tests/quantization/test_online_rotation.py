@@ -12,16 +12,12 @@ import pytest
 import ray
 import torch
 
-from vllm.model_executor.layers.quantization.\
-    quark.schemes.hadamard_transform import (
-    hadamard_transform_registry, hadamard_sizes
-)
-
-from vllm.distributed import (broadcast_tensor_dict, get_pp_group,
-                              tensor_model_parallel_all_gather,
-                              tensor_model_parallel_all_reduce)
+from vllm.model_executor.layers.quantization\
+.quark.schemes.hadamard_transform import (
+    hadamard_sizes, hadamard_transform_registry)
 
 from ..utils import init_test_distributed_environment, multi_process_parallel
+
 
 @ray.remote(num_gpus=1, max_calls=1)
 def test_quarot_r4(
@@ -44,12 +40,15 @@ def test_quarot_r4(
     hadamard_transform = hadamard_transform_registry['quarot_r4']
     from types import SimpleNamespace
     input_size=14336
-    dummylayer = SimpleNamespace(weight=torch.Tensor([0]).to(device).bfloat16(),input_size_per_partition=input_size//tp_size,input_size=input_size)
+    dummylayer = SimpleNamespace(weight=torch.Tensor([0]).to(device).bfloat16(),
+                                 input_size_per_partition=input_size//tp_size,
+                                 input_size=input_size)
     rotation_function=hadamard_transform(layer=dummylayer)
     
     """TP: Perform rotation function on activation shard - bfloat16"""
     activation=torch.ones(2,input_size,device=device).bfloat16()
-    activation_shard=activation[:,rank*(input_size//tp_size):(rank+1)*(input_size//tp_size)]
+    isye=input_size//tp_size
+    activation_shard=activation[:,rank*(isye):(rank+1)*(isye)]
     activation_shard=activation_shard.contiguous().to(device)
     rotated_activation_shard=rotation_function(activation_shard)
 
