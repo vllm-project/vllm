@@ -59,11 +59,11 @@ if not HAS_TRITON:
                 except Exception as e:
                     logger.warning(
                         "Ignore import error when loading " \
-                        "torch._inductor.runtime module: %s", e)
+                        "%s: %s", module_info.name, e)
                     continue
 
     # initialize torch inductor without triton placeholder
-    # FIXME(Isotr0py): See if we can remove this after bumping torch version 
+    # FIXME(Isotr0py): See if we can remove this after bumping torch version
     # to 2.7.0, because torch 2.7.0 has a better triton check.
     init_torch_inductor_runtime()
     # Replace the triton module in sys.modules with the placeholder
