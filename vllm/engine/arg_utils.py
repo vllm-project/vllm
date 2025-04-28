@@ -309,7 +309,7 @@ class EngineArgs:
     disable_chunked_mm_input: bool = SchedulerConfig.disable_chunked_mm_input
 
     guided_decoding_backend: str = DecodingConfig.guided_decoding_backend
-    guided_decofing_backend_options: set[str] = \
+    guided_decoding_backend_options: set[str] = \
         get_field(DecodingConfig, "guided_decoding_backend_options")
     logits_processor_pattern: Optional[str] = None
 
