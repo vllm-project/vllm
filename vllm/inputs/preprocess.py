@@ -258,7 +258,8 @@ class InputPreprocessor:
 
         inputs = mm_processor.apply(prompt, mm_data, mm_processor_kwargs,
                                     return_mm_hashes)
-        inputs["cache_salt"] = cache_salt
+        if inputs is not None:
+            inputs["cache_salt"] = cache_salt
         return inputs
 
     async def _process_multimodal_async(
@@ -287,7 +288,8 @@ class InputPreprocessor:
 
         inputs = mm_processor.apply(prompt, mm_data, mm_processor_kwargs,
                                     return_mm_hashes)
-        inputs["cache_salt"] = cache_salt
+        if inputs is not None:
+            inputs["cache_salt"] = cache_salt
         return inputs
 
     def _get_prompt_data(self, parsed_prompt: Union[ParsedStrPrompt,
