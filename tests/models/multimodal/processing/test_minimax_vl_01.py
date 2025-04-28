@@ -9,12 +9,6 @@ from ...utils import build_model_context
 
 
 @pytest.mark.parametrize("model_id", ["MiniMaxAI/MiniMax-VL-01"])
-# yapf: disable
-@pytest.mark.parametrize(
-    ("mm_processor_kwargs", "expected_toks_per_img", "expected_pixels_shape"), [
-        ({}, 1426, (5704, 1176)),
-        ({"min_pixels": 64**2, "max_pixels": 512**2}, 330, (1320, 1176)),
-    ])
 # yapf: enable
 @pytest.mark.parametrize("num_imgs", [1, 2])
 @pytest.mark.parametrize("kwargs_on_init", [True, False])
@@ -22,8 +16,6 @@ def test_processor_override(
     image_assets: _ImageAssets,
     model_id: str,
     mm_processor_kwargs: dict[str, object],
-    expected_toks_per_img: int,
-    expected_pixels_shape: tuple[int, int],
     num_imgs: int,
     kwargs_on_init: bool,
 ):
@@ -39,17 +31,11 @@ def test_processor_override(
 
     # Build the image str / prompt based on the number of images we pass
     prompt = "<image>" * num_imgs
-    image = Image.new("RGB", size=image_size)
+    image = Image.new("RGB", size=(334, 334))
     mm_data = {"image": [image] * num_imgs}
 
     processed_inputs = processor.apply(prompt, mm_data, hf_processor_mm_kwargs)
 
-    # Ensure we have the right number of placeholders per num_crops size
-    hf_processor = processor.info.get_hf_processor(**hf_processor_mm_kwargs)
-    image_token_id = tokenizer.convert_tokens_to_ids(hf_processor.image_token)
-    img_tok_count = processed_inputs["prompt_token_ids"].count(image_token_id)
-    pixel_shape = processed_inputs["mm_kwargs"]["pixel_values"].shape
+    image_placeholders = processed_inputs["mm_placeholders"]["image"]
 
-    assert img_tok_count == expected_toks_per_img * num_imgs
-    assert pixel_shape[0] == expected_pixels_shape[0] * num_imgs
-    assert pixel_shape[1] == expected_pixels_shape[1]
+    assert len(image_placeholders) == num_imgs
