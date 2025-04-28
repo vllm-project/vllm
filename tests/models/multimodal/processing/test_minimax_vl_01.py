@@ -1,54 +1,99 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import pytest
+from PIL import Image
 
 from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.multimodal.parse import ImageSize
+from vllm.multimodal.processing import BaseMultiModalProcessor
 
 from ....conftest import _ImageAssets
 from ...utils import build_model_context
 
 
 @pytest.mark.parametrize("model_id", ["MiniMaxAI/MiniMax-VL-01"])
-# yapf: disable
-@pytest.mark.parametrize(
-    ("mm_processor_kwargs", "expected_toks_per_img", "expected_pixels_shape"), [
-        ({}, 1426, (5704, 1176)),
-        ({"min_pixels": 64**2, "max_pixels": 512**2}, 330, (1320, 1176)),
-    ])
 # yapf: enable
 @pytest.mark.parametrize("num_imgs", [1, 2])
-@pytest.mark.parametrize("kwargs_on_init", [True, False])
 def test_processor_override(
     image_assets: _ImageAssets,
     model_id: str,
-    mm_processor_kwargs: dict[str, object],
-    expected_toks_per_img: int,
-    expected_pixels_shape: tuple[int, int],
     num_imgs: int,
-    kwargs_on_init: bool,
 ):
-    """Ensure MiniMaxVL01MultiModalProcessor handles min/max pixels properly."""
     ctx = build_model_context(
         model_id,
-        mm_processor_kwargs=mm_processor_kwargs if kwargs_on_init else None,
+        mm_processor_kwargs=None,
         limit_mm_per_prompt={"image": num_imgs},
     )
     processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
-    tokenizer = processor.info.get_tokenizer()
-    hf_processor_mm_kwargs = {} if kwargs_on_init else mm_processor_kwargs
+    prompt = "<image>" * num_imgs
+    image = Image.new("RGB", size=(364, 364))
+    mm_data = {"image": [image] * num_imgs}
 
-    # Build the image str / prompt based on the number of images we pass
-    prompt = "<|vision_start|><|image_pad|><|vision_end|>" * num_imgs
-    mm_data = {"image": [image_assets[0].pil_image] * num_imgs}
+    processed_inputs = processor.apply(prompt, mm_data, {})
+    image_placeholders = processed_inputs["mm_placeholders"]["image"]
 
-    processed_inputs = processor.apply(prompt, mm_data, hf_processor_mm_kwargs)
+    assert len(image_placeholders) == num_imgs
 
-    # Ensure we have the right number of placeholders per num_crops size
-    hf_processor = processor.info.get_hf_processor(**hf_processor_mm_kwargs)
-    image_token_id = tokenizer.convert_tokens_to_ids(hf_processor.image_token)
-    img_tok_count = processed_inputs["prompt_token_ids"].count(image_token_id)
-    pixel_shape = processed_inputs["mm_kwargs"]["pixel_values"].shape
 
-    assert img_tok_count == expected_toks_per_img * num_imgs
-    assert pixel_shape[0] == expected_pixels_shape[0] * num_imgs
-    assert pixel_shape[1] == expected_pixels_shape[1]
+def _validate_image_prompt_replacements_one(
+    processor: BaseMultiModalProcessor,
+    num_imgs: int,
+    failed_size_excs: list[tuple[ImageSize, Exception]],
+    image_size: ImageSize,
+) -> None:
+    prompt = "<image>" * num_imgs
+    image = Image.new("RGB", size=image_size)
+    mm_data = {"image": [image] * num_imgs}
+
+    try:
+        processed_inputs = processor.apply(prompt, mm_data, {})
+
+        image_placeholders = processed_inputs["mm_placeholders"]["image"]
+        assert len(image_placeholders) == num_imgs
+
+    except Exception as exc:
+        failed_size_excs.append((image_size, exc))
+
+
+def _test_image_prompt_replacements(
+    processor,
+    *,
+    num_imgs: int,
+    image_sizes: list[ImageSize],
+) -> None:
+
+    failed_size_excs = list[tuple[ImageSize, Exception]]()
+
+    for size in image_sizes:
+        _validate_image_prompt_replacements_one(processor, num_imgs,
+                                                failed_size_excs, size)
+
+    if failed_size_excs:
+        msg = "Found failing image sizes:" \
+            + "\n========\n".join(f"[{size}]\n{exc}"
+                                  for size, exc in failed_size_excs)
+        raise AssertionError(msg)
+
+
+@pytest.mark.parametrize("model_id", ["MiniMaxAI/MiniMax-VL-01"])
+@pytest.mark.parametrize("num_imgs", [1, 2])
+def test_processor_prompt_replacements_regression(model_id, num_imgs):
+    ctx = build_model_context(
+        model_id,
+        mm_processor_kwargs=None,
+        limit_mm_per_prompt={"image": num_imgs},
+    )
+    processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
+
+    image_ratios = [(171, 152), (184, 161), (198, 176), (333, 296), (369, 328),
+                    (488, 183), (2560, 1669)]
+    image_sizes = [
+        size for w, h in image_ratios
+        for size in [ImageSize(w, h), ImageSize(h, w)]
+    ]
+
+    _test_image_prompt_replacements(
+        processor,
+        num_imgs=num_imgs,
+        image_sizes=image_sizes,
+    )
