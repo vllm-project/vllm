@@ -125,7 +125,6 @@ class EagleProposer:
         else:
             num_input_tokens = num_tokens
         attn_metadata.num_input_tokens = num_input_tokens
-
         # copy inputs to buffer for cudagraph
         self.positions[:num_tokens] = target_positions
 
@@ -156,13 +155,11 @@ class EagleProposer:
 
         positions = target_positions[last_token_indices]
         hidden_states = hidden_states[last_token_indices]
-
         if self.use_cuda_graph and \
             batch_size <= self.cudagraph_batch_sizes[-1]:
             input_batch_size = self.vllm_config.pad_for_cudagraph(batch_size)
         else:
             input_batch_size = batch_size
-
         attn_metadata.num_actual_tokens = batch_size
         attn_metadata.num_input_tokens = input_batch_size
         attn_metadata.max_query_len = 1
@@ -304,7 +301,6 @@ class EagleProposer:
 
         loaded_weights = self.model.load_weights(
             loader.get_all_weights(draft_model_config, self.model))
-
         if self.vllm_config.speculative_config.method == "eagle3":
             if "model.embed_tokens.weight" not in loaded_weights:
                 logger.info(

@@ -1488,7 +1488,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     intermediate_tensors=intermediate_tensors,
                     inputs_embeds=inputs_embeds,
                 )
-
             if self.use_aux_hidden_state_outputs:
                 hidden_states, _ = outputs
             else:
