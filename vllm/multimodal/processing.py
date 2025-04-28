@@ -1569,56 +1569,35 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
                     "model (usually arising from an inconsistency between "
                     "`_call_hf_processor` and `_get_prompt_updates`).")
 
-    def apply(
+    def _hash_mm_items(
         self,
-        prompt: Union[str, list[int]],
-        mm_data: MultiModalDataDict,
+        mm_items: MultiModalDataItems,
         hf_processor_mm_kwargs: Mapping[str, object],
-        return_mm_hashes: bool = False,
-    ) -> MultiModalInputs:
-        """
-        Process multi-modal inputs to be used in vLLM.
+    ) -> dict[str, list[str]]:
+        """Create MM hashes to be returned (only used in V1)."""
 
-        The main steps are:
-
-        1. Apply HF Processor on prompt text and multi-modal data together,
-           outputting token IDs and processed tensors.
-        2. Find and update sequences in the token IDs with placeholder tokens.
-           The number of placeholder tokens equals the feature size of the
-           multi-modal data outputted by the multi-modal encoder.
-        3. Extract information about the placeholder tokens from the
-           processed token IDs.
-        """
-        mm_items = self._to_mm_items(mm_data)
-
-        # Create MM hashes to be returned (only used in V1)
         # TODO: Use these hash keys for caching operations in apply_hf_processor
         # instead of rehashing.
+        model_id = self.info.model_id
 
-        if return_mm_hashes:
-            model_id = self.info.model_id
-            mm_hashes = {
-                modality: [
-                    MultiModalHasher.hash_kwargs(model_id=model_id,
-                                                 **{modality: item},
-                                                 **hf_processor_mm_kwargs)
-                    for item in items
-                ]
-                for modality, items in mm_items.items()
-            }
-        else:
-            mm_hashes = None
+        return {
+            modality: [
+                MultiModalHasher.hash_kwargs(model_id=model_id,
+                                             **{modality: item},
+                                             **hf_processor_mm_kwargs)
+                for item in items
+            ]
+            for modality, items in mm_items.items()
+        }
 
-        (
-            prompt_ids,
-            mm_kwargs,
-            is_update_applied,
-        ) = self._cached_apply_hf_processor(
-            prompt,
-            mm_items,
-            hf_processor_mm_kwargs,
-        )
-
+    def _maybe_apply_prompt_updates(
+        self,
+        mm_items: MultiModalDataItems,
+        hf_processor_mm_kwargs: Mapping[str, object],
+        prompt_ids: list[int],
+        mm_kwargs: MultiModalKwargs,
+        is_update_applied: bool,
+    ) -> tuple[list[int], str, Mapping[str, list[PlaceholderFeaturesInfo]]]:
         unbound_prompt_updates = self._get_prompt_updates(
             mm_items,
             hf_processor_mm_kwargs,
@@ -1651,6 +1630,51 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
                 mm_item_counts,
             )
             self._validate_mm_placeholders(mm_placeholders, mm_item_counts)
+
+        return prompt_ids, prompt, mm_placeholders
+
+    def apply(
+        self,
+        prompt: Union[str, list[int]],
+        mm_data: MultiModalDataDict,
+        hf_processor_mm_kwargs: Mapping[str, object],
+        return_mm_hashes: bool = False,
+    ) -> MultiModalInputs:
+        """
+        Process multi-modal inputs to be used in vLLM.
+
+        The main steps are:
+
+        1. Apply HF Processor on prompt text and multi-modal data together,
+           outputting token IDs and processed tensors.
+        2. Find and update sequences in the token IDs with placeholder tokens.
+           The number of placeholder tokens equals the feature size of the
+           multi-modal data outputted by the multi-modal encoder.
+        3. Extract information about the placeholder tokens from the
+           processed token IDs.
+        """
+        mm_items = self._to_mm_items(mm_data)
+
+        mm_hashes = (self._hash_mm_items(mm_items, hf_processor_mm_kwargs)
+                     if return_mm_hashes else None)
+
+        (
+            prompt_ids,
+            mm_kwargs,
+            is_update_applied,
+        ) = self._cached_apply_hf_processor(
+            prompt,
+            mm_items,
+            hf_processor_mm_kwargs,
+        )
+
+        prompt_ids, prompt, mm_placeholders = self._maybe_apply_prompt_updates(
+            mm_items=mm_items,
+            hf_processor_mm_kwargs=hf_processor_mm_kwargs,
+            prompt_ids=prompt_ids,
+            mm_kwargs=mm_kwargs,
+            is_update_applied=is_update_applied,
+        )
 
         mm_placeholder_ranges = {
             modality: [item.to_range() for item in placeholders]
