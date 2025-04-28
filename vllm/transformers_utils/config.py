@@ -693,7 +693,7 @@ def load_params_config(model: Union[str, Path], revision: Optional[str],
                 "quant_method": "fp8",
                 "activation_scheme": "static"
             }
-        elif quantization.get("quant_method") == "compressed_tensors":
+        elif quantization.get("quant_method") == "compressed-tensors":
             # Pass through the quantization config to compressed-tensors
             quantization_config = quantization
         else:

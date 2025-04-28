@@ -23,7 +23,7 @@ QuantizationMethods = Literal[
     "gptq_bitblas",
     "awq_marlin",
     "gptq",
-    "compressed_tensors",
+    "compressed-tensors",
     "bitsandbytes",
     "qqq",
     "hqq",
@@ -127,7 +127,7 @@ def get_quantization_config(quantization: str) -> Type[QuantizationConfig]:
         "gptq_bitblas": GPTQBitBLASConfig,
         "awq_marlin": AWQMarlinConfig,
         "gptq": GPTQConfig,
-        "compressed_tensors": CompressedTensorsConfig,
+        "compressed-tensors": CompressedTensorsConfig,
         "bitsandbytes": BitsAndBytesConfig,
         "ptpc_fp8": PTPCFp8Config,
         "qqq": QQQConfig,
@@ -149,4 +149,5 @@ __all__ = [
     "QuantizationConfig",
     "QuantizationMethods",
     "get_quantization_config",
+    "QUANTIZATION_METHODS",
 ]
