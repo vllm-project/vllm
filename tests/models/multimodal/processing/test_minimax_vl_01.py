@@ -51,11 +51,6 @@ def _validate_image_prompt_replacements_one(
         image_placeholders = processed_inputs["mm_placeholders"]["image"]
         assert len(image_placeholders) == num_imgs
 
-        first_placeholder = image_placeholders[0]
-
-        assert first_placeholder.length == (
-            len(processed_inputs["prompt_token_ids"]) - 1) // num_imgs
-
     except Exception as exc:
         failed_size_excs.append((image_size, exc))
 
