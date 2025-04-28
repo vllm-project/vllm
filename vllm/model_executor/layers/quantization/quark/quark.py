@@ -199,7 +199,7 @@ class QuarkConfig(QuantizationConfig):
         return is_int8_dtype and is_tensor and is_weight_symmetric and is_static
 
     def _find_matched_config(self, layer_name: str,
-                    module: torch.nn.Module) -> Dict[str, Any]:
+                             module: torch.nn.Module) -> Dict[str, Any]:
 
         proj_name = layer_name.split(".")[-1]
         if proj_name in self.packed_modules_mapping:
@@ -241,12 +241,12 @@ class QuarkConfig(QuantizationConfig):
             rv = global_quant_config
 
         if "online_rotations" in self.quant_config:
-            quant_config_online_rot=self.quant_config['online_rotations']
-            rot_info = next((value 
+            quant_config_online_rot = self.quant_config['online_rotations']
+            rot_info = next((value
                              for key, value in quant_config_online_rot.items()
                              if layer_name.endswith(key)), None)
-            rv['online_rotations']=rot_info
-            
+            rv['online_rotations'] = rot_info
+
         return rv
 
     def _get_scheme_from_config(self, config: Dict[str, Any]) -> "QuarkScheme":
@@ -256,22 +256,20 @@ class QuarkConfig(QuantizationConfig):
                 "and bias quantized are not supported")
         weight_config = cast(Dict[str, Any], config.get("weight"))
         input_config = cast(Dict[str, Any], config.get("input_tensors"))
-        
         """for QuaRot and other techniques that involve online rotations"""
-        online_rotation_config = cast(Dict[str, Any], 
+        online_rotation_config = cast(Dict[str, Any],
                                       config.get("online_rotations"))
         if online_rotation_config:
-            func_name=online_rotation_config['func_name']
-            func_args=online_rotation_config['func_args']
+            func_name = online_rotation_config['func_name']
+            func_args = online_rotation_config['func_args']
             if func_name in hadamard_transform_registry:
-                func_name=hadamard_transform_registry[func_name]
-                online_rotation_method=func_name,func_args
+                func_name = hadamard_transform_registry[func_name]
+                online_rotation_method = func_name, func_args
             else:
                 raise ValueError("hadamard rotation func_name"
                                  " is not found in registry")
         else:
             online_rotation_method = None
-
 
         if self._is_fp8_w8a8(weight_config, input_config):
             is_fp8_w8a8_supported = self._check_scheme_supported(
@@ -285,13 +283,13 @@ class QuarkConfig(QuantizationConfig):
         elif self._is_static_tensor_w8a8(weight_config, input_config):
             weight_qscheme = cast(str, weight_config.get("qscheme"))
             return QuarkW8A8Int8(qscheme=weight_qscheme,
-                                is_static_input_scheme=True,
-                                input_symmetric=input_config.get("symmetric"),
-                                online_rot_method=online_rotation_method)
+                                 is_static_input_scheme=True,
+                                 input_symmetric=input_config.get("symmetric"),
+                                 online_rot_method=online_rotation_method)
 
         raise NotImplementedError("No quark compatible scheme was found. "
-                                f"Weight config: {weight_config}, "
-                                f"Input config: {input_config}")
+                                  f"Weight config: {weight_config}, "
+                                  f"Input config: {input_config}")
 
     def get_scheme(self, layer: torch.nn.Module,
                    layer_name: str) -> "QuarkScheme":

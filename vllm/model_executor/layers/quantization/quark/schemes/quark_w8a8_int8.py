@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
-from typing import Callable, List, Optional, Set
+from typing import Callable, List, Optional, Set, Tuple
 
 import torch
 
@@ -19,11 +19,8 @@ logger = init_logger(__name__)
 class QuarkW8A8Int8(QuarkScheme):
     _kernel_backends_being_used: Set[str] = set()
 
-    def __init__(self, 
-                 qscheme: str, 
-                 is_static_input_scheme: Optional[bool],
-                 input_symmetric: Optional[bool],
-                 online_rot_method):
+    def __init__(self, qscheme: str, is_static_input_scheme: Optional[bool],
+                 input_symmetric: Optional[bool], online_rot_method):
         self.qscheme = qscheme
         self.is_static_input_scheme = is_static_input_scheme
         self.input_symmetric = input_symmetric
@@ -111,8 +108,8 @@ class QuarkW8A8Int8(QuarkScheme):
                                   azp_adj_param_name="azp_adj")
 
         if self.online_rotation_method:
-            func_name,func_args=self.online_rotation_method
-            self.online_rotation_method_callable=func_name(layer,*func_args)
+            func_name, func_args = self.online_rotation_method
+            self.online_rotation_method_callable = func_name(layer, *func_args)
 
     # Checkpoints are serialized in quark format, which is
     # different from the format the kernel may want. Handle repacking here.
@@ -126,10 +123,10 @@ class QuarkW8A8Int8(QuarkScheme):
         self.kernel.process_weights_after_loading(layer)
 
     def apply_weights(self, layer: torch.nn.Module, x: torch.Tensor,
-        bias: Optional[torch.Tensor]) -> torch.Tensor:
+                      bias: Optional[torch.Tensor]) -> torch.Tensor:
 
         if self.online_rotation_method:
 
-            x=self.online_rotation_method_callable(x)
-            
+            x = self.online_rotation_method_callable(x)
+
         return self.kernel.apply_weights(layer, x, bias)
