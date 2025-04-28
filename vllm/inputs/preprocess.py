@@ -258,7 +258,7 @@ class InputPreprocessor:
 
         inputs = mm_processor.apply(prompt, mm_data, mm_processor_kwargs,
                                     return_mm_hashes)
-        if inputs is not None:
+        if cache_salt is not None:
             inputs["cache_salt"] = cache_salt
         return inputs
 
@@ -288,7 +288,7 @@ class InputPreprocessor:
 
         inputs = mm_processor.apply(prompt, mm_data, mm_processor_kwargs,
                                     return_mm_hashes)
-        if inputs is not None:
+        if cache_salt is not None:
             inputs["cache_salt"] = cache_salt
         return inputs
 
@@ -361,7 +361,7 @@ class InputPreprocessor:
         if multi_modal_data is not None:
             return self._process_multimodal(
                 prompt_text if prompt_text is not None else prompt_token_ids,
-                parsed["content"].get("multi_modal_data"),
+                parsed["content"]["multi_modal_data"],
                 parsed["content"].get("mm_processor_kwargs"),
                 lora_request=lora_request,
                 return_mm_hashes=return_mm_hashes,
@@ -412,7 +412,7 @@ class InputPreprocessor:
                 "content"] is not None:
             return await self._process_multimodal_async(
                 prompt_token_ids if prompt_text is None else prompt_text,
-                parsed["content"].get("multi_modal_data"),
+                parsed["content"]["multi_modal_data"],
                 parsed["content"].get("mm_processor_kwargs"),
                 lora_request=lora_request,
                 return_mm_hashes=return_mm_hashes,
