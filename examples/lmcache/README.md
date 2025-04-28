@@ -8,8 +8,8 @@ This example demonstrates how to run LMCache with disaggregated prefill using NI
 
 ### Prerequisites
 
-- Install [LMCache](https://github.com/ai-dynamo/lmcache)
-- Install [NIXL](https://github.com/ai-dynamo/nixl)
+- Install [LMCache](https://github.com/LMCache/LMCache). You can simply run `pip install lmcache`.
+- Install [NIXL](https://github.com/ai-dynamo/nixl).
 - At least 2 GPUs
 - Valid Hugging Face token (HF_TOKEN) for Llama 3.1 8B Instruct.
 
