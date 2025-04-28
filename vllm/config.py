@@ -3167,6 +3167,9 @@ class DecodingConfig:
                 and self.backend not in ("xgrammar", "guidance")):
             raise ValueError("disable_any_whitespace is only supported for "
                              "xgrammar and guidance backends.")
+        if (self.disable_additional_properties and self.backend != "guidance"):
+            raise ValueError("disable_additional_properties is only supported "
+                             "for the guidance backend.")
 
     @deprecated(
         "Passing guided decoding backend options inside backend in the format "
