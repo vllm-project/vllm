@@ -87,12 +87,10 @@ class P2pNcclPipe:
                                                      daemon=True)
                 self._send_thread.start()
 
-        # tensor_id: torch.Tensor
-        self.recv_store: Dict[str, torch.Tensor] = {}
-        # remote_address: client socket
-        self.socks: Dict[str, Any] = {}
-        # remote_address: (ncclComm_t, rank, stream)
-        self.comms: Dict[str, Any] = {}
+        self.recv_store: Dict[str,
+                              torch.Tensor] = {}  # tensor_id: torch.Tensor
+        self.socks: Dict[str, Any] = {}  # remote_address: client socket
+        self.comms: Dict[str, Any] = {}  # remote_address: (ncclComm_t, rank)
 
         self.buffer_size = 0
         self.buffer_size_threshold = self.config.kv_buffer_size
@@ -127,8 +125,7 @@ class P2pNcclPipe:
                 rank = 0
                 comm: ncclComm_t = self.nccl.ncclCommInitRank(
                     2, unique_id, rank)
-                stream = torch.cuda.Stream()
-                self.comms[remote_address] = (comm, rank, stream)
+                self.comms[remote_address] = (comm, rank)
                 logger.info("🤝ncclCommInitRank Success, %s👉%s, MyRank: %s",
                             self.zmq_address, remote_address, rank)
 
@@ -218,7 +215,7 @@ class P2pNcclPipe:
             self._create_connect(remote_address)
 
         sock = self.socks[remote_address]
-        comm, rank, stream = self.comms[remote_address]
+        comm, rank = self.comms[remote_address]
 
         data = {"cmd": "GET", "tensor_id": tensor_id}
         sock.send(msgpack.dumps(data))
@@ -235,7 +232,7 @@ class P2pNcclPipe:
                              device=self.device)
 
         start_time = time.time()
-        self._recv(comm, tensor, rank ^ 1, stream)
+        self._recv(comm, tensor, rank ^ 1, self.recv_stream)
         duration = time.time() - start_time
         logger.info(
             "🔵[GET]Recv From %s, tensor_id:%s, shape:%s, duration:%.3fms, "
@@ -260,8 +257,7 @@ class P2pNcclPipe:
                         rank = 1
                         comm: ncclComm_t = self.nccl.ncclCommInitRank(
                             2, unique_id, rank)
-                        stream = torch.cuda.Stream()
-                        self.comms[remote_address.decode()] = (comm, rank, stream)
+                        self.comms[remote_address.decode()] = (comm, rank)
                         logger.info(
                             "🤝ncclCommInitRank Success, %s👈%s, MyRank:%s",
                             self.zmq_address, remote_address.decode(), rank)
@@ -287,8 +283,9 @@ class P2pNcclPipe:
                             self.buffer_size += tensor_size
                             self.router_socket.send_multipart(
                                 [remote_address, b"0"])
-                            comm, rank, stream = self.comms[remote_address.decode()]
-                            self._recv(comm, tensor, rank ^ 1, stream)
+                            comm, rank = self.comms[remote_address.decode()]
+                            self._recv(comm, tensor, rank ^ 1,
+                                       self.recv_stream)
                             logger.info(
                                 "🔵[PUT]Recv Tensor, %s👈%s, MyRank:%s, "
                                 "data:%s, shape:%s", self.zmq_address,
@@ -328,6 +325,7 @@ class P2pNcclPipe:
                         [remote_address, msgpack.dumps(data)])
 
                     if data["ret"] == 0:
+                        comm, rank = self.comms[remote_address.decode()]
                         self._send(comm, tensor.to(self.device), rank ^ 1,
                                    self.send_stream)
 
@@ -373,7 +371,7 @@ class P2pNcclPipe:
             self._create_connect(remote_address)
 
         sock = self.socks[remote_address]
-        comm, rank, stream = self.comms[remote_address]
+        comm, rank = self.comms[remote_address]
         data = {
             "cmd": "PUT",
             "tensor_id": tensor_id,
@@ -395,7 +393,7 @@ class P2pNcclPipe:
                 response.decode())
             return False
 
-        self._send(comm, tensor.to(self.device), rank ^ 1, stream)
+        self._send(comm, tensor.to(self.device), rank ^ 1, self.send_stream)
         logger.info("🔵Send Tensor, %s👉%s, MyRank:%s, data:%s, tensor:%s",
                     self.zmq_address, remote_address, rank, data, tensor.shape)
         return True
