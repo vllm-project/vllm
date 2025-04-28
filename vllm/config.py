@@ -52,8 +52,6 @@ if TYPE_CHECKING:
     from vllm.model_executor.layers.quantization.base_config import (
         QuantizationConfig)
     from vllm.model_executor.model_loader.loader import BaseModelLoader
-    from vllm.transformers_utils.tokenizer_group.base_tokenizer_group import (
-        BaseTokenizerGroup)
 
     ConfigType = type[DataclassInstance]
 else:
@@ -1250,6 +1248,10 @@ class ModelConfig:
         return (hasattr(self.hf_config, "matryoshka_dimensions")
                 or getattr(self.hf_config, "is_matryoshka", False))
 
+    @property
+    def matryoshka_dimensions(self):
+        return getattr(self.hf_config, "matryoshka_dimensions", None)
+
 
 BlockSize = Literal[1, 8, 16, 32, 64, 128]
 CacheDType = Literal["auto", "fp8", "fp8_e4m3", "fp8_e5m2"]
@@ -1407,83 +1409,33 @@ class CacheConfig:
             logger.warning("Possibly too large swap space. %s", msg)
 
 
-PoolType = Literal["ray"]
-
-
 @config
 @dataclass
 class TokenizerPoolConfig:
-    """Configuration for the tokenizer pool."""
+    """This config is deprecated and will be removed in a future release.
+
+    Passing these parameters will have no effect. Please remove them from your
+    configurations.
+    """
 
     pool_size: int = 0
-    """Number of tokenizer workers in the pool to use for asynchronous
-    tokenization. If 0, will use synchronous tokenization."""
-
-    pool_type: Union[PoolType, type["BaseTokenizerGroup"]] = "ray"
-    """Type of tokenizer pool to use for asynchronous tokenization. Ignored if
-    tokenizer_pool_size is 0."""
-
+    """This parameter is deprecated and will be removed in a future release.
+    Passing this parameter will have no effect. Please remove it from your
+    configurations."""
+    pool_type: str = "ray"
+    """This parameter is deprecated and will be removed in a future release.
+    Passing this parameter will have no effect. Please remove it from your
+    configurations."""
     extra_config: dict = field(default_factory=dict)
-    """Additional config for the pool. The way the config will be used depends
-    on the pool type. This should be a JSON string that will be parsed into a
-    dictionary. Ignored if tokenizer_pool_size is 0."""
+    """This parameter is deprecated and will be removed in a future release.
+    Passing this parameter will have no effect. Please remove it from your
+    configurations."""
 
-    def compute_hash(self) -> str:
-        """
-        WARNING: Whenever a new field is added to this config,
-        ensure that it is included in the factors list if
-        it affects the computation graph.
-
-        Provide a hash that uniquely identifies all the configs
-        that affect the structure of the computation
-        graph from input ids/embeddings to the final hidden states,
-        excluding anything before input ids/embeddings and after
-        the final hidden states.
-        """
-        # no factors to consider.
-        # this config will not affect the computation graph.
-        factors: list[Any] = []
-        hash_str = hashlib.md5(str(factors).encode(),
-                               usedforsecurity=False).hexdigest()
-        return hash_str
-
-    def __post_init__(self):
-        if self.pool_type not in ("ray", ) and not isinstance(
-                self.pool_type, type):
-            raise ValueError(f"Unknown pool type: {self.pool_type}")
-        if not isinstance(self.extra_config, dict):
-            raise ValueError("extra_config must be a dictionary.")
-
-    @classmethod
-    def create_config(
-        cls, tokenizer_pool_size: int,
-        tokenizer_pool_type: Union[PoolType, type["BaseTokenizerGroup"]],
-        tokenizer_pool_extra_config: Optional[Union[str, dict]]
-    ) -> Optional["TokenizerPoolConfig"]:
-        """Create a TokenizerPoolConfig from the given parameters.
-
-        If tokenizer_pool_size is 0, return None.
-
-        Args:
-            tokenizer_pool_size: Number of tokenizer workers in the pool.
-            tokenizer_pool_type: Type of the pool.
-            tokenizer_pool_extra_config: Additional config for the pool.
-                The way the config will be used depends on the
-                pool type. This can be a JSON string (will be parsed).
-        """
-        if tokenizer_pool_size:
-            if isinstance(tokenizer_pool_extra_config, str):
-                tokenizer_pool_extra_config_parsed = json.loads(
-                    tokenizer_pool_extra_config)
-            else:
-                tokenizer_pool_extra_config_parsed = (
-                    tokenizer_pool_extra_config or {})
-            tokenizer_pool_config = cls(tokenizer_pool_size,
-                                        tokenizer_pool_type,
-                                        tokenizer_pool_extra_config_parsed)
-        else:
-            tokenizer_pool_config = None
-        return tokenizer_pool_config
+    def __post_init__(self) -> None:
+        logger.warning_once(
+            "TokenizerPoolConfig is deprecated and will be removed in a "
+            "future release. Passing this parameter will have no effect. "
+            "Please remove it from your configurations.")
 
 
 class LoadFormat(str, enum.Enum):
@@ -1624,8 +1576,8 @@ class ParallelConfig:
     """Disable the custom all-reduce kernel and fall back to NCCL."""
 
     tokenizer_pool_config: Optional[TokenizerPoolConfig] = None
-    """Config for the tokenizer pool. If None, will use synchronous
-    tokenization."""
+    """This parameter is deprecated and will be removed in a future release.
+    Please remove it from your configs"""
 
     ray_workers_use_nsight: bool = False
     """Whether to profile Ray workers with nsight, see https://docs.ray.io/en/latest/ray-observability/user-guides/profiling.html#profiling-nsight-profiler."""
@@ -1826,6 +1778,7 @@ class ParallelConfig:
             "worker_extension_cls must be a string (qualified class name).")
 
 
+PreemptionMode = Literal["swap", "recompute"]
 SchedulerPolicy = Literal["fcfs", "priority"]
 
 
@@ -1902,7 +1855,7 @@ class SchedulerConfig:
     NOTE: This is not currently configurable. It will be overridden by
     max_num_batched_tokens in case max multimodal embedding size is larger."""
 
-    preemption_mode: Optional[str] = None
+    preemption_mode: Optional[PreemptionMode] = None
     """Whether to perform preemption by swapping or
     recomputation. If not specified, we determine the mode as follows:
     We use recomputation by default since it incurs lower overhead than
@@ -2267,9 +2220,10 @@ class SpeculativeConfig:
         excluding anything before input ids/embeddings and after
         the final hidden states.
         """
-        # no factors to consider.
-        # spec decode does not use `torch.compile` yet.
         factors: list[Any] = []
+        # Eagle3 affects the computation graph because it returns intermediate
+        # hidden states in addition to the final hidden state.
+        factors.append(self.method == "eagle3")
         hash_str = hashlib.md5(str(factors).encode(),
                                usedforsecurity=False).hexdigest()
         return hash_str
@@ -2386,9 +2340,10 @@ class SpeculativeConfig:
                 )
 
                 # Automatically detect the method
-                if self.method == 'eagle':
+                if self.method in ('eagle', 'eagle3'):
                     pass
-                elif "eagle-" in self.draft_model_config.model.lower():
+                elif "eagle-" in self.draft_model_config.model.lower() or \
+                        "eagle3-" in self.draft_model_config.model.lower():
                     self.method = "eagle"
                 elif self.draft_model_config.hf_config.model_type == "medusa":
                     self.method = "medusa"
@@ -2399,7 +2354,7 @@ class SpeculativeConfig:
                     self.method = "draft_model"
 
                 # Replace hf_config for EAGLE draft_model
-                if self.method == "eagle":
+                if self.method in ("eagle", "eagle3"):
                     if self.enable_chunked_prefill and not envs.VLLM_USE_V1:
                         raise ValueError(
                             "Chunked prefill and EAGLE are not compatible "
@@ -2544,7 +2499,6 @@ class SpeculativeConfig:
             max_parallel_loading_workers,
             disable_custom_all_reduce=target_parallel_config.
             disable_custom_all_reduce,
-            tokenizer_pool_config=target_parallel_config.tokenizer_pool_config,
             ray_workers_use_nsight=target_parallel_config.
             ray_workers_use_nsight,
             placement_group=target_parallel_config.placement_group,
@@ -2597,6 +2551,12 @@ class SpeculativeConfig:
                              "speculative decoding is > 1, but got "
                              f"{self.disable_by_batch_size=}")
 
+        if self.method == "eagle3" and self.target_model_config and \
+            "llama" not in self.target_model_config.hf_text_config.model_type:
+            raise ValueError(
+                "Eagle3 is only supported for Llama models. "
+                f"Got {self.target_model_config.hf_text_config.model_type=}")
+
     @property
     def num_lookahead_slots(self) -> int:
         """The number of additional slots the scheduler should allocate per
@@ -2607,6 +2567,9 @@ class SpeculativeConfig:
         """
         return self.num_speculative_tokens
 
+    def use_eagle(self) -> bool:
+        return self.method in ("eagle", "eagle3")
+
     def __repr__(self) -> str:
         method = self.method
         model = None if method == "ngram" else self.draft_model_config.model
@@ -2614,18 +2577,41 @@ class SpeculativeConfig:
         return f"SpeculativeConfig({method=}, {model=}, {num_spec_tokens=})"
 
 
+LoRADType = Literal["auto", "float16", "bfloat16"]
+
+
+@config
 @dataclass
 class LoRAConfig:
-    max_lora_rank: int
-    max_loras: int
+    """Configuration for LoRA."""
+
+    max_lora_rank: int = 16
+    """Max LoRA rank."""
+    max_loras: int = 1
+    """Max number of LoRAs in a single batch."""
     fully_sharded_loras: bool = False
+    """By default, only half of the LoRA computation is sharded with tensor
+    parallelism. Enabling this will use the fully sharded layers. At high
+    sequence length, max rank or tensor parallel size, this is likely faster.
+    """
     max_cpu_loras: Optional[int] = None
-    lora_dtype: Optional[Union[torch.dtype, str]] = None
+    """Maximum number of LoRAs to store in CPU memory. Must be >= than
+    `max_loras`."""
+    lora_dtype: Union[torch.dtype, LoRADType] = "auto"
+    """Data type for LoRA. If auto, will default to base model dtype."""
     lora_extra_vocab_size: int = 256
+    """Maximum size of extra vocabulary that can be present in a LoRA adapter
+    (added to the base model vocabulary)."""
     # This is a constant.
     lora_vocab_padding_size: ClassVar[int] = 256
-    long_lora_scaling_factors: Optional[tuple[float]] = None
+    long_lora_scaling_factors: Optional[tuple[float, ...]] = None
+    """Specify multiple scaling factors (which can be different from base model
+    scaling factor - see eg. Long LoRA) to allow for multiple LoRA adapters
+    trained with those scaling factors to be used at the same time. If not
+    specified, only adapters trained with the base model scaling factor are
+    allowed."""
     bias_enabled: bool = False
+    """Enable bias for LoRA adapters."""
 
     def compute_hash(self) -> str:
         """
@@ -2690,12 +2676,19 @@ class LoRAConfig:
                 "V1 LoRA does not support long LoRA, please use V0.")
 
 
+@config
 @dataclass
 class PromptAdapterConfig:
-    max_prompt_adapters: int
-    max_prompt_adapter_token: int
+    max_prompt_adapters: int = 1
+    """Max number of PromptAdapters in a batch."""
+    max_prompt_adapter_token: int = 0
+    """Max number of PromptAdapters tokens."""
     max_cpu_prompt_adapters: Optional[int] = None
-    prompt_adapter_dtype: Optional[torch.dtype] = None
+    """Maximum number of PromptAdapters to store in CPU memory. Must be >= than
+    `max_prompt_adapters`."""
+    prompt_adapter_dtype: Union[torch.dtype, str] = "auto"
+    """Data type for PromptAdapter. If auto, will default to base model dtype.
+    """
 
     def compute_hash(self) -> str:
         """
@@ -2727,7 +2720,7 @@ class PromptAdapterConfig:
             self.max_cpu_prompt_adapters = self.max_prompt_adapters
 
     def verify_with_model_config(self, model_config: ModelConfig):
-        if self.prompt_adapter_dtype in (None, "auto"):
+        if self.prompt_adapter_dtype == "auto":
             self.prompt_adapter_dtype = model_config.dtype
         elif isinstance(self.prompt_adapter_dtype, str):
             self.prompt_adapter_dtype = getattr(torch,
@@ -2859,12 +2852,10 @@ def _get_and_verify_dtype(
 ) -> torch.dtype:
     # NOTE: getattr(config, "torch_dtype", torch.float32) is not correct
     # because config.torch_dtype can be None.
-    config_dtype = getattr(config, "torch_dtype", None)
+    config_dtype = getattr(config.get_text_config(), "torch_dtype", None)
 
-    # Fallbacks for multi-modal models if the root config
+    # Fallback for multi-modal models if the root config
     # does not define torch_dtype
-    if config_dtype is None and hasattr(config, "text_config"):
-        config_dtype = getattr(config.text_config, "torch_dtype", None)
     if config_dtype is None and hasattr(config, "vision_config"):
         config_dtype = getattr(config.vision_config, "torch_dtype", None)
 
@@ -3414,11 +3405,13 @@ class CompilationConfig(BaseModel):
         - enable_fusion: whether to enable the custom fusion pass.
         - enable_noop: whether to enable the custom no-op elimination pass.
             TODO(luka) better pass enabling system.
+        - enable_sequence_parallelism: whether to enable sequence parallelism.
         """
         dump_graph_stages: list[str] = Field(default_factory=list)
         dump_graph_dir: Path = Field(default=Path("."))
         enable_fusion: bool = True
         enable_noop: bool = True
+        enable_sequence_parallelism: bool = False
 
         def uuid(self):
             """
@@ -3427,7 +3420,8 @@ class CompilationConfig(BaseModel):
             Do not include dump_graph_* in the hash - they don't affect
             compilation.
             """
-            dict_ = self.model_dump(include={"enable_fusion", "enable_noop"})
+            dict_ = self.model_dump(include={"enable_fusion", "enable_noop", \
+                "enable_sequence_parallelism"})
             return InductorPass.hash_dict(dict_)
 
         def model_post_init(self, __context: Any) -> None:
@@ -3454,7 +3448,8 @@ class CompilationConfig(BaseModel):
     compilation_time: float = PrivateAttr
 
     # Per-model forward context
-    # Map from layer name to the attention cls
+    # Map from layer name to layer objects that need to be accessed outside
+    # model code, e.g., Attention, FusedMOE when dp_size>1.
     static_forward_context: dict[str, Any] = PrivateAttr
 
     def compute_hash(self) -> str:
@@ -3785,6 +3780,17 @@ class VllmConfig:
             return quant_config
         return None
 
+    @staticmethod
+    def get_quantization_config(
+            model_config: ModelConfig,
+            load_config: LoadConfig) -> Optional[QuantizationConfig]:
+        import copy
+
+        # For some reason, the _ version of this modifies the model_config
+        # object, so using deepcopy to avoid this problem.
+        return VllmConfig._get_quantization_config(copy.deepcopy(model_config),
+                                                   load_config)
+
     def with_hf_config(
         self,
         hf_config: PretrainedConfig,
@@ -3837,6 +3843,8 @@ class VllmConfig:
 
         if self.compilation_config is None:
             self.compilation_config = CompilationConfig()
+        if self.compilation_config.pass_config.enable_sequence_parallelism:
+            self.compilation_config.custom_ops.append("+rms_norm")
         if envs.VLLM_USE_V1 and self.model_config is not None and \
             not self.model_config.enforce_eager:
             # NOTE(woosuk): Currently, we use inductor because the piecewise
@@ -3844,7 +3852,8 @@ class VllmConfig:
             # FIXME(woosuk): Disable inductor to reduce the compilation time
             # and avoid any potential issues with the inductor.
             # FIXME(rob): Add function to set all of these.
-            self.compilation_config.custom_ops = ["none"]
+            if not self.compilation_config.custom_ops:
+                self.compilation_config.custom_ops = ["none"]
             self.compilation_config.use_cudagraph = True
             self.compilation_config.use_inductor = True
             self.compilation_config.cudagraph_num_of_warmups = 1
@@ -3852,6 +3861,18 @@ class VllmConfig:
             self.compilation_config.pass_config.enable_noop = False
             self.compilation_config.level = CompilationLevel.PIECEWISE
             self.compilation_config.set_splitting_ops_for_v1()
+
+        if self.parallel_config is not None and \
+            self.parallel_config.tensor_parallel_size > 1 and \
+            self.parallel_config.pipeline_parallel_size > 1 and \
+            self.compilation_config is not None and \
+                self.compilation_config.pass_config is not None and \
+            self.compilation_config.pass_config.enable_sequence_parallelism:
+            logger.warning_once(
+                "Sequence parallelism is not supported with pipeline "
+                "parallelism. Disabling sequence parallelism.")
+            self.compilation_config.pass_config.\
+                enable_sequence_parallelism = False
 
         self._set_cudagraph_sizes()
 
@@ -3892,6 +3913,26 @@ class VllmConfig:
         if not self.instance_id:
             self.instance_id = random_uuid()[:5]
 
+    def update_sizes_for_sequence_parallelism(self,
+                                              possible_sizes: list) -> list:
+        # remove the sizes that not multiple of tp_size when
+        # enable sequence parallelism
+        removed_sizes = [
+            size for size in possible_sizes
+            if size % self.parallel_config.tensor_parallel_size != 0
+        ]
+        if removed_sizes:
+            logger.warning(
+                "Batch sizes %s are removed because they are not "
+                "multiple of tp_size %d when "
+                "sequence parallelism is enabled", removed_sizes,
+                self.parallel_config.tensor_parallel_size)
+
+        return [
+            size for size in possible_sizes
+            if size % self.parallel_config.tensor_parallel_size == 0
+        ]
+
     def _set_cudagraph_sizes(self):
         """
         cudagraph batchsize padding logic:
@@ -3929,6 +3970,11 @@ class VllmConfig:
                     not self.model_config.enforce_eager:
 
                 possible_sizes = [1, 2, 4] + [8 * i for i in range(1, 1025)]
+                if self.parallel_config.tensor_parallel_size > 1 and \
+                    self.compilation_config.pass_config.enable_sequence_parallelism:
+                    possible_sizes = self.update_sizes_for_sequence_parallelism(
+                        possible_sizes)
+
                 # find the minimum size that is larger than max_num_seqs,
                 # which then becomes the max_batchsize_to_capture
                 larger_sizes = [
@@ -3952,6 +3998,11 @@ class VllmConfig:
                 not self.model_config.enforce_eager:
                 batch_size_capture_list = [1, 2, 4
                                            ] + [i for i in range(8, 513, 8)]
+                if self.parallel_config.tensor_parallel_size > 1 and \
+                    self.compilation_config.pass_config.enable_sequence_parallelism:
+                    batch_size_capture_list = \
+                        self.update_sizes_for_sequence_parallelism(batch_size_capture_list)
+
                 max_num_tokens = self.scheduler_config.max_num_batched_tokens
                 batch_size_capture_list = [
                     size for size in batch_size_capture_list
@@ -4077,3 +4128,16 @@ def assert_hashable(text):
         f"vLLM tried to hash some configs that may have Python objects ids "
         f"in them. This is a bug, please file an issue. "
         f"Text being hashed: {text}")
+
+
+T = TypeVar("T")
+
+
+def get_layers_from_vllm_config(vllm_config: VllmConfig,
+                                layer_type: type[T]) -> dict[str, T]:
+    return {
+        layer_name: layer
+        for layer_name, layer in
+        vllm_config.compilation_config.static_forward_context.items()
+        if isinstance(layer, layer_type)
+    }

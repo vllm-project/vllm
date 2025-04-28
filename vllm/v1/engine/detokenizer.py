@@ -2,6 +2,8 @@
 from abc import ABC, abstractmethod
 from typing import Optional
 
+import tokenizers
+from packaging import version
 from tokenizers import Tokenizer
 from tokenizers.decoders import DecodeStream
 from transformers import PreTrainedTokenizerFast
@@ -43,8 +45,10 @@ class IncrementalDetokenizer:
             # No tokenizer => skipping detokenization.
             return IncrementalDetokenizer()
 
-        if isinstance(tokenizer, PreTrainedTokenizerFast):
+        if (isinstance(tokenizer, PreTrainedTokenizerFast) and version.parse(
+                tokenizers.__version__) >= version.parse("0.21.1")):
             # Fast tokenizer => use tokenizers library DecodeStream.
+            # And only tokenizers >= 0.21.1 supports Fast Detokenizer.
             return FastIncrementalDetokenizer(tokenizer, request)
 
         # Fall back to slow python-based incremental detokenization.

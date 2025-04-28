@@ -63,14 +63,16 @@ class Request:
     output_len: int
 
 
-def sample_tokens(tokenizer: PreTrainedTokenizerBase, length: int) -> str:
+def sample_tokens(tokenizer: PreTrainedTokenizerBase,
+                  length: int) -> list[int]:
     vocab = tokenizer.get_vocab()
+    all_special_ids = set(tokenizer.all_special_ids)
+
     # Remove the special tokens.
-    vocab = {
-        k: v
-        for k, v in vocab.items() if k not in tokenizer.all_special_ids
-    }
-    return random.choices(list(vocab.values()), k=length)
+    return random.choices(
+        [v for k, v in vocab.items() if k not in all_special_ids],
+        k=length,
+    )
 
 
 def sample_requests_from_dataset(

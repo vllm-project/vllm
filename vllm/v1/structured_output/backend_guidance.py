@@ -61,9 +61,7 @@ class GuidanceBackend(StructuredOutputBackend):
         tokenizer_group = init_tokenizer_from_configs(
             model_config=vllm_config.model_config,
             scheduler_config=vllm_config.scheduler_config,
-            parallel_config=vllm_config.parallel_config,
             lora_config=vllm_config.lora_config)  # type: ignore[arg-type]
-        tokenizer_group.ping()
         self.vllm_config = vllm_config
         self.vocab_size = vllm_config.model_config.get_vocab_size()
 
@@ -109,6 +107,9 @@ class GuidanceBackend(StructuredOutputBackend):
     def allocate_token_bitmask(self, max_num_seqs: int):
         return llguidance_torch.allocate_token_bitmask(
             max_num_seqs, self.ll_tokenizer.vocab_size)
+
+    def destroy(self):
+        pass
 
 
 @dataclass
@@ -193,6 +194,9 @@ def serialize_guidance_grammar(
             tp = "grammar"
         elif request_type == StructuredOutputOptions.CHOICE:
             tp = "choice"
+        elif request_type == StructuredOutputOptions.STRUCTURAL_TAG:
+            raise ValueError("Structural tag is not supported "
+                             "for guidance backend yet")
         else:
             logger.error("Validation should have already occurred. "
                          "Please file an issue.")
