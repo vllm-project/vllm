@@ -693,20 +693,22 @@ class Scheduler(SchedulerInterface):
             # NOTE: We will need to first advance the FSM
             # given that we apply bitmask in first pass
             # and we only perform jump-forward posteriori.
-            initial_advancement = True
+            first_pass = True
             if new_token_ids and request.use_structured_output:
                 so_request = request.structured_output_request
                 if TYPE_CHECKING:
                     assert so_request is not None
                     assert so_request.grammar is not None
-                so_request.grammar.accept_tokens(request.request_id,
-                                                 new_token_ids)
-                initial_advancement = False
+                so_request.grammar.accept_tokens(
+                    request.request_id,
+                    new_token_ids,
+                )
+                first_pass = False
 
             # NOTE: We are performing retokenization to handle
             # tokenizer boundary. There will be some
             # overhead here.
-            if initial_advancement and new_token_ids and request.use_structured_output and (  # noqa: E501
+            if first_pass and new_token_ids and request.use_structured_output and (  # noqa: E501
                     jump_tokens :=
                     self.structured_output_manager.jump_forward_tokens(request)
             ):

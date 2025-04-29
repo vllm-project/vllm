@@ -148,24 +148,25 @@ class StructuredOutputManager:
         # for performance reason (tokenizer is blocking)
         max_rollback_window = 10
 
-        current_text_str = self.tokenizer.decode(
+        rollback_text_str = self.tokenizer.decode(
             request.all_token_ids[-max_rollback_window:])
-        all_text = current_text_str + jf_string
         retokenized_output_ids = self.tokenizer.encode(
-            all_text, add_special_tokens=False)
+            rollback_text_str + jf_string,
+            add_special_tokens=False,
+        )
         if request.prompt_token_ids[-1] in retokenized_output_ids:
-            retokenized_output_ids = retokenized_output_ids[
-                retokenized_output_ids.index(request.prompt_token_ids[-1]) +
-                1:]
+            prompt_boundary = retokenized_output_ids.index(
+                request.prompt_token_ids[-1]) + 1
+            retokenized_output_ids = retokenized_output_ids[prompt_boundary:]
 
         # Find the prefix match length
         k = sum(1 for _ in itertools.takewhile(
             lambda pair: pair[0] == pair[1],
-            zip(original_output_ids, retokenized_output_ids)))
-        num_original_suffix = len(original_output_ids) - k
+            zip(original_output_ids, retokenized_output_ids),
+        ))
         retokenized_suffix = retokenized_output_ids[k:]
-        if num_original_suffix > 0:
-            so_request.grammar.rollback(num_original_suffix)
+        if k < len(original_output_ids):
+            so_request.grammar.rollback(len(original_output_ids) - k)
 
         # Validate tokens one by one
         accepted_tokens: list[int] = []
@@ -186,7 +187,9 @@ class StructuredOutputManager:
 
         original_suffix_tokens = original_output_ids[num_validated_in_suffix:]
         if original_suffix_tokens and not so_request.grammar.accept_tokens(
-                request.request_id, original_suffix_tokens):
+                request.request_id,
+                original_suffix_tokens,
+        ):
             so_request.grammar.rollback(len(original_suffix_tokens))
         return None
 

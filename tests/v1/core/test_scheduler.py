@@ -1165,3 +1165,87 @@ def test_kv_connector_handles_preemption():
     # All memory should be freed since nothing is running.
     assert scheduler.kv_cache_manager.block_pool.get_num_free_blocks() \
         == NUM_BLOCKS - 1
+
+
+def test_scheduler_jump_forward():
+    scheduler = create_scheduler()
+    so_manager = scheduler.structured_output_manager
+
+    # Mock the tokenizer used by StructuredOutputManager
+    mock_tokenizer = Mock()
+    # Example tokenization behavior:
+    # decode([10, 20]) -> "ab"
+    # encode("abc") -> [10, 25]  (Simulates 'c' being token 25)
+    # encode("ab" + "c") -> [10, 25]
+    mock_tokenizer.decode.side_effect = lambda ids: {
+        tuple([10, 20]): "ab",
+        # Add more cases as needed
+    }.get(tuple(ids), "decode_fallback")
+    mock_tokenizer.encode.side_effect = lambda text, add_special_tokens: {
+        "abc": [10, 25],
+    }.get(text, [999])
+
+    so_manager.tokenizer = mock_tokenizer
+
+    # 2. Create a request using structured output
+    request = create_requests(num_requests=1)[0]
+    request.use_structured_output = True
+    request.structured_output_request = Mock()
+    request.structured_output_request.structured_output_key = ("json", "{}"
+                                                               )  # Dummy key
+
+    # Mock the grammar object
+    mock_grammar = Mock()
+    mock_grammar.find_jump_string.return_value = "c"  # The jump string
+    mock_grammar.accept_tokens.return_value = True  # Assume validation passes for now
+    mock_grammar.is_terminated.return_value = False
+    mock_grammar.rollback = Mock()  # To track calls
+
+    request.structured_output_request.grammar = mock_grammar
+
+    # 3. Simulate scheduling and initial output
+    scheduler.add_request(request)
+    output = scheduler.schedule()  # Schedule the prompt
+
+    # Simulate model outputting initial tokens (e.g., [10, 20] for "ab")
+    initial_output_tokens = [10, 20]
+    model_runner_output = ModelRunnerOutput(
+        req_ids=[request.request_id],
+        req_id_to_index={request.request_id: 0},
+        sampled_token_ids=[initial_output_tokens],
+        spec_token_ids=None,
+        logprobs=None,
+        prompt_logprobs_dict={},
+    )
+
+    # 4. Call update_from_output - this triggers jump_forward_tokens
+    # First, manually update computed tokens as schedule() does
+    request.num_computed_tokens += output.num_scheduled_tokens[
+        request.request_id]
+    # Update output_token_ids with initial output before jump-forward call
+    request.append_output_token_ids(initial_output_tokens)
+
+    # Now manually call jump_forward_tokens (since it's complex to mock the whole update flow)
+    # In reality, update_from_output calls this internally
+    jump_tokens = so_manager.jump_forward_tokens(request)
+
+    # 5. Assertions
+    # Based on mock tokenizer: decode([10, 20]) -> "ab"
+    # jf_string = "c"
+    # text = "ab" + "c" = "abc"
+    # encode("abc") -> [10, 25]
+    # original_output_ids = [10, 20]
+    # retokenized_output_ids = [10, 25]
+    # k = 1 (common prefix is [10])
+    # num_original_suffix = 1 ([20])
+    # retokenized_suffix = [25]
+    # rollback(1) should be called
+    # accept_tokens([25]) should be called and return True
+    # expected jump_tokens = [25]
+
+    assert jump_tokens == [
+        25
+    ], f"Expected jump tokens [25], but got {jump_tokens}"
+    mock_grammar.rollback.assert_called_once_with(1)
+    mock_grammar.accept_tokens.assert_called_once_with(request.request_id,
+                                                       [25])
