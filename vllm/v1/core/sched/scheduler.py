@@ -703,17 +703,14 @@ class Scheduler(SchedulerInterface):
                                                  new_token_ids)
                 initial_advancement = False
 
-            jump_tokens: list[int] | None = None
-            if initial_advancement and new_token_ids and request.use_structured_output:  # noqa: E501
-                # NOTE: We are performing retokenization to handle
-                # tokenizer boundary edge cases. There will be some
-                # general overhead incur here. Note that we already
-                # handle the state of the grammar within
-                # jump_forward_tokens.
-                jump_tokens = self.structured_output_manager.jump_forward_tokens(  # noqa: E501
-                    request)
-                if jump_tokens:
-                    new_token_ids += jump_tokens
+            # NOTE: We are performing retokenization to handle
+            # tokenizer boundary. There will be some
+            # overhead here.
+            if initial_advancement and new_token_ids and request.use_structured_output and (  # noqa: E501
+                    jump_tokens :=
+                    self.structured_output_manager.jump_forward_tokens(request)
+            ):
+                new_token_ids += jump_tokens
 
             # Append generated tokens and check for stop. Note that if
             # a request is still being prefilled, we expect the model runner

@@ -146,15 +146,17 @@ class StructuredOutputManager:
         # of the tokenes from all_token_ids to be used for retokenization.
         # Note that we don't need to whole token_ids
         # for performance reason (tokenizer is blocking)
-        # TODO: handle token fusion
-        # max_rollback_window = 10
+        max_rollback_window = 10
 
-        current_text_str = self.tokenizer.decode(request.all_token_ids)
+        current_text_str = self.tokenizer.decode(
+            request.all_token_ids[-max_rollback_window:])
         all_text = current_text_str + jf_string
-        combined_all_token_ids = self.tokenizer.encode(
+        retokenized_output_ids = self.tokenizer.encode(
             all_text, add_special_tokens=False)
-        retokenized_output_ids = combined_all_token_ids[request.
-                                                        num_prompt_tokens:]
+        if request.prompt_token_ids[-1] in retokenized_output_ids:
+            retokenized_output_ids = retokenized_output_ids[
+                retokenized_output_ids.index(request.prompt_token_ids[-1]) +
+                1:]
 
         # Find the prefix match length
         k = sum(1 for _ in itertools.takewhile(
