@@ -938,8 +938,7 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
             decode_ql_nope, decode_q_pe = \
                 self._q_proj_and_k_up_proj(decode_hs_or_q_c)
             decode_q_pe[...], decode_k_pe[...] = self.rotary_emb(
-                attn_metadata.decode.input_positions, decode_q_pe.contiguous(),
-                decode_k_pe)
+                attn_metadata.decode.input_positions, decode_q_pe, decode_k_pe)
 
         if has_prefill:
             assert attn_metadata.prefill is not None
@@ -948,8 +947,8 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
             prefill_q_pe = prefill_q[..., self.qk_nope_head_dim:]
 
             prefill_q_pe[...], prefill_k_pe[...] = self.rotary_emb(
-                attn_metadata.prefill.input_positions,
-                prefill_q_pe.contiguous(), prefill_k_pe)
+                attn_metadata.prefill.input_positions, prefill_q_pe,
+                prefill_k_pe)
 
         # write the latent and rope to kv cache
         if kv_cache.numel() > 0:
