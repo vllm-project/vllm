@@ -425,9 +425,10 @@ def test_guided_json_completion_with_enum(llm, guided_decoding_backend: str,
 
 
 @pytest.mark.skip_global_cleanup
-@pytest.mark.parametrize("guided_decoding_backend", GUIDED_DECODING_BACKENDS)
-def test_guided_number_range_json_completion(llm,
-                                             guided_decoding_backend: str):
+@pytest.mark.parametrize("guided_decoding_backend,disable_any_whitespace",
+                         GUIDED_DECODING_BACKENDS)
+def test_guided_number_range_json_completion(llm, guided_decoding_backend: str,
+                                             disable_any_whitespace: bool):
     sample_output_schema = {
         "type": "object",
         "properties": {
@@ -451,8 +452,10 @@ def test_guided_number_range_json_completion(llm,
     sampling_params = SamplingParams(
         temperature=1.0,
         max_tokens=1000,
-        guided_decoding=GuidedDecodingParams(json=sample_output_schema,
-                                             backend=guided_decoding_backend),
+        guided_decoding=GuidedDecodingParams(
+            json=sample_output_schema,
+            backend=guided_decoding_backend,
+            disable_any_whitespace=disable_any_whitespace),
     )
     outputs = llm.generate(
         prompts=[
