@@ -807,6 +807,9 @@ def test_eagle_with_sliding_window():
     # Prime the cache
     computed_blocks, _ = manager.get_computed_blocks(req)
     manager.allocate_slots(req, len(token_ids), computed_blocks)
+    # record the block hash of the first block in the request for later use
+    block_hash_first_block = manager.req_to_block_hashes[req.request_id][0]
+    assert block_hash_first_block is not None
     manager.free(req)
 
     # New request with Eagle enabled
@@ -817,8 +820,6 @@ def test_eagle_with_sliding_window():
     assert num_tokens == 1 * block_size
 
     # Evict the first block in the request
-    block_hash_first_block = computed_blocks[0].block_hash
-    assert block_hash_first_block is not None
     assert manager.block_pool.get_cached_block(
         block_hash_first_block) is not None
     manager.block_pool.cached_block_hash_to_block.pop(block_hash_first_block)

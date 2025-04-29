@@ -105,14 +105,12 @@ class SlidingWindowManager(SpecializedManager):
         # -1 since the input token itself is also included in the window
         self.sliding_window_contiguous_blocks = cdiv(
             (kv_cache_spec.sliding_window - 1), self.block_size)
-        print("conti b eagle", self.sliding_window_contiguous_blocks)
         if self.use_eagle:
             # Need to drop the last matched block if eagle is enabled. For
             # sliding window layer, we achieve this by increasing the number of
             # contiguous blocks needed for prefix cache hit by one and dropping
             # the last matched block.
             self.sliding_window_contiguous_blocks += 1
-        print("conti b eagle", self.sliding_window_contiguous_blocks)
         self._null_block = block_pool.null_block
 
     def find_longest_cache_hit(
