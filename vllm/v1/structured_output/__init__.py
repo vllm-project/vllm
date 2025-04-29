@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 from __future__ import annotations
 
+import itertools
 import multiprocessing
 from concurrent.futures import ThreadPoolExecutor
 from typing import TYPE_CHECKING, Optional
@@ -18,12 +19,10 @@ if TYPE_CHECKING:
     import numpy as np
     import numpy.typing as npt
     import torch
-    import xgrammar.testing as xgr_testing
 
     from vllm.v1.request import Request
 else:
     torch = LazyLoader('torch', globals(), 'torch')
-    xgr_testing = LazyLoader('xgr_testing', globals(), 'xgrammar.testing')
 
 logger = init_logger(__name__)
 
@@ -126,35 +125,68 @@ class StructuredOutputManager:
         # and deserialization when sending this to the GPU workers.
         return bitmask_tensor.numpy()
 
-    def jump_forward_tokens(
-        self,
-        request: Request,
-        bitmask: npt.NDArray[np.int32],
-        batch_index: int,
-    ) -> list[int] | None:
+    def jump_forward_tokens(self, request: Request) -> list[int] | None:
         """
-        For structured output requests, repeatedly
-        check if the grammar bitmask is a single-token bitmask, and if so,
-        advance the FSM and collect all jump-forward tokens.
-        Returns the list of jump-forward token IDs.
-
-        We can also consider to perform jump_and_retokenize here as well.
+        For structured output requests, we will perform
+        jump_and_retokenize possible divergence based on grammar state
         """
+        so_request = request.structured_output_request
         if TYPE_CHECKING:
-            assert request.structured_output_request is not None
-            assert request.structured_output_request.grammar is not None
+            assert so_request is not None
+            assert so_request.grammar is not None
             assert self.backend is not None
 
-        is_single, unique_token_id = xgr_testing._is_single_token_bitmask(
-            torch.from_numpy(bitmask),
-            vocab_size=self.backend.vocab_size,
-            index=batch_index,
-        )
-        s = request.structured_output_request.grammar.find_jf_string()
-        if s:
-            jf_tokens = self.tokenizer.encode(s, add_special_tokens=False)
-            print(jf_tokens)
-        return [unique_token_id] if is_single else None
+        jf_string = so_request.grammar.find_jump_string()
+        if not jf_string:
+            return None
+
+        original_output_ids = list(request.output_token_ids)
+
+        # NOTE: max_rollback_window determines the size
+        # of the tokenes from all_token_ids to be used for retokenization.
+        # Note that we don't need to whole token_ids
+        # for performance reason (tokenizer is blocking)
+        # TODO: handle token fusion
+        # max_rollback_window = 10
+
+        current_text_str = self.tokenizer.decode(request.all_token_ids)
+        all_text = current_text_str + jf_string
+        combined_all_token_ids = self.tokenizer.encode(
+            all_text, add_special_tokens=False)
+        retokenized_output_ids = combined_all_token_ids[request.
+                                                        num_prompt_tokens:]
+
+        # Find the prefix match length
+        k = sum(1 for _ in itertools.takewhile(
+            lambda pair: pair[0] == pair[1],
+            zip(original_output_ids, retokenized_output_ids)))
+        num_original_suffix = len(original_output_ids) - k
+        retokenized_suffix = retokenized_output_ids[k:]
+        if num_original_suffix > 0:
+            so_request.grammar.rollback(num_original_suffix)
+
+        # Validate tokens one by one
+        accepted_tokens: list[int] = []
+        num_validated_in_suffix = 0
+        validation_ok = True
+        for token in retokenized_suffix:
+            if so_request.grammar.accept_tokens(request.request_id, [token]):
+                accepted_tokens.append(token)
+                num_validated_in_suffix += 1
+            else:
+                if num_validated_in_suffix > 0:
+                    so_request.grammar.rollback(num_validated_in_suffix)
+                validation_ok = False
+                break
+
+        if validation_ok:
+            return accepted_tokens
+
+        original_suffix_tokens = original_output_ids[num_validated_in_suffix:]
+        if original_suffix_tokens and not so_request.grammar.accept_tokens(
+                request.request_id, original_suffix_tokens):
+            so_request.grammar.rollback(len(original_suffix_tokens))
+        return None
 
     def clear_backend(self) -> None:
         if self.backend is not None:

@@ -30,6 +30,15 @@ class StructuredOutputGrammar(ABC):
     """Request-level backend for structured output requests."""
 
     @abstractmethod
+    def find_jump_string(self) -> str | None:
+        """
+        Find jump-forward string based on current grammar state.
+
+        Returns:
+            Optional list of int: list of jump tokens
+        """
+
+    @abstractmethod
     def accept_tokens(self, request_id: str, tokens: list[int]) -> bool:
         """
         Determines whether the provided tokens are accepted for the
@@ -41,6 +50,15 @@ class StructuredOutputGrammar(ABC):
 
         Returns:
             bool: True if the tokens are accepted, False otherwise.
+        """
+
+    @abstractmethod
+    def rollback(self, num_tokens: int) -> None:
+        """
+        Rolls back the state of the grammar by a specified number of tokens.
+        Will also revert counters for the number of processed tokens.
+        Args:
+            num_tokens (int): The number of tokens to roll back.
         """
 
     @abstractmethod
@@ -67,10 +85,6 @@ class StructuredOutputGrammar(ABC):
         """
         Resets the state of the structured output grammar.
         """
-
-    @abstractmethod
-    def find_jf_string(self):
-        ...
 
 
 @dataclass

@@ -690,6 +690,31 @@ class Scheduler(SchedulerInterface):
             new_logprobs = None
             new_token_ids = generated_token_ids
 
+            # NOTE: We will need to first advance the FSM
+            # given that we apply bitmask in first pass
+            # and we only perform jump-forward posteriori.
+            initial_advancement = True
+            if new_token_ids and request.use_structured_output:
+                so_request = request.structured_output_request
+                if TYPE_CHECKING:
+                    assert so_request is not None
+                    assert so_request.grammar is not None
+                so_request.grammar.accept_tokens(request.request_id,
+                                                 new_token_ids)
+                initial_advancement = False
+
+            jump_tokens: list[int] | None = None
+            if initial_advancement and new_token_ids and request.use_structured_output:  # noqa: E501
+                # NOTE: We are performing retokenization to handle
+                # tokenizer boundary edge cases. There will be some
+                # general overhead incur here. Note that we already
+                # handle the state of the grammar within
+                # jump_forward_tokens.
+                jump_tokens = self.structured_output_manager.jump_forward_tokens(  # noqa: E501
+                    request)
+                if jump_tokens:
+                    new_token_ids += jump_tokens
+
             # Append generated tokens and check for stop. Note that if
             # a request is still being prefilled, we expect the model runner
             # to return empty token ids for the request.
@@ -709,28 +734,6 @@ class Scheduler(SchedulerInterface):
                 # NOTE: once we support N tokens per step (spec decode),
                 # the outer lists can be of length > 1.
                 new_logprobs = logprobs.slice(req_index, req_index + 1)
-
-            if new_token_ids and request.use_structured_output:
-                grammar_bitmask = scheduler_output.grammar_bitmask
-                batch_index = scheduler_output.structured_output_request_ids.get(  # noqa: E501
-                    req_id,
-                    0,
-                )
-                if TYPE_CHECKING:
-                    assert request.structured_output_request is not None
-                    assert request.structured_output_request.grammar is not None
-                    assert grammar_bitmask is not None
-                jump_tokens = self.structured_output_manager.jump_forward_tokens(  # noqa: E501
-                    request,
-                    bitmask=grammar_bitmask,
-                    batch_index=batch_index,
-                )
-                if jump_tokens:
-                    new_token_ids.extend(jump_tokens)
-                request.structured_output_request.grammar.accept_tokens(
-                    req_id,
-                    new_token_ids,
-                )
 
             # Get prompt logprobs for this request.
             prompt_logprobs_tensors = prompt_logprobs_dict.get(req_id)

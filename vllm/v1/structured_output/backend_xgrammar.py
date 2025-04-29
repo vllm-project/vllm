@@ -88,6 +88,12 @@ class XgrammarBackend(StructuredOutputBackend):
             cache_limit_bytes=vllm.envs.VLLM_XGRAMMAR_CACHE_MB * 1024 * 1024,
         )
 
+        self.num_speculative_tokens = \
+            self.vllm_config.scheduler_config.max_num_seqs
+        if self.vllm_config.speculative_config is not None:
+            self.num_speculative_tokens = \
+                self.vllm_config.speculative_config.num_speculative_tokens
+
     def compile_grammar(self, request_type: StructuredOutputOptions,
                         grammar_spec: str) -> StructuredOutputGrammar:
         if request_type == StructuredOutputOptions.JSON:
@@ -119,7 +125,10 @@ class XgrammarBackend(StructuredOutputBackend):
                 f"grammar is not of valid supported types. ({request_type!s})")
 
         return XgrammarGrammar(
-            matcher=xgr.GrammarMatcher(ctx),
+            matcher=xgr.GrammarMatcher(
+                ctx,
+                max_rollback_tokens=self.num_speculative_tokens,
+            ),
             vocab_size=self.vocab_size,
             ctx=ctx,
         )
@@ -174,8 +183,13 @@ class XgrammarGrammar(StructuredOutputGrammar):
         self.num_processed_tokens = 0
         self.matcher.reset()
 
-    def find_jf_string(self):
-        return self.matcher.find_jump_forward_string()
+    def find_jump_string(self) -> str | None:
+        jf_string = self.matcher.find_jump_forward_string()
+        return jf_string if jf_string else None
+
+    def rollback(self, num_tokens: int) -> None:
+        self.matcher.rollback(num_tokens)
+        self.num_processed_tokens -= num_tokens
 
 
 def has_xgrammar_unsupported_json_features(schema: dict[str, Any]) -> bool:
