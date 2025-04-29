@@ -3,7 +3,6 @@
 import functools
 import json
 import os
-from math import prod
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import torch
@@ -27,13 +26,6 @@ from vllm.utils import direct_register_custom_op, round_up
 from .rocm_aiter_fused_moe import is_rocm_aiter_moe_enabled
 
 logger = init_logger(__name__)
-
-has_deep_gemm = False
-try:
-    import deep_gemm as dg
-    has_deep_gemm = True
-except ImportError:
-    pass
 
 
 @triton.jit
@@ -493,7 +485,7 @@ def invoke_fused_moe_kernel(A: torch.Tensor,
     assert topk_weights is None or topk_weights.stride(1) == 1
     assert sorted_token_ids.stride(0) == 1
 
-    if use_fp8_w8a8:
+    if use_fp8_w8a8 or use_int8_w8a8:
         assert B_scale is not None
         assert (block_shape is None or triton.cdiv(B.shape[-2], block_shape[0])
                 == B_scale.shape[-2])
@@ -509,20 +501,6 @@ def invoke_fused_moe_kernel(A: torch.Tensor,
 
     M = A.shape[0]
     num_tokens = M * top_k
-
-    if use_fp8_w8a8:
-        assert B_scale is not None
-        assert (block_shape is None or triton.cdiv(B.shape[-2], block_shape[0])
-                == B_scale.shape[-2])
-        assert (block_shape is None or triton.cdiv(B.shape[-1], block_shape[1])
-                == B_scale.shape[-1])
-
-    elif use_int8_w8a16 or use_int4_w4a16:
-        assert B_scale is not None
-        assert block_shape is None or block_shape[0] == 0
-    else:
-        assert A_scale is None
-        assert B_scale is None
 
     EM = sorted_token_ids.shape[0]
     if A.shape[0] < config["BLOCK_SIZE_M"]:
@@ -1063,8 +1041,7 @@ def inplace_fused_experts_fake(
         w2_zp: Optional[torch.Tensor] = None,
         a1_scale: Optional[torch.Tensor] = None,
         a2_scale: Optional[torch.Tensor] = None,
-        block_shape: Optional[List[int]] = None,
-        allow_deep_gemm: bool = False) -> None:
+        block_shape: Optional[List[int]] = None) -> None:
     pass
 
 
@@ -1098,8 +1075,7 @@ def outplace_fused_experts(
         w2_zp: Optional[torch.Tensor] = None,
         a1_scale: Optional[torch.Tensor] = None,
         a2_scale: Optional[torch.Tensor] = None,
-        block_shape: Optional[List[int]] = None,
-        allow_deep_gemm: bool = False) -> torch.Tensor:
+        block_shape: Optional[List[int]] = None) -> torch.Tensor:
     return fused_experts_impl(hidden_states, w1, w2, topk_weights, topk_ids,
                               False, activation, apply_router_weight_on_input,
                               use_fp8_w8a8, use_int8_w8a8, use_int8_w8a16,
@@ -1129,8 +1105,7 @@ def outplace_fused_experts_fake(
         w2_zp: Optional[torch.Tensor] = None,
         a1_scale: Optional[torch.Tensor] = None,
         a2_scale: Optional[torch.Tensor] = None,
-        block_shape: Optional[List[int]] = None,
-        allow_deep_gemm: bool = False) -> torch.Tensor:
+        block_shape: Optional[List[int]] = None) -> torch.Tensor:
     return torch.empty_like(hidden_states)
 
 
@@ -1211,7 +1186,6 @@ def fused_experts(hidden_states: torch.Tensor,
             w2=w2,
             topk_weights=topk_weights,
             topk_ids=topk_ids,
-            inplace=inplace,
             activation=activation,
             apply_router_weight_on_input=apply_router_weight_on_input,
             use_fp8_w8a8=use_fp8_w8a8,
@@ -1299,6 +1273,19 @@ def fused_experts_impl(hidden_states: torch.Tensor,
 
     config = get_config_func(M)
 
+    # We can reuse the memory between these because by the time we need
+    # cache3, we're done with cache1
+    cache13 = torch.empty(M * top_k_num * max(N, K),
+                          device=hidden_states.device,
+                          dtype=hidden_states.dtype)
+    intermediate_cache1 = cache13[:M * top_k_num * N].view(M, top_k_num, N)
+    intermediate_cache3 = cache13[:M * top_k_num * K].view(M, top_k_num, K)
+
+    # This needs separate memory since it's used concurrently with cache1
+    intermediate_cache2 = torch.empty((M * top_k_num, N // 2),
+                                      device=hidden_states.device,
+                                      dtype=hidden_states.dtype)
+
     if hidden_states.dtype == torch.bfloat16:
         compute_type = tl.bfloat16
     elif hidden_states.dtype == torch.float16:
@@ -1313,50 +1300,7 @@ def fused_experts_impl(hidden_states: torch.Tensor,
     else:
         out_hidden_states = torch.empty_like(hidden_states)
 
-    block_m = config['BLOCK_SIZE_M']
-    assert not use_dg or block_m == dg.get_m_alignment_for_contiguous_layout()
-
-    cache1_view: Tuple[int, ...] = ()
-    cache2_view: Tuple[int, ...] = ()
-    cache3_view: Tuple[int, ...] = ()
-
-    if use_dg:
-        assert w1_scale is not None
-        assert w2_scale is not None
-
-        # We attempt to transpose and align offline in Fp8MoEMethod, in which
-        # case these calls will be nops.  Otherwise, they'll be performed every
-        # time the layer is executed.
-        w1_scale = dg.get_col_major_tma_aligned_tensor(w1_scale).contiguous()
-        w2_scale = dg.get_col_major_tma_aligned_tensor(w2_scale).contiguous()
-
-        M_sum = topk_ids.numel() + global_num_experts * (block_m - 1)
-        M_sum = round_up(M_sum, block_m)
-
-        cache1_view = (M_sum, N)
-        cache3_view = (M_sum, K)
-    else:
-        M_sum = M * top_k_num
-        cache1_view = (M, top_k_num, N)
-        cache3_view = (M, top_k_num, K)
-
-    num_chunks = (num_tokens // CHUNK_SIZE) + 1
-
-    # We can reuse the memory between cache1 and cache3 because by the time
-    # we need cache3, we're done with cache1
-    cache13 = torch.empty(M_sum * max(N, K),
-                          device=hidden_states.device,
-                          dtype=hidden_states.dtype)
-
-    intermediate_cache1 = cache13[:M_sum * N].view(*cache1_view)
-    intermediate_cache2 = torch.empty((M_sum, N // 2),
-                                      device=hidden_states.device,
-                                      dtype=hidden_states.dtype)
-    intermediate_cache3 = cache13[:M_sum * K].view(*cache3_view)
-
-    needs_fp8_quantization = use_fp8_w8a8 or use_dg
-
-    for chunk in range(num_chunks):
+    for chunk in range((num_tokens // CHUNK_SIZE) + 1):
         begin_chunk_idx, end_chunk_idx = (chunk * CHUNK_SIZE,
                                           min((chunk + 1) * CHUNK_SIZE,
                                               num_tokens))
@@ -1365,6 +1309,17 @@ def fused_experts_impl(hidden_states: torch.Tensor,
 
         if tokens_in_chunk == 0:
             break
+
+        if tokens_in_chunk < CHUNK_SIZE and chunk > 0:
+            # Adjust the intermediate cache size and config for the last
+            # chunk. Note that in most cases we only have one chunk
+            # so the cache size and config are already set correctly and
+            # do not need to be adjusted.
+            intermediate_cache1 = intermediate_cache1[:tokens_in_chunk]
+            intermediate_cache2 = intermediate_cache2[:tokens_in_chunk *
+                                                      topk_ids.shape[1]]
+            intermediate_cache3 = intermediate_cache3[:tokens_in_chunk]
+            config = get_config_func(tokens_in_chunk)
 
         curr_topk_ids = topk_ids[begin_chunk_idx:end_chunk_idx]
         curr_topk_weights = topk_weights[begin_chunk_idx:end_chunk_idx]
@@ -1377,8 +1332,8 @@ def fused_experts_impl(hidden_states: torch.Tensor,
             block_shape=block_shape)
 
         sorted_token_ids, expert_ids, num_tokens_post_padded = (
-            moe_align_block_size(curr_topk_ids, block_m, global_num_experts,
-                                 expert_map))
+            moe_align_block_size(curr_topk_ids, config['BLOCK_SIZE_M'],
+                                 global_num_experts, expert_map))
 
         invoke_fused_moe_kernel(qcurr_hidden_states,
                                 w1,
@@ -1664,9 +1619,6 @@ class TritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
             raise ValueError(
                 f"Unsupported compute_type: {hidden_states.dtype}")
 
-        #print(f"shape: E={E}, M={num_tokens}, N={N}, K={K}, top_k={top_k_num}")
-        #print(f"BLOCK_M = {self.block_m}")
-
         # We can reuse the memory between these because by the time we need
         # cache3, we're done with cache1
         intermediate_cache1 = _resize_cache(workspace13,
@@ -1717,8 +1669,7 @@ class TritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
                                 per_channel_quant=self.per_channel_quant,
                                 block_shape=self.block_shape)
 
-        self.activation(activation,
-                        intermediate_cache2,
+        self.activation(activation, intermediate_cache2,
                         intermediate_cache1.view(-1, N))
 
         a2q_scale: Optional[torch.Tensor] = None

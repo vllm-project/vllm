@@ -9,8 +9,6 @@ from vllm.model_executor.layers.fused_moe.utils import (
     moe_kernel_quantize_input)
 
 
-logger = init_logger(__name__)
-
 # Note use: layer.get_all_to_all() to get an AllToAll instance
 # The max_num_tokens, world_size and dp_size must be the same
 # as the ones used to create the AllToAll.
@@ -46,7 +44,6 @@ class PplxDispatchCombine(mk.FusedMoEQuantizeDispatchCombine):
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor]]:
         # Is this always going to be a1.device?
         device = a1.device
-        num_tokens = a1.shape[0]   # M
         hidden_dim = a1.shape[-1]  # K
 
         assert expert_map is None, "NYI"
@@ -75,18 +72,13 @@ class PplxDispatchCombine(mk.FusedMoEQuantizeDispatchCombine):
             dtype=torch.int32,
             device=device,
         )
-        #expert_num_tokens.fill_(-1)  # debugging, remove later
 
         num_dp = self.world_size // self.dp_size
-        logger.debug(f"GOT HERE A {self.rank}: {self.max_num_tokens} {num_dp} {hidden_dim}")
         expert_x = torch.empty(
-            (num_local_experts, self.max_num_tokens * num_dp, a1q.shape[-1]),
+            (num_local_experts, self.max_num_tokens * num_dp, hidden_dim),
             dtype=a1q.dtype,
             device=device,
         )
-        #expert_x.fill_(0) #torch.nan   # debugging, remove later
-
-        logger.debug(f"GOT HERE B {self.rank}")
 
         expert_x_scale: Optional[torch.Tensor] = None
         if a1q.dtype.itemsize == 1:
@@ -103,11 +95,10 @@ class PplxDispatchCombine(mk.FusedMoEQuantizeDispatchCombine):
                 device=device,
             )
 
-        logger.debug(f"GOT HERE C {self.rank}")
-
         # This argument is optional, defaults to indices.shape[0]
-        # This causes a deadlock????
+        # This causes a deadlock?
         #bound_m = get_forward_context().dp_metadata.dp_rank_num_tokens
+        #num_tokens = a1.shape[0]   # M
         #bound_m = torch.tensor([num_tokens], dtype=torch.uint32, device=device)
         bound_m = None
 
@@ -133,23 +124,17 @@ class PplxDispatchCombine(mk.FusedMoEQuantizeDispatchCombine):
         topk_ids: torch.Tensor,
         apply_router_weight_on_input: bool,
     ) -> None:
-        device = fused_expert_output.device
-        #device = torch.device("cuda", self.rank)
-        #device = get_dp_group().device
-        #assert fused_expert_output.device == device
-
-        logger.debug(f"COMBINE START {self.rank}")
-
         # This argument is optional
         #bound_m = get_forward_context().dp_metadata.dp_rank_num_tokens
         #num_tokens = fused_expert_output.shape[0]   # M
-        #bound_m = torch.tensor([num_tokens], dtype=torch.uint32, device=device)
+        #bound_m = torch.tensor([num_tokens], dtype=torch.uint32,
+        #                       device=fused_expert_output.device)
         bound_m = None
 
         assert output.shape[0] <= self.max_num_tokens
         assert output.shape[1] == fused_expert_output.shape[-1]
 
-        # Set weights to 1 if we did them in dispatch.  This is hacky.
+        # Set weights to 1 if we did them in dispatch. This is hacky.
         if apply_router_weight_on_input:
             topk_weights = torch.ones_like(topk_weights)
 
@@ -158,5 +143,3 @@ class PplxDispatchCombine(mk.FusedMoEQuantizeDispatchCombine):
                          weights=topk_weights,
                          expert_y=fused_expert_output,
                          bound_m=bound_m)
-
-        logger.debug(f"COMBINE END {self.rank}")

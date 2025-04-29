@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Callable, List, Optional, Tuple
 
-import pplx_kernels as pplx
+import pplx_kernels as pplx  # TODO: guard this
 import torch
 import torch.nn.functional as F
 from torch.nn.parameter import UninitializedParameter
@@ -259,19 +259,20 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         assert self.fused_experts == fused_experts
 
         block_m = MOE_DP_CHUNK_SIZE * (self.moe.ep_size // self.moe.dp_size)
-        #print(f"block_m = {block_m}")
 
         if isinstance(dispatch_combine, (BatchedDispatchCombine, PplxDispatchCombine)):
             logger.info(f"BatchedExperts {self.moe}")
-            experts = BatchedExperts() #rank=self.moe.ep_rank, world_size=self.moe.ep_size)
+            experts = BatchedExperts()
         else:
             logger.info(f"TritonExperts {self.moe}")
             experts = TritonExperts(
                 use_fp8_w8a8 = False,
+                use_int8_w8a8 = False,
                 use_int8_w8a16 = False,
                 use_int4_w4a16 = False,
                 block_shape = None,
                 block_m = None, #block_m,
+                per_channel_quant = False,
             )
 
         self.fused_experts = FusedMoEModularKernel(
@@ -552,7 +553,7 @@ class FusedMoE(torch.nn.Module):
         # Use expert parallelism instead of tensor parallelism?
         vllm_config = get_current_vllm_config()
         use_ep = (vllm_config.parallel_config.enable_expert_parallel
-                  and (self.tp_size * self.dp_size) > 1)
+                  and self.tp_size * self.dp_size > 1)
 
         # For smuggling this layer into the fused moe custom op
         self.use_direct_call = self.dp_size == 1
@@ -583,7 +584,6 @@ class FusedMoE(torch.nn.Module):
             self.ep_size = 1
             self.local_num_experts = self.global_num_experts
             self.expert_map = None
-        #self.global_num_experts = num_experts  redundant?
         self.top_k = top_k
 
         assert intermediate_size % self.tp_size == 0
@@ -605,23 +605,20 @@ class FusedMoE(torch.nn.Module):
         if self.scoring_func != "softmax" and not self.use_grouped_topk:
             raise ValueError("Only softmax scoring function is supported for "
                              "non-grouped topk.")
-
         if current_platform.is_hpu():
             from vllm_hpu_extension.ops import DynamicFusedMOE
             self.hpu_fused_moe = DynamicFusedMOE(self.global_num_experts)
 
-        #print(f"params dtype= {params_dtype}")
-
         moe = MoEConfig(
             num_experts=self.global_num_experts,
-            experts_per_token=top_k, # ?  must be same as topk_ids.shape[1]
+            experts_per_token=top_k,
             hidden_dim=hidden_size,
             num_local_experts=self.local_num_experts,
             dp_size=self.dp_size,
             dp_rank=self.dp_rank,
             ep_size=self.ep_size,
             ep_rank=self.ep_rank,
-            in_dtype = params_dtype, # this is probably not right, where to get?
+            in_dtype = params_dtype,  # this is probably not right, where to get?
             out_dtype = params_dtype, # ditto.
         )
 
@@ -645,14 +642,6 @@ class FusedMoE(torch.nn.Module):
             world_size = moe.ep_size
             dp_size = moe.ep_size // moe.dp_size # dp_size actually means TP.
             rank = moe.ep_rank
-
-            if False:
-                print(f"max num = {max_num_tokens}")
-                print(f"world size = {world_size}")
-                print(f"moe ep size = {moe.ep_size}")
-                print(f"moe dp size = {moe.dp_size}")
-                print(f"dp size = {dp_size}")
-                print(f"rank= {rank}")
 
             all_to_all = get_all_to_all(
                 max_num_tokens=max_num_tokens,
@@ -684,7 +673,7 @@ class FusedMoE(torch.nn.Module):
                 rank, # just for debugging
                 moe.in_dtype,
             )
-        elif False:
+        elif True:
             logger.info("using standard dispatch")
             dispatch_combine = StandardDispatchCombine(
                 moe.in_dtype,
@@ -1037,7 +1026,7 @@ class FusedMoE(torch.nn.Module):
                 router_logits: torch.Tensor):
         if self.use_direct_call:
             return self.forward_impl(hidden_states, router_logits)
-        elif True:
+        else:
             return torch.ops.vllm.moe_forward(hidden_states, router_logits,
                                               self.layer_name)
 
@@ -1047,10 +1036,8 @@ class FusedMoE(torch.nn.Module):
         ctx = get_forward_context()
 
         max_tokens_across_dp = ctx.dp_metadata.max_tokens_across_dp
-        #cu_tokens_across_dp_cpu = ctx.dp_metadata.cu_tokens_across_dp_cpu
+        cu_tokens_across_dp_cpu = ctx.dp_metadata.cu_tokens_across_dp_cpu
         num_tokens_across_dp = ctx.dp_metadata.num_tokens_across_dp
-
-        #print(f"max/num/rank_num = {max_tokens_across_dp}/{num_tokens_across_dp}/{ctx.dp_metadata.dp_rank_num_tokens}")
 
         #In this function we define two ranges:
         # 1. chunk_range - The current iteration of the loops's range over the DP world tokens
@@ -1064,9 +1051,6 @@ class FusedMoE(torch.nn.Module):
                         full_hidden_states.shape[0])
         full_final_hidden_states = torch.empty_like(full_hidden_states)
 
-        #print(f"ORIGINAL SHAPE {full_hidden_states.shape}")
-        #print(f"moe_dp_chunk_size_per_rank = {moe_dp_chunk_size_per_rank}")
-
         assert full_hidden_states.shape[0] == full_router_logits.shape[0]
 
         for iter in range(0, max_tokens_across_dp, moe_dp_chunk_size_per_rank):
@@ -1077,8 +1061,6 @@ class FusedMoE(torch.nn.Module):
                 num_tokens_remaining_across_dp.clamp(
                     max=moe_dp_chunk_size_per_rank),
                 dim=0)
-
-            print(f"loop {iter}: {chunk_start}:{chunk_end}, {hidden_states.shape} {cu_tokens_across_dp_this_iter}")
 
             hidden_states = self.naive_multicast(
                 hidden_states, cu_tokens_across_dp_this_iter)
@@ -1103,8 +1085,6 @@ class FusedMoE(torch.nn.Module):
                 activation=self.activation,
             )
 
-            #print(f"final1 = {final_hidden_states.shape}")
-
             if self.dp_size > 1:
                 start = 0 if self.dp_rank == 0 else cu_tokens_across_dp_this_iter[
                     self.dp_rank - 1]
@@ -1114,26 +1094,18 @@ class FusedMoE(torch.nn.Module):
                     final_hidden_states)
                 final_hidden_states = all_hidden_states[start:end, :]
 
-                print(f"final2 (AR) = {final_hidden_states.shape}")
-
             if self.reduce_results and (self.tp_size > 1 or self.ep_size > 1):
                 # Default set to False. (May have to add shared expert outputs.)
                 final_hidden_states = tensor_model_parallel_all_reduce(
                     final_hidden_states)
 
-                print(f"final3 (AR) = {final_hidden_states.shape}")
-
             full_final_hidden_states[chunk_start:chunk_end, :].copy_(
                 final_hidden_states)
-
-            #print(f"partial final = {full_final_hidden_states.shape}")
 
             # Update bounds
             num_tokens_remaining_across_dp = torch.clamp(
                 num_tokens_remaining_across_dp - moe_dp_chunk_size_per_rank,
                 min=0)
-
-            #print(f"num remaining = {num_tokens_remaining_across_dp}")
 
             # HACK FIX
             if num_tokens_remaining_across_dp.sum() == 0:
@@ -1145,8 +1117,6 @@ class FusedMoE(torch.nn.Module):
 
             chunk_start = update_chunk_bound(chunk_start)
             chunk_end = update_chunk_bound(chunk_end)
-
-        #print(f"full final shape {full_final_hidden_states.shape}")
 
         return full_final_hidden_states
 
