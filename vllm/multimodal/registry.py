@@ -95,15 +95,17 @@ class MultiModalRegistry:
         mm_config: "MultiModalConfig",
     ) -> Optional[Executor]:
         if not hasattr(self, "_processing_executor"):
+            executor: Optional[Executor]
             if mm_config.parallel_processor_backend == "uni":
-                self._processing_executor = None
+                executor = None
             elif mm_config.parallel_processor_backend == "mp":
-                self._processing_executor = ProcessPoolExecutor(
-                    mp_context=get_mp_context())
+                executor = ProcessPoolExecutor(mp_context=get_mp_context())
             elif mm_config.parallel_processor_backend == "mt":
-                self._processing_executor = ThreadPoolExecutor()
+                executor = ThreadPoolExecutor()
             else:
                 assert_never(mm_config.parallel_processor_backend)
+
+            self._processing_executor = executor
 
         return self._processing_executor
 
