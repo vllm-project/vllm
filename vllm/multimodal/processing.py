@@ -2017,7 +2017,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
             enable_hf_prompt_update=False,
         )
 
-        mm_cache_items = self._merge_mm_kwargs(
+        mm_cache_items_merged = self._merge_mm_kwargs(
             cache,
             mm_cache_items=mm_cache_items,
             mm_missing_data=mm_missing_data,
@@ -2025,13 +2025,13 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         )
 
         mm_kwargs = MultiModalKwargs.from_items([
-            item.value for cache_items in mm_cache_items.values()
+            item.value for cache_items in mm_cache_items_merged.values()
             for item in cache_items
         ])
 
         mm_hashes = {
             modality: [item.key for item in cache_items]
-            for modality, cache_items in mm_cache_items.items()
+            for modality, cache_items in mm_cache_items_merged.items()
         } if return_mm_hashes else None
 
         return prompt_ids, mm_kwargs, mm_hashes, is_update_applied
