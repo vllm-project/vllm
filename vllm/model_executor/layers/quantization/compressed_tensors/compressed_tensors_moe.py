@@ -570,10 +570,10 @@ class CompressedTensorsW8A8Int8MoEMethod(CompressedTensorsMoEMethod):
                 f"{self.weight_quant}, {self.input_quant}")
 
         self.static_input_scales = not self.input_quant.dynamic
-        if self.static_input_scales and per_channel:
+        if self.static_input_scales:
             raise ValueError(
                 "For INT8 Fused MoE layers, we require channelwise, "
-                "dynamic per token quantization.")
+                "dynamic per token quantization. Found static input scales.")
 
     def create_weights(self, layer: torch.nn.Module, num_experts: int,
                        hidden_size: int, intermediate_size_per_partition: int,
@@ -662,9 +662,9 @@ class CompressedTensorsW8A8Int8MoEMethod(CompressedTensorsMoEMethod):
             e_score_correction_bias=e_score_correction_bias)
 
         return fused_experts(
-            x,
-            layer.w13_weight,
-            layer.w2_weight,
+            hidden_states=x,
+            w1=layer.w13_weight,
+            w2=layer.w2_weight,
             topk_weights=topk_weights,
             topk_ids=topk_ids,
             inplace=True,
