@@ -4,6 +4,7 @@ from dataclasses import MISSING, Field, asdict, dataclass, field
 from typing import Literal, Union
 
 import pytest
+import json
 
 from vllm.config import ModelConfig, PoolerConfig, config, get_field
 from vllm.model_executor.layers.pooler import PoolingType
@@ -410,3 +411,21 @@ def test_generation_config_loading():
         override_generation_config=override_generation_config)
 
     assert model_config.get_diff_sampling_param() == override_generation_config
+
+@pytest.mark.parametrize(("model_id", "pt_load_map_location"), [
+    ("facebook/opt-125m", None),
+    ("facebook/opt-125m", "cuda"),
+    ("jerryzh/opt-125m-int4wo", "cuda")
+])
+def test_load_config_pt_load_map_location(model_id, pt_load_map_location):
+    config = ModelConfig(
+        model_id,
+        task="auto",
+        tokenizer=model_id,
+        tokenizer_mode="auto",
+        trust_remote_code=False,
+        dtype="float16",
+        seed=0,
+    )
+
+    assert config.is_encoder_decoder == is_encoder_decoder
