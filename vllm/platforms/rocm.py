@@ -13,9 +13,6 @@ from .interface import DeviceCapability, Platform, PlatformEnum, _Backend
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig, VllmConfig
-else:
-    ModelConfig = None
-    VllmConfig = None
 
 logger = init_logger(__name__)
 
@@ -98,22 +95,22 @@ def device_id_to_physical_device_id(device_id: int) -> int:
         return device_id
 
 
+def on_mi250_mi300() -> bool:
+    GPU_ARCH = torch.cuda.get_device_properties("cuda").gcnArchName
+    return any(arch in GPU_ARCH for arch in ["gfx90a", "gfx942"])
+
+
 @cache
 def use_rocm_custom_paged_attention(qtype: torch.dtype, head_size: int,
                                     block_size: int, gqa_ratio: int,
                                     max_seq_len: int,
                                     sliding_window: int) -> bool:
 
-    GPU_ARCH = torch.cuda.get_device_properties("cuda").gcnArchName
-    ON_NAVI = "gfx1" in GPU_ARCH
-    ON_MI250_MI300 = any(arch in GPU_ARCH for arch in ["gfx90a", "gfx942"])
-
-    # rocm custom page attention not support on navi (gfx1*)
+    # rocm custom page attention not support on gfx1*
     # custom paged attn always supported on V0. On V1, requires sliding window
     # disabled due to observed numerical discrepancy.
-    return (ON_MI250_MI300 and not ON_NAVI
-            and (not envs.VLLM_USE_V1 or sliding_window == 0
-                 or sliding_window == (-1, -1))
+    return (on_mi250_mi300() and (not envs.VLLM_USE_V1 or sliding_window == 0
+                                  or sliding_window == (-1, -1))
             and (qtype == torch.half or qtype == torch.bfloat16)
             and (head_size == 64 or head_size == 128)
             and (block_size == 16 or block_size == 32)
@@ -133,8 +130,8 @@ class RocmPlatform(Platform):
     device_control_env_var: str = "CUDA_VISIBLE_DEVICES"
 
     supported_quantization: list[str] = [
-        "awq", "gptq", "fp8", "compressed_tensors", "compressed-tensors",
-        "fbgemm_fp8", "gguf", "quark", "ptpc_fp8"
+        "awq", "gptq", "fp8", "compressed-tensors", "fbgemm_fp8", "gguf",
+        "quark", "ptpc_fp8"
     ]
 
     @classmethod
@@ -243,7 +240,7 @@ class RocmPlatform(Platform):
         return True
 
     @classmethod
-    def check_and_update_config(cls, vllm_config: VllmConfig) -> None:
+    def check_and_update_config(cls, vllm_config: "VllmConfig") -> None:
         cache_config = vllm_config.cache_config
         if cache_config and cache_config.block_size is None:
             cache_config.block_size = 16
@@ -332,7 +329,7 @@ class RocmPlatform(Platform):
             return torch.float8_e4m3fn
 
     @classmethod
-    def supports_v1(cls, model_config: ModelConfig) -> bool:
+    def supports_v1(cls, model_config: "ModelConfig") -> bool:
         # V1 support on AMD gpus is experimental
         return True
 
