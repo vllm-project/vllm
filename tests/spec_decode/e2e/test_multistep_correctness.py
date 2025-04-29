@@ -526,11 +526,8 @@ def test_spec_decode_e2e_greedy_correctness_with_preemption(
 @pytest.mark.parametrize(
     "per_test_common_llm_kwargs",
     [
-        # As of this writing, vLLM only compiles with these 3 block sizes by
-        # default.
-        {
-            "block_size": 8,
-        },
+        # https://github.com/triton-lang/triton/issues/2266 tl.dot
+        # doesn't support embedding < 16
         {
             "block_size": 16,
         },
