@@ -156,12 +156,7 @@ vl_test_cases = [
 ]
 
 
-@pytest.mark.parametrize("test_case", vl_test_cases)
-def test_vl_get_input_positions_and_delta_correctness(test_case):
-    input = test_case["input"]
-    spatial_merge_size = test_case["spatial_merge_size"]
-    tokens_per_second = test_case.get("tokens_per_second", 1.0)
-
+def make_vl_hf_config(spatial_merge_size=2, tokens_per_second=2):
     hf_config = Mock()
     hf_config.image_token_id = IMAGE
     hf_config.video_token_id = VIDEO
@@ -176,6 +171,17 @@ def test_vl_get_input_positions_and_delta_correctness(test_case):
         "mrope_section": [16, 24, 24],
     }
     hf_config.thinker_config = None
+
+    return hf_config
+
+
+@pytest.mark.parametrize("test_case", vl_test_cases)
+def test_vl_get_input_positions_and_delta_correctness(test_case):
+    input = test_case["input"]
+    spatial_merge_size = test_case["spatial_merge_size"]
+    tokens_per_second = test_case.get("tokens_per_second", 1.0)
+
+    hf_config = make_vl_hf_config(spatial_merge_size, tokens_per_second)
 
     input_tokens = []
     image_grid_thw = []
@@ -362,14 +368,11 @@ omni_test_cases = [
 ]
 
 
-@pytest.mark.parametrize("test_case", omni_test_cases)
-def test_omni_get_input_positions_and_delta_correctness(test_case):
-    input = test_case["input"]
-    spatial_merge_size = test_case["spatial_merge_size"]
-    use_audio_with_video = test_case.get("use_audio_with_video", False)
-    tokens_per_second = test_case.get("tokens_per_second", 25)
-    seconds_per_chunk = test_case.get("seconds_per_chunk", 2.0)
-
+def make_omni_hf_config(
+    spatial_merge_size=2,
+    tokens_per_second=25,
+    seconds_per_chunk=2.0,
+):
     hf_config = Mock()
 
     hf_config.thinker_config = Mock()
@@ -392,6 +395,23 @@ def test_omni_get_input_positions_and_delta_correctness(test_case):
     hf_config.thinker_config.text_config.rope_scaling = {
         "mrope_section": [16, 24, 24],
     }
+
+    return hf_config
+
+
+@pytest.mark.parametrize("test_case", omni_test_cases)
+def test_omni_get_input_positions_and_delta_correctness(test_case):
+    input = test_case["input"]
+    spatial_merge_size = test_case["spatial_merge_size"]
+    use_audio_with_video = test_case.get("use_audio_with_video", False)
+    tokens_per_second = test_case.get("tokens_per_second", 25)
+    seconds_per_chunk = test_case.get("seconds_per_chunk", 2.0)
+
+    hf_config = make_omni_hf_config(
+        spatial_merge_size,
+        tokens_per_second,
+        seconds_per_chunk,
+    )
 
     t_ntoken_per_chunk = int(tokens_per_second * seconds_per_chunk)
 
@@ -461,3 +481,152 @@ def test_omni_get_input_positions_and_delta_correctness(test_case):
 
     assert torch.equal(input_positions_torch, input_positions_numba)
     assert mrope_position_delta_torch == mrope_position_delta_numba
+
+
+@pytest.mark.parametrize("is_omni, modality", [
+    (True, "image_grid_thw"),
+    (True, "video_grid_thw"),
+    (True, "audio_feature_lengths"),
+    (False, "image_grid_thw"),
+    (False, "video_grid_thw"),
+])
+def test_missing_mm_item_error(is_omni, modality):
+    hf_config = make_omni_hf_config() if is_omni else make_vl_hf_config()
+    input_tokens = [1, 2, 3, 4]
+    image_grid_thw = []
+    video_grid_thw = []
+    second_per_grid_ts = []
+    audio_feature_lengths = []
+    if modality == "image_grid_thw":
+        input_tokens.extend(
+            [VISION_START, IMAGE, IMAGE, IMAGE, IMAGE, VISION_END])
+    elif modality == "video_grid_thw":
+        if is_omni:
+            input_tokens.extend(
+                [VISION_START, VIDEO, VIDEO, VIDEO, VIDEO, AUDIO, VISION_END])
+        else:
+            input_tokens.extend(
+                [VISION_START, VIDEO, VIDEO, VIDEO, VIDEO, VISION_END])
+    elif modality == "audio_feature_lengths":
+        input_tokens.extend(
+            [AUDIO_START, AUDIO, AUDIO, AUDIO, AUDIO, AUDIO_END])
+
+    with pytest.raises(ValueError) as exc_info:
+        mrope_get_input_positions_and_delta(
+            input_tokens=input_tokens,
+            hf_config=hf_config,
+            image_grid_thw=image_grid_thw,
+            video_grid_thw=video_grid_thw,
+            second_per_grid_ts=second_per_grid_ts,
+            audio_feature_lengths=torch.tensor(audio_feature_lengths,
+                                               dtype=torch.float64),
+            use_audio_in_video=is_omni,
+            use_numba=True,
+        )
+
+    assert f"{modality}[0] is missing" in str(exc_info.value)
+
+
+@pytest.mark.parametrize("is_omni, modality", [
+    (True, "image_grid_thw"),
+    (True, "video_grid_thw"),
+    (True, "audio_feature_lengths"),
+    (False, "image_grid_thw"),
+    (False, "video_grid_thw"),
+])
+def test_tokens_out_of_bound_error(is_omni, modality):
+    hf_config = make_omni_hf_config() if is_omni else make_vl_hf_config()
+    input_tokens = [1, 2, 3, 4]
+    image_grid_thw = []
+    video_grid_thw = []
+    second_per_grid_ts = []
+    audio_feature_lengths = []
+    if modality == "image_grid_thw":
+        input_tokens.extend(
+            [VISION_START, IMAGE, IMAGE, IMAGE, IMAGE, VISION_END])
+        image_grid_thw.append([1, 8, 8])
+    elif modality == "video_grid_thw":
+        video_grid_thw.append([1, 8, 8])
+        if is_omni:
+            audio_feature_lengths.append(1000)
+            input_tokens.extend(
+                [VISION_START, VIDEO, VIDEO, VIDEO, VIDEO, AUDIO, VISION_END])
+        else:
+            input_tokens.extend(
+                [VISION_START, VIDEO, VIDEO, VIDEO, VIDEO, VISION_END])
+        second_per_grid_ts.append(1.0)
+    elif modality == "audio_feature_lengths":
+        audio_feature_lengths.append(1000)
+        input_tokens.extend(
+            [AUDIO_START, AUDIO, AUDIO, AUDIO, AUDIO, AUDIO_END])
+
+    with pytest.raises(ValueError) as exc_info:
+        mrope_get_input_positions_and_delta(
+            input_tokens=input_tokens,
+            hf_config=hf_config,
+            image_grid_thw=image_grid_thw,
+            video_grid_thw=video_grid_thw,
+            second_per_grid_ts=second_per_grid_ts,
+            audio_feature_lengths=torch.tensor(audio_feature_lengths,
+                                               dtype=torch.float64),
+            use_audio_in_video=is_omni,
+            use_numba=True,
+        )
+    assert f"input_tokens out of bounds while processing {modality}[0]" in str(
+        exc_info.value)
+
+
+@pytest.mark.parametrize("is_omni, modality", [
+    (True, "image_grid_thw"),
+    (True, "video_grid_thw"),
+    (True, "audio_feature_lengths"),
+    (False, "image_grid_thw"),
+    (False, "video_grid_thw"),
+])
+def test_unused_mm_items_error(is_omni, modality):
+    hf_config = make_omni_hf_config() if is_omni else make_vl_hf_config()
+    input_tokens = [1, 2, 3, 4]
+    image_grid_thw = []
+    video_grid_thw = []
+    second_per_grid_ts = []
+    audio_feature_lengths = []
+    if modality == "image_grid_thw":
+        image_grid_thw.append([1, 4, 4])
+        image_grid_thw.append([1, 4, 4])
+        input_tokens.extend(
+            [VISION_START, IMAGE, IMAGE, IMAGE, IMAGE, VISION_END])
+    elif modality == "video_grid_thw":
+        video_grid_thw.append([1, 4, 4])
+        video_grid_thw.append([1, 4, 4])
+        if is_omni:
+            audio_feature_lengths.append(16)
+            audio_feature_lengths.append(16)
+            input_tokens.extend([
+                VISION_START, VIDEO, VIDEO, VIDEO, VIDEO, AUDIO, AUDIO, AUDIO,
+                AUDIO, VISION_END
+            ])
+        else:
+            input_tokens.extend(
+                [VISION_START, VIDEO, VIDEO, VIDEO, VIDEO, VISION_END])
+        second_per_grid_ts.append(1.0)
+        second_per_grid_ts.append(1.0)
+    elif modality == "audio_feature_lengths":
+        audio_feature_lengths.append(16)
+        audio_feature_lengths.append(16)
+        input_tokens.extend(
+            [AUDIO_START, AUDIO, AUDIO, AUDIO, AUDIO, AUDIO_END])
+
+    with pytest.raises(ValueError) as exc_info:
+        mrope_get_input_positions_and_delta(
+            input_tokens=input_tokens,
+            hf_config=hf_config,
+            image_grid_thw=image_grid_thw,
+            video_grid_thw=video_grid_thw,
+            second_per_grid_ts=second_per_grid_ts,
+            audio_feature_lengths=torch.tensor(audio_feature_lengths,
+                                               dtype=torch.float64),
+            use_audio_in_video=is_omni,
+            use_numba=True,
+        )
+
+    assert f"{modality} has 1 unused item" in str(exc_info.value)
