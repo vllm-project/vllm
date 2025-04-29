@@ -92,8 +92,6 @@ def test_gemma3_with_mm_on_multichip(
         with vllm_runner(
                 model,
                 max_num_batched_tokens=256,
-                # max_model_len=8192,
-                # gpu_memory_utilization=0.7,
                 max_num_seqs=max_num_seqs,
                 tensor_parallel_size=tensor_parallel_size) as vllm_model:
             vllm_outputs = vllm_model.generate_greedy(prompts, max_tokens)
