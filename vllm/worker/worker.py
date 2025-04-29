@@ -115,6 +115,11 @@ class Worker(LocalOrDistributedWorkerBase):
         else:
             self.profiler = None
 
+        from vllm.worker.worker_metrics import VllmWorkerMetadata
+        metadata = VllmWorkerMetadata(self.model_config.model, self.parallel_config.world_size, self.parallel_config.rank)
+        from vllm.worker.worker_metrics import VllmWorkerStatsLogger
+        self.stat_logger = VllmWorkerStatsLogger(metadata, log_interval=10)
+
     def start_profile(self):
         if self.profiler is None:
             raise RuntimeError("Profiler is not enabled.")
