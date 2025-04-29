@@ -74,15 +74,13 @@ def set_forward_context(attn_metadata: Any,
     if vllm_config.parallel_config.data_parallel_size > 1:
         dp_size = vllm_config.parallel_config.data_parallel_size
         dp_rank = vllm_config.parallel_config.data_parallel_rank
-        if attn_metadata is not None:
-            if hasattr(attn_metadata, "num_prefill_tokens"):
-                # for v0 attention backends
-                batchsize = attn_metadata.num_prefill_tokens + \
-                    attn_metadata.num_decode_tokens
-            else:
-                # for v1 attention backends
-                batchsize = attn_metadata.num_input_tokens
+        if attn_metadata is not None and hasattr(attn_metadata,
+                                                 "num_prefill_tokens"):
+            # for v0 attention backends
+            batchsize = attn_metadata.num_prefill_tokens + \
+                attn_metadata.num_decode_tokens
         else:
+            # for v1 attention backends or no attn_metadata
             batchsize = num_tokens
         num_tokens_across_dp = [0] * dp_size
         num_tokens_across_dp[dp_rank] = batchsize
@@ -124,7 +122,7 @@ def set_forward_context(attn_metadata: Any,
                     attn_metadata.num_decode_tokens
             else:
                 # for v1 attention backends
-                batchsize = attn_metadata.num_input_tokens
+                batchsize = num_tokens
             # we use synchronous scheduling right now,
             # adding a sync point here should not affect
             # scheduling of the next batch

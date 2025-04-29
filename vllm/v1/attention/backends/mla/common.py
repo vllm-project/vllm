@@ -312,9 +312,6 @@ class MLACommonMetadata(Generic[D]):
     num_decode_tokens: int
     num_prefills: int
 
-    # For logging.
-    num_input_tokens: int = 0  # Number of tokens including padding.
-
     # The dimension of the attention heads
     head_dim: Optional[int] = None
 
