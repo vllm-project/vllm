@@ -292,6 +292,14 @@ class TransformersModel(nn.Module):
         """
         for name, buffer in module.named_buffers(recurse=False):
             if buffer.device == torch.device("meta"):
+                if module == self.model:
+                    logger.warning(
+                        "To initialize buffers correctly, we instantiate the "
+                        "parent module and and extract the value of the "
+                        "buffer from it. In this case, the parent module is "
+                        "the base model. Instantiating the entire model here "
+                        "risks GPU OOM. Could this buffer be moved to a child "
+                        "module?")
                 new_buffer = getattr(type(module)(self.config), name)
                 setattr(module, name, new_buffer)
         for child in module.children():
