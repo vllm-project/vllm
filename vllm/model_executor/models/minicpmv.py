@@ -47,6 +47,9 @@ from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.model_executor.models.qwen2 import Qwen2ForCausalLM
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalKwargs
+from vllm.model_executor.layers.quantization.gptq import GPTQConfig
+from vllm.model_executor.layers.quantization.gptq_marlin import (
+    GPTQMarlinConfig)
 from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig,
                                     NestedTensors)
 from vllm.multimodal.parse import (DictEmbeddingItems, ImageItem,
@@ -1181,7 +1184,7 @@ class MiniCPMV2_6(MiniCPMVBaseModel, SupportsLoRA):
     def init_vision_module(
         self,
         config: PretrainedConfig,
-        quant_config: Optional[QuantizationConfig],
+        quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
     ) -> nn.Module:
         model = Idefics2VisionTransformer(config.vision_config,
@@ -1202,11 +1205,20 @@ class MiniCPMV2_6(MiniCPMVBaseModel, SupportsLoRA):
                                      embed_dim=embed_dim,
                                      num_heads=embed_dim // 128,
                                      kv_dim=vision_dim,
-                                     quant_config=quant_config,
+                                     quant_config=self._maybe_ignore_quant_config(quant_config),
                                      prefix=prefix)
 
         return resampler.to(device=current_platform.device_type,
                             dtype=torch.get_default_dtype())
+
+    def _maybe_ignore_quant_config(self, quant_config: QuantizationConfig):
+        # GPTQ configs do not have a list of ignored modules, however AutoGPTQ
+        # seems to avoid vision encoder sections for some models.
+        # See: https://huggingface.co/openbmb/MiniCPM-V-2_6-int4
+        # and https://huggingface.co/openbmb/MiniCPM-o-2_6-int4
+        if isinstance(quant_config, (GPTQConfig, GPTQMarlinConfig)):
+            return None
+        return quant_config
 
     def get_vision_hidden_states(
             self, data: MiniCPMVImagePixelInputs) -> torch.Tensor:
