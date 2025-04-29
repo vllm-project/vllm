@@ -43,7 +43,7 @@ class MOETensors:
 
     @staticmethod
     def make_moe_tensors(m: int, k: int, n: int, e: int,
-                         dtype: torch.dtype, ep_size: int = 1) -> "MOETensors":
+                         dtype: torch.dtype) -> "MOETensors":
         a = torch.randn((m, k), device="cuda", dtype=dtype) / 10
         w1 = torch.randn((e, 2 * n, k), device="cuda", dtype=dtype) / 10
         w2 = torch.randn((e, k, n), device="cuda", dtype=dtype) / 10
@@ -77,12 +77,11 @@ class MOETensors8Bit(MOETensors):
     @staticmethod
     def make_moe_tensors_8bit(m: int, k: int, n: int, e: int,
                               per_act_token: bool,
-                              per_out_channel: bool,
-                              ep_size: int = 1) -> "MOETensors8Bit":
+                              per_out_channel: bool) -> "MOETensors8Bit":
         dtype = torch.half
         q_dtype = torch.float8_e4m3fn
 
-        moe_tensors_fp16 = MOETensors.make_moe_tensors(m, k, n, e, dtype, ep_size)
+        moe_tensors_fp16 = MOETensors.make_moe_tensors(m, k, n, e, dtype)
 
         # a -> a_q, w1 -> w1_q, w2 -> w2_q
         n_b_scales = 2 * n if per_out_channel else 1
@@ -347,6 +346,7 @@ def test_cutlass_moe_8_bit_cuda_graph(
                                    atol=9e-2,
                                    rtol=1e-2)
 
+
 @pytest.mark.parametrize("m,n,k", MNK_FACTORS)
 @pytest.mark.parametrize("e", NUM_EXPERTS)
 @pytest.mark.parametrize("topk", TOP_KS)
@@ -467,7 +467,7 @@ def test_cutlass_moe_8_bit_EP(
                 pipeline_parallel_size=1))):
 
         mt = MOETensors8Bit.make_moe_tensors_8bit(m, k, n, e, per_act_token,
-                                                  per_out_channel, ep_size=ep_size)
+                                                  per_out_channel)
 
         score = torch.randn((m, e), device="cuda", dtype=torch.half)
         topk_weights, topk_ids = fused_topk(mt.a,
@@ -517,7 +517,7 @@ def test_cutlass_moe_16_bit_EP(
             VllmConfig(parallel_config=ParallelConfig(
                 pipeline_parallel_size=1))):
 
-        mt = MOETensors.make_moe_tensors(m, k, n, e, dtype=dtype, ep_size=ep_size)
+        mt = MOETensors.make_moe_tensors(m, k, n, e, dtype=dtype)
 
         score = torch.randn((m, e), device="cuda", dtype=torch.half)
         topk_weights, topk_ids = fused_topk(mt.a,
