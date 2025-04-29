@@ -51,8 +51,7 @@ class Processor:
         self.mm_input_cache_client = MirroredProcessingCache(self.model_config)
 
         # Multi-modal hasher (for images)
-        self.use_hash = (
-            not self.model_config.disable_mm_preprocessor_cache) or \
+        self.use_hash = self.mm_input_cache_client.use_cache or \
             self.cache_config.enable_prefix_caching
 
     def _validate_logprobs(

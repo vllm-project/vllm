@@ -774,8 +774,9 @@ class Qwen2VLProcessingInfo(BaseProcessingInfo):
         size: Optional[dict[str, int]] = None,
         **kwargs: object,
     ):
-        if self.ctx.model_config.mm_processor_kwargs:
-            kwargs.update(self.ctx.model_config.mm_processor_kwargs)
+        mm_config = self.ctx.model_config.get_multimodal_config()
+        if mm_config.mm_processor_kwargs:
+            kwargs.update(mm_config.mm_processor_kwargs)
 
         if min_pixels is not None:
             kwargs["min_pixels"] = min_pixels
