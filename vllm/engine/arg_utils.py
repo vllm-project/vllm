@@ -678,6 +678,9 @@ class EngineArgs:
         multimodal_group.add_argument(
             '--disable-mm-preprocessor-cache',
             **multimodal_kwargs["disable_mm_preprocessor_cache"])
+        multimodal_group.add_argument(
+            '--parallel-processor-backend',
+            **multimodal_kwargs["parallel_processor_backend"])
 
         # LoRA related configs
         lora_kwargs = get_kwargs(LoRAConfig)
