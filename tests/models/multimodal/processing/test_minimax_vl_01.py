@@ -12,7 +12,6 @@ from ...utils import build_model_context
 
 
 @pytest.mark.parametrize("model_id", ["MiniMaxAI/MiniMax-VL-01"])
-# yapf: enable
 @pytest.mark.parametrize("num_imgs", [1, 2])
 def test_processor_override(
     image_assets: _ImageAssets,
