@@ -1,10 +1,10 @@
-sphinx==6.2.1
-sphinx-argparse==0.4.0
-sphinx-book-theme==1.0.1
+sphinx==8.2.3
+sphinx-argparse==0.5.2
+sphinx-book-theme==1.1.4
 sphinx-copybutton==0.5.2
 sphinx-design==0.6.1
 sphinx-togglebutton==0.3.2
-myst-parser==3.0.1
+myst-parser==4.0.1
 msgspec
 cloudpickle
 commonmark # Required by sphinx-argparse when using :markdownhelp:
