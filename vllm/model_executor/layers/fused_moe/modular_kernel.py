@@ -76,7 +76,6 @@ def _moe_problem_size(
     return E, M, N, K, topk
 
 
-
 class FusedMoEQuantizeDispatchCombine(ABC):
     """
     An abstract base class for the [Quantize-Dispatch] and [Combine] steps
@@ -107,7 +106,8 @@ class FusedMoEQuantizeDispatchCombine(ABC):
         - num_experts: The total number of experts in the global expert space.
         - expert_map: A tensor mapping expert indices from the global expert
           space to the local expert space of the expert parallel shard.
-        - apply_router_weight_on_input: When True, apply the weights to the activations, before quantization + dispatching.
+        - apply_router_weight_on_input: When True, apply the weights to the
+          activations, before quantization + dispatching.
 
         Returns a tuple of:
         - quantized + dispatched a.
@@ -132,7 +132,8 @@ class FusedMoEQuantizeDispatchCombine(ABC):
           experts, it will have (M, topk, K) shape.
         - topk_weights: The weights to be applied to the fused_experts_output.
         - topk_ids: The topk_ids.
-        - apply_router_weight_on_input: When False, apply the weights to fused_expert_output.
+        - apply_router_weight_on_input: When False, apply the weights to
+          fused_expert_output.
         """
         raise NotImplementedError
 
@@ -312,13 +313,8 @@ class FusedMoEModularKernel(torch.nn.Module):
         Returns:
         - torch.Tensor: The output tensor after applying the MoE layer.
         """
-        #from vllm.distributed import (get_dp_group, get_tensor_model_parallel_rank)
-        #print(f"START {hidden_states.shape} {topk_ids.shape} {get_tensor_model_parallel_rank()}/{get_dp_group().rank_in_group}")
-
         a1 = hidden_states
         E, M, N, K, top_k = _moe_problem_size(a1, w1, w2, topk_ids)
-
-        #print(f"INIT shape: E={E}, M={M}, N={N}, K={K}, top_k={top_k}")
 
         if global_num_experts == -1:
             global_num_experts = E
@@ -363,7 +359,5 @@ class FusedMoEModularKernel(torch.nn.Module):
 
         self.dispatch_combine.combine(output, fused_out, topk_weights,
                                       topk_ids, apply_router_weight_on_input)
-
-        #print(f"DONE {hidden_states.shape} {topk_ids.shape} {get_tensor_model_parallel_rank()}/{get_dp_group().rank_in_group}")
 
         return output

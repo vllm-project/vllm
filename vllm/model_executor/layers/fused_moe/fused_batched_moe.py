@@ -24,7 +24,7 @@ class BatchedDispatchCombine(mk.FusedMoEQuantizeDispatchCombine):
         topk_ids: torch.Tensor,
         num_experts: int,
         expert_map: Optional[torch.Tensor],
-        apply_router_weight_on_input: bool = False,
+        apply_router_weight_on_input: bool,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor]]:
         assert topk_ids.dim() == 2
         assert topk_ids.shape[0] == a1.shape[0]
@@ -99,8 +99,6 @@ class BatchedExperts(mk.FusedMoEPermuteExpertsUnpermute):
 
     def __init__(
         self,
-        rank: int = 0,
-        world_size: int = 1,
         max_num_tokens: Optional[int] = None,
         use_fp8_w8a8: bool = False,
         use_int8_w8a8: bool = False,
@@ -116,8 +114,6 @@ class BatchedExperts(mk.FusedMoEPermuteExpertsUnpermute):
         assert block_shape is None
         assert block_m is None
         self.max_num_tokens = max_num_tokens
-        self.rank = rank
-        self.world_size = world_size
         assert not use_fp8_w8a8, "NYI"
         assert not use_int8_w8a8, "NYI"
         assert not use_int8_w8a16, "NYI"
@@ -171,12 +167,6 @@ class BatchedExperts(mk.FusedMoEPermuteExpertsUnpermute):
                             (num_experts, max_num_tokens, w2.shape[1]))
         num_local_experts = expert_num_tokens.numel()
 
-        # TODO: don't need world_size or rank if expert_base always == 0
-        #assert w1.shape[0] == num_experts, f"{w1.shape} == {num_experts}"
-        #expert_base = rank_chunk(w1.shape[0], self.rank,
-        #                         self.world_size) * self.rank
-        expert_base = 0
-
         for expert in range(num_local_experts):
             num = expert_num_tokens[expert]
             assert num <= max_num_tokens, f"{num}, {max_num_tokens}"
@@ -184,8 +174,7 @@ class BatchedExperts(mk.FusedMoEPermuteExpertsUnpermute):
                 tmp = _resize_cache(workspace2, (num, w1.shape[1] // 2))
                 self.activation(
                     activation, tmp, hidden_states[expert, :num, :]
-                    @ w1[expert_base + expert].transpose(0, 1))
-                out[expert, :num, :] = tmp @ w2[expert_base +
-                                                expert].transpose(0, 1)
+                    @ w1[expert].transpose(0, 1))
+                out[expert, :num, :] = tmp @ w2[expert].transpose(0, 1)
 
         return out
