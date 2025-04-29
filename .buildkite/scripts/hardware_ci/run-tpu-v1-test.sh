@@ -2,9 +2,12 @@
 
 set -xue
 
+du -sh ~/.cache/vllm/xla_cache
+rm -r ~/.cache/vllm/xla_cache
 docker images -a
 docker ps -a
 df -h
+du -sh ~/*
 
 # Build the docker image.
 docker build -f docker/Dockerfile.tpu -t vllm-tpu .
