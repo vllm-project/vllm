@@ -121,7 +121,7 @@ def literal_to_kwargs(type_hints: set[TypeHint]) -> dict[str, Any]:
     type_hint = get_type(type_hints, Literal)
     choices = get_args(type_hint)
     choice_type = type(choices[0])
-    if not all(type(choice) is choice_type for choice in choices):
+    if not all(isinstance(choice, choice_type) for choice in choices):
         raise ValueError(
             "All choices must be of the same type. "
             f"Got {choices} with types {[type(c) for c in choices]}")
