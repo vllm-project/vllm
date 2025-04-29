@@ -9,8 +9,7 @@ from vllm.forward_context import set_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader.loader import get_model_loader
 from vllm.model_executor.model_loader.utils import set_default_torch_dtype
-from vllm.model_executor.models.llama_eagle import EagleLlamaForCausalLM
-from vllm.model_executor.models.llama_eagle3 import Eagle3LlamaForCausalLM
+from vllm.model_executor.models import ModelRegistry
 from vllm.v1.attention.backends.flash_attn import FlashAttentionMetadata
 from vllm.v1.sample.metadata import SamplingMetadata
 
@@ -225,15 +224,11 @@ class EagleProposer:
         with set_default_torch_dtype(
                 draft_model_config.dtype), set_current_vllm_config(
                     self.vllm_config):
-            if self.vllm_config.speculative_config.method == "eagle":
-                self.model = EagleLlamaForCausalLM(
-                    model_config=draft_model_config,
-                    start_layer_id=target_layer_num).to(target_device)
-            else:
-                assert self.vllm_config.speculative_config.method == "eagle3"
-                self.model = Eagle3LlamaForCausalLM(
-                    model_config=draft_model_config,
-                    start_layer_id=target_layer_num).to(target_device)
+            draft_model_cls, arch = ModelRegistry.resolve_model_cls(
+                draft_model_config.architectures)
+            self.model = draft_model_cls(
+                model_config=draft_model_config,
+                start_layer_id=target_layer_num).to(target_device)
 
         loaded_weights = self.model.load_weights(
             loader.get_all_weights(
