@@ -109,7 +109,8 @@ def test_llm_chat_tokenization_no_double_bos():
     ]
     outputs = llm.chat(messages)
     assert len(outputs) == 1
-    prompt_token_ids = getattr(outputs[0], "prompt_token_ids", None)
+
+    prompt_token_ids = outputs[0].prompt_token_ids
     assert prompt_token_ids is not None
 
     bos_token = llm.get_tokenizer().bos_token_id
@@ -117,3 +118,34 @@ def test_llm_chat_tokenization_no_double_bos():
     # Ensure we have a single BOS
     assert prompt_token_ids[0] == bos_token
     assert prompt_token_ids[1] != bos_token, "Double BOS"
+
+
+@pytest.mark.parametrize("enable_thinking", [True, False])
+def test_chat_extra_kwargs(enable_thinking):
+    llm = LLM(model="Qwen/Qwen3-0.6B", enforce_eager=True)
+    messages = [
+        {
+            "role": "system",
+            "content": "You are a helpful assistant"
+        },
+        {
+            "role": "user",
+            "content": "What is 1+1?"
+        },
+    ]
+
+    outputs = llm.chat(
+        messages,
+        chat_template_kwargs={"enable_thinking": enable_thinking},
+    )
+    assert len(outputs) == 1
+
+    prompt_token_ids = outputs[0].prompt_token_ids
+    assert prompt_token_ids is not None
+
+    think_id = llm.get_tokenizer().get_vocab()["<think>"]
+
+    if enable_thinking:
+        assert think_id in prompt_token_ids
+    else:
+        assert think_id not in prompt_token_ids
