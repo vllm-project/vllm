@@ -523,13 +523,9 @@ def _pplx_moe(
     m, k = a.shape
     e, _, n = w2.shape
 
-    torch.set_printoptions(profile="full")
-
     with set_current_vllm_config(vllm_config):
         topk_weight, topk_ids = fused_topk(a, score, topk, False)
-
         torch_output = torch_moe2(a, w1, w2, topk_weight, topk_ids)
-
         pplx_output = torch_pplx_moe(pgi, dp_size, a, w1, w2, score, topk)
 
     torch_output = chunk_by_rank(torch_output, pgi.rank,
