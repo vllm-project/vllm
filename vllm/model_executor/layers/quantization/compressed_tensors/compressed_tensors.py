@@ -384,7 +384,7 @@ class CompressedTensorsConfig(QuantizationConfig):
 
         Detect whether a layer_name is found in any target and
         use the quantization scheme corresponding to the matched target
-        to select the CompressedTensorsScheme used for infernece.
+        to select the CompressedTensorsScheme used for inference.
         """
 
         # Find the "target" in the compressed-tensors config
