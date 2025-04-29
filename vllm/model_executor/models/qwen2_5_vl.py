@@ -71,6 +71,12 @@ from .vision import get_vit_attn_backend
 
 logger = init_logger(__name__)
 
+try:
+    from vllm.vllm_flash_attn import flash_attn_varlen_func
+except ImportError:
+    # For rocm use upstream flash attention
+    from flash_attn import flash_attn_varlen_func
+
 # === Vision Inputs === #
 
 
@@ -128,7 +134,7 @@ class Qwen2_5_VLVideoPixelInputs(TypedDict):
 
     second_per_grid_ts: torch.Tensor
     """
-    The video time interval (in seconds) for each grid along the temporal 
+    The video time interval (in seconds) for each grid along the temporal
     dimension in the 3D position IDs. Returned when `videos` is not `None`.
     """
 
@@ -306,10 +312,6 @@ class Qwen2_5_VisionAttention(nn.Module):
                                             use_flash_attn=use_flash_attn)
 
         if self.attn_backend == _Backend.FLASH_ATTN:
-            # from vllm_flash_attn.flash_attn_interface import (
-            #   flash_attn_varlen_func)
-            from flash_attn import flash_attn_varlen_func
-
             q, k, v = (rearrange(x, "b s ... -> (b s) ...") for x in [q, k, v])
 
             output = flash_attn_varlen_func(q,

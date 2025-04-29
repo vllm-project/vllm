@@ -82,6 +82,12 @@ logger = init_logger(__name__)
 # For profile run
 _MAX_FRAMES_PER_VIDEO = 16
 
+try:
+    from vllm.vllm_flash_attn import flash_attn_varlen_func
+except ImportError:
+    # For rocm use upstream flash attention
+    from flash_attn import flash_attn_varlen_func
+
 # === Vision Inputs === #
 
 
@@ -106,7 +112,7 @@ class Qwen2VLImageEmbeddingInputs(TypedDict):
         Each tensor holds an image's features.
     - `torch.Tensor`: A tensor holding all images' features
         (concatenation of all images' feature tensors).
-    
+
     Tensor shape: `(num_image_features, hidden_size)`
     - `num_image_features` varies based on
         the number and resolution of the images.
@@ -146,9 +152,9 @@ class Qwen2VLVideoEmbeddingInputs(TypedDict):
         Each tensor holds an video's features.
     - `torch.Tensor`: A tensor holding all videos' features
         (concatenation of all videos' feature tensors).
-    
+
     Tensor shape: `(num_image_features, hidden_size)`
-    - `num_image_features` varies based on 
+    - `num_image_features` varies based on
         the number and resolution of the videos.
     - `hidden_size` must match the hidden size of language model backbone.
     """
@@ -325,10 +331,6 @@ class Qwen2VisionAttention(nn.Module):
             k = apply_rotary_pos_emb_vision(k, rotary_pos_emb)
 
         if self.attn_backend == _Backend.FLASH_ATTN:
-            # from vllm_flash_attn.flash_attn_interface import (
-            #   flash_attn_varlen_func)
-            from flash_attn import flash_attn_varlen_func
-
             q, k, v = (rearrange(x, "b s ... -> (b s) ...") for x in [q, k, v])
 
             output = flash_attn_varlen_func(q,
