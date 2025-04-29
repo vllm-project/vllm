@@ -34,10 +34,10 @@ from unittest.mock import patch
 
 import torch
 import torch.distributed
-from torch.distributed import Backend, ProcessGroup
 from pplx_kernels.nvshmem import (nvshmem_alloc_empty_unique_id,
-                                  nvshmem_get_unique_id, nvshmem_init,
-                                  nvshmem_finalize)
+                                  nvshmem_finalize, nvshmem_get_unique_id,
+                                  nvshmem_init)
+from torch.distributed import Backend, ProcessGroup
 
 import vllm.envs as envs
 from vllm.distributed.device_communicators.base_device_communicator import (
@@ -941,6 +941,7 @@ def init_distributed_environment(
 
 PPLX_DID_INIT: bool = False
 
+
 @run_once
 def pplx_init(rank, world_size):
     if world_size > 1:
@@ -1186,7 +1187,6 @@ def destroy_model_parallel():
     if _EP:
         _EP.destroy()
     _EP = None
-
 
 
 def destroy_distributed_environment():
