@@ -483,7 +483,6 @@ class InputPreprocessor:
                     mm_kwargs=inputs["mm_kwargs"],
                     mm_hashes=inputs["mm_hashes"],
                     mm_placeholders=inputs["mm_placeholders"],
-                    cache_salt=inputs["cache_salt"],
                 )
             else:
                 decoder_inputs = MultiModalInputs(
@@ -493,8 +492,12 @@ class InputPreprocessor:
                     mm_kwargs=inputs["mm_kwargs"],
                     mm_hashes=inputs["mm_hashes"],
                     mm_placeholders=inputs["mm_placeholders"],
-                    cache_salt=inputs["cache_salt"],
                 )
+
+            cache_salt = inputs.get("cache_salt")
+            if cache_salt is not None:
+                decoder_inputs["cache_salt"] = cache_salt
+
         elif inputs["type"] == "token":
             # Text-only inputs
             encoder_inputs = token_inputs(prompt="", prompt_token_ids=[])
