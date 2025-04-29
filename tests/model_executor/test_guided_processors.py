@@ -89,7 +89,7 @@ async def test_guided_logits_processor_black_box(backend: str, is_local: bool,
             await get_guided_decoding_logits_processor(
                     regex_request, llama_1B_tokenzer, config)
     assert regex_lp is not None
-    tensor = torch.rand(32000)
+    tensor = torch.rand(128256)
     original_tensor = torch.clone(tensor)
     tensor = regex_lp(token_ids, tensor)
     assert tensor.shape == original_tensor.shape
@@ -103,7 +103,7 @@ async def test_guided_logits_processor_black_box(backend: str, is_local: bool,
     json_lp = await get_guided_decoding_logits_processor(
         json_request, llama_1B_tokenzer, config)
     assert json_lp is not None
-    tensor = torch.rand(32000)
+    tensor = torch.rand(128256)
     original_tensor = torch.clone(tensor)
     tensor = json_lp(token_ids, tensor)
     assert tensor.shape == original_tensor.shape
