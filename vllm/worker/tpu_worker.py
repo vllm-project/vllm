@@ -56,8 +56,7 @@ class TPUWorker(LoRANotSupportedWorkerBase, LocalOrDistributedWorkerBase):
 
         if vllm_config.lora_config is not None:
             raise NotImplementedError(
-                """The V0 TPU backend doesn't support LoRA serving, please try \
-                    V1 by setting VLLM_USE_V1=1""")
+                "The V0 TPU backend doesn't support LoRA serving")
 
     def init_device(self) -> None:
         os.environ["PJRT_DEVICE"] = "TPU"

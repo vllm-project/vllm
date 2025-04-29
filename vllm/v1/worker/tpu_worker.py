@@ -83,6 +83,10 @@ class TPUWorker:
         if self.model_config.seed is None:
             self.model_config.seed = 0
 
+        if vllm_config.lora_config is not None:
+            raise NotImplementedError(
+                "The V1 TPU backend doesn't support LoRA serving")
+
     def init_device(self):
         os.environ["PJRT_DEVICE"] = "TPU"
         # Note: Currently the XLA compiler wrongly uses 2D ring strategy on 1D
