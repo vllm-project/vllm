@@ -51,11 +51,9 @@ from vllm.model_executor.models.qwen2_audio import (
 from vllm.model_executor.models.qwen2_vl import Qwen2VLMultiModalDataParser
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.hasher import MultiModalHasher
 from vllm.multimodal.inputs import (ImageItem, ModalityData,
                                     MultiModalDataDict, MultiModalFieldConfig,
-                                    MultiModalInputs, MultiModalKwargs,
-                                    NestedTensors)
+                                    MultiModalKwargs, NestedTensors)
 from vllm.multimodal.parse import (AudioProcessorItems, DictEmbeddingItems,
                                    ModalityDataItems, MultiModalDataItems,
                                    MultiModalDataParser)
@@ -279,46 +277,17 @@ class Qwen2_5OmniThinkerMultiModalProcessor(
     ) -> Mapping[str, MultiModalFieldConfig]:
         return _qwen2_5_omni_thinker_field_config(hf_inputs)
 
-    def apply(
+    def _maybe_apply_prompt_updates(
         self,
-        prompt: Union[str, list[int]],
-        mm_data: MultiModalDataDict,
+        mm_items: MultiModalDataItems,
         hf_processor_mm_kwargs: Mapping[str, object],
-        return_mm_hashes: bool = False,
-    ) -> MultiModalInputs:
+        prompt_ids: list[int],
+        mm_kwargs: MultiModalKwargs,
+        is_update_applied: bool,
+    ) -> tuple[list[int], str, Mapping[str, list[PlaceholderFeaturesInfo]]]:
         """
         Qwen2.5-Omni reimplements this function to handle `use_audio_in_video`.
         """
-        mm_items = self._to_mm_items(mm_data)
-
-        # Create MM hashes to be returned (only used in V1)
-        # TODO: Use these hash keys for caching operations in apply_hf_processor
-        # instead of rehashing.
-
-        if return_mm_hashes:
-            model_id = self.info.model_id
-            mm_hashes = {
-                modality: [
-                    MultiModalHasher.hash_kwargs(model_id=model_id,
-                                                 **{modality: item},
-                                                 **hf_processor_mm_kwargs)
-                    for item in items
-                ]
-                for modality, items in mm_items.items()
-            }
-        else:
-            mm_hashes = None
-
-        (
-            prompt_ids,
-            mm_kwargs,
-            is_update_applied,
-        ) = self._cached_apply_hf_processor(
-            prompt,
-            mm_items,
-            hf_processor_mm_kwargs,
-        )
-
         unbound_prompt_updates = self._get_prompt_updates(
             mm_items,
             hf_processor_mm_kwargs,
@@ -364,22 +333,10 @@ class Qwen2_5OmniThinkerMultiModalProcessor(
         tokenizer = self.info.get_tokenizer()
         prompt = decode_tokens(tokenizer, prompt_ids)
 
-        mm_placeholder_ranges = {
-            modality: [item.to_range() for item in placeholders]
-            for modality, placeholders in mm_placeholders.items()
-        }
-
         if use_audio_in_video:
             mm_kwargs["use_audio_in_video"] = True
 
-        return MultiModalInputs(
-            type="multimodal",
-            prompt=prompt,
-            prompt_token_ids=prompt_ids,
-            mm_kwargs=mm_kwargs,
-            mm_hashes=mm_hashes,
-            mm_placeholders=mm_placeholder_ranges,
-        )
+        return prompt_ids, prompt, mm_placeholders
 
     def _get_prompt_updates(
         self,
@@ -808,6 +765,9 @@ class Qwen2_5OmniThinkerForConditionalGeneration(
                 mm_input_by_modality[
                     "audio"] = self._parse_and_validate_audio_input(**kwargs)
         return mm_input_by_modality
+
+    def get_language_model(self) -> torch.nn.Module:
+        return self.language_model
 
     def get_multimodal_embeddings(
             self, **kwargs: object) -> Optional[MultiModalEmbeddings]:

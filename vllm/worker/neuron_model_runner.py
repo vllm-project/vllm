@@ -15,8 +15,7 @@ from vllm.logger import init_logger
 from vllm.model_executor import SamplingMetadata
 from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.model_executor.model_loader.neuron import get_neuron_model
-from vllm.multimodal import (MULTIMODAL_REGISTRY, BatchedTensorInputs,
-                             MultiModalKwargs)
+from vllm.multimodal import BatchedTensorInputs, MultiModalKwargs
 from vllm.sequence import IntermediateTensors, SequenceGroupMetadata
 from vllm.utils import is_pin_memory_available, make_tensor_with_pad
 from vllm.worker.model_runner_base import ModelRunnerBase, ModelRunnerInputBase
@@ -68,11 +67,6 @@ class NeuronModelRunner(ModelRunnerBase[ModelInputForNeuron]):
                            "The model will run without sliding window.")
         self.device = self.device_config.device
         self.pin_memory = is_pin_memory_available()
-
-        # Multi-modal data support
-        self.mm_registry = MULTIMODAL_REGISTRY
-        self.multi_modal_input_mapper = self.mm_registry \
-            .create_input_mapper(self.model_config)
 
         # Lazy initialization.
         self.model: nn.Module  # initialize after load_model.
@@ -149,16 +143,8 @@ class NeuronModelRunner(ModelRunnerBase[ModelInputForNeuron]):
             assert len(block_table) == 1
             input_block_ids.append(block_table[0])
 
-            mm_data = seq_group_metadata.multi_modal_data
-            if mm_data:
-                if self.mm_registry.has_processor(self.model_config):
-                    mm_kwargs = mm_data
-                else:
-                    mm_kwargs = self.multi_modal_input_mapper(
-                        mm_data,
-                        seq_group_metadata.mm_processor_kwargs,
-                    )
-
+            mm_kwargs = seq_group_metadata.multi_modal_data
+            if mm_kwargs:
                 multi_modal_kwargs_list.append(mm_kwargs)
 
         max_seq_len = max(seq_lens)
