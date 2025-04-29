@@ -65,7 +65,6 @@ class KVCacheManager:
         # This is only used to track the RUNNING requests, we do not track the
         # data for reempted ones.
         self.num_cached_block: dict[str, int] = {}
-        self.num_evicted_tokens = 0
 
     @property
     def usage(self) -> float:
@@ -87,16 +86,6 @@ class KVCacheManager:
         stats = self.prefix_cache_stats
         self.prefix_cache_stats = PrefixCacheStats()
         return stats
-
-    def get_and_reset_evicted_tokens(self) -> int:
-        """Get and reset the number of evicted tokens.
-
-        Returns:
-            The number of tokens evicted since the last reset.
-        """
-        evicted_tokens = self.num_evicted_tokens
-        self.num_evicted_tokens = 0
-        return evicted_tokens
 
     def get_computed_blocks(
             self, request: Request) -> tuple[list[KVCacheBlock], int]:
@@ -150,11 +139,6 @@ class KVCacheManager:
             assert self.prefix_cache_stats is not None
             self.prefix_cache_stats.queries += len(block_hashes)
             self.prefix_cache_stats.hits += len(computed_blocks)
-
-        # Track evicted tokens from computed blocks
-        for block in computed_blocks:
-            if block and block.block_hash and block.block_hash.token_ids:
-                self.num_evicted_tokens += len(block.block_hash.token_ids)
 
         if last_block_hash is not None:
             # Add back the last block hash if it was removed.

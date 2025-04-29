@@ -27,6 +27,7 @@ class BlockPool:
     """
 
     def __init__(self, num_gpu_blocks: int, enable_caching: bool):
+        self.num_evicted_tokens = 0
         assert isinstance(num_gpu_blocks, int) and num_gpu_blocks > 0
         self.num_gpu_blocks = num_gpu_blocks
         self.enable_caching = enable_caching
@@ -200,6 +201,10 @@ class BlockPool:
         """
         block_hash = block.block_hash
         if block_hash and block_hash in self.cached_block_hash_to_block:
+            # Track evicted tokens only if this is an actual eviction
+            if block_hash.token_ids is not None:
+                self.num_evicted_tokens += len(block_hash.token_ids)
+
             block.reset_hash()
             del self.cached_block_hash_to_block[block_hash][block.block_id]
 
@@ -279,3 +284,12 @@ class BlockPool:
             The KV cache usage (between 0.0 and 1.0).
         """
         return 1.0 - (self.get_num_free_blocks() / self.num_gpu_blocks)
+
+    def get_and_reset_evicted_tokens(self) -> int:
+        """Get and reset the number of tokens evicted from cache.
+        Returns:
+            The number of tokens evicted since the last reset.
+        """
+        evicted_tokens = self.num_evicted_tokens
+        self.num_evicted_tokens = 0
+        return evicted_tokens

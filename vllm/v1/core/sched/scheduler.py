@@ -836,7 +836,7 @@ class Scheduler(SchedulerInterface):
             num_waiting_reqs=len(self.waiting),
             num_tokens_waiting=self._waiting_tokens,
             gpu_cache_usage=self.kv_cache_manager.usage,
-            num_evicted_tokens=self.kv_cache_manager.
+            num_evicted_tokens=self.kv_cache_manager.block_pool.
             get_and_reset_evicted_tokens(),
             prefix_cache_stats=prefix_cache_stats,
             spec_decoding_stats=spec_decoding_stats,
