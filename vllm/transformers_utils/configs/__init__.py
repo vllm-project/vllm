@@ -15,6 +15,8 @@ from vllm.transformers_utils.configs.internvl import InternVLChatConfig
 from vllm.transformers_utils.configs.jais import JAISConfig
 from vllm.transformers_utils.configs.kimi_vl import KimiVLConfig
 from vllm.transformers_utils.configs.medusa import MedusaConfig
+from vllm.transformers_utils.configs.minimax_text_01 import MiniMaxText01Config
+from vllm.transformers_utils.configs.minimax_vl_01 import MiniMaxVL01Config
 from vllm.transformers_utils.configs.mllama import MllamaConfig
 from vllm.transformers_utils.configs.mlp_speculator import MLPSpeculatorConfig
 from vllm.transformers_utils.configs.moonvit import MoonViTConfig
@@ -39,6 +41,8 @@ __all__ = [
     "MedusaConfig",
     "EAGLEConfig",
     "ExaoneConfig",
+    "MiniMaxText01Config",
+    "MiniMaxVL01Config",
     "MllamaConfig",
     "MLPSpeculatorConfig",
     "MoonViTConfig",

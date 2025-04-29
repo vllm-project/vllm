@@ -34,11 +34,13 @@ from vllm.transformers_utils.configs import (ChatGLMConfig, Cohere2Config,
                                              H2OVLChatConfig,
                                              InternVLChatConfig, JAISConfig,
                                              KimiVLConfig, MedusaConfig,
-                                             MllamaConfig, MLPSpeculatorConfig,
-                                             MPTConfig, NemotronConfig,
-                                             NVLM_D_Config, RWConfig,
-                                             SkyworkR1VChatConfig, SolarConfig,
-                                             Telechat2Config, UltravoxConfig)
+                                             MiniMaxText01Config,
+                                             MiniMaxVL01Config, MllamaConfig,
+                                             MLPSpeculatorConfig, MPTConfig,
+                                             NemotronConfig, NVLM_D_Config,
+                                             RWConfig, SkyworkR1VChatConfig,
+                                             SolarConfig, Telechat2Config,
+                                             UltravoxConfig)
 # yapf: enable
 from vllm.transformers_utils.utils import check_gguf_file
 from vllm.utils import resolve_obj_by_qualname
@@ -73,6 +75,8 @@ _CONFIG_REGISTRY: Dict[str, Type[PretrainedConfig]] = {
     "exaone": ExaoneConfig,
     "h2ovl_chat": H2OVLChatConfig,
     "internvl_chat": InternVLChatConfig,
+    "minimax_text_01": MiniMaxText01Config,
+    "minimax_vl_01": MiniMaxVL01Config,
     "nemotron": NemotronConfig,
     "NVLM_D": NVLM_D_Config,
     "solar": SolarConfig,

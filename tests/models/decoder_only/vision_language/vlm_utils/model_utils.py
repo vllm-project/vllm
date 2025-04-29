@@ -229,6 +229,14 @@ def minicpmv_trunc_hf_output(hf_output: RunnerOutput,
     return output_ids, output_str, out_logprobs
 
 
+def minimax_vl_01_hf_output(hf_output: RunnerOutput,
+                            model: str) -> RunnerOutput:
+    output_ids, output_str, out_logprobs = hf_output
+    if output_str.endswith("<end_of_sentence>"):
+        output_str = output_str.split("<end_of_sentence>")[0]
+    return output_ids, output_str, out_logprobs
+
+
 ####### Functions for converting image assets to embeddings
 def get_llava_embeddings(image_assets: _ImageAssets):
     return [asset.image_embeds for asset in image_assets]
@@ -617,6 +625,17 @@ def minicpmo_26_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
 
 
 def minicpmv_26_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
+    orig_generate = hf_model.model.generate
+
+    def _generate(self, *args, image_sizes=None, **kwargs):
+        return orig_generate(*args, decode_text=False, **kwargs)
+
+    hf_model.model.generate = types.MethodType(_generate, hf_model.model)
+
+    return hf_model
+
+
+def minimax_vl_01_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
     orig_generate = hf_model.model.generate
 
     def _generate(self, *args, image_sizes=None, **kwargs):
