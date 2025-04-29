@@ -159,6 +159,12 @@ with torch.no_grad():
 
 ### 5. Evaluation in vLLM
 
+Install `vllm` and `lm-evaluation-harness`:
+
+```console
+pip install vllm lm-eval==0.4.4
+```
+
 Now, you can load and run the Quark quantized model directly through the LLM entrypoint:
 
 ```python

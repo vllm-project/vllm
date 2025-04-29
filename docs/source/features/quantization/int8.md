@@ -91,7 +91,7 @@ oneshot(
     num_calibration_samples=NUM_CALIBRATION_SAMPLES,
 )
 
-# Save the compressed model
+# Save the compressed model: Meta-Llama-3-8B-Instruct-W8A8-Dynamic-Per-Token
 SAVE_DIR = MODEL_ID.split("/")[1] + "-W8A8-Dynamic-Per-Token"
 model.save_pretrained(SAVE_DIR, save_compressed=True)
 tokenizer.save_pretrained(SAVE_DIR)
@@ -100,6 +100,12 @@ tokenizer.save_pretrained(SAVE_DIR)
 This process creates a W8A8 model with weights and activations quantized to 8-bit integers.
 
 ### 4. Evaluating Accuracy
+
+Install `vllm` and `lm-evaluation-harness`:
+
+```console
+pip install vllm lm-eval==0.4.4
+```
 
 After quantization, you can load and run the model in vLLM:
 
