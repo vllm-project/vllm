@@ -96,12 +96,16 @@ class DummyConfigClass:
     """Optional bool with default None"""
     optional_literal: Optional[Literal["x", "y"]] = None
     """Optional literal with default None"""
-    tuple_n: tuple[int, ...] = field(default_factory=lambda: (1, 2, 3))
-    """Tuple with default (1, 2, 3)"""
-    tuple_2: tuple[int, int] = field(default_factory=lambda: (1, 2))
-    """Tuple with default (1, 2)"""
-    list_n: list[int] = field(default_factory=lambda: [1, 2, 3])
-    """List with default [1, 2, 3]"""
+    tuple_n: tuple[int, ...] = field(default_factory=tuple)
+    """Tuple with variable length"""
+    tuple_2: tuple[int, int] = field(default_factory=tuple)
+    """Tuple with fixed length"""
+    list_n: list[int] = field(default_factory=list)
+    """List with variable length"""
+    list_literal: list[Literal[1, 2]] = field(default_factory=list)
+    """List with literal choices"""
+    literal_literal: Literal[Literal[1], Literal[2]] = 1
+    """Literal of literals with default 1"""
 
 
 @pytest.mark.parametrize(("type_hint", "expected"), [
@@ -127,6 +131,12 @@ def test_get_kwargs():
     # lists should work
     assert kwargs["list_n"]["type"] is int
     assert kwargs["list_n"]["nargs"] == "+"
+    # lists with literals should have the correct choices
+    assert kwargs["list_literal"]["type"] is int
+    assert kwargs["list_literal"]["nargs"] == "+"
+    assert kwargs["list_literal"]["choices"] == [1, 2]
+    # literals of literals should have merged choices
+    assert kwargs["literal_literal"]["choices"] == [1, 2]
 
 
 @pytest.mark.parametrize(("arg", "expected"), [
