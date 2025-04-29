@@ -9,8 +9,7 @@ from vllm.forward_context import set_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader.loader import get_model_loader
 from vllm.model_executor.model_loader.utils import set_default_torch_dtype
-from vllm.model_executor.models.llama_eagle import EagleLlamaForCausalLM
-from vllm.model_executor.models.llama_eagle3 import Eagle3LlamaForCausalLM
+from vllm.model_executor.models import ModelRegistry
 from vllm.v1.attention.backends.flash_attn import FlashAttentionMetadata
 from vllm.v1.sample.metadata import SamplingMetadata
 
@@ -124,7 +123,6 @@ class EagleProposer:
             num_input_tokens = self.vllm_config.pad_for_cudagraph(num_tokens)
         else:
             num_input_tokens = num_tokens
-        attn_metadata.num_input_tokens = num_input_tokens
         # copy inputs to buffer for cudagraph
         self.positions[:num_tokens] = target_positions
 
@@ -135,7 +133,9 @@ class EagleProposer:
             # TODO: make eagle3 compatible with cuda graph
             hidden_states = target_hidden_states
 
-        with set_forward_context(attn_metadata, self.vllm_config):
+        with set_forward_context(attn_metadata,
+                                 self.vllm_config,
+                                 num_tokens=num_input_tokens):
             last_hidden_states, hidden_states = self.model(
                 input_ids=self.input_ids[:num_input_tokens],
                 positions=self.positions[:num_input_tokens],
@@ -161,7 +161,6 @@ class EagleProposer:
         else:
             input_batch_size = batch_size
         attn_metadata.num_actual_tokens = batch_size
-        attn_metadata.num_input_tokens = input_batch_size
         attn_metadata.max_query_len = 1
         attn_metadata.query_start_loc = self.arange[:batch_size + 1]
         for _ in range(self.num_speculative_tokens - 1):
@@ -216,7 +215,9 @@ class EagleProposer:
                 hidden_states = self.hidden_states
 
             # Run the model.
-            with set_forward_context(attn_metadata, self.vllm_config):
+            with set_forward_context(attn_metadata,
+                                     self.vllm_config,
+                                     num_tokens=input_batch_size):
                 last_hidden_states, hidden_states = self.model(
                     input_ids=self.input_ids[:input_batch_size],
                     positions=self.positions[:input_batch_size],
@@ -289,15 +290,11 @@ class EagleProposer:
         with set_default_torch_dtype(
                 draft_model_config.dtype), set_current_vllm_config(
                     self.vllm_config):
-            if self.vllm_config.speculative_config.method == "eagle":
-                self.model = EagleLlamaForCausalLM(
-                    vllm_config=self.vllm_config,
-                    start_layer_id=target_layer_num).to(target_device)
-            else:
-                assert self.vllm_config.speculative_config.method == "eagle3"
-                self.model = Eagle3LlamaForCausalLM(
-                    model_config=draft_model_config,
-                    start_layer_id=target_layer_num).to(target_device)
+            draft_model_cls, arch = ModelRegistry.resolve_model_cls(
+                draft_model_config.architectures)
+            self.model = draft_model_cls(
+                vllm_config=self.vllm_config,
+                start_layer_id=target_layer_num).to(target_device)
 
         loaded_weights = self.model.load_weights(
             loader.get_all_weights(draft_model_config, self.model))

@@ -6,7 +6,7 @@ import torch
 import torch.nn as nn
 from transformers import LlamaConfig
 
-from vllm.config import ModelConfig
+from vllm.config import ModelConfig, VllmConfig
 from vllm.logger import init_logger
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import QKVParallelLinear
@@ -117,7 +117,7 @@ class LlamaModel(nn.Module):
         input_ids: torch.Tensor,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
-    ) -> torch.Tensor:
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         input_embeds = self.embed_tokens(input_ids)
         if (hidden_states.shape[-1] != input_embeds.shape[-1]):
             hidden_states = self.fc(hidden_states)
@@ -167,8 +167,9 @@ class LlamaModel(nn.Module):
 
 class Eagle3LlamaForCausalLM(LlamaForCausalLM):
 
-    def __init__(self, *, model_config: ModelConfig, start_layer_id: int = 0):
+    def __init__(self, *, vllm_config: VllmConfig, start_layer_id: int = 0):
         nn.Module.__init__(self)
+        model_config = vllm_config.speculative_config.draft_model_config
         self.config = model_config.hf_config
         self.model = LlamaModel(model_config=model_config,
                                 start_layer_id=start_layer_id,
@@ -194,7 +195,7 @@ class Eagle3LlamaForCausalLM(LlamaForCausalLM):
         input_ids: torch.Tensor,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
-    ) -> torch.Tensor:
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         return self.model(input_ids, positions, hidden_states)
 
     def compute_logits(

@@ -32,6 +32,7 @@ class MyType:
     large_f_contig_tensor: torch.Tensor
     small_non_contig_tensor: torch.Tensor
     large_non_contig_tensor: torch.Tensor
+    empty_tensor: torch.Tensor
 
 
 def test_encode_decode():
@@ -58,6 +59,7 @@ def test_encode_decode():
         large_f_contig_tensor=torch.rand(1024, 4).t(),
         small_non_contig_tensor=torch.rand(2, 4)[:, 1:3],
         large_non_contig_tensor=torch.rand(1024, 512)[:, 10:20],
+        empty_tensor=torch.empty(0),
     )
 
     encoder = MsgpackEncoder(size_threshold=256)
@@ -193,3 +195,4 @@ def assert_equal(obj1: MyType, obj2: MyType):
                        obj2.small_non_contig_tensor)
     assert torch.equal(obj1.large_non_contig_tensor,
                        obj2.large_non_contig_tensor)
+    assert torch.equal(obj1.empty_tensor, obj2.empty_tensor)

@@ -347,7 +347,7 @@ struct ComputeTile_W8A16_PerC_MtilexNtilex32_multistage_SM8x_SplitK {
       for (int n_idx = 0; n_idx < WARP_NITER; ++n_idx) {
         hmma16816_f32<FType>(
             C_frag[m_idx][n_idx], A_frag[reg_buf_idx][m_idx],
-            reinterpret_cast<uint32_t(&)[2]>(BF_frag[reg_buf_idx][n_idx]));
+            reinterpret_cast<uint32_t (&)[2]>(BF_frag[reg_buf_idx][n_idx]));
       }
     }
   }

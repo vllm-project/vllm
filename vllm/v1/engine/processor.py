@@ -51,8 +51,7 @@ class Processor:
         self.mm_input_cache_client = MirroredProcessingCache(self.model_config)
 
         # Multi-modal hasher (for images)
-        self.use_hash = (
-            not self.model_config.disable_mm_preprocessor_cache) or \
+        self.use_hash = self.mm_input_cache_client.use_cache or \
             self.cache_config.enable_prefix_caching
 
     def _validate_logprobs(
@@ -202,7 +201,7 @@ class Processor:
         trace_headers: Optional[Mapping[str, str]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
         priority: int = 0,
-    ) -> EngineCoreRequest:
+    ) -> tuple[Optional[str], EngineCoreRequest]:
 
         # TODO(woosuk): Support pooling models.
         # TODO(woosuk): Support encoder-decoder models.
@@ -306,9 +305,8 @@ class Processor:
             else:
                 sorted_mm_inputs = orig_sorted_mm_inputs
 
-        return EngineCoreRequest(
+        return decoder_inputs.get("prompt"), EngineCoreRequest(
             request_id=request_id,
-            prompt=decoder_inputs.get("prompt"),
             prompt_token_ids=decoder_inputs["prompt_token_ids"],
             mm_inputs=sorted_mm_inputs,
             mm_hashes=sorted_mm_hashes,
