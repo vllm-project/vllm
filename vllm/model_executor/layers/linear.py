@@ -959,7 +959,6 @@ class QKVParallelLinear(ColumnParallelLinear):
             shard_size=shard_size,
             use_presharded_weights=self.use_presharded_weights)
 
-
     def weight_loader(self,
                       param: Parameter,
                       loaded_weight: torch.Tensor,
