@@ -168,6 +168,8 @@ class TPUModelRunner:
         # Lazy initialization
         # self.model: nn.Module  # Set after load_model
         self.kv_caches: list[torch.Tensor] = []
+        self.kv_cache_config = cast(KVCacheConfig, None)
+
         # req_id -> (input_id -> encoder_output)
         self.encoder_cache: dict[str, dict[int, torch.Tensor]] = {}
 
@@ -588,7 +590,13 @@ class TPUModelRunner:
         # Padded to avoid recompiling when `num_reqs` varies.
         logits_indices = self.query_start_loc_cpu[1:padded_num_reqs + 1] - 1
         logits_indices = logits_indices.to(self.device)
-        return attn_metadata, logits_indices, padded_num_reqs
+
+        per_layer_attn_metadata = {
+            layer_name: attn_metadata
+            for layer_name in
+            self.kv_cache_config.kv_cache_groups[0].layer_names
+        }
+        return per_layer_attn_metadata, logits_indices, padded_num_reqs
 
     def _scatter_placeholders(
         self,
@@ -1202,6 +1210,7 @@ class TPUModelRunner:
             raise NotImplementedError(
                 "Hybrid models with more than one KV cache type are not "
                 "supported yet.")
+        self.kv_cache_config = kv_cache_config
 
         kv_caches: dict[str, torch.Tensor] = {}
 
