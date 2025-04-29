@@ -319,6 +319,7 @@ steps:
   - pytest -v -s compile/test_full_graph.py
 
 - label: Kernels Core Operation Test
+  mirror_hardwares: [amd]
   source_file_dependencies:
   - csrc/
   - tests/kernels/core
@@ -326,6 +327,7 @@ steps:
     - pytest -v -s kernels/core
 
 - label: Kernels Attention Test %N
+  mirror_hardwares: [amd]
   source_file_dependencies:
   - csrc/attention/
   - vllm/attention
@@ -336,6 +338,7 @@ steps:
   parallelism: 2
 
 - label: Kernels Quantization Test %N
+  mirror_hardwares: [amd]
   source_file_dependencies:
   - csrc/quantization/
   - vllm/model_executor/layers/quantization
@@ -345,6 +348,7 @@ steps:
   parallelism: 2
 
 - label: Kernels MoE Test
+  #mirror_hardwares: [amd]
   source_file_dependencies:
   - csrc/moe/
   - tests/kernels/moe
@@ -353,6 +357,7 @@ steps:
     - pytest -v -s kernels/moe
 
 - label: Kernels Mamba Test
+  #mirror_hardwares: [amd]
   source_file_dependencies:
   - csrc/mamba/
   - tests/kernels/mamba

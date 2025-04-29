@@ -2091,7 +2091,7 @@ class LLMEngine:
 
             tokenizer = self.get_tokenizer(lora_request=lora_request)
             guided_decoding.backend = guided_decoding.backend or \
-                self.decoding_config.guided_decoding_backend
+                self.decoding_config.backend
 
             if self.decoding_config.reasoning_backend is not None:
                 logger.debug("Building with reasoning backend %s",

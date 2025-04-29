@@ -293,7 +293,8 @@ class HfRunner:
     def get_default_device(self):
         from vllm.platforms import current_platform
 
-        return ("cpu" if current_platform.is_cpu() else "cuda")
+        return ("cpu"
+                if current_platform.is_cpu() else current_platform.device_type)
 
     def wrap_device(self, x: _T, device: Optional[str] = None) -> _T:
         if x is None or isinstance(x, (bool, )):
