@@ -339,7 +339,7 @@ class VllmBackend:
 
     def configure_post_pass(self):
         config = self.compilation_config
-        self.post_grad_pass_manager.configure(config.pass_config)
+        self.post_grad_pass_manager.configure(self.vllm_config)
 
         # Post-grad custom passes are run using the post_grad_custom_post_pass
         # hook. If a pass for that hook exists, add it to the pass manager.
@@ -382,6 +382,10 @@ class VllmBackend:
             hash_content = []
             for filepath in forward_code_files:
                 hash_content.append(filepath)
+                if filepath == "<string>":
+                    # This means the function was dynamically generated, with
+                    # e.g. exec(). We can't actually check these.
+                    continue
                 with open(filepath) as f:
                     hash_content.append(f.read())
             import hashlib
