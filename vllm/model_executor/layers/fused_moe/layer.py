@@ -28,10 +28,9 @@ if current_platform.is_cuda_alike():
 else:
     fused_experts = None  # type: ignore
 if current_platform.is_rocm():
-    from .rocm_aiter_fused_moe import (
-        rocm_aiter_fused_experts as fused_experts_rocm_aiter)
+    from .rocm_aiter_fused_moe import rocm_aiter_fused_experts
 else:
-    fused_experts_rocm_aiter = None  # type: ignore
+    rocm_aiter_fused_experts = None  # type: ignore
 if current_platform.is_tpu():
     # the iterative moe implementation is used until the moe_pallas is fixed
     from .moe_torch_iterative import fused_moe as fused_moe_pallas
@@ -222,7 +221,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             e_score_correction_bias=e_score_correction_bias)
 
         if self.rocm_aiter_moe_enabled:
-            return fused_experts_rocm_aiter(
+            return rocm_aiter_fused_experts(
                 hidden_states=x,
                 w1=layer.w13_weight,
                 w2=layer.w2_weight,
@@ -233,8 +232,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
                 apply_router_weight_on_input=apply_router_weight_on_input,
                 global_num_experts=global_num_experts,
                 expert_map=expert_map,
-                use_ck_moe_2stages=self.rocm_aiter_2stage_moe_enabled,
-            )
+                use_ck_moe_2stages=self.rocm_aiter_2stage_moe_enabled)
 
         return fused_experts(
             hidden_states=x,

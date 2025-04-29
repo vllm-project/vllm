@@ -215,7 +215,7 @@ def rocm_aiter_ck_moe_2stages_impl(
     fc2_scale: Optional[torch.Tensor] = None,
     a1_scale: Optional[torch.Tensor] = None,
     a2_scale: Optional[torch.Tensor] = None,
-    block_size: Optional[list[int]] = None,
+    block_size: Optional[List[int]] = None,
     expert_mask: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
 
@@ -243,7 +243,7 @@ def rocm_aiter_ck_moe_2stages_fake(
     fc2_scale: Optional[torch.Tensor] = None,
     a1_scale: Optional[torch.Tensor] = None,
     a2_scale: Optional[torch.Tensor] = None,
-    block_size: Optional[list[int]] = None,
+    block_size: Optional[List[int]] = None,
     expert_mask: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     return torch.empty_like(hidden_states)
@@ -404,7 +404,7 @@ def rocm_aiter_fused_experts(
         #   fp8 quantization w8a8
         if use_ck_moe_2stages and a1_scale is not None and a2_scale is not None:
             return torch.ops.vllm.rocm_aiter_ck_moe_2stages(
-                a1=hidden_states,
+                hidden_states=hidden_states,
                 w1=w1,
                 w2=w2,
                 topk_weights=topk_weights,
@@ -447,7 +447,7 @@ def rocm_aiter_fused_experts(
             hidden_states=hidden_states,
             w1=w1,
             w2=w2,
-            topk_weight=topk_weights,
+            topk_weights=topk_weights,
             topk_ids=topk_ids)
 
     # w16a16 fallback to rocm_aiter_ck_moe w16a16
@@ -487,7 +487,7 @@ def shuffle_weights(*tensors: torch.Tensor,
 
 
 def expand_weights(*tensors: torch.Tensor,
-                   expansion_dims: list[int]) -> Tuple[torch.Tensor, ...]:
+                   expansion_dims: List[int]) -> Tuple[torch.Tensor, ...]:
     """
     Expands the dimensions of input tensors.
 
