@@ -173,8 +173,8 @@ dequant<half, vllm::kU4B8.id()>(int q) {
   const int HI = 0x00f000f0;
   const int EX = 0x64006400;
   // Guarantee that the `(a & b) | c` operations are LOP3s.
-  int lo = lop3 < (0xf0 & 0xcc) | 0xaa > (q, LO, EX);
-  int hi = lop3 < (0xf0 & 0xcc) | 0xaa > (q, HI, EX);
+  int lo = lop3<(0xf0 & 0xcc) | 0xaa>(q, LO, EX);
+  int hi = lop3<(0xf0 & 0xcc) | 0xaa>(q, HI, EX);
   // We want signed int4 outputs, hence we fuse the `-8` symmetric zero point
   // directly into `SUB` and `ADD`.
   const int SUB = 0x64086408;
@@ -197,9 +197,9 @@ dequant<nv_bfloat16, vllm::kU4B8.id()>(int q) {
 
   // Guarantee that the `(a & b) | c` operations are LOP3s.
 
-  int lo = lop3 < (0xf0 & 0xcc) | 0xaa > (q, MASK, EX);
+  int lo = lop3<(0xf0 & 0xcc) | 0xaa>(q, MASK, EX);
   q >>= 4;
-  int hi = lop3 < (0xf0 & 0xcc) | 0xaa > (q, MASK, EX);
+  int hi = lop3<(0xf0 & 0xcc) | 0xaa>(q, MASK, EX);
 
   typename ScalarType<nv_bfloat16>::FragB frag_b;
   static constexpr uint32_t MUL = 0x3F803F80;
@@ -221,8 +221,8 @@ dequant<half, vllm::kU4.id()>(int q) {
   const int HI = 0x00f000f0;
   const int EX = 0x64006400;
   // Guarantee that the `(a & b) | c` operations are LOP3s.
-  int lo = lop3 < (0xf0 & 0xcc) | 0xaa > (q, LO, EX);
-  int hi = lop3 < (0xf0 & 0xcc) | 0xaa > (q, HI, EX);
+  int lo = lop3<(0xf0 & 0xcc) | 0xaa>(q, LO, EX);
+  int hi = lop3<(0xf0 & 0xcc) | 0xaa>(q, HI, EX);
 
   const int SUB = 0x64006400;
   const int MUL = 0x2c002c00;
@@ -244,9 +244,9 @@ dequant<nv_bfloat16, vllm::kU4.id()>(int q) {
 
   // Guarantee that the `(a & b) | c` operations are LOP3s.
 
-  int lo = lop3 < (0xf0 & 0xcc) | 0xaa > (q, MASK, EX);
+  int lo = lop3<(0xf0 & 0xcc) | 0xaa>(q, MASK, EX);
   q >>= 4;
-  int hi = lop3 < (0xf0 & 0xcc) | 0xaa > (q, MASK, EX);
+  int hi = lop3<(0xf0 & 0xcc) | 0xaa>(q, MASK, EX);
 
   typename ScalarType<nv_bfloat16>::FragB frag_b;
   static constexpr uint32_t MUL = 0x3F803F80;
