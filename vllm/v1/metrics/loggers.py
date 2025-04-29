@@ -190,8 +190,8 @@ class PrometheusStatLogger(StatLoggerBase):
             documentation="Number of generation tokens processed.",
             labelnames=labelnames).labels(*labelvalues)
 
-        self.counter_total_evicted_tokens = prometheus_client.Counter(
-            name="vllm:total_evicted_tokens_total",
+        self.counter_evicted_tokens = prometheus_client.Counter(
+            name="vllm:evicted_tokens_total",
             documentation="Total number of tokens evicted from KV cache.",
             labelnames=labelnames).labels(*labelvalues)
 
@@ -421,8 +421,7 @@ class PrometheusStatLogger(StatLoggerBase):
         self.counter_prompt_tokens.inc(iteration_stats.num_prompt_tokens)
         self.counter_generation_tokens.inc(
             iteration_stats.num_generation_tokens)
-        self.counter_total_evicted_tokens.inc(
-            scheduler_stats.num_evicted_tokens)
+        self.counter_evicted_tokens.inc(scheduler_stats.num_evicted_tokens)
         self.histogram_iteration_tokens.observe(
             iteration_stats.num_prompt_tokens + \
             iteration_stats.num_generation_tokens)

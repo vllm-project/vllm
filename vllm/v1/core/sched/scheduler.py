@@ -383,7 +383,7 @@ class Scheduler(SchedulerInterface):
                     # The request cannot be scheduled.
                     break
 
-                tokens = self._get_request_total_tokens(request)
+                request_total_tokens = self._get_request_total_tokens(request)
 
                 # KVConnector: update internal state after allocation.
                 # This information is used to determine if a load is
@@ -395,7 +395,7 @@ class Scheduler(SchedulerInterface):
                     )
 
                 self.waiting.popleft()
-                self._waiting_tokens -= tokens
+                self._waiting_tokens -= request_total_tokens
                 if request.use_structured_output:
                     structured_output_request_ids[
                         request.request_id] = req_index
