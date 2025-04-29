@@ -232,7 +232,10 @@ class PrometheusStatLogger(StatLoggerBase):
             prometheus_client.Histogram(
                 name="vllm:iteration_tokens_total",
                 documentation="Histogram of number of tokens per engine_step.",
-                buckets=build_cudagraph_buckets(vllm_config),
+                buckets=[
+                    1, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192,
+                    16384
+                ],
                 labelnames=labelnames).labels(*labelvalues)
 
         self.histogram_max_num_generation_tokens_request = \
@@ -465,16 +468,6 @@ def build_1_2_5_buckets(max_value: int) -> list[int]:
     [1, 2, 5, 10, 20, 50, 100]
     """
     return build_buckets([1, 2, 5], max_value)
-
-
-def build_cudagraph_buckets(vllm_config: VllmConfig) -> list[int]:
-    if not vllm_config.model_config.enforce_eager:
-        buckets = vllm_config.compilation_config.\
-            cudagraph_capture_sizes.copy()
-        buckets.sort()
-        return buckets
-    else:
-        return [1, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8096]
 
 
 def setup_default_loggers(
