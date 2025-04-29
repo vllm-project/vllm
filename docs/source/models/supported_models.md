@@ -979,6 +979,13 @@ See [this page](#generative-models) for more information on how to use generativ
   * ✅︎
   * ✅︎
   * ✅︎
+- * `MiniMaxVL01ForConditionalGeneration`
+  * MiniMax-VL
+  * T + I<sup>E+</sup>
+  * `MiniMaxAI/MiniMax-VL-01`, etc.
+  *
+  * ✅︎
+  * ✅︎
 - * `Mistral3ForConditionalGeneration`
   * Mistral3
   * T + I<sup>+</sup>
