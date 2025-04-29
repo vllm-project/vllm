@@ -94,7 +94,7 @@ def _worker_parallel_launch(
         )
     except Exception as ex:
         print(ex)
-        traceback.print_exception(ex)
+        traceback.print_exc()
         raise
     finally:
         torch.distributed.destroy_process_group()
@@ -175,8 +175,6 @@ def torch_dispatch(
     b_a = torch.zeros((num_experts, max_num_tokens, a.shape[1]),
                       dtype=a.dtype,
                       device=a.device)
-
-    #print(f"b_a shape {b_a.shape}")
 
     token_counts = torch.zeros(num_experts, dtype=torch.int, device=a.device)
 
