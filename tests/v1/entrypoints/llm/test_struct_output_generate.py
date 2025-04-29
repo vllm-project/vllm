@@ -435,13 +435,10 @@ Given the previous instructions, what is the weather in New York City?
 """
 
     # Change this once other backends support structural_tag
-    if guided_decoding_backend.startswith("xgrammar"):
-        outputs = llm.generate(prompts=prompt,
-                               sampling_params=sampling_params,
-                               use_tqdm=True)
-        assert outputs is not None
-    else:
-        outputs = []
+    outputs = llm.generate(prompts=prompt,
+                           sampling_params=sampling_params,
+                           use_tqdm=True)
+    assert outputs is not None
 
     for output in outputs:
         assert output is not None
