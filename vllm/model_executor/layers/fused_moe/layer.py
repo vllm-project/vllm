@@ -32,9 +32,10 @@ from vllm.utils import direct_register_custom_op
 
 if current_platform.is_cuda_alike():
     from .dispatch_combine import StandardDispatchCombine
-    from .fused_moe import TritonExperts, fused_experts
     from .fused_batched_moe import BatchedDispatchCombine, BatchedTritonExperts
-    from .modular_kernel import FusedMoEModularKernel, FusedMoEQuantizeDispatchCombine
+    from .fused_moe import TritonExperts, fused_experts
+    from .modular_kernel import (FusedMoEModularKernel,
+                                 FusedMoEQuantizeDispatchCombine)
     from .pplx_dispatch_combine import PplxDispatchCombine
 else:
     fused_experts = None  # type: ignore
@@ -88,7 +89,8 @@ class FusedMoEMethodBase(QuantizeMethodBase):
                        params_dtype: torch.dtype, **extra_weight_attrs):
         raise NotImplementedError
 
-    def set_dispatch_combine(self, dispatch_combine: FusedMoEQuantizeDispatchCombine) -> bool:
+    def set_dispatch_combine(
+            self, dispatch_combine: FusedMoEQuantizeDispatchCombine) -> bool:
         return False
 
     @abstractmethod
@@ -257,29 +259,31 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             apply_router_weight_on_input=apply_router_weight_on_input)
 
     # Maybe extra args
-    def set_dispatch_combine(self, dispatch_combine: FusedMoEQuantizeDispatchCombine) -> bool:
+    def set_dispatch_combine(
+            self, dispatch_combine: FusedMoEQuantizeDispatchCombine) -> bool:
         assert self.fused_experts == fused_experts
 
-        block_m = MOE_DP_CHUNK_SIZE * (self.moe.ep_size // self.moe.dp_size)
+        #block_m = MOE_DP_CHUNK_SIZE * (self.moe.ep_size // self.moe.dp_size)
 
-        if isinstance(dispatch_combine, (BatchedDispatchCombine, PplxDispatchCombine)):
-            logger.info(f"BatchedTritonExperts {self.moe}")
+        if isinstance(dispatch_combine,
+                      (BatchedDispatchCombine, PplxDispatchCombine)):
+            logger.info("BatchedTritonExperts %s", self.moe)
             experts = BatchedTritonExperts(
-                use_fp8_w8a8 = False,
-                use_int8_w8a8 = False,
-                use_int8_w8a16 = False,
-                use_int4_w4a16 = False,
-                block_shape = None,
+                use_fp8_w8a8=False,
+                use_int8_w8a8=False,
+                use_int8_w8a16=False,
+                use_int4_w4a16=False,
+                block_shape=None,
             )
         else:
-            logger.info(f"TritonExperts {self.moe}")
+            logger.info("TritonExperts %s", self.moe)
             experts = TritonExperts(
-                use_fp8_w8a8 = False,
-                use_int8_w8a8 = False,
-                use_int8_w8a16 = False,
-                use_int4_w4a16 = False,
-                block_shape = None,
-                per_channel_quant = False,
+                use_fp8_w8a8=False,
+                use_int8_w8a8=False,
+                use_int8_w8a16=False,
+                use_int4_w4a16=False,
+                block_shape=None,
+                per_channel_quant=False,
             )
 
         self.fused_experts = FusedMoEModularKernel(
@@ -625,8 +629,8 @@ class FusedMoE(torch.nn.Module):
             dp_rank=self.dp_rank,
             ep_size=self.ep_size,
             ep_rank=self.ep_rank,
-            in_dtype = params_dtype,  # this is probably not right, where to get?
-            out_dtype = params_dtype, # ditto.
+            in_dtype=params_dtype,  # this is probably not right, where to get?
+            out_dtype=params_dtype,  # ditto.
         )
 
         # Note: get_quant_method will look at the layer's local_num_experts
@@ -645,46 +649,41 @@ class FusedMoE(torch.nn.Module):
         # TODO: move to method?
         if self.dp_size > 1:
             logger.info("using pplx dispatch")
-            max_num_tokens = MOE_DP_CHUNK_SIZE # // moe.dp_size
+            max_num_tokens = MOE_DP_CHUNK_SIZE  # // moe.dp_size
             world_size = moe.ep_size
-            dp_size = moe.ep_size // moe.dp_size # dp_size actually means TP.
+            dp_size = moe.ep_size // moe.dp_size  # dp_size actually means TP.
             rank = moe.ep_rank
 
             all_to_all = get_all_to_all(
                 max_num_tokens=max_num_tokens,
                 num_experts=moe.num_experts,
-                experts_per_token=moe.experts_per_token, # topk
+                experts_per_token=moe.experts_per_token,  # topk
                 rank=rank,
                 world_size=world_size,
                 dp_size=dp_size,
                 hidden_dim=moe.hidden_dim,
                 hidden_dim_bytes=moe.hidden_dim * moe.in_dtype.itemsize,
-                # For blocked per token: set to ceil_div(hidden_dim, block_size) * sizeof(float32)
+                # For blocked per token: set to
+                #   ceil_div(hidden_dim, block_size) * sizeof(float32)
                 # For per-token: set to sizeof(float32)
-                hidden_dim_scale_bytes=(
-                    0
-                    if moe.in_dtype.itemsize != 1
-                    else (
-                            (moe.hidden_dim + moe.block_size - 1)
-                            // moe.block_size
-                            * torch.float32.itemsize
-                    )
-                )
-            )
+                hidden_dim_scale_bytes=(0 if moe.in_dtype.itemsize != 1 else (
+                    (moe.hidden_dim + moe.block_size - 1) // moe.block_size *
+                    torch.float32.itemsize)))
 
             dispatch_combine = PplxDispatchCombine(
                 all_to_all,
                 max_num_tokens,
                 world_size,
                 dp_size,
-                rank, # just for debugging
+                rank,  # just for debugging
                 moe.in_dtype,
             )
         elif True:
             logger.info("using standard dispatch")
             dispatch_combine = StandardDispatchCombine(
                 moe.in_dtype,
-                quant_config.weight_block_size if quant_config is not None else None,
+                quant_config.weight_block_size
+                if quant_config is not None else None,
             )
         else:
             logger.info("using batched dispatch")
@@ -695,7 +694,8 @@ class FusedMoE(torch.nn.Module):
 
         success = self.quant_method.set_dispatch_combine(dispatch_combine)
         if not success:
-            logger.warning("DP+EP not supported for %s.", type(self.quant_method))
+            logger.warning("DP+EP not supported for %s.",
+                           type(self.quant_method))
 
         moe_quant_params = {
             "num_experts": self.local_num_experts,
@@ -1043,12 +1043,14 @@ class FusedMoE(torch.nn.Module):
         ctx = get_forward_context()
 
         max_tokens_across_dp = ctx.dp_metadata.max_tokens_across_dp
-        cu_tokens_across_dp_cpu = ctx.dp_metadata.cu_tokens_across_dp_cpu
+        #cu_tokens_across_dp_cpu = ctx.dp_metadata.cu_tokens_across_dp_cpu
         num_tokens_across_dp = ctx.dp_metadata.num_tokens_across_dp
 
         #In this function we define two ranges:
-        # 1. chunk_range - The current iteration of the loops's range over the DP world tokens
-        # 2. my_tokens_in_chunk - The tokens within chunk_range that this DP rank owns.
+        # 1. chunk_range - The current iteration of the loops's range over the
+        #    DP world tokens
+        # 2. my_tokens_in_chunk - The tokens within chunk_range that this DP
+        #    rank owns.
 
         moe_dp_chunk_size_per_rank = MOE_DP_CHUNK_SIZE // self.dp_size
 
@@ -1096,8 +1098,11 @@ class FusedMoE(torch.nn.Module):
 
             # TODO: needed for non-pplx?
             if False and self.dp_size > 1:
-                start = 0 if self.dp_rank == 0 else cu_tokens_across_dp_this_iter[
-                    self.dp_rank - 1]
+                if self.dp_rank == 0:
+                    start = 0
+                else:
+                    start = cu_tokens_across_dp_this_iter[self.dp_rank - 1]
+
                 end = cu_tokens_across_dp_this_iter[self.dp_rank]
 
                 all_hidden_states = get_dp_group().all_reduce(
@@ -1105,7 +1110,8 @@ class FusedMoE(torch.nn.Module):
                 final_hidden_states = all_hidden_states[start:end, :]
 
             # TODO: needed for non-pplx?
-            if False and self.reduce_results and (self.tp_size > 1 or self.ep_size > 1):
+            if False and self.reduce_results and (self.tp_size > 1
+                                                  or self.ep_size > 1):
                 # Default set to False. (May have to add shared expert outputs.)
                 final_hidden_states = tensor_model_parallel_all_reduce(
                     final_hidden_states)
@@ -1167,7 +1173,8 @@ class FusedMoE(torch.nn.Module):
             final_hidden_states = get_ep_group().combine(final_hidden_states)
 
         # TODO: needed for non-pplx?
-        if False and self.reduce_results and (self.tp_size > 1 or self.ep_size > 1):
+        if False and self.reduce_results and (self.tp_size > 1
+                                              or self.ep_size > 1):
             # Default set to False. (May have to add shared expert outputs.)
             final_hidden_states = tensor_model_parallel_all_reduce(
                 final_hidden_states)

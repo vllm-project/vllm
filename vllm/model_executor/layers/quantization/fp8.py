@@ -10,8 +10,8 @@ from torch.nn import Module
 from torch.nn.parameter import Parameter
 
 import vllm.envs as envs
-from vllm import _custom_ops as ops
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
+from vllm import _custom_ops as ops
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import (FusedMoE, FusedMoEMethodBase,
@@ -439,7 +439,6 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         from vllm.model_executor.layers.fused_moe import fused_experts
         self.quant_config = quant_config
         self.block_quant = self.quant_config.weight_block_size is not None
-        self.allow_deep_gemm = allow_deep_gemm
 
         # For GPUs that lack FP8 hardware support, we can leverage the Marlin
         # kernel for fast weight-only FP8 quantization
@@ -793,21 +792,24 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             del layer.w2_input_scale
 
     # Maybe extra args
-    def set_dispatch_combine(self, dispatch_combine: mk.FusedMoEQuantizeDispatchCombine) -> bool:
+    def set_dispatch_combine(
+            self,
+            dispatch_combine: mk.FusedMoEQuantizeDispatchCombine) -> bool:
+        from vllm.model_executor.layers.fused_moe.triton_deep_gemm_moe import (
+            TritonOrDeepGemmExperts)
+
         if self.use_marlin:
             return False
-
-        from vllm.model_executor.layers.fused_moe.triton_deep_gemm_moe import TritonOrDeepGemmExperts
 
         #block_m = MOE_DP_CHUNK_SIZE * (moe.ep_size // moe.dp_size)
         #print(f"block_m = {block_m}")
 
         experts = TritonOrDeepGemmExperts(
-            use_fp8_w8a8 = True,
-            use_int8_w8a16 = False,
-            use_int4_w4a16 = False,
-            block_shape = self.quant_config.weight_block_size,
-            block_m = None, # TODO
+            use_fp8_w8a8=True,
+            use_int8_w8a16=False,
+            use_int4_w4a16=False,
+            block_shape=self.quant_config.weight_block_size,
+            block_m=None,  # TODO
             allow_deep_gemm=self.allow_deep_gemm,
         )
 
@@ -890,8 +892,8 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         else:
             return self.fused_experts(
                 hidden_states=x,
-                layer.w13_weight,
-                layer.w2_weight,
+                w1=layer.w13_weight,
+                w2=layer.w2_weight,
                 topk_weights=topk_weights,
                 topk_ids=topk_ids,
                 inplace=True,

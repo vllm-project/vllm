@@ -1204,28 +1204,29 @@ def fused_experts(hidden_states: torch.Tensor,
             block_shape=block_shape)
 
 
-def fused_experts_impl(hidden_states: torch.Tensor,
-                       w1: torch.Tensor,
-                       w2: torch.Tensor,
-                       topk_weights: torch.Tensor,
-                       topk_ids: torch.Tensor,
-                       inplace: bool = False,
-                       activation: str = "silu",
-                       apply_router_weight_on_input: bool = False,
-                       use_fp8_w8a8: bool = False,
-                       use_int8_w8a8: bool = False,
-                       use_int8_w8a16: bool = False,
-                       use_int4_w4a16: bool = False,
-                       per_channel_quant: bool = False,
-                       global_num_experts: int = -1,
-                       expert_map: Optional[torch.Tensor] = None,
-                       w1_scale: Optional[torch.Tensor] = None,
-                       w2_scale: Optional[torch.Tensor] = None,
-                       w1_zp: Optional[torch.Tensor] = None,
-                       w2_zp: Optional[torch.Tensor] = None,
-                       a1_scale: Optional[torch.Tensor] = None,
-                       a2_scale: Optional[torch.Tensor] = None,
-                       block_shape: Optional[List[int]] = None) -> torch.Tensor:
+def fused_experts_impl(
+        hidden_states: torch.Tensor,
+        w1: torch.Tensor,
+        w2: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        inplace: bool = False,
+        activation: str = "silu",
+        apply_router_weight_on_input: bool = False,
+        use_fp8_w8a8: bool = False,
+        use_int8_w8a8: bool = False,
+        use_int8_w8a16: bool = False,
+        use_int4_w4a16: bool = False,
+        per_channel_quant: bool = False,
+        global_num_experts: int = -1,
+        expert_map: Optional[torch.Tensor] = None,
+        w1_scale: Optional[torch.Tensor] = None,
+        w2_scale: Optional[torch.Tensor] = None,
+        w1_zp: Optional[torch.Tensor] = None,
+        w2_zp: Optional[torch.Tensor] = None,
+        a1_scale: Optional[torch.Tensor] = None,
+        a2_scale: Optional[torch.Tensor] = None,
+        block_shape: Optional[List[int]] = None) -> torch.Tensor:
     # Check constraints.
     if use_int4_w4a16:
         assert hidden_states.shape[1] // 2 == w1.shape[
@@ -1628,22 +1629,32 @@ class TritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
         intermediate_cache3 = _resize_cache(workspace13,
                                             (num_tokens, top_k_num, K))
 
-        if hidden_states.dim() == 2: #block_m is None:
+        if hidden_states.dim() == 2:  #block_m is None:
             sorted_token_ids, expert_ids, num_tokens_post_padded = (
-                moe_align_block_size(
-                    topk_ids,
-                    config['BLOCK_SIZE_M'],
-                    global_num_experts, expert_map
-                ))
+                moe_align_block_size(topk_ids, config['BLOCK_SIZE_M'],
+                                     global_num_experts, expert_map))
         else:
             max_num_tokens = hidden_states.shape[1]
-            sorted_token_ids = torch.arange(0, hidden_states.shape[0] * max_num_tokens, device=hidden_states.device, dtype=torch.int)
+            sorted_token_ids = torch.arange(0,
+                                            hidden_states.shape[0] *
+                                            max_num_tokens,
+                                            device=hidden_states.device,
+                                            dtype=torch.int)
             sorted_token_ids = sorted_token_ids.flatten()
-            expert_ids = torch.arange(0, global_num_experts, device=hidden_states.device, dtype=torch.int)
-            expert_ids = torch.repeat_interleave(expert_ids, max_num_tokens, dim=0)
+            expert_ids = torch.arange(0,
+                                      global_num_experts,
+                                      device=hidden_states.device,
+                                      dtype=torch.int)
+            expert_ids = torch.repeat_interleave(expert_ids,
+                                                 max_num_tokens,
+                                                 dim=0)
             print(f"EXPERT_IDS {expert_ids}")
-            #num_tokens_post_padded = torch.tensor([num_tokens], device=hidden_states.device, dtype=torch.int32)
-            num_tokens_post_padded = torch.zeros(1, device=hidden_states.device, dtype=torch.int32)
+            #num_tokens_post_padded = torch.tensor([num_tokens],
+            #                                      device=hidden_states.device,
+            #                                      dtype=torch.int32)
+            num_tokens_post_padded = torch.zeros(1,
+                                                 device=hidden_states.device,
+                                                 dtype=torch.int32)
             num_tokens_post_padded.fill_(max_num_tokens)
             hidden_states = hidden_states.view(-1, hidden_states.shape[-1])
             #print(f"P = {sorted_token_ids}, {hidden_states.shape}")
@@ -1700,170 +1711,6 @@ class TritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
                                 block_shape=self.block_shape)
 
         return intermediate_cache3
-
-
-class BatchedDispatchCombine(mk.FusedMoEQuantizeDispatchCombine):
-    def __init__(self,
-                 world_size: int,
-                 rank: int):
-        super().__init__()
-        self.world_size = world_size
-        self.rank = rank
-
-    def dispatch(
-        self,
-        a1: torch.Tensor,
-        a1_scale: Optional[torch.Tensor],
-        a2_scale: Optional[torch.Tensor],
-        topk_ids: torch.Tensor,
-        num_experts: int,
-        expert_map: Optional[torch.Tensor],
-    ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor]]:
-        assert topk_ids.dim() == 2
-        assert topk_ids.shape[0] == a1.shape[0]
-
-        num_tokens = a1.shape[0]
-        topk = topk_ids.shape[1]
-
-        tokens_per_expert = torch.bincount(topk_ids.view(-1), minlength=num_experts)
-        max_num_tokens = tokens_per_expert.max()
-        expert_counts = torch.zeros(num_experts, dtype=torch.int, device=a1.device)
-
-        b_a1 = torch.zeros((num_experts, max_num_tokens, a1.shape[1]),
-                           dtype=a1.dtype, device=a1.device)
-
-        #print(f"START DISPATCH {hex(id(self))}")
-
-        for token in range(num_tokens):
-            for j in range(topk):
-                expert_id = topk_ids[token, j]
-                idx = expert_counts[expert_id]
-                b_a1[expert_id, idx:idx+1, :] = a1[token, :]
-                expert_counts[expert_id] = expert_counts[expert_id] + 1
-
-        #print(f"END DISPATCH {hex(id(self))}: tokens_per_expert {(tokens_per_expert > 0).nonzero().view(-1)}")
-
-        return b_a1, a1_scale, tokens_per_expert
-
-    def combine(
-        self,
-        output: torch.Tensor,
-        fused_expert_output: torch.Tensor,
-        topk_weights: torch.Tensor,
-        topk_ids: torch.Tensor,
-    ) -> None:
-        if False:
-            print(f"topk_ids {topk_ids.shape}")
-            print(f"fused_expert_output {fused_expert_output.shape}")
-            print(f"output {output.shape}")
-            print(f"counts {self.expert_counts.shape}")
-
-        #print(f"START COMBINE {hex(id(self))}")
-
-        num_tokens, topk = topk_ids.shape
-        num_experts, _, K = fused_expert_output.shape
-        expert_counts = torch.zeros(num_experts, dtype=torch.int, device=fused_expert_output.device)
-        for token in range(num_tokens):
-            expert_ids = topk_ids[token]
-            for i in range(topk_ids.shape[1]):
-                expert_id = expert_ids[i]
-                if expert_id < num_experts:
-                    idx = expert_counts[expert_id]
-                    output[token, :] = output[token, :] + fused_expert_output[expert_id, idx:idx+1, :] * topk_weights[token, i]
-                    expert_counts[expert_id] = expert_counts[expert_id] + 1
-
-        #print(f"END COMBINE {hex(id(self))}")
-
-
-def rank_chunk(num, r, w):
-    rem = num % w
-    return (num // w) + (1 if r < rem else 0)
-
-
-class BatchedExperts(mk.FusedMoEPermuteExpertsUnpermute):
-
-    def __init__(
-        self,
-        rank: int = 0,
-        world_size: int = 1,
-        max_num_tokens: Optional[int] = None,
-        use_fp8_w8a8: bool = False,
-        use_int8_w8a16: bool = False,
-        use_int4_w4a16: bool = False,
-        block_shape: Optional[List[int]] = None,
-        block_m: Optional[int] = None,
-    ):
-        super().__init__()
-        assert not use_fp8_w8a8
-        assert not use_int4_w4a16
-        assert not use_int8_w8a16
-        assert block_shape is None
-        assert block_m is None
-        self.max_num_tokens = max_num_tokens
-        self.rank = rank
-        self.world_size = world_size
-
-    def workspace_shapes(
-        self,
-        a: torch.Tensor,
-        M: int,
-        N: int,
-        K: int,
-        topk: int,
-        num_experts: int,
-    ) -> Tuple[int, int, torch.dtype]:
-        #assert self.max_num_tokens >= a.shape[1]
-        max_num_tokens = a.shape[1] if self.max_num_tokens is None else self.max_num_tokens
-        workspace13 = num_experts * max_num_tokens * K * topk * 2 # TODO: *2 is a hack
-        workspace2 = max_num_tokens * N
-        return (workspace13, workspace2, a.dtype)
-
-    def apply(
-        self,
-        hidden_states: torch.Tensor,
-        w1: torch.Tensor,
-        w2: torch.Tensor,
-        topk_ids: torch.Tensor,
-        activation: str,
-        global_num_experts: int,
-        expert_map: Optional[torch.Tensor],
-        w1_scale: Optional[torch.Tensor],
-        w2_scale: Optional[torch.Tensor],
-        w1_zp: Optional[torch.Tensor],
-        w2_zp: Optional[torch.Tensor],
-        a1q_scale: Optional[torch.Tensor],
-        a2_scale: Optional[torch.Tensor],
-        workspace13: torch.Tensor,
-        workspace2: torch.Tensor,
-        expert_num_tokens: Optional[torch.Tensor],
-    ) -> torch.Tensor:
-        #print("START EXPERTS")
-        assert hidden_states.dim() == 3
-        assert expert_num_tokens is not None
-        num_tokens, topk = topk_ids.shape
-        _, tmp_max_num_tokens, K = hidden_states.shape
-        max_num_tokens = tmp_max_num_tokens if self.max_num_tokens is None else self.max_num_tokens
-        #print(f"global_num_experts = {global_num_experts}")
-        num_experts = global_num_experts
-        out = _resize_cache(workspace13, (num_experts, max_num_tokens, w2.shape[1]))
-        num_local_experts = expert_num_tokens.numel()
-        #print(f"shapes = {hidden_states.shape}, {w1.shape}, {w2.shape}, {out.shape} {expert_num_tokens.shape} {workspace2.shape} {num_experts}")
-
-        # TODO: don't need world_size or rank if expert_base always == 0
-        #assert w1.shape[0] == num_experts, f"{w1.shape} == {num_experts}"
-        #expert_base = rank_chunk(w1.shape[0], self.rank, self.world_size) * self.rank
-        expert_base = 0
-
-        for expert in range(num_local_experts):  # num_experts
-            num = expert_num_tokens[expert]
-            assert num <= max_num_tokens, f"{num}, {max_num_tokens}"
-            #print(f"{type(num)}, {num}, {max_num_tokens}")
-            if num > 0:
-                tmp = _resize_cache(workspace2, (num, w1.shape[1] // 2))
-                self.activation(activation, tmp, hidden_states[expert,:num,:] @ w1[expert_base + expert].transpose(0, 1))
-                out[expert, :num, :] = tmp @ w2[expert_base + expert].transpose(0, 1)
-
-        return out
 
 
 def modular_triton_fused_moe(

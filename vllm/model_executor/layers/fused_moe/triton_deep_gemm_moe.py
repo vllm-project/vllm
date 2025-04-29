@@ -1,36 +1,26 @@
 # SPDX-License-Identifier: Apache-2.0
-import importlib.util
 from typing import List, Optional, Tuple
 
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.model_executor.layers.fused_moe.deep_gemm_moe import (
-    DeepGemmExperts,
-    _valid_deep_gemm_shape,
-    _valid_deep_gemm,
-)
+    DeepGemmExperts, _valid_deep_gemm, _valid_deep_gemm_shape)
 from vllm.model_executor.layers.fused_moe.fused_moe import TritonExpert
+
 
 class TritonOrDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
 
-    def __init__(
-        self,
-        use_fp8_w8a8: bool,
-        use_int8_w8a16: bool,
-        use_int4_w4a16: bool,
-        block_shape: Optional[List[int]] = None,
-        block_m: Optional[int] = None,
-        allow_deep_gemm: bool = False
-    ):
+    def __init__(self,
+                 use_fp8_w8a8: bool,
+                 use_int8_w8a16: bool,
+                 use_int4_w4a16: bool,
+                 block_shape: Optional[List[int]] = None,
+                 block_m: Optional[int] = None,
+                 allow_deep_gemm: bool = False):
         super().__init__()
-        self.triton_expert = TritonExpert(
-            use_fp8_w8a8,
-            use_int4_w4a16,
-            use_int8_w8a16,
-            block_shape,
-            block_m
-        )
+        self.triton_expert = TritonExpert(use_fp8_w8a8, use_int4_w4a16,
+                                          use_int8_w8a16, block_shape, block_m)
         self.deep_gemm_expert = DeepGemmExperts()
         self.allow_deep_gemm = allow_deep_gemm
         self.use_fp8_w8a8 = use_fp8_w8a8
@@ -48,9 +38,11 @@ class TritonOrDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         # workspaces so we can be pessimistic here and allocate for DeepGemm
         # even if we fall back to triton later, e.g. if expert maps are set.
         if self.allow_deep_gemm and _valid_deep_gemm_shape(M, N, K):
-            return self.deep_gemm_expert.workspace_shapes(a, M, N, K, topk, num_experts)
+            return self.deep_gemm_expert.workspace_shapes(
+                a, M, N, K, topk, num_experts)
         else:
-            return self.triton_expert.workspace_shapes(a, M, N, K, topk, num_experts)
+            return self.triton_expert.workspace_shapes(a, M, N, K, topk,
+                                                       num_experts)
 
     def apply(
         self,
@@ -73,7 +65,7 @@ class TritonOrDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
     ) -> torch.Tensor:
         N = w1.shape[1]
         if (self.allow_deep_gemm and self.use_fp8_w8a8 and N > 512
-            and _valid_deep_gemm(hidden_states, w1, w2, expert_map)):
+                and _valid_deep_gemm(hidden_states, w1, w2, expert_map)):
             return self.deep_gemm_expert(
                 hidden_states,
                 w1,

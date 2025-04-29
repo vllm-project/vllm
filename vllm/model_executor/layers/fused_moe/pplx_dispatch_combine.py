@@ -9,6 +9,11 @@ from vllm.model_executor.layers.fused_moe.utils import (
     moe_kernel_quantize_input)
 
 
+def rank_chunk(num, r, w):
+    rem = num % w
+    return (num // w) + (1 if r < rem else 0)
+
+
 # Note use: layer.get_all_to_all() to get an AllToAll instance
 # The max_num_tokens, world_size and dp_size must be the same
 # as the ones used to create the AllToAll.
@@ -97,7 +102,7 @@ class PplxDispatchCombine(mk.FusedMoEQuantizeDispatchCombine):
             )
 
         # This argument is optional, defaults to indices.shape[0]
-        num_tokens = a1.shape[0]   # M
+        num_tokens = a1.shape[0]  # M
         bound_m = torch.tensor([num_tokens], dtype=torch.uint32, device=device)
 
         # TODO: optimize this?
@@ -123,8 +128,9 @@ class PplxDispatchCombine(mk.FusedMoEQuantizeDispatchCombine):
         apply_router_weight_on_input: bool,
     ) -> None:
         # This argument is optional
-        num_tokens = output.shape[0]   # M
-        bound_m = torch.tensor([num_tokens], dtype=torch.uint32,
+        num_tokens = output.shape[0]  # M
+        bound_m = torch.tensor([num_tokens],
+                               dtype=torch.uint32,
                                device=fused_expert_output.device)
 
         assert output.shape[0] <= self.max_num_tokens

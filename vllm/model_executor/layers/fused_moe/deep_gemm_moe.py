@@ -134,9 +134,7 @@ class DeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         dg.m_grouped_gemm_fp8_fp8_bf16_nt_contiguous(
             (a1q, a1q_scale), (w1, w1_scale), workspace1, expert_ids)
 
-        self.activation(activation,
-                        workspace2,
-                        workspace1.view(-1, N))
+        self.activation(activation, workspace2, workspace1.view(-1, N))
 
         a2q_scale: Optional[torch.Tensor] = None
 
