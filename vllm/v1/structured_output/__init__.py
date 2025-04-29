@@ -126,7 +126,7 @@ class StructuredOutputManager:
             request = full_request.structured_output_request
             assert request is not None and request.grammar is not None
 
-            apply_bitmask = request.reasoning_ended if self.reasoner is not None else True
+            apply_bitmask = request.reasoning_ended if self.reasoner is not None else True  # noqa: E501
 
             if apply_bitmask and not request.grammar.is_terminated():
                 request.grammar.fill_bitmask(bitmask_tensor, batch_index)
