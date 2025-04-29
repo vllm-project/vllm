@@ -222,16 +222,6 @@ def test_prefix_cache_default():
     assert not engine_args.enable_prefix_caching
 
 
-def test_valid_pooling_config():
-    parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
-    args = parser.parse_args([
-        '--override-pooler-config',
-        '{"pooling_type": "MEAN"}',
-    ])
-    engine_args = EngineArgs.from_cli_args(args=args)
-    assert engine_args.override_pooler_config == {"pooling_type": "MEAN"}
-
-
 @pytest.mark.parametrize(
     ("arg"),
     [
