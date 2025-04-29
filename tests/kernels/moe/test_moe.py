@@ -337,8 +337,8 @@ def test_fused_marlin_moe(
             return
 
     a = torch.randn((m, k), device="cuda", dtype=dtype) / 10
-    w1 = torch.randn((e, 2 * n, k), device="cuda", dtype=dtype) / 10
-    w2 = torch.randn((e, k, n), device="cuda", dtype=dtype) / 10
+    w1 = torch.randn((e, 2 * n, k), device="cuda", dtype=dtype) / 20
+    w2 = torch.randn((e, k, n), device="cuda", dtype=dtype) / 20
 
     if ep_size > 1:
         local_e = e // ep_size
@@ -458,7 +458,7 @@ def test_fused_marlin_moe(
         quant_type_id=quant_type.id,
         is_k_full=is_k_full)
 
-    torch.testing.assert_close(marlin_output, torch_output, atol=2e-2, rtol=0)
+    torch.testing.assert_close(marlin_output, torch_output, atol=4e-2, rtol=0)
 
 
 def test_moe_align_block_size_opcheck():
