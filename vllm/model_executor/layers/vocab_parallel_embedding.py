@@ -7,7 +7,6 @@ import torch
 import torch.nn.functional as F
 from torch.nn.parameter import Parameter, UninitializedParameter
 
-from vllm.compilation.decorators import support_torch_compile
 from vllm.distributed import (divide, get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size,
                               tensor_model_parallel_all_reduce)
@@ -137,11 +136,8 @@ class VocabParallelEmbeddingShardIndices:
         assert self.num_added_elements <= self.num_added_elements_padded
 
 
-# @torch.compile(dynamic=True, backend="inductor")  # original
-# @support_torch_compile
-# @torch.compile(backend="openxla", fullgraph=True, dynamic=False)  # works
-# @torch.compile(dynamic=True, backend="openxla")
-@torch.compile(dynamic=True, backend=current_platform.get_simple_compile_backend())
+@torch.compile(dynamic=True,
+               backend=current_platform.get_simple_compile_backend())
 def get_masked_input_and_mask(
         input_: torch.Tensor, org_vocab_start_index: int,
         org_vocab_end_index: int, num_org_vocab_padding: int,

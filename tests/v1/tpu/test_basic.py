@@ -64,6 +64,7 @@ def test_basic(
 
         assert "1024" in output or "0, 1" in output
 
+
 @pytest.mark.skipif(not current_platform.is_tpu(),
                     reason="This is a basic test for TPU only")
 def test_gemma3_with_mm_on_multichip(
@@ -95,8 +96,7 @@ def test_gemma3_with_mm_on_multichip(
                 # gpu_memory_utilization=0.7,
                 max_num_seqs=max_num_seqs,
                 tensor_parallel_size=tensor_parallel_size) as vllm_model:
-            vllm_outputs = vllm_model.generate_greedy(prompts,
-                                                      max_tokens)
+            vllm_outputs = vllm_model.generate_greedy(prompts, max_tokens)
         # vllm_outputs is a list of tuples whose first element is the token id
         # and the second element is the output (including the prompt).
         for output, answer in zip(vllm_outputs, answers):
