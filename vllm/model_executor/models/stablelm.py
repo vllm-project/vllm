@@ -104,9 +104,8 @@ class StablelmAttention(nn.Module):
             1, self.total_num_key_value_heads // tp_size)
         self.head_dim = self.hidden_size // self.total_num_heads
         self.max_position_embeddings = config.max_position_embeddings
-        rope_pct = getattr(config, "rope_pct",
-                           getattr(config, "partial_rotary_factor", 1))
-        self.rotary_ndims = int(self.head_dim * rope_pct)
+        self.partial_rotary_factor = getattr(
+            config, "rope_pct", getattr(config, "partial_rotary_factor", 1))
         self.scaling = self.head_dim**-0.5
         self.q_size = self.num_heads * self.head_dim
         self.kv_size = self.num_key_value_heads * self.head_dim
@@ -130,9 +129,10 @@ class StablelmAttention(nn.Module):
                                         prefix=f"{prefix}.o_proj")
         self.rotary_emb = get_rope(
             self.head_dim,
-            rotary_dim=self.rotary_ndims,
+            rotary_dim=self.head_dim,
             max_position=self.config.max_position_embeddings,
             base=self.config.rope_theta,
+            partial_rotary_factor=self.partial_rotary_factor,
         )
         self.attn = Attention(self.num_heads,
                               self.head_dim,
