@@ -1,9 +1,10 @@
-#pragma once 
+#pragma once
 
 template <typename T, bool CHECK_SKIPPED, bool ALIGN_BLOCK_SIZE>
 __global__ void expandInputRowsKernel(
-    T const* unpermuted_input, T* permuted_output, const float* unpermuted_scales,
-    int* sorted_experts, int const* expanded_dest_row_to_expanded_source_row,
+    T const* unpermuted_input, T* permuted_output,
+    const float* unpermuted_scales, int* sorted_experts,
+    int const* expanded_dest_row_to_expanded_source_row,
     int* expanded_source_row_to_expanded_dest_row,
     int64_t* expert_first_token_offset, int64_t const num_rows,
     int64_t const* num_dest_rows, int64_t const cols, int64_t k,
@@ -81,11 +82,11 @@ __global__ void expandInputRowsKernel(
   }
 }
 
-
 template <typename T>
 void expandInputRowsKernelLauncher(
-    T const* unpermuted_input, T* permuted_output, const float* unpermuted_scales,
-    int* sorted_experts, int const* expanded_dest_row_to_expanded_source_row,
+    T const* unpermuted_input, T* permuted_output,
+    const float* unpermuted_scales, int* sorted_experts,
+    int const* expanded_dest_row_to_expanded_source_row,
     int* expanded_source_row_to_expanded_dest_row,
     int64_t* expert_first_token_offset, int64_t const num_rows,
     int64_t const* num_valid_tokens_ptr, int64_t const cols, int const k,

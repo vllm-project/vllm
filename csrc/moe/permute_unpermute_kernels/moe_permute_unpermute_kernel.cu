@@ -127,7 +127,8 @@ void sortAndScanExpert(int* expert_for_source_row, const int* source_rows,
 }
 
 __global__ void preprocessTopkIdKernel(int* topk_id_ptr, int size,
-                                       const int* expert_map_ptr, int num_experts) {
+                                       const int* expert_map_ptr,
+                                       int num_experts) {
   auto tidx = threadIdx.x;
   auto bidx = blockIdx.x;
   auto lidx = tidx & 31;
@@ -157,8 +158,9 @@ __global__ void preprocessTopkIdKernel(int* topk_id_ptr, int size,
     topk_id_ptr[offset + tidx] = topk_id;
   }
 }
-void preprocessTopkIdLauncher(int* topk_id_ptr, int size, const int* expert_map_ptr,
-                              int num_experts, cudaStream_t stream) {
+void preprocessTopkIdLauncher(int* topk_id_ptr, int size,
+                              const int* expert_map_ptr, int num_experts,
+                              cudaStream_t stream) {
   int block = std::min(size, 1024);
   int grid = (size + block - 1) / block;
   int smem_size = (num_experts) * sizeof(int);
