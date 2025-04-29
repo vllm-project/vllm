@@ -18,9 +18,9 @@ from vllm import version
 from vllm.config import (BlockSize, CacheConfig, CacheDType, CompilationConfig,
                          ConfigFormat, ConfigType, DecodingConfig, Device,
                          DeviceConfig, DistributedExecutorBackend,
-                         GuidedDecodingBackendV1, HfOverrides,
-                         KVTransferConfig, LoadConfig, LoadFormat, LoRAConfig,
-                         ModelConfig, ModelImpl, MultiModalConfig,
+                         GuidedDecodingBackend, GuidedDecodingBackendV1,
+                         HfOverrides, KVTransferConfig, LoadConfig, LoadFormat,
+                         LoRAConfig, ModelConfig, ModelImpl, MultiModalConfig,
                          ObservabilityConfig, ParallelConfig, PoolerConfig,
                          PrefixCachingHashAlgo, PromptAdapterConfig,
                          SchedulerConfig, SchedulerPolicy, SpeculativeConfig,
@@ -317,7 +317,12 @@ class EngineArgs:
         bool] = SchedulerConfig.enable_chunked_prefill
     disable_chunked_mm_input: bool = SchedulerConfig.disable_chunked_mm_input
 
-    guided_decoding_backend: str = DecodingConfig.guided_decoding_backend
+    guided_decoding_backend: GuidedDecodingBackend = DecodingConfig.backend
+    guided_decoding_disable_fallback: bool = DecodingConfig.disable_fallback
+    guided_decoding_disable_any_whitespace: bool = \
+        DecodingConfig.disable_any_whitespace
+    guided_decoding_disable_additional_properties: bool = \
+        DecodingConfig.disable_additional_properties
     logits_processor_pattern: Optional[str] = None
 
     speculative_config: Optional[Dict[str, Any]] = None
@@ -498,9 +503,17 @@ class EngineArgs:
             title="DecodingConfig",
             description=DecodingConfig.__doc__,
         )
+        guided_decoding_group.add_argument("--guided-decoding-backend",
+                                           **guided_decoding_kwargs["backend"])
         guided_decoding_group.add_argument(
-            '--guided-decoding-backend',
-            **guided_decoding_kwargs["guided_decoding_backend"])
+            "--guided-decoding-disable-fallback",
+            **guided_decoding_kwargs["disable_fallback"])
+        guided_decoding_group.add_argument(
+            "--guided-decoding-disable-any-whitespace",
+            **guided_decoding_kwargs["disable_any_whitespace"])
+        guided_decoding_group.add_argument(
+            "--guided-decoding-disable-additional-properties",
+            **guided_decoding_kwargs["disable_additional_properties"])
         guided_decoding_group.add_argument(
             "--reasoning-parser",
             # This choices is a special case because it's not static
@@ -1244,7 +1257,11 @@ class EngineArgs:
                                         if self.enable_prompt_adapter else None
 
         decoding_config = DecodingConfig(
-            guided_decoding_backend=self.guided_decoding_backend,
+            backend=self.guided_decoding_backend,
+            disable_fallback=self.guided_decoding_disable_fallback,
+            disable_any_whitespace=self.guided_decoding_disable_any_whitespace,
+            disable_additional_properties=\
+                self.guided_decoding_disable_additional_properties,
             reasoning_backend=self.reasoning_parser
             if self.enable_reasoning else None,
         )
@@ -1335,9 +1352,8 @@ class EngineArgs:
                                recommend_to_remove=True)
             return False
 
-        # remove backend options when doing this check
-        if self.guided_decoding_backend.split(':')[0] \
-            not in get_args(GuidedDecodingBackendV1):
+        if self.guided_decoding_backend not in get_args(
+                GuidedDecodingBackendV1):
             _raise_or_fallback(
                 feature_name=
                 f"--guided-decoding-backend={self.guided_decoding_backend}",

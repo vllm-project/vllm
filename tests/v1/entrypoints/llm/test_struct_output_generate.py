@@ -17,15 +17,12 @@ from vllm.platforms import current_platform
 from vllm.sampling_params import GuidedDecodingParams, SamplingParams
 
 PARAMS_MODELS_BACKENDS_TOKENIZER_MODE = [
-    ("mistralai/Ministral-8B-Instruct-2410", "xgrammar:disable-any-whitespace",
-     "auto"),
-    ("mistralai/Ministral-8B-Instruct-2410", "guidance:disable-any-whitespace",
-     "auto"),
-    ("mistralai/Ministral-8B-Instruct-2410", "xgrammar:disable-any-whitespace",
-     "mistral"),
-    ("Qwen/Qwen2.5-1.5B-Instruct", "xgrammar:disable-any-whitespace", "auto"),
+    ("mistralai/Ministral-8B-Instruct-2410", "xgrammar", "auto"),
+    ("mistralai/Ministral-8B-Instruct-2410", "guidance", "auto"),
+    ("mistralai/Ministral-8B-Instruct-2410", "xgrammar", "mistral"),
+    ("Qwen/Qwen2.5-1.5B-Instruct", "xgrammar", "auto"),
     #FIXME: This test is flaky on CI thus disabled
-    #("Qwen/Qwen2.5-1.5B-Instruct", "guidance:disable-any-whitespace", "auto"),
+    #("Qwen/Qwen2.5-1.5B-Instruct", "guidance", "auto"),
 ]
 
 PARAMS_MODELS_TOKENIZER_MODE = [
@@ -73,6 +70,7 @@ def test_structured_output(
               enforce_eager=enforce_eager,
               max_model_len=1024,
               guided_decoding_backend=guided_decoding_backend,
+              guided_decoding_disable_any_whitespace=True,
               tokenizer_mode=tokenizer_mode)
 
     #
@@ -98,8 +96,7 @@ def test_structured_output(
 
         generated_text = output.outputs[0].text
         assert generated_text is not None
-        if 'disable-any-whitespace' in guided_decoding_backend:
-            assert "\n" not in generated_text
+        assert "\n" not in generated_text
         print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
         output_json = json.loads(generated_text)
         jsonschema.validate(instance=output_json, schema=sample_json_schema)
@@ -520,10 +517,11 @@ def test_structured_output_auto_mode(
 def test_guidance_no_additional_properties(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("VLLM_USE_V1", "1")
 
-    backend = 'guidance:no-additional-properties,disable-any-whitespace'
     llm = LLM(model="Qwen/Qwen2.5-1.5B-Instruct",
               max_model_len=1024,
-              guided_decoding_backend=backend)
+              guided_decoding_backend="guidance",
+              guided_decoding_disable_any_whitespace=True,
+              guided_decoding_disable_additional_properties=True)
 
     schema = {
         'type': 'object',
@@ -548,7 +546,11 @@ def test_guidance_no_additional_properties(monkeypatch: pytest.MonkeyPatch):
         "<|im_end|>\n<|im_start|>assistant\n")
 
     def generate_with_backend(backend):
-        guided_params = GuidedDecodingParams(json=schema, backend=backend)
+        guided_params = GuidedDecodingParams(
+            json=schema,
+            backend=backend,
+            disable_any_whitespace=True,
+            disable_additional_properties=True)
         sampling_params = SamplingParams(temperature=0,
                                          max_tokens=256,
                                          guided_decoding=guided_params)
@@ -562,8 +564,7 @@ def test_guidance_no_additional_properties(monkeypatch: pytest.MonkeyPatch):
         jsonschema.validate(instance=parsed_json, schema=schema)
         return parsed_json
 
-    generated = generate_with_backend(
-        'guidance:no-additional-properties,disable-any-whitespace')
+    generated = generate_with_backend("guidance")
     assert "a1" in generated
     assert "a2" in generated
     assert "a3" in generated
