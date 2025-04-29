@@ -485,6 +485,20 @@ def invoke_fused_moe_kernel(A: torch.Tensor,
     assert topk_weights is None or topk_weights.stride(1) == 1
     assert sorted_token_ids.stride(0) == 1
 
+    if use_fp8_w8a8:
+        assert B_scale is not None
+        assert (block_shape is None or triton.cdiv(B.shape[-2], block_shape[0])
+                == B_scale.shape[-2])
+        assert (block_shape is None or triton.cdiv(B.shape[-1], block_shape[1])
+                == B_scale.shape[-1])
+
+    elif use_int8_w8a16 or use_int4_w4a16:
+        assert B_scale is not None
+        assert block_shape is None or block_shape[0] == 0
+    else:
+        assert A_scale is None
+        assert B_scale is None
+
     M = A.shape[0]
     num_tokens = M * top_k
 
