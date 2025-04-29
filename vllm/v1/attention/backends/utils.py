@@ -7,7 +7,8 @@ import torch
 @dataclass
 class CommonAttentionMetadata:
     """
-    Attention Metadata that are same for different layer types.
+    Attention metadata attributes that can be shared by layers in different KV
+    cache groups and thus having different block table.
     """
     query_start_loc: torch.Tensor
     seq_lens: torch.Tensor
