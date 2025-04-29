@@ -988,15 +988,6 @@ class EngineArgs:
                             "(only cuda platform is supported)")
 
         parser.add_argument(
-            '--calculate-kv-scales',
-            action='store_true',
-            help='This enables dynamic calculation of '
-            'k_scale and v_scale when kv-cache-dtype is fp8. '
-            'If calculate-kv-scales is false, the scales will '
-            'be loaded from the model checkpoint if available. '
-            'Otherwise, the scales will default to 1.0.')
-
-        parser.add_argument(
             '--split-qkv',
             action='store_true',
             default=EngineArgs.split_qkv,
