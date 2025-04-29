@@ -30,8 +30,10 @@ def llm(request):
         if mode == "autoregressive":
             return {}
         return {
-            "speculative_model": "Qwen/Qwen2.5-0.5B-Instruct",
-            "num_speculative_tokens": 3,
+            "speculative_config": {
+                "model": "Qwen/Qwen2.5-0.5B-Instruct",
+                "num_speculative_tokens": 3,
+            },
         }
 
     test_llm_kwargs = get_llm_kwargs(request.param)

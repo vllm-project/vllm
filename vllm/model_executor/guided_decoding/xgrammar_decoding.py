@@ -176,6 +176,7 @@ class GrammarConfig:
         )
         num_lookahead_slots = (speculative_config.num_lookahead_slots
                                if speculative_config else None)
+        print("num_lookahead_slots", num_lookahead_slots)
 
         if guided_params.json:
             if not isinstance(guided_params.json, str):
@@ -274,6 +275,7 @@ class GrammarConfig:
                 tokenizer_hash=tokenizer_hash,
                 max_threads=max_threads,
                 tokenizer_data=tokenizer_data,
+                num_lookahead_slots=num_lookahead_slots,
             )
         else:
             raise ValueError(
@@ -372,6 +374,7 @@ class XGrammarLogitsProcessor:
         if len(self.matchers) == 0:
             max_rollback_tokens = (self.config.num_lookahead_slots
                                    if self.config.num_lookahead_slots else 0)
+            print("max_rollback_tokens", max_rollback_tokens)
             self.matchers = [
                 xgr.GrammarMatcher(self.ctx,
                                    max_rollback_tokens=max_rollback_tokens)
