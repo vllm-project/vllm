@@ -51,7 +51,7 @@ __global__ void compute_arg_sorts(const int32_t* __restrict__ topk_ids,
                                   int32_t* output_permutation,
                                   int32_t* atomic_buffer, const int topk_length,
                                   const int topk) {
-  int blk_expert_id = blockIdx.x;
+  int const blk_expert_id = blockIdx.x;
   int const num_experts = gridDim.x;
   int32_t const num_tokens = expert_offsets[num_experts];
 
@@ -95,7 +95,7 @@ void get_cutlass_moe_mm_data_caller(
       static_cast<int32_t*>(atomic_buffer.data_ptr()), num_experts);
   compute_arg_sorts<<<num_experts, num_threads, 0, stream>>>(
       static_cast<const int32_t*>(topk_ids.data_ptr()),
-      static_cast<int32_t*>(expert_offsets.data_ptr()),
+      static_cast<const int32_t*>(expert_offsets.data_ptr()),
       static_cast<int32_t*>(input_permutation.data_ptr()),
       static_cast<int32_t*>(output_permutation.data_ptr()),
       static_cast<int32_t*>(atomic_buffer.data_ptr()), topk_ids.numel(),

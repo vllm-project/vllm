@@ -13,7 +13,7 @@ def cutlass_moe(
     w1: torch.Tensor,
     w2: torch.Tensor,
     topk_weights: torch.Tensor,
-    topk_ids: torch.Tensor,
+    topk_ids_: torch.Tensor,
     ab_strides1: torch.Tensor,
     c_strides1: torch.Tensor,
     ab_strides2: torch.Tensor,
@@ -69,7 +69,7 @@ def cutlass_moe(
     - torch.Tensor: The output tensor after applying the MoE layer.
     """
 
-    assert topk_weights.shape == topk_ids.shape, "topk shape mismatch"
+    assert topk_weights.shape == topk_ids_.shape, "topk shape mismatch"
     assert a.shape[1] == w1.shape[1], "Hidden size mismatch w1"
     assert w1.shape[2] == w2.shape[1] * 2, "Hidden size mismatch w2"
     assert w1.shape[0] == w2.shape[0], "Expert number mismatch"
@@ -121,14 +121,15 @@ def cutlass_moe(
     m = a.size(0)
     k = w1.size(1)
     n = w2.size(1)
-    topk = topk_ids.size(1)
     out_dtype = a.dtype
 
-    local_topk_ids = topk_ids
+    local_topk_ids = topk_ids_
     if expert_map is not None:
         "Translate info from expert_map to topk_ids"
-        local_topk_ids = torch.where(expert_map[topk_ids] != -1,
-                                     expert_map[topk_ids], -1)
+        local_topk_ids = torch.where(expert_map[topk_ids_] != -1,
+                                     expert_map[topk_ids_], -1)
+
+    topk = local_topk_ids.size(1)
 
     if apply_router_weight_on_input:
         assert topk == 1, \
@@ -152,9 +153,18 @@ def cutlass_moe(
                                  dtype=torch.int32,
                                  device=device)
 
-    a_map = torch.zeros((local_topk_ids.numel()),
-                        dtype=torch.int32,
-                        device=device)
+    a_map_initializer = torch.empty
+    c2_initializer = torch.empty
+    if expert_map is not None:
+        # With expert_map each Rank processes only a subset of experts. As
+        # a result not all of a_map and c2 tensors are filled. We fill it
+        # zeros for correctness.
+        a_map_initializer = torch.zeros
+        c2_initializer = torch.zeros
+
+    a_map = a_map_initializer((local_topk_ids.numel()),
+                              dtype=torch.int32,
+                              device=device)
     c_map = torch.empty((local_topk_ids.numel()),
                         dtype=torch.int32,
                         device=device)
@@ -171,7 +181,7 @@ def cutlass_moe(
         rep_a1_scales = None
 
     c1 = torch.empty((m * topk, n * 2), device=device, dtype=out_dtype)
-    c2 = torch.zeros((m * topk, k), device=device, dtype=out_dtype)
+    c2 = c2_initializer((m * topk, k), device=device, dtype=out_dtype)
 
     ops.cutlass_moe_mm(c1, rep_a, w1, rep_a1_scales, w1_scale,
                        expert_offsets[:-1], problem_sizes1, ab_strides1,

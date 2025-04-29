@@ -70,7 +70,7 @@ class LlamaModel(nn.Module):
         input_ids: torch.Tensor,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
-    ) -> torch.Tensor:
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         input_embeds = self.embed_tokens(input_ids)
         hidden_states = self.fc(
             torch.cat((input_embeds, hidden_states), dim=-1))
@@ -82,7 +82,8 @@ class LlamaModel(nn.Module):
                 hidden_states,
                 residual,
             )
-        return hidden_states + residual
+        hidden_states = hidden_states + residual
+        return hidden_states, hidden_states
 
     def load_weights(self, weights: Iterable[Tuple[str,
                                                    torch.Tensor]]) -> Set[str]:
@@ -132,7 +133,7 @@ class EagleLlamaForCausalLM(LlamaForCausalLM):
         input_ids: torch.Tensor,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
-    ) -> torch.Tensor:
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         return self.model(input_ids, positions, hidden_states)
 
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):

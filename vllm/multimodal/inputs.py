@@ -320,7 +320,8 @@ class MultiModalFlatField(BaseMultiModalField):
         :func:`MultiModalFieldConfig.flat`
         :func:`MultiModalFieldConfig.flat_from_sizes`
     """
-    slices: Sequence[slice]
+    slices: Union[Sequence[slice], Sequence[Sequence[slice]]]
+    dim: int = 0
 
     def build_elems(
         self,
@@ -329,7 +330,10 @@ class MultiModalFlatField(BaseMultiModalField):
         data: NestedTensors,
     ) -> Sequence[MultiModalFieldElem]:
         field_factory = self._field_factory(modality=modality, key=key)
-        return [field_factory(data[s]) for s in self.slices]
+        if not is_list_of(self.slices, slice, check="all"):
+            assert isinstance(data, torch.Tensor), \
+                "torch.Tensor is required for multiple slices"
+        return [field_factory(data[cast(slice, s)]) for s in self.slices]
 
     def _reduce_data(self, batch: list[NestedTensors]) -> NestedTensors:
         if len(batch) > 0 and is_list_of(batch, torch.Tensor, check="all"):
@@ -338,10 +342,16 @@ class MultiModalFlatField(BaseMultiModalField):
                 # - produce exactly same result as `torch.concat(batch)`
                 # - will achieve zero-copy if the tensor is contiguous
                 return batch[0].contiguous()
-            first_shape = batch[0].shape
-            if all(elem.shape[1:] == first_shape[1:] for elem in batch):
-                return torch.concat(batch)
 
+            def _expect_same_shape(tensor: torch.Tensor):
+                return tensor.shape[:self.dim] + tensor.shape[self.dim + 1:]
+
+            first_shape = _expect_same_shape(batch[0])
+
+            if all(_expect_same_shape(elem) == first_shape for elem in batch):
+                return torch.concat(batch, dim=self.dim)
+
+        assert self.dim == 0, "dim == 0 is required for nested list"
         return [e for elem in batch for e in elem]
 
 
@@ -398,7 +408,9 @@ class MultiModalFieldConfig:
         )
 
     @staticmethod
-    def flat(modality: str, slices: Sequence[slice]):
+    def flat(modality: str,
+             slices: Union[Sequence[slice], Sequence[Sequence[slice]]],
+             dim: int = 0):
         """
         Defines a field where an element in the batch is obtained by
         slicing along the first dimension of the underlying data.
@@ -406,8 +418,10 @@ class MultiModalFieldConfig:
         Args:
             modality: The modality of the multi-modal item that uses this
                 keyword argument.
-            slices: For each multi-modal item, a slice that is used to extract
-                the data corresponding to it.
+            slices: For each multi-modal item, a slice (dim=0) or a tuple of
+                slices (dim>0) that is used to extract the data corresponding 
+                to it.
+            dim: The dimension to extract data, default to 0.
 
         Example:
 
@@ -423,14 +437,33 @@ class MultiModalFieldConfig:
                     Element 1: [AAA]
                     Element 2: [BBBB]
                     Element 3: [CC]
+            
+            .. code-block::
+
+                Given:
+                    slices: [
+                        (slice(None), slice(0, 3)),
+                        (slice(None), slice(3, 7)),
+                        (slice(None), slice(7, 9))]
+                    dim: 1
+
+                Input:
+                    Data: [[A],[A],[A],[B],[B],[B],[B],[C],[C]]
+
+                Output:
+                    Element 1: [[A],[A],[A]]
+                    Element 2: [[B],[B],[B],[B]]
+                    Element 3: [[C],[C]]
         """
         return MultiModalFieldConfig(
-            field=MultiModalFlatField(slices=slices),
+            field=MultiModalFlatField(slices=slices, dim=dim),
             modality=modality,
         )
 
     @staticmethod
-    def flat_from_sizes(modality: str, size_per_item: torch.Tensor):
+    def flat_from_sizes(modality: str,
+                        size_per_item: torch.Tensor,
+                        dim: int = 0):
         """
         Defines a field where an element in the batch is obtained by
         slicing along the first dimension of the underlying data.
@@ -440,6 +473,7 @@ class MultiModalFieldConfig:
                 keyword argument.
             slices: For each multi-modal item, the size of the slice that
                 is used to extract the data corresponding to it.
+            dim: The dimension to slice, default to 0.
 
         Example:
 
@@ -455,6 +489,21 @@ class MultiModalFieldConfig:
                     Element 1: [AAA]
                     Element 2: [BBBB]
                     Element 3: [CC]
+
+            
+            .. code-block::
+
+                Given:
+                    slices: [3, 4, 2]
+                    dim: 1
+
+                Input:
+                    Data: [[A],[A],[A],[B],[B],[B],[B],[C],[C]]
+
+                Output:
+                    Element 1: [[A],[A],[A]]
+                    Element 2: [[B],[B],[B],[B]]
+                    Element 3: [[C],[C]]
     
         See also:
             :func:`MultiModalFieldConfig.flat`
@@ -465,12 +514,11 @@ class MultiModalFieldConfig:
                              f"but found shape: {size_per_item.shape}")
 
         slice_idxs = [0, *accumulate(size_per_item)]
-        slices = [
-            slice(slice_idxs[i], slice_idxs[i + 1])
-            for i in range(len(size_per_item))
-        ]
+        slices = [(slice(None, None, None), ) * dim +
+                  (slice(slice_idxs[i], slice_idxs[i + 1]), )
+                  for i in range(len(size_per_item))]
 
-        return MultiModalFieldConfig.flat(modality, slices)
+        return MultiModalFieldConfig.flat(modality, slices, dim=dim)
 
     @staticmethod
     def shared(modality: str, batch_size: int):
