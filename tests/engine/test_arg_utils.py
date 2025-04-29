@@ -8,7 +8,7 @@ from typing import Literal, Optional
 
 import pytest
 
-from vllm.config import PoolerConfig, config
+from vllm.config import config
 from vllm.engine.arg_utils import (EngineArgs, contains_type, get_kwargs,
                                    get_type, is_not_builtin, is_type,
                                    nullable_kvs, optional_type)
@@ -204,8 +204,7 @@ def test_valid_pooling_config():
         '{"pooling_type": "MEAN"}',
     ])
     engine_args = EngineArgs.from_cli_args(args=args)
-    assert engine_args.override_pooler_config == PoolerConfig(
-        pooling_type="MEAN", )
+    assert engine_args.override_pooler_config == {"pooling_type": "MEAN"}
 
 
 @pytest.mark.parametrize(
