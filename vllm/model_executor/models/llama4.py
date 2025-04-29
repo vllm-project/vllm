@@ -37,7 +37,7 @@ from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 
 from .llama import LlamaForCausalLM, LlamaMLP, LlamaModel
-from .utils import (AutoWeightsLoader, extract_layer_index,
+from .utils import (AutoWeightsLoader, extract_layer_index, fast_topk,
                     is_pp_missing_parameter)
 
 
@@ -50,9 +50,9 @@ class Llama4MoE(nn.Module):
         topk: int,
         renormalize: bool,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        router_scores, router_indices = torch.topk(gating_output, topk, dim=-1)
-        router_scores = torch.sigmoid(router_scores.float()).to(
-            hidden_states.dtype)
+        router_scores, router_indices = fast_topk(gating_output, topk, dim=-1)
+        # psuedo-standard is that the router scores are floats
+        router_scores = torch.sigmoid(router_scores.float())
         return (router_scores, router_indices.to(torch.int32))
 
     def __init__(self,
@@ -273,8 +273,8 @@ class Llama4DecoderLayer(nn.Module):
             cache_config=cache_config,
             prefix=f"{prefix}.self_attn",
         )
-        is_moe_layer = (self.layer_idx +
-                        1) % config.interleave_moe_layer_step == 0
+        is_moe_layer = config.interleave_moe_layer_step > 0 and (
+            self.layer_idx + 1) % config.interleave_moe_layer_step == 0
         if is_moe_layer:
             self.feed_forward = Llama4MoE(
                 config=config,

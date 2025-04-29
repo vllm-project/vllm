@@ -251,7 +251,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
 
   # Set CUTLASS_REVISION manually -- its revision detection doesn't work in this case.
   # Please keep this in sync with FetchContent_Declare line below.
-  set(CUTLASS_REVISION "v3.8.0" CACHE STRING "CUTLASS revision to use")
+  set(CUTLASS_REVISION "v3.9.0" CACHE STRING "CUTLASS revision to use")
 
   # Use the specified CUTLASS source directory for compilation if VLLM_CUTLASS_SRC_DIR is provided
   if (DEFINED ENV{VLLM_CUTLASS_SRC_DIR})
@@ -269,7 +269,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
         cutlass
         GIT_REPOSITORY https://github.com/nvidia/cutlass.git
         # Please keep this in sync with CUTLASS_REVISION line above.
-        GIT_TAG v3.8.0
+        GIT_TAG v3.9.0
         GIT_PROGRESS TRUE
 
         # Speed up CUTLASS download by retrieving only the specified GIT_TAG instead of the history.
@@ -290,7 +290,8 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
     "csrc/quantization/fp4/nvfp4_quant_entry.cu"
     "csrc/quantization/fp4/nvfp4_scaled_mm_entry.cu"
     "csrc/sparse/cutlass/sparse_scaled_mm_entry.cu"
-    "csrc/cutlass_extensions/common.cpp")
+    "csrc/cutlass_extensions/common.cpp"
+    "csrc/attention/mla/cutlass_mla_entry.cu")
 
   set_gencode_flags_for_srcs(
     SRCS "${VLLM_EXT_SRC}"
@@ -463,7 +464,26 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
     set(FP4_ARCHS)
   endif()
 
-  #
+  # CUTLASS MLA Archs and flags
+  cuda_archs_loose_intersection(MLA_ARCHS "10.0a" "${CUDA_ARCHS}")
+  if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER 12.8 AND MLA_ARCHS)
+    set(SRCS
+      "csrc/attention/mla/cutlass_mla_kernels.cu")
+    set_gencode_flags_for_srcs(
+      SRCS "${SRCS}"
+      CUDA_ARCHS "${MLA_ARCHS}")
+    list(APPEND VLLM_EXT_SRC "${SRCS}")
+    list(APPEND VLLM_GPU_FLAGS "-DENABLE_CUTLASS_MLA=1")
+    # Add MLA-specific include directories only to MLA source files
+    set_source_files_properties(${SRCS}
+      PROPERTIES INCLUDE_DIRECTORIES "${CUTLASS_DIR}/examples/77_blackwell_fmha;${CUTLASS_DIR}/examples/common")
+    message(STATUS "Building CUTLASS MLA for archs: ${MLA_ARCHS}")
+  else()
+    message(STATUS "Not building CUTLASS MLA as no compatible archs were found.")
+    # clear MLA_ARCHS
+    set(MLA_ARCHS)
+  endif()
+
   # CUTLASS MoE kernels
 
   # The MoE kernel cutlass_moe_mm requires CUDA 12.3 or later (and only works
@@ -609,21 +629,51 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
   list(APPEND VLLM_MOE_EXT_SRC "${VLLM_MOE_WNA16_SRC}")
   cuda_archs_loose_intersection(MARLIN_MOE_ARCHS "8.0;8.6;8.7;8.9;9.0;10.0;10.1;12.0" "${CUDA_ARCHS}")
   if (MARLIN_MOE_ARCHS)
-    set(MARLIN_MOE_SRC
-        "csrc/moe/marlin_kernels/marlin_moe_kernel.h"
-        "csrc/moe/marlin_kernels/marlin_moe_kernel_ku4b8.h"
-        "csrc/moe/marlin_kernels/marlin_moe_kernel_ku4b8.cu"
-        "csrc/moe/marlin_kernels/marlin_moe_kernel_ku8b128.h"
-        "csrc/moe/marlin_kernels/marlin_moe_kernel_ku8b128.cu"
-        "csrc/moe/marlin_kernels/marlin_moe_kernel_ku4.h"
-        "csrc/moe/marlin_kernels/marlin_moe_kernel_ku4.cu"
-        "csrc/moe/marlin_moe_ops.cu")
 
+    #
+    # For the Marlin MOE kernels we automatically generate sources for various
+    # preselected input type pairs and schedules.
+    # Generate sources:
+    set(MOE_MARLIN_GEN_SCRIPT
+      ${CMAKE_CURRENT_SOURCE_DIR}/csrc/moe/marlin_moe_wna16/generate_kernels.py)
+    file(MD5 ${MOE_MARLIN_GEN_SCRIPT} MOE_MARLIN_GEN_SCRIPT_HASH)
+
+    message(STATUS "Marlin MOE generation script hash: ${MOE_MARLIN_GEN_SCRIPT_HASH}")
+    message(STATUS "Last run Marlin MOE generate script hash: $CACHE{MOE_MARLIN_GEN_SCRIPT_HASH}")
+
+    if (NOT DEFINED CACHE{MOE_MARLIN_GEN_SCRIPT_HASH}
+        OR NOT $CACHE{MOE_MARLIN_GEN_SCRIPT_HASH} STREQUAL ${MOE_MARLIN_GEN_SCRIPT_HASH})
+      execute_process(
+        COMMAND ${CMAKE_COMMAND} -E env
+        PYTHONPATH=${CMAKE_CURRENT_SOURCE_DIR}/csrc/cutlass_extensions/:${CUTLASS_DIR}/python/:${VLLM_PYTHON_PATH}:$PYTHONPATH
+          ${Python_EXECUTABLE} ${MOE_MARLIN_GEN_SCRIPT}
+        RESULT_VARIABLE moe_marlin_generation_result
+        OUTPUT_VARIABLE moe_marlin_generation_output
+        OUTPUT_FILE ${CMAKE_CURRENT_BINARY_DIR}/moe_marlin_generation.log
+        ERROR_FILE ${CMAKE_CURRENT_BINARY_DIR}/moe_marlin_generation.log
+      )
+
+      if (NOT moe_marlin_generation_result EQUAL 0)
+        message(FATAL_ERROR "Marlin MOE generation failed."
+                            " Result: \"${moe_marlin_generation_result}\""
+                            "\nCheck the log for details: "
+                            "${CMAKE_CURRENT_BINARY_DIR}/moe_marlin_generation.log")
+      else()
+        set(MOE_MARLIN_GEN_SCRIPT_HASH ${MOE_MARLIN_GEN_SCRIPT_HASH}
+            CACHE STRING "Last run Marlin MOE generate script hash" FORCE)
+        message(STATUS "Marlin MOE generation completed successfully.")
+      endif()
+    else()
+      message(STATUS "Marlin MOE generation script has not changed, skipping generation.")
+    endif()
+
+    file(GLOB MOE_WNAA16_MARLIN_SRC "csrc/moe/marlin_moe_wna16/*.cu")
     set_gencode_flags_for_srcs(
-      SRCS "${MARLIN_MOE_SRC}"
+      SRCS "${MOE_WNAA16_MARLIN_SRC}"
       CUDA_ARCHS "${MARLIN_MOE_ARCHS}")
 
-    list(APPEND VLLM_MOE_EXT_SRC "${MARLIN_MOE_SRC}")
+    list(APPEND VLLM_MOE_EXT_SRC ${MOE_WNAA16_MARLIN_SRC})
+
     message(STATUS "Building Marlin MOE kernels for archs: ${MARLIN_MOE_ARCHS}")
   else()
     message(STATUS "Not building Marlin MOE kernels as no compatible archs found"
@@ -648,6 +698,7 @@ if(VLLM_GPU_LANG STREQUAL "HIP")
   #
   set(VLLM_ROCM_EXT_SRC
     "csrc/rocm/torch_bindings.cpp"
+    "csrc/rocm/skinny_gemms.cu"
     "csrc/rocm/attention.cu")
 
   define_gpu_extension_target(
