@@ -9,9 +9,8 @@ from vllm.model_executor.layers.fused_moe.utils import _resize_cache
 
 
 class BatchedDispatchCombine(mk.FusedMoEQuantizeDispatchCombine):
-    def __init__(self,
-                 world_size: int,
-                 rank: int):
+
+    def __init__(self, world_size: int, rank: int):
         super().__init__()
         self.world_size = world_size
         self.rank = rank
@@ -40,18 +39,22 @@ class BatchedDispatchCombine(mk.FusedMoEQuantizeDispatchCombine):
         num_tokens = a1.shape[0]
         topk = topk_ids.shape[1]
 
-        tokens_per_expert = torch.bincount(topk_ids.view(-1), minlength=num_experts)
+        tokens_per_expert = torch.bincount(topk_ids.view(-1),
+                                           minlength=num_experts)
         max_num_tokens = tokens_per_expert.max()
-        expert_counts = torch.zeros(num_experts, dtype=torch.int, device=a1.device)
+        expert_counts = torch.zeros(num_experts,
+                                    dtype=torch.int,
+                                    device=a1.device)
 
         b_a1 = torch.zeros((num_experts, max_num_tokens, a1.shape[1]),
-                           dtype=a1.dtype, device=a1.device)
+                           dtype=a1.dtype,
+                           device=a1.device)
 
         for token in range(num_tokens):
             for j in range(topk):
                 expert_id = topk_ids[token, j]
                 idx = expert_counts[expert_id]
-                b_a1[expert_id, idx:idx+1, :] = a1[token, :]
+                b_a1[expert_id, idx:idx + 1, :] = a1[token, :]
                 expert_counts[expert_id] = expert_counts[expert_id] + 1
 
         return b_a1, a1_scale, tokens_per_expert
@@ -66,7 +69,9 @@ class BatchedDispatchCombine(mk.FusedMoEQuantizeDispatchCombine):
     ) -> None:
         num_tokens = topk_ids.shape[0]
         num_experts = fused_expert_output.shape[0]
-        expert_counts = torch.zeros(num_experts, dtype=torch.int, device=fused_expert_output.device)
+        expert_counts = torch.zeros(num_experts,
+                                    dtype=torch.int,
+                                    device=fused_expert_output.device)
         for token in range(num_tokens):
             expert_ids = topk_ids[token]
             for i in range(topk_ids.shape[1]):
@@ -74,9 +79,14 @@ class BatchedDispatchCombine(mk.FusedMoEQuantizeDispatchCombine):
                 if expert_id < num_experts:
                     idx = expert_counts[expert_id]
                     if apply_router_weight_on_input:
-                        output[token, :] = output[token, :] + fused_expert_output[expert_id, idx:idx+1, :]
+                        output[token, :] = output[
+                            token, :] + fused_expert_output[expert_id,
+                                                            idx:idx + 1, :]
                     else:
-                        output[token, :] = output[token, :] + fused_expert_output[expert_id, idx:idx+1, :] * topk_weights[token, i]
+                        output[
+                            token, :] = output[token, :] + fused_expert_output[
+                                expert_id,
+                                idx:idx + 1, :] * topk_weights[token, i]
                     expert_counts[expert_id] = expert_counts[expert_id] + 1
 
 
@@ -122,8 +132,10 @@ class BatchedExperts(mk.FusedMoEPermuteExpertsUnpermute):
         topk: int,
         num_experts: int,
     ) -> Tuple[int, int, torch.dtype]:
-        max_num_tokens = a.shape[1] if self.max_num_tokens is None else self.max_num_tokens
-        workspace13 = num_experts * max_num_tokens * K * topk * 2 # TODO: *2 is a hack
+        max_num_tokens = a.shape[
+            1] if self.max_num_tokens is None else self.max_num_tokens
+        # TODO: *2 is a hack
+        workspace13 = num_experts * max_num_tokens * K * topk * 2
         workspace2 = max_num_tokens * N
         return (workspace13, workspace2, a.dtype)
 
@@ -148,16 +160,21 @@ class BatchedExperts(mk.FusedMoEPermuteExpertsUnpermute):
     ) -> torch.Tensor:
         assert hidden_states.dim() == 3
         assert expert_num_tokens is not None
-        num_tokens = topk_ids.shape[0]
-        _, tmp_max_num_tokens, K = hidden_states.shape
-        max_num_tokens = tmp_max_num_tokens if self.max_num_tokens is None else self.max_num_tokens
+
+        if self.max_num_tokens is None:
+            max_num_tokens = hidden_states.shape[1]
+        else:
+            max_num_tokens = self.max_num_tokens
+
         num_experts = global_num_experts
-        out = _resize_cache(workspace13, (num_experts, max_num_tokens, w2.shape[1]))
+        out = _resize_cache(workspace13,
+                            (num_experts, max_num_tokens, w2.shape[1]))
         num_local_experts = expert_num_tokens.numel()
 
         # TODO: don't need world_size or rank if expert_base always == 0
         #assert w1.shape[0] == num_experts, f"{w1.shape} == {num_experts}"
-        #expert_base = rank_chunk(w1.shape[0], self.rank, self.world_size) * self.rank
+        #expert_base = rank_chunk(w1.shape[0], self.rank,
+        #                         self.world_size) * self.rank
         expert_base = 0
 
         for expert in range(num_local_experts):
@@ -166,10 +183,9 @@ class BatchedExperts(mk.FusedMoEPermuteExpertsUnpermute):
             if num > 0:
                 tmp = _resize_cache(workspace2, (num, w1.shape[1] // 2))
                 self.activation(
-                    activation,
-                    tmp,
-                    hidden_states[expert,:num,:] @ w1[expert_base + expert].transpose(0, 1)
-                )
-                out[expert, :num, :] = tmp @ w2[expert_base + expert].transpose(0, 1)
+                    activation, tmp, hidden_states[expert, :num, :]
+                    @ w1[expert_base + expert].transpose(0, 1))
+                out[expert, :num, :] = tmp @ w2[expert_base +
+                                                expert].transpose(0, 1)
 
         return out
