@@ -1,17 +1,19 @@
 # SPDX-License-Identifier: Apache-2.0
 from collections.abc import Mapping
+from concurrent.futures import (Executor, ProcessPoolExecutor,
+                                ThreadPoolExecutor)
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Generic, Optional, Protocol, TypeVar
 
 import torch.nn as nn
-from typing_extensions import deprecated
+from typing_extensions import assert_never, deprecated
 
 from vllm.envs import VLLM_MM_INPUT_CACHE_GIB
 from vllm.inputs import InputProcessingContext
 from vllm.logger import init_logger
 from vllm.transformers_utils.tokenizer import (AnyTokenizer,
                                                cached_tokenizer_from_config)
-from vllm.utils import ClassRegistry
+from vllm.utils import ClassRegistry, get_mp_context
 
 from .processing import (BaseMultiModalProcessor, BaseProcessingInfo,
                          ProcessingCache)
@@ -19,7 +21,7 @@ from .profiling import (BaseDummyInputsBuilder, DummyDecoderData,
                         DummyEncoderData, MultiModalProfiler)
 
 if TYPE_CHECKING:
-    from vllm.config import ModelConfig
+    from vllm.config import ModelConfig, MultiModalConfig
 
 logger = init_logger(__name__)
 
@@ -87,6 +89,23 @@ class MultiModalRegistry:
                                                   _ProcessorFactories]()
 
         self._processing_cache = ProcessingCache(VLLM_MM_INPUT_CACHE_GIB)
+
+    def _get_executor(
+        self,
+        mm_config: "MultiModalConfig",
+    ) -> Optional[Executor]:
+        if not hasattr(self, "_processing_executor"):
+            if mm_config.parallel_processor_backend == "uni":
+                self._processing_executor = None
+            elif mm_config.parallel_processor_backend == "mp":
+                self._processing_executor = ProcessPoolExecutor(
+                    mp_context=get_mp_context())
+            elif mm_config.parallel_processor_backend == "mt":
+                self._processing_executor = ThreadPoolExecutor()
+            else:
+                assert_never(mm_config.parallel_processor_backend)
+
+        return self._processing_executor
 
     @deprecated("Legacy input processor/mapper pipeline has been removed. "
                 "Please update your model runner to use "
@@ -259,16 +278,21 @@ class MultiModalRegistry:
         if not model_config.is_multimodal_model:
             raise ValueError(f"{model_config.model} is not a multimodal model")
 
+        mm_config = model_config.get_multimodal_config()
+
         if tokenizer is None:
             tokenizer = cached_tokenizer_from_config(model_config)
         if disable_cache is None:
-            mm_config = model_config.get_multimodal_config()
             disable_cache = mm_config.disable_mm_preprocessor_cache
 
         model_cls = self._get_model_cls(model_config)
         factories = self._processor_factories[model_cls]
 
-        ctx = InputProcessingContext(model_config, tokenizer)
+        ctx = InputProcessingContext(
+            model_config,
+            tokenizer=tokenizer,
+            executor=self._get_executor(mm_config),
+        )
         cache = None if disable_cache else self._processing_cache
 
         return factories.build_processor(ctx, cache=cache)

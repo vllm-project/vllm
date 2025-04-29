@@ -2777,6 +2777,14 @@ class PromptAdapterConfig:
                                                 self.prompt_adapter_dtype)
 
 
+ParallelProcessorBackend = Literal["uni", "mp", "mt"]
+"""
+- `uni`: The multi-modal processor is run in the main process and thread.
+- `mp`: The multi-modal processor is run in parallel processes.
+- `mt`: The multi-modal processor is run in parallel threads.
+"""
+
+
 @config
 @dataclass
 class MultiModalConfig:
@@ -2789,23 +2797,27 @@ class MultiModalConfig:
     Defaults to 1 (V0) or 999 (V1) for each modality.
 
     For example, to allow up to 16 images and 2 videos per prompt:
-    :code:`{"images": 16, "videos": 2}`
+    `{"images": 16, "videos": 2}`
     """
 
     mm_processor_kwargs: Optional[dict[str, object]] = None
     """
     Overrides for the multi-modal processor obtained from
-    :meth:`transformers.AutoProcessor.from_pretrained`.
+    {meth}`transformers.AutoProcessor.from_pretrained`.
 
     The available overrides depend on the model that is being run.
 
-    For example, for Phi-3-Vision:
-    :code:`{"num_crops": 4}`.
+    For example, for Phi-3-Vision: `{"num_crops": 4}`.
     """
 
     disable_mm_preprocessor_cache: bool = False
     """
-    If :code:`True`, disable caching of the processed multi-modal inputs.
+    If set, disable caching of the processed multi-modal inputs.
+    """
+
+    parallel_processor_backend: ParallelProcessorBackend = "uni"
+    """
+    EXPERIMENTAL: Configures running the multi-modal processor in parallel.
     """
 
     def compute_hash(self) -> str:

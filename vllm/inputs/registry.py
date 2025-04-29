@@ -1,4 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
+import asyncio
+import concurrent.futures
+import functools
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, NamedTuple, Optional, Union
@@ -116,6 +119,9 @@ class InputProcessingContext(InputContext):
     tokenizer: AnyTokenizer
     """The tokenizer used to tokenize the inputs."""
 
+    executor: Optional[concurrent.futures.Executor] = None
+    """If set, enables HF processing in parallel."""
+
     def get_hf_processor(
         self,
         typ: Union[type[_P], tuple[type[_P], ...]] = ProcessorMixin,
@@ -154,6 +160,50 @@ class InputProcessingContext(InputContext):
         )
 
         try:
+            return hf_processor(**data, **merged_kwargs, return_tensors="pt")
+        except Exception as exc:
+            msg = (f"Failed to apply {type(hf_processor).__name__} "
+                   f"on data={data} with kwargs={merged_kwargs}")
+
+            raise RuntimeError(msg) from exc
+
+    async def call_hf_processor_async(
+        self,
+        hf_processor: ProcessorMixin,
+        data: Mapping[str, object],
+        kwargs: Mapping[str, object] = {},
+    ) -> BatchFeature:
+        """
+        Call :code:`hf_processor` on the prompt :code:`data`
+        (text, image, audio...) with configurable options :code:`kwargs`.
+        """
+        assert callable(hf_processor)
+
+        mm_config = self.model_config.get_multimodal_config()
+        base_kwargs = mm_config.mm_processor_kwargs
+        if base_kwargs is None:
+            base_kwargs = {}
+
+        merged_kwargs = resolve_mm_processor_kwargs(
+            base_kwargs,
+            kwargs,
+            hf_processor,
+            requires_kw_only=False,
+            allow_var_kwargs=True,
+        )
+
+        try:
+            if self.executor is not None:
+                loop = asyncio.get_running_loop()
+                fn = functools.partial(
+                    hf_processor,
+                    **data,
+                    **merged_kwargs,
+                    return_tensors="pt",
+                )
+
+                return await loop.run_in_executor(self.executor, fn)
+
             return hf_processor(**data, **merged_kwargs, return_tensors="pt")
         except Exception as exc:
             msg = (f"Failed to apply {type(hf_processor).__name__} "

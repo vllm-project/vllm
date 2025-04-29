@@ -249,8 +249,12 @@ class InputPreprocessor:
         if mm_processor_kwargs is None:
             mm_processor_kwargs = {}
 
-        return mm_processor.apply(prompt, mm_data, mm_processor_kwargs,
-                                  return_mm_hashes)
+        return mm_processor.apply(
+            prompt,
+            mm_data,
+            hf_processor_mm_kwargs=mm_processor_kwargs,
+            return_mm_hashes=return_mm_hashes,
+        )
 
     async def _process_multimodal_async(
         self,
@@ -275,8 +279,12 @@ class InputPreprocessor:
         if mm_processor_kwargs is None:
             mm_processor_kwargs = {}
 
-        return mm_processor.apply(prompt, mm_data, mm_processor_kwargs,
-                                  return_mm_hashes)
+        return await mm_processor.apply_async(
+            prompt,
+            mm_data,
+            hf_processor_mm_kwargs=mm_processor_kwargs,
+            return_mm_hashes=return_mm_hashes,
+        )
 
     def _prompt_to_llm_inputs(
         self,
