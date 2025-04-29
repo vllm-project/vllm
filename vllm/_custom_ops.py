@@ -1196,6 +1196,26 @@ def selective_scan_fwd(u: torch.Tensor, delta: torch.Tensor, A: torch.Tensor,
                                     ssm_states, pad_slot_id)
 
 
+# ROCm skinny gemms
+def LLMM1(a: torch.Tensor, b: torch.Tensor,
+          rows_per_block: int) -> torch.Tensor:
+    return torch.ops._rocm_C.LLMM1(a, b, rows_per_block)
+
+
+def wvSplitK(a: torch.Tensor, b: torch.Tensor, cu_count: int) -> torch.Tensor:
+    return torch.ops._rocm_C.wvSplitK(a, b, cu_count)
+
+
+def wvSplitKQ(a: torch.Tensor, b: torch.Tensor, out_dtype: torch.dtype,
+              scale_a: torch.Tensor, scale_b: torch.Tensor,
+              cu_count: int) -> torch.Tensor:
+    out = torch.empty((b.shape[0], a.shape[0]),
+                      dtype=out_dtype,
+                      device=b.device)
+    torch.ops._rocm_C.wvSplitKQ(a, b, out, scale_a, scale_b, cu_count)
+    return out
+
+
 # moe
 def moe_sum(input: torch.Tensor, output: torch.Tensor):
     torch.ops._moe_C.moe_sum(input, output)
@@ -1505,3 +1525,12 @@ def flash_mla_with_kvcache(
         num_splits,
     )
     return out, softmax_lse
+
+
+def cutlass_mla_decode(out: torch.Tensor, q_nope: torch.Tensor,
+                       q_pe: torch.Tensor, kv_c_and_k_pe_cache: torch.Tensor,
+                       seq_lens: torch.Tensor, page_table: torch.Tensor,
+                       scale: float) -> torch.Tensor:
+    torch.ops._C.cutlass_mla_decode(out, q_nope, q_pe, kv_c_and_k_pe_cache,
+                                    seq_lens, page_table, scale)
+    return out
