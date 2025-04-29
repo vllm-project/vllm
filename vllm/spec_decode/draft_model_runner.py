@@ -242,9 +242,16 @@ class TP1DraftModelRunner(ModelRunnerWrapperBase):
 
         # Get model
         if use_cuda_graph:
-            graph_batch_size = model_input.input_tokens.shape[0]
-            model_executable = (self.graph_runners[model_input.virtual_engine]
-                                [graph_batch_size])
+            if model_input.inputs_embeds is None:
+                graph_batch_size = model_input.input_tokens.shape[0]
+                model_executable = (
+                    self.graph_runners[model_input.virtual_engine][(
+                        graph_batch_size, False)])
+            else:
+                graph_batch_size = model_input.inputs_embeds.shape[0]
+                model_executable = (
+                    self.graph_runners[model_input.virtual_engine][(
+                        graph_batch_size, True)])
 
             if previous_hidden_states is not None:
                 hidden_states = torch.cat([

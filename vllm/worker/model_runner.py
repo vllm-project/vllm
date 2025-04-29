@@ -1081,6 +1081,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
         self.max_batchsize_to_capture = \
             self.vllm_config.compilation_config.max_capture_size
 
+        #
         self.graph_runners: List[Dict[Tuple[int, bool], CUDAGraphRunner]] = [
             {} for _ in range(self.parallel_config.pipeline_parallel_size)
         ]
