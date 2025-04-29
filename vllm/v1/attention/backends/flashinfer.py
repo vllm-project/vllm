@@ -183,9 +183,6 @@ class FlashInferMetadata:
     decode_wrapper: Optional[BatchDecodeWithPagedKVCacheWrapper] = None
     cascade_wrapper: Optional[MultiLevelCascadeAttentionWrapper] = None
 
-    # For logging.
-    num_input_tokens: int = 0  # Number of tokens including padding.
-
     @property
     def query_start_loc(self):
         # The GPUModelRunner expects to be able to access this property.
