@@ -8,6 +8,7 @@ from typing import Optional
 
 import psutil
 import pytest
+import zmq
 from transformers import AutoTokenizer
 
 from vllm import SamplingParams
@@ -250,7 +251,6 @@ async def test_engine_core_client_asyncio(monkeypatch: pytest.MonkeyPatch):
         assert str(e_info.value) == "Call to echo method failed: help!"
 
 
-@create_new_process_for_each_test()
 @pytest.mark.parametrize(
     "multiprocessing_mode,publisher_config",
     [(True, "tcp"), (False, "inproc")],
@@ -332,8 +332,11 @@ def test_kv_cache_events(
             assert event.token_ids == custom_tokens, (
                 "Token ids should be the same as the custom tokens")
         finally:
-            subscriber.close()
             client.shutdown()
+            subscriber.close()
+            # TODO hack to try and fix CI hang
+            ctx = zmq.Context.instance()
+            ctx.term()
         return
 
 

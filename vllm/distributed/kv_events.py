@@ -119,7 +119,7 @@ class ZmqEventPublisher(EventPublisher):
         topic: str = "",
     ) -> None:
         # Storage
-        self._event_queue = Queue[EventBatch](maxsize=max_queue_size)
+        self._event_queue = Queue[Optional[EventBatch]](maxsize=max_queue_size)
         self._buffer = deque[tuple[int, bytes]](maxlen=buffer_steps)
 
         # ZMQ sockets
@@ -151,9 +151,9 @@ class ZmqEventPublisher(EventPublisher):
     def shutdown(self) -> None:
         """Stop the publisher thread and clean up resources."""
         self._running = False
+        self._event_queue.put_nowait(None)
 
         start = time.time()
-
         pending_items = True
         while pending_items and (time.time() - start < self.SHUTDOWN_TIMEOUT):
             pending_items = not self._event_queue.empty()
@@ -177,8 +177,7 @@ class ZmqEventPublisher(EventPublisher):
             if self._replay is not None:
                 self._replay.close(linger=0)
         finally:
-            # Do not terminate context; other sockets may use it
-            pass
+            pass  # Do not terminate context; other sockets may use it
 
     def _socket_setup(self) -> None:
         """Initialize sockets
@@ -211,7 +210,7 @@ class ZmqEventPublisher(EventPublisher):
 
         assert self._pub is not None  # narrows type for mypy
 
-        while self._running or not self._event_queue.empty():
+        while self._running or self._event_queue.qsize() > 0:
             # --- replay (non-critical) ---------------------------------
             if self._replay is not None and self._replay.poll(0):
                 try:
@@ -222,6 +221,8 @@ class ZmqEventPublisher(EventPublisher):
             # --- main queue (critical) ---------------------------------
             try:
                 event = self._event_queue.get(timeout=0.1)
+                if event is None:
+                    break  # Sentinel received, exit thread
             except queue.Empty:
                 continue
 
