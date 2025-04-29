@@ -11,7 +11,7 @@ from transformers import AutoModel, AutoTokenizer
 from vllm.multimodal.audio import resample_audio_librosa
 from vllm.sequence import SampleLogprobs
 
-from ....conftest import HfRunner, VllmRunner
+from ....conftest import HfRunner, VllmRunner, _AudioAssets
 from ....utils import RemoteOpenAIServer
 from ...registry import HF_EXAMPLE_MODELS
 from ...utils import check_logprobs_close
@@ -29,12 +29,6 @@ CHUNKED_PREFILL_KWARGS = {
     # Use a very small limit to exercise chunked prefill.
     "max_num_batched_tokens": 16
 }
-
-
-@pytest.fixture(scope="session")
-def audio_assets():
-    from vllm.assets.audio import AudioAsset
-    return [AudioAsset("mary_had_lamb"), AudioAsset("winning_call")]
 
 
 @pytest.fixture(scope="module", params=("mary_had_lamb", "winning_call"))
@@ -59,7 +53,7 @@ def params_kwargs_to_cli_args(params_kwargs: dict[str, Any]) -> list[str]:
     pytest.param({}, marks=pytest.mark.cpu_model),
     pytest.param(CHUNKED_PREFILL_KWARGS),
 ])
-def server(request, audio_assets):
+def server(request, audio_assets: _AudioAssets):
     args = [
         "--dtype", "bfloat16", "--max-model-len", "4096", "--enforce-eager",
         "--limit-mm-per-prompt",
@@ -230,8 +224,9 @@ def test_models(hf_runner, vllm_runner, audio, dtype: str, max_tokens: int,
     pytest.param({}, marks=pytest.mark.cpu_model),
     pytest.param(CHUNKED_PREFILL_KWARGS),
 ])
-def test_models_with_multiple_audios(vllm_runner, audio_assets, dtype: str,
-                                     max_tokens: int, num_logprobs: int,
+def test_models_with_multiple_audios(vllm_runner, audio_assets: _AudioAssets,
+                                     dtype: str, max_tokens: int,
+                                     num_logprobs: int,
                                      vllm_kwargs: dict) -> None:
 
     vllm_prompt = _get_prompt(len(audio_assets),
@@ -250,7 +245,7 @@ def test_models_with_multiple_audios(vllm_runner, audio_assets, dtype: str,
 
 
 @pytest.mark.asyncio
-async def test_online_serving(client, audio_assets):
+async def test_online_serving(client, audio_assets: _AudioAssets):
     """Exercises online serving with/without chunked prefill enabled."""
 
     messages = [{
