@@ -19,7 +19,10 @@ RUN echo 'tzdata tzdata/Areas select America' | debconf-set-selections \
     && echo 'tzdata tzdata/Zones/America select Los_Angeles' | debconf-set-selections \
     && apt-get update -y \
     && apt-get install -y ccache software-properties-common git curl sudo \
-    && add-apt-repository ppa:deadsnakes/ppa \
+    && for i in 1 2 3; do \
+        add-apt-repository -y ppa:deadsnakes/ppa && break || \
+        { echo "Attempt $i failed, retrying in 5s..."; sleep 5; }; \
+    done \
     && apt-get update -y \
     && apt-get install -y python${PYTHON_VERSION} python${PYTHON_VERSION}-dev python${PYTHON_VERSION}-venv \
     && update-alternatives --install /usr/bin/python3 python3 /usr/bin/python${PYTHON_VERSION} 1 \
@@ -162,6 +165,9 @@ ENV UV_HTTP_TIMEOUT=500
 COPY requirements/lint.txt requirements/lint.txt
 COPY requirements/test.txt requirements/test.txt
 COPY requirements/dev.txt requirements/dev.txt
+# Workaround for #17068
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv pip install --system mamba-ssm==2.2.4 --no-build-isolation
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip install --system -r requirements/dev.txt
 #################### DEV IMAGE ####################
@@ -185,7 +191,10 @@ RUN echo 'tzdata tzdata/Areas select America' | debconf-set-selections \
     && apt-get update -y \
     && apt-get install -y ccache software-properties-common git curl wget sudo vim python3-pip \
     && apt-get install -y ffmpeg libsm6 libxext6 libgl1 \
-    && add-apt-repository ppa:deadsnakes/ppa \
+    && for i in 1 2 3; do \
+        add-apt-repository -y ppa:deadsnakes/ppa && break || \
+        { echo "Attempt $i failed, retrying in 5s..."; sleep 5; }; \
+    done \
     && apt-get update -y \
     && apt-get install -y python${PYTHON_VERSION} python${PYTHON_VERSION}-dev python${PYTHON_VERSION}-venv libibverbs-dev \
     && update-alternatives --install /usr/bin/python3 python3 /usr/bin/python${PYTHON_VERSION} 1 \
@@ -241,6 +250,7 @@ if [ "$TARGETPLATFORM" != "linux/arm64" ]; then \
 fi
 COPY examples examples
 COPY benchmarks benchmarks
+COPY ./vllm/collect_env.py .
 
 # Although we build Flashinfer with AOT mode, there's still
 # some issues w.r.t. JIT compilation. Therefore we need to
@@ -264,6 +274,9 @@ ADD . /vllm-workspace/
 ENV UV_HTTP_TIMEOUT=500
 
 # install development dependencies (for testing)
+# Workaround for #17068
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv pip install --system mamba-ssm==2.2.4 --no-build-isolation
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip install --system -r requirements/dev.txt
 
@@ -290,6 +303,7 @@ RUN mv vllm test_docs/
 #################### OPENAI API SERVER ####################
 # base openai image with additional requirements, for any subsequent openai-style images
 FROM vllm-base AS vllm-openai-base
+ARG TARGETPLATFORM
 
 # This timeout (in seconds) is necessary when installing some dependencies via uv since it's likely to time out
 # Reference: https://github.com/astral-sh/uv/pull/1694

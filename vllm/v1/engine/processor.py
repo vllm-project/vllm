@@ -17,7 +17,7 @@ from vllm.multimodal.utils import merge_and_sort_multimodal_metadata
 from vllm.pooling_params import PoolingParams
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import SamplingParams
-from vllm.transformers_utils.tokenizer_group import BaseTokenizerGroup
+from vllm.transformers_utils.tokenizer_group import TokenizerGroup
 from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.engine.mm_input_cache import MirroredProcessingCache
 from vllm.v1.structured_output.backend_guidance import (
@@ -31,7 +31,7 @@ class Processor:
     def __init__(
         self,
         vllm_config: VllmConfig,
-        tokenizer: BaseTokenizerGroup,
+        tokenizer: TokenizerGroup,
         mm_registry: MultiModalRegistry = MULTIMODAL_REGISTRY,
     ):
 
@@ -51,8 +51,7 @@ class Processor:
         self.mm_input_cache_client = MirroredProcessingCache(self.model_config)
 
         # Multi-modal hasher (for images)
-        self.use_hash = (
-            not self.model_config.disable_mm_preprocessor_cache) or \
+        self.use_hash = self.mm_input_cache_client.use_cache or \
             self.cache_config.enable_prefix_caching
 
     def _validate_logprobs(
@@ -145,16 +144,16 @@ class Processor:
         if not params.guided_decoding or not self.decoding_config:
             return
 
-        supported_backends = [
-            "xgrammar", "xgrammar:disable-any-whitespace", "guidance",
-            "guidance:disable-any-whitespace", "auto"
-        ]
-        engine_level_backend = self.decoding_config.guided_decoding_backend
-        if engine_level_backend not in supported_backends:
-            raise ValueError(f"Only {supported_backends} structured output is "
-                             "supported in V1.")
+        engine_level_backend = self.decoding_config.backend
         if params.guided_decoding.backend:
-            if params.guided_decoding.backend != engine_level_backend:
+            # Request-level backend selection is not supported in V1.
+            # The values may differ if `params` is reused and was set
+            # to a specific backend based on `auto` behavior in a previous
+            # request. We remember that it was set as a result of `auto`
+            # using the `_auto` option set on the backend in the params.
+            if (params.guided_decoding.backend != engine_level_backend
+                    and not (engine_level_backend == "auto"
+                             and params.guided_decoding.backend_was_auto)):
                 raise ValueError(
                     "Request-level structured output backend selection is no "
                     "longer supported. The request specified "
@@ -169,8 +168,15 @@ class Processor:
         if engine_level_backend.startswith("xgrammar"):
             # xgrammar with no fallback
             validate_xgrammar_grammar(params)
-            params.guided_decoding.backend = engine_level_backend
-        elif engine_level_backend == "auto":
+        elif engine_level_backend.startswith("guidance"):
+            # TODO: ideally we would have the LLTokenizer here as Lark syntax
+            # allows <|special_token|> and similar, see
+            # https://github.com/guidance-ai/llguidance/blob/main/docs/syntax.md#special-tokens
+            # Without tokenizer these are disallowed in grammars.
+            validate_guidance_grammar(params, tokenizer=None)
+        else:
+            # NOTE: engine_level_backend must be "auto" here, because we have
+            # checked supported_backends above.
             # "auto" is an opt-in to opinionated behavior where we try to
             # choose a backend based on request contents. This is not the
             # default as it is less predictable and subject to change
@@ -182,14 +188,8 @@ class Processor:
                 # The request includes some jsonschema feature(s) that
                 # are not supported in xgrammar. Fall back to guidance.
                 params.guided_decoding.backend = "guidance"
-
-        if engine_level_backend.startswith("guidance"):
-            # TODO ideally we would have the LLTokenizer here as Lark syntax
-            # allows <|special_token|> and similar, see
-            # https://github.com/guidance-ai/llguidance/blob/main/docs/syntax.md#special-tokens
-            # Without tokenizer these are disallowed in grammars.
-            validate_guidance_grammar(params, tokenizer=None)
-            params.guided_decoding.backend = engine_level_backend
+            # Remember that this backend was set automatically
+            params.guided_decoding.backend_was_auto = True
 
     def process_inputs(
         self,
@@ -201,7 +201,7 @@ class Processor:
         trace_headers: Optional[Mapping[str, str]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
         priority: int = 0,
-    ) -> EngineCoreRequest:
+    ) -> tuple[Optional[str], EngineCoreRequest]:
 
         # TODO(woosuk): Support pooling models.
         # TODO(woosuk): Support encoder-decoder models.
@@ -305,9 +305,8 @@ class Processor:
             else:
                 sorted_mm_inputs = orig_sorted_mm_inputs
 
-        return EngineCoreRequest(
+        return decoder_inputs.get("prompt"), EngineCoreRequest(
             request_id=request_id,
-            prompt=decoder_inputs.get("prompt"),
             prompt_token_ids=decoder_inputs["prompt_token_ids"],
             mm_inputs=sorted_mm_inputs,
             mm_hashes=sorted_mm_hashes,

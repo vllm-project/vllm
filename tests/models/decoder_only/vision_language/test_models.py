@@ -139,6 +139,23 @@ VLM_TEST_SETTINGS = {
         image_size_factors=[(), (0.25,), (0.25, 0.25, 0.25), (0.25, 0.2, 0.15)],
         marks=[pytest.mark.core_model, pytest.mark.cpu_model],
     ),
+    "qwen2_5_omni": VLMTestInfo(
+        models=["Qwen/Qwen2.5-Omni-7B"],
+        test_type=(
+            VLMTestType.IMAGE,
+            VLMTestType.MULTI_IMAGE,
+            VLMTestType.VIDEO
+        ),
+        prompt_formatter=lambda img_prompt: f"<|im_start|>User\n{img_prompt}<|im_end|>\n<|im_start|>assistant\n", # noqa: E501
+        img_idx_to_prompt=lambda idx: "<|vision_bos|><|IMAGE|><|vision_eos|>", # noqa: E501
+        video_idx_to_prompt=lambda idx: "<|vision_bos|><|VIDEO|><|vision_eos|>", # noqa: E501
+        max_model_len=4096,
+        max_num_seqs=2,
+        auto_cls=AutoModelForVision2Seq,
+        vllm_output_post_proc=model_utils.qwen2_vllm_to_hf_output,
+        image_size_factors=[(), (0.25,), (0.25, 0.25, 0.25), (0.25, 0.2, 0.15)],
+        marks=[pytest.mark.core_model, pytest.mark.cpu_model],
+    ),
     #### Extended model tests
     "aria": VLMTestInfo(
         models=["rhymes-ai/Aria"],
@@ -428,6 +445,19 @@ VLM_TEST_SETTINGS = {
         get_stop_token_ids=lambda tok: tok.convert_tokens_to_ids(['<|im_end|>', '<|endoftext|>']),  # noqa: E501
         hf_output_post_proc=model_utils.minicpmv_trunc_hf_output,
         patch_hf_runner=model_utils.minicpmv_26_patch_hf_runner,
+    ),
+    "minimax_vl_01": VLMTestInfo(
+        models=["MiniMaxAI/MiniMax-VL-01"],
+        prompt_formatter=lambda img_prompt: f"<beginning_of_sentence>user: {img_prompt} assistant:<end_of_sentence>", # noqa: E501
+        img_idx_to_prompt=lambda _: "<image>",
+        test_type=(VLMTestType.IMAGE, VLMTestType.MULTI_IMAGE),
+        max_model_len=8192,
+        max_num_seqs=4,
+        dtype="bfloat16",
+        hf_output_post_proc=model_utils.minimax_vl_01_hf_output,
+        patch_hf_runner=model_utils.minimax_vl_01_patch_hf_runner,
+        auto_cls=AutoModelForImageTextToText,
+        marks=[large_gpu_mark(min_gb=80)],
     ),
     "molmo": VLMTestInfo(
         models=["allenai/Molmo-7B-D-0924"],

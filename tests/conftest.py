@@ -21,9 +21,10 @@ from transformers.models.auto.auto_factory import _BaseAutoModelClass
 from tests.models.utils import (TokensTextLogprobs,
                                 TokensTextLogprobsPromptLogprobs)
 from vllm import LLM, SamplingParams
+from vllm.assets.audio import AudioAsset
 from vllm.assets.image import ImageAsset
 from vllm.assets.video import VideoAsset
-from vllm.config import TaskOption, TokenizerPoolConfig, _get_and_verify_dtype
+from vllm.config import TaskOption, _get_and_verify_dtype
 from vllm.connections import global_http_connection
 from vllm.distributed import (cleanup_dist_env_and_memory,
                               init_distributed_environment,
@@ -103,10 +104,25 @@ class _VideoAssets(_VideoAssetsBase):
         return [prompts["sample_demo_1"]]
 
 
+class _AudioAssetsBase(UserList[AudioAsset]):
+    pass
+
+
+class _AudioAssets(_AudioAssetsBase):
+
+    def __init__(self) -> None:
+        super().__init__([
+            AudioAsset("mary_had_lamb"),
+            AudioAsset("winning_call"),
+        ])
+
+
 IMAGE_ASSETS = _ImageAssets()
 """Singleton instance of :class:`_ImageAssets`."""
 VIDEO_ASSETS = _VideoAssets()
 """Singleton instance of :class:`_VideoAssets`."""
+AUDIO_ASSETS = _AudioAssets()
+"""Singleton instance of :class:`_AudioAssets`."""
 
 
 @pytest.fixture(scope="function", autouse=True)
@@ -263,6 +279,11 @@ def video_assets() -> _VideoAssets:
     return VIDEO_ASSETS
 
 
+@pytest.fixture(scope="session")
+def audio_assets() -> _AudioAssets:
+    return AUDIO_ASSETS
+
+
 _T = TypeVar("_T", nn.Module, torch.Tensor, BatchEncoding, BatchFeature, dict)
 _R = TypeVar("_R")
 
@@ -272,7 +293,8 @@ class HfRunner:
     def get_default_device(self):
         from vllm.platforms import current_platform
 
-        return ("cpu" if current_platform.is_cpu() else "cuda")
+        return ("cpu"
+                if current_platform.is_cpu() else current_platform.device_type)
 
     def wrap_device(self, x: _T, device: Optional[str] = None) -> _T:
         if x is None or isinstance(x, (bool, )):
@@ -390,10 +412,15 @@ class HfRunner:
                 processor_kwargs["images"] = image
             if videos is not None and (video := videos[i]) is not None:
                 processor_kwargs["videos"] = video
-            if audios is not None and (audio_tuple := audios[i]) is not None:
-                audio, sr = audio_tuple
-                processor_kwargs["audio"] = audio
-                processor_kwargs["sampling_rate"] = sr
+            if audios is not None and (audio_inputs := audios[i]) is not None:
+                # HACK - not all processors take sampling_rate; we should
+                # clean this up in the future.
+                if len(audio_inputs) == 2:
+                    audio, sr = audio_inputs
+                    processor_kwargs["audio"] = audio
+                    processor_kwargs["sampling_rate"] = sr
+                else:
+                    processor_kwargs["audio"] = audio_inputs
 
             inputs = self.processor(**processor_kwargs)
             if isinstance(inputs, BatchFeature):
@@ -531,7 +558,10 @@ class HfRunner:
         for _, hidden_state in enumerate(hidden_states):
             last_hidden_states = hidden_state[-1][0]
             logits = torch.matmul(
-                last_hidden_states.to(output_embeddings.weight.device),
+                last_hidden_states.to(
+                    device=output_embeddings.weight.device,
+                    dtype=output_embeddings.weight.dtype,
+                ),
                 output_embeddings.weight.t(),
             )
             if getattr(output_embeddings, "bias", None) is not None:
@@ -1008,20 +1038,6 @@ class VllmRunner:
 @pytest.fixture(scope="session")
 def vllm_runner():
     return VllmRunner
-
-
-def get_tokenizer_pool_config(tokenizer_group_type):
-    if tokenizer_group_type is None:
-        return None
-    if tokenizer_group_type == "ray":
-        return TokenizerPoolConfig(pool_size=1,
-                                   pool_type="ray",
-                                   extra_config={})
-    if isinstance(tokenizer_group_type, type):
-        return TokenizerPoolConfig(pool_size=1,
-                                   pool_type=tokenizer_group_type,
-                                   extra_config={})
-    raise ValueError(f"Unknown tokenizer_group_type: {tokenizer_group_type}")
 
 
 @pytest.fixture()
