@@ -96,11 +96,11 @@ class DummyConfigClass:
     """Optional bool with default None"""
     optional_literal: Optional[Literal["x", "y"]] = None
     """Optional literal with default None"""
-    tuple_n: tuple[int, ...] = field(default_factory=tuple)
+    tuple_n: tuple[int, ...] = field(default_factory=lambda: (1, 2, 3))
     """Tuple with variable length"""
-    tuple_2: tuple[int, int] = field(default_factory=tuple)
+    tuple_2: tuple[int, int] = field(default_factory=lambda: (1, 2))
     """Tuple with fixed length"""
-    list_n: list[int] = field(default_factory=list)
+    list_n: list[int] = field(default_factory=lambda: [1, 2, 3])
     """List with variable length"""
     list_literal: list[Literal[1, 2]] = field(default_factory=list)
     """List with literal choices"""
