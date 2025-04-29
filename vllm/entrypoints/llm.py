@@ -656,6 +656,7 @@ class LLM:
         add_generation_prompt: bool = True,
         continue_final_message: bool = False,
         tools: Optional[list[dict[str, Any]]] = None,
+        chat_template_kwargs: Optional[dict[str, Any]] = None,
         mm_processor_kwargs: Optional[dict[str, Any]] = None,
     ) -> list[RequestOutput]:
         """
@@ -696,6 +697,8 @@ class LLM:
             continue_final_message: If True, continues the final message in
                 the conversation instead of starting a new one. Cannot be
                 ``True`` if ``add_generation_prompt`` is also ``True``.
+            chat_template_kwargs: Additional kwargs to pass to the chat
+                template.
             mm_processor_kwargs: Multimodal processor kwarg overrides for this
                 chat request. Only used for offline requests.
 
@@ -726,6 +729,14 @@ class LLM:
             trust_remote_code=model_config.trust_remote_code,
         )
 
+        _chat_template_kwargs: dict[str, Any] = dict(
+            chat_template=chat_template,
+            add_generation_prompt=add_generation_prompt,
+            continue_final_message=continue_final_message,
+            tools=tools,
+        )
+        _chat_template_kwargs.update(chat_template_kwargs or {})
+
         prompts: list[Union[TokensPrompt, TextPrompt]] = []
 
         for msgs in list_of_messages:
@@ -743,20 +754,14 @@ class LLM:
                 prompt_token_ids = apply_mistral_chat_template(
                     tokenizer,
                     messages=msgs,
-                    chat_template=chat_template,
-                    tools=tools,
-                    add_generation_prompt=add_generation_prompt,
-                    continue_final_message=continue_final_message,
+                    **_chat_template_kwargs,
                 )
             else:
                 prompt_str = apply_hf_chat_template(
                     tokenizer,
                     trust_remote_code=model_config.trust_remote_code,
                     conversation=conversation,
-                    chat_template=chat_template,
-                    tools=tools,
-                    add_generation_prompt=add_generation_prompt,
-                    continue_final_message=continue_final_message,
+                    **_chat_template_kwargs,
                 )
                 # Special tokens are already included in chat templates so
                 # should not be added by the tokenizer in this case.
