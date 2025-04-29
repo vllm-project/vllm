@@ -5,15 +5,13 @@ import pplx_kernels as pplx
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
-from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.fused_moe.utils import (
     moe_kernel_quantize_input)
 
 
 # Note use: layer.get_all_to_all() to get an AllToAll instance
 # The max_num_tokens, world_size and dp_size must be the same
-# as the ones used to create the AllToAll.  Unfortunately, there's
-# no way(?) to extract this info from AllToAll
+# as the ones used to create the AllToAll.
 class PplxDispatchCombine(mk.FusedMoEQuantizeDispatchCombine):
 
     def __init__(self,
@@ -21,13 +19,16 @@ class PplxDispatchCombine(mk.FusedMoEQuantizeDispatchCombine):
                  max_num_tokens: int,
                  world_size: int,
                  dp_size: int,
+                 rank: int,
                  quant_dtype: Optional[torch.dtype] = None,
                  block_shape: Optional[List[int]] = None):
         super().__init__()
         self.a2a = a2a
         self.block_shape = block_shape
         self.max_num_tokens = max_num_tokens
-        self.dp_num_tokens = max_num_tokens * (world_size // dp_size)
+        self.world_size = world_size
+        self.dp_size = dp_size
+        self.rank = rank
         self.quant_dtype = quant_dtype
 
     def dispatch(
@@ -39,8 +40,8 @@ class PplxDispatchCombine(mk.FusedMoEQuantizeDispatchCombine):
         rank_topk_ids: torch.Tensor,
         num_experts: int,
         expert_map: Optional[torch.Tensor],
-        apply_router_weight_on_input: bool = False,
-    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+        apply_router_weight_on_input: bool,
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor]]:
         # Is this always going to be a1.device?
         device = a1.device
 
@@ -63,14 +64,19 @@ class PplxDispatchCombine(mk.FusedMoEQuantizeDispatchCombine):
                                                    per_act_token,
                                                    self.block_shape)
 
+        rem_experts = num_experts % self.world_size
+        num_local_experts = ((num_experts // self.world_size) +
+                             (1 if self.rank < rem_experts else 0))
+
         expert_num_tokens = torch.empty(
-            num_experts,
+            num_local_experts,
             dtype=torch.int32,
             device=device,
         )
 
+        num_dp = self.world_size // self.dp_size
         expert_x = torch.empty(
-            (num_experts, self.dp_num_tokens, a1q.shape[-1]),
+            (num_local_experts, self.max_num_tokens * num_dp, a1q.shape[-1]),
             dtype=a1q.dtype,
             device=device,
         )
@@ -90,8 +96,14 @@ class PplxDispatchCombine(mk.FusedMoEQuantizeDispatchCombine):
                 device=device,
             )
 
-        # This argument is optional
-        bound_m = get_forward_context().dp_metadata.dp_rank_num_tokens
+        # This argument is optional, defaults to indices.shape[0]
+        # This causes a deadlock????
+        #bound_m = get_forward_context().dp_metadata.dp_rank_num_tokens
+        #bound_m = torch.tensor([num_tokens], dtype=torch.uint32, device=device)
+        bound_m = None
+
+        # TODO: optimize this?
+        indices = rank_topk_ids.to(dtype=torch.uint32)
 
         self.a2a.dispatch(
             out_expert_num_tokens=expert_num_tokens,
@@ -99,10 +111,10 @@ class PplxDispatchCombine(mk.FusedMoEQuantizeDispatchCombine):
             out_expert_x_scale=expert_x_scale,
             dp_x=a1q,
             dp_x_scale=a1q_scale,
-            indices=rank_topk_ids,
+            indices=indices,
             bound_m=bound_m,
         )
-        return expert_x, expert_x_scale
+        return expert_x, expert_x_scale, expert_num_tokens
 
     def combine(
         self,
@@ -113,9 +125,10 @@ class PplxDispatchCombine(mk.FusedMoEQuantizeDispatchCombine):
         apply_router_weight_on_input: bool,
     ) -> None:
         # This argument is optional
-        bound_m = get_forward_context().dp_metadata.dp_rank_num_tokens
+        #bound_m = get_forward_context().dp_metadata.dp_rank_num_tokens
+        bound_m = None
 
-        assert output.shape[0] == self.max_num_tokens
+        assert output.shape[0] <= self.max_num_tokens
         assert output.shape[1] == fused_expert_output.shape[-1]
 
         # Set weights to 1?
@@ -124,7 +137,7 @@ class PplxDispatchCombine(mk.FusedMoEQuantizeDispatchCombine):
             topk_weights = torch.ones_like(topk_weights)
 
         self.a2a.combine(out_tokens=output,
-                         indices=topk_ids,
+                         indices=topk_ids.to(torch.uint32),
                          weights=topk_weights,
                          expert_y=fused_expert_output,
                          bound_m=bound_m)
