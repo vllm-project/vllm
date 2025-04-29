@@ -72,7 +72,7 @@ class CompressedTensorsConfig(QuantizationConfig):
         return 70
 
     def get_name(self) -> str:
-        return "compressed_tensors"
+        return "compressed-tensors"
 
     def get_quant_method(
         self,
@@ -384,7 +384,7 @@ class CompressedTensorsConfig(QuantizationConfig):
 
         Detect whether a layer_name is found in any target and
         use the quantization scheme corresponding to the matched target
-        to select the CompressedTensorsScheme used for infernece.
+        to select the CompressedTensorsScheme used for inference.
         """
 
         # Find the "target" in the compressed-tensors config

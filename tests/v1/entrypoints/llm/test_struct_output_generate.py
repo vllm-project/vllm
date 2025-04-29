@@ -17,15 +17,12 @@ from vllm.platforms import current_platform
 from vllm.sampling_params import GuidedDecodingParams, SamplingParams
 
 PARAMS_MODELS_BACKENDS_TOKENIZER_MODE = [
-    ("mistralai/Ministral-8B-Instruct-2410", "xgrammar:disable-any-whitespace",
-     "auto"),
-    ("mistralai/Ministral-8B-Instruct-2410", "guidance:disable-any-whitespace",
-     "auto"),
-    ("mistralai/Ministral-8B-Instruct-2410", "xgrammar:disable-any-whitespace",
-     "mistral"),
-    ("Qwen/Qwen2.5-1.5B-Instruct", "xgrammar:disable-any-whitespace", "auto"),
+    ("mistralai/Ministral-8B-Instruct-2410", "xgrammar", "auto"),
+    ("mistralai/Ministral-8B-Instruct-2410", "guidance", "auto"),
+    ("mistralai/Ministral-8B-Instruct-2410", "xgrammar", "mistral"),
+    ("Qwen/Qwen2.5-1.5B-Instruct", "xgrammar", "auto"),
     #FIXME: This test is flaky on CI thus disabled
-    #("Qwen/Qwen2.5-1.5B-Instruct", "guidance:disable-any-whitespace", "auto"),
+    #("Qwen/Qwen2.5-1.5B-Instruct", "guidance", "auto"),
 ]
 
 PARAMS_MODELS_TOKENIZER_MODE = [
@@ -73,6 +70,7 @@ def test_structured_output(
               enforce_eager=enforce_eager,
               max_model_len=1024,
               guided_decoding_backend=guided_decoding_backend,
+              guided_decoding_disable_any_whitespace=True,
               tokenizer_mode=tokenizer_mode)
 
     #
@@ -98,8 +96,7 @@ def test_structured_output(
 
         generated_text = output.outputs[0].text
         assert generated_text is not None
-        if 'disable-any-whitespace' in guided_decoding_backend:
-            assert "\n" not in generated_text
+        assert "\n" not in generated_text
         print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
         output_json = json.loads(generated_text)
         jsonschema.validate(instance=output_json, schema=sample_json_schema)
@@ -350,6 +347,7 @@ def test_structured_output(
         temperature=1.0,
         max_tokens=1000,
         guided_decoding=GuidedDecodingParams(json=json_schema))
+
     outputs = llm.generate(
         prompts="Generate a description of a frog using 50 characters.",
         sampling_params=sampling_params,
@@ -367,6 +365,103 @@ def test_structured_output(
         print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
         output_json = json.loads(generated_text)
         jsonschema.validate(instance=output_json, schema=json_schema)
+
+    #
+    # Test 11: Generate structured output using structural_tag format
+    #
+    structural_tag_config = {
+        "type":
+        "structural_tag",
+        "structures": [{
+            "begin": "<function=get_weather>",
+            "schema": {
+                "type": "object",
+                "properties": {
+                    "city": {
+                        "type": "string"
+                    }
+                }
+            },
+            "end": "</function>"
+        }],
+        "triggers": ["<function="]
+    }
+
+    sampling_params = SamplingParams(
+        temperature=0.0,
+        max_tokens=100,
+        guided_decoding=GuidedDecodingParams(
+            structural_tag=json.dumps(structural_tag_config)))
+
+    prompt = """
+You have access to the following function to retrieve the weather in a city:
+         
+    {
+        "name": "get_weather",
+        "parameters": {
+            "city": {
+                "param_type": "string",
+                "description": "The city to get the weather for",
+                "required": True
+            }
+        }
+    }
+         
+If a you choose to call a function ONLY reply in the following format:
+<{start_tag}={function_name}>{parameters}{end_tag}
+where
+
+start_tag => `<function`
+parameters => a JSON dict with the function argument name
+              as key and function argument value as value.
+end_tag => `</function>`
+
+Here is an example,
+<function=example_function_name>{"example_name": "example_value"}</function>
+
+Reminder:
+- Function calls MUST follow the specified format
+- Required parameters MUST be specified
+- Only call one function at a time
+- Put the entire function call reply on one line
+- Always add your sources when using search results to answer the user query
+
+You are a helpful assistant.
+         
+Given the previous instructions, what is the weather in New York City?
+"""
+
+    # Change this once other backends support structural_tag
+    outputs = llm.generate(prompts=prompt,
+                           sampling_params=sampling_params,
+                           use_tqdm=True)
+    assert outputs is not None
+
+    for output in outputs:
+        assert output is not None
+        assert isinstance(output, RequestOutput)
+        generated_text = output.outputs[0].text
+        assert generated_text is not None
+
+        # Search for function call pattern in the response
+        function_call_pattern = r'<function=get_weather>(.*?)</function>'
+        matches = re.findall(function_call_pattern, generated_text)
+
+        if not matches:
+            print(f"Warning: No function calls found in response: "
+                  f"{generated_text!r}")
+            continue
+
+        # Take the first function call if multiple are found
+        json_str = matches[0]
+        try:
+            json_content = json.loads(json_str)
+            assert "city" in json_content
+            assert isinstance(json_content["city"], str)
+            print(f"Found valid function call: {generated_text!r}")
+        except (json.JSONDecodeError, AssertionError) as e:
+            pytest.fail("Invalid function call format: "
+                        f"{generated_text!r}\nError: {str(e)}")
 
 
 @pytest.mark.skip_global_cleanup
@@ -422,10 +517,11 @@ def test_structured_output_auto_mode(
 def test_guidance_no_additional_properties(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("VLLM_USE_V1", "1")
 
-    backend = 'guidance:no-additional-properties,disable-any-whitespace'
     llm = LLM(model="Qwen/Qwen2.5-1.5B-Instruct",
               max_model_len=1024,
-              guided_decoding_backend=backend)
+              guided_decoding_backend="guidance",
+              guided_decoding_disable_any_whitespace=True,
+              guided_decoding_disable_additional_properties=True)
 
     schema = {
         'type': 'object',
@@ -450,7 +546,11 @@ def test_guidance_no_additional_properties(monkeypatch: pytest.MonkeyPatch):
         "<|im_end|>\n<|im_start|>assistant\n")
 
     def generate_with_backend(backend):
-        guided_params = GuidedDecodingParams(json=schema, backend=backend)
+        guided_params = GuidedDecodingParams(
+            json=schema,
+            backend=backend,
+            disable_any_whitespace=True,
+            disable_additional_properties=True)
         sampling_params = SamplingParams(temperature=0,
                                          max_tokens=256,
                                          guided_decoding=guided_params)
@@ -464,8 +564,7 @@ def test_guidance_no_additional_properties(monkeypatch: pytest.MonkeyPatch):
         jsonschema.validate(instance=parsed_json, schema=schema)
         return parsed_json
 
-    generated = generate_with_backend(
-        'guidance:no-additional-properties,disable-any-whitespace')
+    generated = generate_with_backend("guidance")
     assert "a1" in generated
     assert "a2" in generated
     assert "a3" in generated

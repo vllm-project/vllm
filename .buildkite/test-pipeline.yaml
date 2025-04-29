@@ -307,6 +307,7 @@ steps:
   commands:
     - pytest -v -s compile/test_pass_manager.py
     - pytest -v -s compile/test_fusion.py
+    - pytest -v -s compile/test_sequence_parallelism.py
 
 - label: PyTorch Fullgraph Smoke Test # 9min
   source_file_dependencies:
@@ -336,6 +337,7 @@ steps:
     - pytest -v -s kernels/core
 
 - label: Kernels Attention Test %N
+  mirror_hardwares: [amd]
   source_file_dependencies:
   - csrc/attention/
   - vllm/attention
@@ -346,6 +348,7 @@ steps:
   parallelism: 2
 
 - label: Kernels Quantization Test %N
+  mirror_hardwares: [amd]
   source_file_dependencies:
   - csrc/quantization/
   - vllm/model_executor/layers/quantization
@@ -355,6 +358,7 @@ steps:
   parallelism: 2
 
 - label: Kernels MoE Test
+  #mirror_hardwares: [amd]
   source_file_dependencies:
   - csrc/moe/
   - tests/kernels/moe
@@ -363,6 +367,7 @@ steps:
     - pytest -v -s kernels/moe
 
 - label: Kernels Mamba Test
+  #mirror_hardwares: [amd]
   source_file_dependencies:
   - csrc/mamba/
   - tests/kernels/mamba
@@ -596,6 +601,8 @@ steps:
   - pytest models/encoder_decoder/language/test_bart.py -v -s -m 'distributed(num_gpus=2)'
   - pytest models/encoder_decoder/vision_language/test_broadcast.py -v -s -m 'distributed(num_gpus=2)'
   - pytest models/decoder_only/vision_language/test_models.py -v -s -m 'distributed(num_gpus=2)'
+  # test sequence parallel
+  - pytest -v -s distributed/test_sequence_parallel.py
   # this test fails consistently.
   # TODO: investigate and fix
   # - pytest -v -s spec_decode/e2e/test_integration_dist_tp2.py

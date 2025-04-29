@@ -9,7 +9,7 @@ import torch
 import vllm.envs
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
-from vllm.sampling_params import GuidedDecodingParams, SamplingParams
+from vllm.sampling_params import SamplingParams
 from vllm.transformers_utils.tokenizer_group import init_tokenizer_from_configs
 from vllm.transformers_utils.tokenizers.mistral import MistralTokenizer
 from vllm.utils import LazyLoader
@@ -37,16 +37,8 @@ class XgrammarBackend(StructuredOutputBackend):
             scheduler_config=vllm_config.scheduler_config,
             lora_config=vllm_config.lora_config)  # type: ignore[arg-type]
 
-        self.disable_any_whitespace = False
-        backend_options = GuidedDecodingParams(
-            backend=vllm_config.decoding_config.guided_decoding_backend
-        ).backend_options()
-        for option in backend_options:
-            if option == "disable-any-whitespace":
-                self.disable_any_whitespace = True
-            else:
-                raise ValueError(
-                    f"Unsupported option for the xgrammar backend: {option}")
+        self.disable_any_whitespace = \
+            vllm_config.decoding_config.disable_any_whitespace
 
         tokenizer = tokenizer_group.get_lora_tokenizer(None)
         self.vocab_size = vllm_config.model_config.get_vocab_size()
@@ -108,6 +100,16 @@ class XgrammarBackend(StructuredOutputBackend):
             ctx = self.compiler.compile_grammar(grammar_spec)
         elif request_type == StructuredOutputOptions.REGEX:
             ctx = self.compiler.compile_regex(grammar_spec)
+        elif request_type == StructuredOutputOptions.STRUCTURAL_TAG:
+            s_tag = json.loads(grammar_spec)
+            tags = [
+                xgr.StructuralTagItem(
+                    begin=s["begin"],
+                    schema=json.dumps(s["schema"]),
+                    end=s["end"],
+                ) for s in s_tag["structures"]
+            ]
+            ctx = self.compiler.compile_structural_tag(tags, s_tag["triggers"])
         else:
             logger.error(
                 "Validation should have already occurred. Please file an issue."
@@ -272,3 +274,18 @@ def validate_xgrammar_grammar(sampling_params: SamplingParams) -> None:
             xgr.Grammar.from_ebnf(gd_params.grammar)
         except Exception as e:
             raise ValueError("Invalid grammar specification.") from e
+        return
+
+    if gd_params.structural_tag:
+        try:
+            s_tag = json.loads(gd_params.structural_tag)
+            tags = [
+                xgr.StructuralTagItem(
+                    begin=s["begin"],
+                    schema=json.dumps(s["schema"]),
+                    end=s["end"],
+                ) for s in s_tag["structures"]
+            ]
+            xgr.Grammar.from_structural_tag(tags, s_tag["triggers"])
+        except Exception as e:
+            raise ValueError("Invalid structural tag specification.") from e

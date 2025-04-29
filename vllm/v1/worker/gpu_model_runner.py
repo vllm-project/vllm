@@ -12,13 +12,13 @@ import torch.nn as nn
 
 from vllm.attention import AttentionType, get_attn_backend
 from vllm.attention.layer import Attention
-from vllm.config import CompilationLevel, VllmConfig
+from vllm.config import (CompilationLevel, VllmConfig,
+                         get_layers_from_vllm_config)
 from vllm.distributed.kv_transfer import (get_kv_transfer_group,
                                           has_kv_transfer_group)
 from vllm.distributed.parallel_state import get_pp_group, graph_capture
 from vllm.forward_context import set_forward_context
 from vllm.logger import init_logger
-from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.rotary_embedding import MRotaryEmbedding
 from vllm.model_executor.model_loader import get_model
 from vllm.multimodal import MULTIMODAL_REGISTRY
@@ -165,14 +165,17 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         # Set up speculative decoding.
         self.use_spec_decode = False
+        self.use_aux_hidden_state_outputs = False
         if self.speculative_config:
             self.use_spec_decode = True
             if get_pp_group().is_last_rank:
                 if self.speculative_config.method == "ngram":
                     self.drafter = NgramProposer(self.vllm_config)
-                elif self.speculative_config.method == "eagle":
+                elif self.speculative_config.use_eagle():
                     self.drafter = EagleProposer(self.vllm_config,
                                                  self.device)  # type: ignore
+                    if self.speculative_config.method == "eagle3":
+                        self.use_aux_hidden_state_outputs = True
                 else:
                     raise ValueError("Unknown speculative decoding method: "
                                      f"{self.speculative_config.method}")
@@ -344,7 +347,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.requests[req_id] = CachedRequestState(
                 req_id=req_id,
                 prompt_token_ids=new_req_data.prompt_token_ids,
-                prompt=new_req_data.prompt,
                 mm_inputs=new_req_data.mm_inputs,
                 mm_positions=new_req_data.mm_positions,
                 sampling_params=sampling_params,
@@ -1025,8 +1027,15 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 num_scheduled_tokens)
         else:
             # Eager mode.
-            num_input_tokens = num_scheduled_tokens
-        attn_metadata.num_input_tokens = num_input_tokens
+            # Pad tokens to multiple of tensor_parallel_size when
+            # enabled collective fusion for SP
+            tp_size = self.vllm_config.parallel_config.tensor_parallel_size
+            if self.vllm_config.compilation_config.pass_config. \
+                enable_sequence_parallelism and tp_size > 1:
+                from vllm.utils import round_up
+                num_input_tokens = round_up(num_scheduled_tokens, tp_size)
+            else:
+                num_input_tokens = num_scheduled_tokens
 
         # _prepare_inputs may reorder the batch, so we must gather multi
         # modal outputs after that to ensure the correct order
@@ -1078,13 +1087,21 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         # Run the decoder.
         # Use persistent buffers for CUDA graphs.
-        with set_forward_context(attn_metadata, self.vllm_config):
-            hidden_states = self.model(
+        with set_forward_context(attn_metadata,
+                                 self.vllm_config,
+                                 num_tokens=num_input_tokens):
+            output = self.model(
                 input_ids=input_ids,
                 positions=positions,
                 intermediate_tensors=intermediate_tensors,
                 inputs_embeds=inputs_embeds,
             )
+
+        if self.use_aux_hidden_state_outputs:
+            hidden_states, aux_hidden_states = output
+        else:
+            hidden_states = output
+
         if not get_pp_group().is_last_rank:
             # For mid-pipeline stages, return the hidden states.
             return hidden_states
@@ -1182,7 +1199,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             assert isinstance(self.drafter, NgramProposer)
             spec_token_ids = self.generate_draft_token_ids(
                 valid_sampled_token_ids, sampling_metadata)
-        elif self.speculative_config.method == "eagle":
+        elif self.speculative_config.use_eagle():
             assert isinstance(self.drafter, EagleProposer)
             # TODO(woosuk): Refactor the loop.
             next_token_ids: list[int] = []
@@ -1210,7 +1227,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 # not include padding.
                 target_token_ids = self.input_ids[:num_scheduled_tokens]
                 target_positions = positions[:num_scheduled_tokens]
-                target_hidden_states = hidden_states[:num_scheduled_tokens]
+                if self.use_aux_hidden_state_outputs:
+                    target_hidden_states = [
+                        h[:num_scheduled_tokens] for h in aux_hidden_states
+                    ]
+                else:
+                    target_hidden_states = hidden_states[:num_scheduled_tokens]
                 target_slot_mapping = attn_metadata.slot_mapping
                 cu_num_tokens = attn_metadata.query_start_loc
             else:
@@ -1231,9 +1253,16 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 )
                 target_token_ids = self.input_ids[token_indices]
                 target_positions = positions[token_indices]
-                target_hidden_states = hidden_states[token_indices]
+                if self.use_aux_hidden_state_outputs:
+                    target_hidden_states = [
+                        h[token_indices] for h in aux_hidden_states
+                    ]
+                else:
+                    target_hidden_states = hidden_states[token_indices]
                 target_slot_mapping = attn_metadata.slot_mapping[token_indices]
 
+            if self.use_aux_hidden_state_outputs:
+                target_hidden_states = torch.cat(target_hidden_states, dim=-1)
             draft_token_ids = self.drafter.propose(
                 target_token_ids=target_token_ids,
                 target_positions=target_positions,
@@ -1311,6 +1340,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             if hasattr(self, "drafter"):
                 logger.info("Loading drafter model...")
                 self.drafter.load_model(self.model)
+            if self.use_aux_hidden_state_outputs:
+                self.model.set_aux_hidden_state_layers(
+                    self.model.get_eagle3_aux_hidden_state_layers())
             time_after_load = time.perf_counter()
         self.model_memory_usage = m.consumed_memory
         logger.info("Model loading took %.4f GiB and %.6f seconds",
@@ -1463,12 +1495,16 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             with set_forward_context(None,
                                      self.vllm_config,
                                      num_tokens=num_tokens):
-                hidden_states = model(
+                outputs = model(
                     input_ids=input_ids,
                     positions=positions,
                     intermediate_tensors=intermediate_tensors,
                     inputs_embeds=inputs_embeds,
                 )
+            if self.use_aux_hidden_state_outputs:
+                hidden_states, _ = outputs
+            else:
+                hidden_states = outputs
 
         logit_indices = np.cumsum(num_scheduled_tokens) - 1
         return hidden_states[logit_indices]
@@ -1706,17 +1742,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             format. Layers that do not need KV cache are not included.
         """
 
-        forward_ctx = self.vllm_config.compilation_config.static_forward_context
+        layers = get_layers_from_vllm_config(self.vllm_config, Attention)
         block_size = self.vllm_config.cache_config.block_size
         use_mla = self.vllm_config.model_config.use_mla
         kv_cache_spec: dict[str, KVCacheSpec] = {}
-        for layer_name, attn_module in forward_ctx.items():
-            if isinstance(attn_module, FusedMoE):
-                continue
-
-            # TODO: Support other attention modules, e.g., sliding window,
-            # cross-attention
-            assert isinstance(attn_module, Attention)
+        for layer_name, attn_module in layers.items():
+            # TODO: Support other attention modules, e.g., cross-attention
             if attn_module.attn_type == AttentionType.DECODER:
                 if attn_module.sliding_window is not None:
                     kv_cache_spec[layer_name] = SlidingWindowSpec(
