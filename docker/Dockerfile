@@ -79,13 +79,6 @@ ENV TORCH_CUDA_ARCH_LIST=${torch_cuda_arch_list}
 # Override the arch list for flash-attn to reduce the binary size
 ARG vllm_fa_cmake_gpu_arches='80-real;90-real'
 ENV VLLM_FA_CMAKE_GPU_ARCHES=${vllm_fa_cmake_gpu_arches}
-
-# TESTING: install xformers from source until it's updated to work
-# with 2.7.0. Also pin it to the current main commit to avoid the issue
-# https://github.com/facebookresearch/xformers/issues/1229 with CUDA 12.8
-RUN --mount=type=cache,target=/root/.cache/uv \
-    MAX_JOBS=16 TORCH_CUDA_ARCH_LIST='7.5 8.0 8.6 8.9 9.0+PTX' \
-    uv pip install --system --no-build-isolation "git+https://github.com/facebookresearch/xformers@f2de641ef670510cadab099ce6954031f52f191c"
 #################### BASE BUILD IMAGE ####################
 
 #################### WHEEL BUILD IMAGE ####################
@@ -240,13 +233,6 @@ RUN --mount=type=bind,from=build,src=/workspace/dist,target=/vllm-workspace/dist
     --mount=type=cache,target=/root/.cache/uv \
     uv pip install --system dist/*.whl --verbose \
     --extra-index-url https://download.pytorch.org/whl/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.')
-
-# TESTING: install xformers from source until it's updated to work
-# with 2.7.0. Also pin it to the current main commit to avoid the issue
-# https://github.com/facebookresearch/xformers/issues/1229 with CUDA 12.8
-RUN --mount=type=cache,target=/root/.cache/uv \
-    MAX_JOBS=16 TORCH_CUDA_ARCH_LIST='7.5 8.0 8.6 8.9 9.0+PTX' \
-    uv pip install --system --no-build-isolation "git+https://github.com/facebookresearch/xformers@f2de641ef670510cadab099ce6954031f52f191c"
 
 # If we need to build FlashInfer wheel before its release:
 # $ export FLASHINFER_ENABLE_AOT=1
