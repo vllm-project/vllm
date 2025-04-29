@@ -110,7 +110,6 @@ fi
 
 if [[ $commands == *" kernels/mamba"* ]]; then
   commands="${commands} \
-  --ignore=kernels/mamba/test_mamba_ssm.py \
   --ignore=kernels/mamba/test_mamba_mixer2.py \
   --ignore=kernels/mamba/test_causal_conv1d.py \
   --ignore=kernels/mamba/test_mamba_ssm_ssd.py"

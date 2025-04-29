@@ -347,7 +347,7 @@ steps:
   parallelism: 2
 
 - label: Kernels MoE Test
-  mirror_hardwares: [amd]
+  #mirror_hardwares: [amd]
   source_file_dependencies:
   - csrc/moe/
   - tests/kernels/moe
@@ -356,7 +356,7 @@ steps:
     - pytest -v -s kernels/moe
 
 - label: Kernels Mamba Test
-  mirror_hardwares: [amd]
+  #mirror_hardwares: [amd]
   source_file_dependencies:
   - csrc/mamba/
   - tests/kernels/mamba
