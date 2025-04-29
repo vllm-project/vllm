@@ -32,7 +32,8 @@ from vllm.utils import direct_register_custom_op
 
 if current_platform.is_cuda_alike():
     from .dispatch_combine import StandardDispatchCombine
-    from .fused_moe import TritonExperts, BatchedDispatchCombine, BatchedExperts, fused_experts
+    from .fused_moe import TritonExperts, fused_experts
+    from .fused_batched_moe import BatchedDispatchCombine, BatchedTritonExperts
     from .modular_kernel import FusedMoEModularKernel, FusedMoEQuantizeDispatchCombine
     from .pplx_dispatch_combine import PplxDispatchCombine
 else:
@@ -125,7 +126,8 @@ class AllToAllCache:
         with self._lock:
             instance = self._cache.get(key)
             if instance is None:
-                instance = pplx.AllToAll(**kwargs)
+                # TODO: should be intranode
+                instance = pplx.AllToAll.internode(**kwargs)
                 self._cache[key] = instance
             return instance
 
@@ -261,8 +263,14 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         block_m = MOE_DP_CHUNK_SIZE * (self.moe.ep_size // self.moe.dp_size)
 
         if isinstance(dispatch_combine, (BatchedDispatchCombine, PplxDispatchCombine)):
-            logger.info(f"BatchedExperts {self.moe}")
-            experts = BatchedExperts()
+            logger.info(f"BatchedTritonExperts {self.moe}")
+            experts = BatchedTritonExperts(
+                use_fp8_w8a8 = False,
+                use_int8_w8a8 = False,
+                use_int8_w8a16 = False,
+                use_int4_w4a16 = False,
+                block_shape = None,
+            )
         else:
             logger.info(f"TritonExperts {self.moe}")
             experts = TritonExperts(
@@ -271,7 +279,6 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
                 use_int8_w8a16 = False,
                 use_int4_w4a16 = False,
                 block_shape = None,
-                block_m = None, #block_m,
                 per_channel_quant = False,
             )
 
@@ -1062,10 +1069,12 @@ class FusedMoE(torch.nn.Module):
                     max=moe_dp_chunk_size_per_rank),
                 dim=0)
 
-            hidden_states = self.naive_multicast(
-                hidden_states, cu_tokens_across_dp_this_iter)
-            router_logits = self.naive_multicast(
-                router_logits, cu_tokens_across_dp_this_iter)
+            # TODO: still may be needed for non-pplx, put into dispatcher class.
+            if False:
+                hidden_states = self.naive_multicast(
+                    hidden_states, cu_tokens_across_dp_this_iter)
+                router_logits = self.naive_multicast(
+                    router_logits, cu_tokens_across_dp_this_iter)
 
             # Matrix multiply.
             final_hidden_states = self.quant_method.apply(
@@ -1085,7 +1094,8 @@ class FusedMoE(torch.nn.Module):
                 activation=self.activation,
             )
 
-            if self.dp_size > 1:
+            # TODO: needed for non-pplx?
+            if False and self.dp_size > 1:
                 start = 0 if self.dp_rank == 0 else cu_tokens_across_dp_this_iter[
                     self.dp_rank - 1]
                 end = cu_tokens_across_dp_this_iter[self.dp_rank]
@@ -1094,7 +1104,8 @@ class FusedMoE(torch.nn.Module):
                     final_hidden_states)
                 final_hidden_states = all_hidden_states[start:end, :]
 
-            if self.reduce_results and (self.tp_size > 1 or self.ep_size > 1):
+            # TODO: needed for non-pplx?
+            if False and self.reduce_results and (self.tp_size > 1 or self.ep_size > 1):
                 # Default set to False. (May have to add shared expert outputs.)
                 final_hidden_states = tensor_model_parallel_all_reduce(
                     final_hidden_states)
@@ -1115,8 +1126,14 @@ class FusedMoE(torch.nn.Module):
                 return min(x + moe_dp_chunk_size_per_rank,
                            full_hidden_states.shape[0])
 
-            chunk_start = update_chunk_bound(chunk_start)
-            chunk_end = update_chunk_bound(chunk_end)
+            #chunk_start = update_chunk_bound(chunk_start)
+            #chunk_end = update_chunk_bound(chunk_end)
+            if chunk_end == full_hidden_states.shape[0]:
+                # simply redo computation
+                pass
+            else:
+                chunk_start = update_chunk_bound(chunk_start)
+                chunk_end = update_chunk_bound(chunk_end)
 
         return full_final_hidden_states
 
@@ -1149,7 +1166,8 @@ class FusedMoE(torch.nn.Module):
         if self.dp_size > 1:
             final_hidden_states = get_ep_group().combine(final_hidden_states)
 
-        if self.reduce_results and (self.tp_size > 1 or self.ep_size > 1):
+        # TODO: needed for non-pplx?
+        if False and self.reduce_results and (self.tp_size > 1 or self.ep_size > 1):
             # Default set to False. (May have to add shared expert outputs.)
             final_hidden_states = tensor_model_parallel_all_reduce(
                 final_hidden_states)

@@ -46,7 +46,8 @@ class PplxDispatchCombine(mk.FusedMoEQuantizeDispatchCombine):
         device = a1.device
         hidden_dim = a1.shape[-1]  # K
 
-        assert expert_map is None, "NYI"
+        # ??
+        # assert expert_map is None, "NYI"
 
         if apply_router_weight_on_input:
             topk = rank_topk_ids.shape[1]
@@ -96,11 +97,8 @@ class PplxDispatchCombine(mk.FusedMoEQuantizeDispatchCombine):
             )
 
         # This argument is optional, defaults to indices.shape[0]
-        # This causes a deadlock?
-        #bound_m = get_forward_context().dp_metadata.dp_rank_num_tokens
-        #num_tokens = a1.shape[0]   # M
-        #bound_m = torch.tensor([num_tokens], dtype=torch.uint32, device=device)
-        bound_m = None
+        num_tokens = a1.shape[0]   # M
+        bound_m = torch.tensor([num_tokens], dtype=torch.uint32, device=device)
 
         # TODO: optimize this?
         indices = rank_topk_ids.to(dtype=torch.uint32)
@@ -125,11 +123,9 @@ class PplxDispatchCombine(mk.FusedMoEQuantizeDispatchCombine):
         apply_router_weight_on_input: bool,
     ) -> None:
         # This argument is optional
-        #bound_m = get_forward_context().dp_metadata.dp_rank_num_tokens
-        #num_tokens = fused_expert_output.shape[0]   # M
-        #bound_m = torch.tensor([num_tokens], dtype=torch.uint32,
-        #                       device=fused_expert_output.device)
-        bound_m = None
+        num_tokens = output.shape[0]   # M
+        bound_m = torch.tensor([num_tokens], dtype=torch.uint32,
+                               device=fused_expert_output.device)
 
         assert output.shape[0] <= self.max_num_tokens
         assert output.shape[1] == fused_expert_output.shape[-1]
