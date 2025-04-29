@@ -202,7 +202,7 @@ class Processor:
         trace_headers: Optional[Mapping[str, str]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
         priority: int = 0,
-    ) -> EngineCoreRequest:
+    ) -> tuple[Optional[str], EngineCoreRequest]:
 
         # TODO(woosuk): Support pooling models.
         # TODO(woosuk): Support encoder-decoder models.
@@ -310,9 +310,8 @@ class Processor:
         else:
             pooling_params = params.clone()
 
-        return EngineCoreRequest(
+        return decoder_inputs.get("prompt"), EngineCoreRequest(
             request_id=request_id,
-            prompt=decoder_inputs.get("prompt"),
             prompt_token_ids=decoder_inputs["prompt_token_ids"],
             token_type_ids=decoder_inputs.get("token_type_ids"),
             mm_inputs=sorted_mm_inputs,

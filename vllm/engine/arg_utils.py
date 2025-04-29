@@ -7,11 +7,11 @@ import json
 import re
 import threading
 from dataclasses import MISSING, dataclass, fields
-from typing import (Any, Callable, Dict, List, Literal, Optional, Tuple, Type,
+from typing import (Any, Callable, Dict, List, Literal, Optional, Type,
                     TypeVar, Union, cast, get_args, get_origin)
 
 import torch
-from typing_extensions import TypeIs
+from typing_extensions import TypeIs, deprecated
 
 import vllm.envs as envs
 from vllm import version
@@ -48,33 +48,29 @@ TypeHint = Union[type[Any], object]
 TypeHintT = Union[type[T], object]
 
 
-def optional_arg(val: str, return_type: Callable[[str], T]) -> Optional[T]:
-    if val == "" or val == "None":
-        return None
-    try:
-        return return_type(val)
-    except ValueError as e:
-        raise argparse.ArgumentTypeError(
-            f"Value {val} cannot be converted to {return_type}.") from e
+def optional_type(
+        return_type: Callable[[str], T]) -> Callable[[str], Optional[T]]:
+
+    def _optional_type(val: str) -> Optional[T]:
+        if val == "" or val == "None":
+            return None
+        try:
+            if return_type is json.loads and not re.match("^{.*}$", val):
+                return cast(T, nullable_kvs(val))
+            return return_type(val)
+        except ValueError as e:
+            raise argparse.ArgumentTypeError(
+                f"Value {val} cannot be converted to {return_type}.") from e
+
+    return _optional_type
 
 
-def optional_str(val: str) -> Optional[str]:
-    return optional_arg(val, str)
-
-
-def optional_int(val: str) -> Optional[int]:
-    return optional_arg(val, int)
-
-
-def optional_float(val: str) -> Optional[float]:
-    return optional_arg(val, float)
-
-
-def nullable_kvs(val: str) -> Optional[dict[str, int]]:
-    """NOTE: This function is deprecated, args should be passed as JSON
-    strings instead.
-    
-    Parses a string containing comma separate key [str] to value [int]
+@deprecated(
+    "Passing a JSON argument as a string containing comma separated key=value "
+    "pairs is deprecated. This will be removed in v0.10.0. Please use a JSON "
+    "string instead.")
+def nullable_kvs(val: str) -> dict[str, int]:
+    """Parses a string containing comma separate key [str] to value [int]
     pairs into a dictionary.
 
     Args:
@@ -83,10 +79,7 @@ def nullable_kvs(val: str) -> Optional[dict[str, int]]:
     Returns:
         Dictionary with parsed values.
     """
-    if len(val) == 0:
-        return None
-
-    out_dict: Dict[str, int] = {}
+    out_dict: dict[str, int] = {}
     for item in val.split(","):
         kv_parts = [part.lower().strip() for part in item.split("=")]
         if len(kv_parts) != 2:
@@ -108,15 +101,103 @@ def nullable_kvs(val: str) -> Optional[dict[str, int]]:
     return out_dict
 
 
-def optional_dict(val: str) -> Optional[dict[str, int]]:
-    if re.match("^{.*}$", val):
-        return optional_arg(val, json.loads)
+def is_type(type_hint: TypeHint, type: TypeHintT) -> TypeIs[TypeHintT]:
+    """Check if the type hint is a specific type."""
+    return type_hint is type or get_origin(type_hint) is type
 
-    logger.warning(
-        "Failed to parse JSON string. Attempting to parse as "
-        "comma-separated key=value pairs. This will be deprecated in a "
-        "future release.")
-    return nullable_kvs(val)
+
+def contains_type(type_hints: set[TypeHint], type: TypeHintT) -> bool:
+    """Check if the type hints contain a specific type."""
+    return any(is_type(type_hint, type) for type_hint in type_hints)
+
+
+def get_type(type_hints: set[TypeHint], type: TypeHintT) -> TypeHintT:
+    """Get the specific type from the type hints."""
+    return next((th for th in type_hints if is_type(th, type)), None)
+
+
+def is_not_builtin(type_hint: TypeHint) -> bool:
+    """Check if the class is not a built-in type."""
+    return type_hint.__module__ != "builtins"
+
+
+def get_kwargs(cls: ConfigType) -> dict[str, Any]:
+    cls_docs = get_attr_docs(cls)
+    kwargs = {}
+    for field in fields(cls):
+        # Get the default value of the field
+        default = field.default
+        if field.default_factory is not MISSING:
+            default = field.default_factory()
+
+        # Get the help text for the field
+        name = field.name
+        help = cls_docs[name]
+        # Escape % for argparse
+        help = help.replace("%", "%%")
+
+        # Initialise the kwargs dictionary for the field
+        kwargs[name] = {"default": default, "help": help}
+
+        # Get the set of possible types for the field
+        type_hints: set[TypeHint] = set()
+        if get_origin(field.type) is Union:
+            type_hints.update(get_args(field.type))
+        else:
+            type_hints.add(field.type)
+
+        # Set other kwargs based on the type hints
+        if contains_type(type_hints, bool):
+            # Creates --no-<name> and --<name> flags
+            kwargs[name]["action"] = argparse.BooleanOptionalAction
+        elif contains_type(type_hints, Literal):
+            # Creates choices from Literal arguments
+            type_hint = get_type(type_hints, Literal)
+            choices = sorted(get_args(type_hint))
+            kwargs[name]["choices"] = choices
+            choice_type = type(choices[0])
+            assert all(type(c) is choice_type for c in choices), (
+                "All choices must be of the same type. "
+                f"Got {choices} with types {[type(c) for c in choices]}")
+            kwargs[name]["type"] = choice_type
+        elif contains_type(type_hints, tuple):
+            type_hint = get_type(type_hints, tuple)
+            types = get_args(type_hint)
+            tuple_type = types[0]
+            assert all(t is tuple_type for t in types if t is not Ellipsis), (
+                "All non-Ellipsis tuple elements must be of the same "
+                f"type. Got {types}.")
+            kwargs[name]["type"] = tuple_type
+            kwargs[name]["nargs"] = "+" if Ellipsis in types else len(types)
+        elif contains_type(type_hints, list):
+            type_hint = get_type(type_hints, list)
+            types = get_args(type_hint)
+            assert len(types) == 1, (
+                "List type must have exactly one type. Got "
+                f"{type_hint} with types {types}")
+            kwargs[name]["type"] = types[0]
+            kwargs[name]["nargs"] = "+"
+        elif contains_type(type_hints, int):
+            kwargs[name]["type"] = int
+        elif contains_type(type_hints, float):
+            kwargs[name]["type"] = float
+        elif contains_type(type_hints, dict):
+            # Dict arguments will always be optional
+            kwargs[name]["type"] = optional_type(json.loads)
+        elif (contains_type(type_hints, str)
+              or any(is_not_builtin(th) for th in type_hints)):
+            kwargs[name]["type"] = str
+        else:
+            raise ValueError(
+                f"Unsupported type {type_hints} for argument {name}.")
+
+        # If None is in type_hints, make the argument optional.
+        # But not if it's a bool, argparse will handle this better.
+        if type(None) in type_hints and not contains_type(type_hints, bool):
+            kwargs[name]["type"] = optional_type(kwargs[name]["type"])
+            if kwargs[name].get("choices"):
+                kwargs[name]["choices"].append("None")
+    return kwargs
 
 
 @dataclass
@@ -192,18 +273,23 @@ class EngineArgs:
         get_field(MultiModalConfig, "limit_per_prompt")
     mm_processor_kwargs: Optional[Dict[str, Any]] = None
     disable_mm_preprocessor_cache: bool = False
+    # LoRA fields
     enable_lora: bool = False
-    enable_lora_bias: bool = False
-    max_loras: int = 1
-    max_lora_rank: int = 16
+    enable_lora_bias: bool = LoRAConfig.bias_enabled
+    max_loras: int = LoRAConfig.max_loras
+    max_lora_rank: int = LoRAConfig.max_lora_rank
+    fully_sharded_loras: bool = LoRAConfig.fully_sharded_loras
+    max_cpu_loras: Optional[int] = LoRAConfig.max_cpu_loras
+    lora_dtype: Optional[Union[str, torch.dtype]] = LoRAConfig.lora_dtype
+    lora_extra_vocab_size: int = LoRAConfig.lora_extra_vocab_size
+    long_lora_scaling_factors: Optional[tuple[float, ...]] = \
+        LoRAConfig.long_lora_scaling_factors
+    # PromptAdapter fields
     enable_prompt_adapter: bool = False
-    max_prompt_adapters: int = 1
-    max_prompt_adapter_token: int = 0
-    fully_sharded_loras: bool = False
-    lora_extra_vocab_size: int = 256
-    long_lora_scaling_factors: Optional[Tuple[float]] = None
-    lora_dtype: Optional[Union[str, torch.dtype]] = 'auto'
-    max_cpu_loras: Optional[int] = None
+    max_prompt_adapters: int = PromptAdapterConfig.max_prompt_adapters
+    max_prompt_adapter_token: int = \
+        PromptAdapterConfig.max_prompt_adapter_token
+
     device: Device = DeviceConfig.device
     num_scheduler_steps: int = SchedulerConfig.num_scheduler_steps
     multi_step_stream_outputs: bool = SchedulerConfig.multi_step_stream_outputs
@@ -274,89 +360,6 @@ class EngineArgs:
     def add_cli_args(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
         """Shared CLI arguments for vLLM engine."""
 
-        def is_type_in_union(cls: TypeHint, type: TypeHint) -> bool:
-            """Check if the class is a type in a union type."""
-            is_union = get_origin(cls) is Union
-            type_in_union = type in [get_origin(a) or a for a in get_args(cls)]
-            return is_union and type_in_union
-
-        def get_type_from_union(cls: TypeHint, type: TypeHintT) -> TypeHintT:
-            """Get the type in a union type."""
-            for arg in get_args(cls):
-                if (get_origin(arg) or arg) is type:
-                    return arg
-            raise ValueError(f"Type {type} not found in union type {cls}.")
-
-        def is_optional(cls: TypeHint) -> TypeIs[Union[Any, None]]:
-            """Check if the class is an optional type."""
-            return is_type_in_union(cls, type(None))
-
-        def can_be_type(cls: TypeHint, type: TypeHintT) -> TypeIs[TypeHintT]:
-            """Check if the class can be of type."""
-            return cls is type or get_origin(cls) is type or is_type_in_union(
-                cls, type)
-
-        def is_custom_type(cls: TypeHint) -> bool:
-            """Check if the class is a custom type."""
-            return cls.__module__ != "builtins"
-
-        def get_kwargs(cls: ConfigType) -> dict[str, Any]:
-            cls_docs = get_attr_docs(cls)
-            kwargs = {}
-            for field in fields(cls):
-                # Get the default value of the field
-                default = field.default
-                if field.default_factory is not MISSING:
-                    default = field.default_factory()
-
-                # Get the help text for the field
-                name = field.name
-                help = cls_docs[name]
-                # Escape % for argparse
-                help = help.replace("%", "%%")
-
-                # Initialise the kwargs dictionary for the field
-                kwargs[name] = {"default": default, "help": help}
-
-                # Make note of if the field is optional and get the actual
-                # type of the field if it is
-                optional = is_optional(field.type)
-                field_type = get_args(
-                    field.type)[0] if optional else field.type
-
-                # Set type, action and choices for the field depending on the
-                # type of the field
-                if can_be_type(field_type, bool):
-                    # Creates --no-<name> and --<name> flags
-                    kwargs[name]["action"] = argparse.BooleanOptionalAction
-                    kwargs[name]["type"] = bool
-                elif can_be_type(field_type, Literal):
-                    # Creates choices from Literal arguments
-                    if is_type_in_union(field_type, Literal):
-                        field_type = get_type_from_union(field_type, Literal)
-                    choices = get_args(field_type)
-                    kwargs[name]["choices"] = choices
-                    choice_type = type(choices[0])
-                    assert all(type(c) is choice_type for c in choices), (
-                        f"All choices must be of the same type. "
-                        f"Got {choices} with types {[type(c) for c in choices]}"
-                    )
-                    kwargs[name]["type"] = choice_type
-                elif can_be_type(field_type, int):
-                    kwargs[name]["type"] = optional_int if optional else int
-                elif can_be_type(field_type, float):
-                    kwargs[name][
-                        "type"] = optional_float if optional else float
-                elif can_be_type(field_type, dict):
-                    kwargs[name]["type"] = optional_dict
-                elif (can_be_type(field_type, str)
-                      or is_custom_type(field_type)):
-                    kwargs[name]["type"] = optional_str if optional else str
-                else:
-                    raise ValueError(
-                        f"Unsupported type {field.type} for argument {name}. ")
-            return kwargs
-
         # Model arguments
         parser.add_argument(
             '--model',
@@ -374,13 +377,13 @@ class EngineArgs:
             'which task to use.')
         parser.add_argument(
             '--tokenizer',
-            type=optional_str,
+            type=optional_type(str),
             default=EngineArgs.tokenizer,
             help='Name or path of the huggingface tokenizer to use. '
             'If unspecified, model name or path will be used.')
         parser.add_argument(
             "--hf-config-path",
-            type=optional_str,
+            type=optional_type(str),
             default=EngineArgs.hf_config_path,
             help='Name or path of the huggingface config to use. '
             'If unspecified, model name or path will be used.')
@@ -392,21 +395,21 @@ class EngineArgs:
             'the input. The generated output will contain token ids.')
         parser.add_argument(
             '--revision',
-            type=optional_str,
+            type=optional_type(str),
             default=None,
             help='The specific model version to use. It can be a branch '
             'name, a tag name, or a commit id. If unspecified, will use '
             'the default version.')
         parser.add_argument(
             '--code-revision',
-            type=optional_str,
+            type=optional_type(str),
             default=None,
             help='The specific revision to use for the model code on '
             'Hugging Face Hub. It can be a branch name, a tag name, or a '
             'commit id. If unspecified, will use the default version.')
         parser.add_argument(
             '--tokenizer-revision',
-            type=optional_str,
+            type=optional_type(str),
             default=None,
             help='Revision of the huggingface tokenizer to use. '
             'It can be a branch name, a tag name, or a commit id. '
@@ -497,7 +500,7 @@ class EngineArgs:
 
         parser.add_argument(
             '--logits-processor-pattern',
-            type=optional_str,
+            type=optional_type(str),
             default=None,
             help='Optional regex pattern specifying valid logits processor '
             'qualified names that can be passed with the `logits_processors` '
@@ -596,7 +599,7 @@ class EngineArgs:
         # Quantization settings.
         parser.add_argument('--quantization',
                             '-q',
-                            type=optional_str,
+                            type=optional_type(str),
                             choices=[*QUANTIZATION_METHODS, None],
                             default=EngineArgs.quantization,
                             help='Method used to quantize the weights. If '
@@ -685,70 +688,49 @@ class EngineArgs:
             'inputs.')
 
         # LoRA related configs
-        parser.add_argument('--enable-lora',
-                            action='store_true',
-                            help='If True, enable handling of LoRA adapters.')
-        parser.add_argument('--enable-lora-bias',
-                            action='store_true',
-                            help='If True, enable bias for LoRA adapters.')
-        parser.add_argument('--max-loras',
-                            type=int,
-                            default=EngineArgs.max_loras,
-                            help='Max number of LoRAs in a single batch.')
-        parser.add_argument('--max-lora-rank',
-                            type=int,
-                            default=EngineArgs.max_lora_rank,
-                            help='Max LoRA rank.')
-        parser.add_argument(
-            '--lora-extra-vocab-size',
-            type=int,
-            default=EngineArgs.lora_extra_vocab_size,
-            help=('Maximum size of extra vocabulary that can be '
-                  'present in a LoRA adapter (added to the base '
-                  'model vocabulary).'))
-        parser.add_argument(
+        lora_kwargs = get_kwargs(LoRAConfig)
+        lora_group = parser.add_argument_group(
+            title="LoRAConfig",
+            description=LoRAConfig.__doc__,
+        )
+        lora_group.add_argument(
+            '--enable-lora',
+            action=argparse.BooleanOptionalAction,
+            help='If True, enable handling of LoRA adapters.')
+        lora_group.add_argument('--enable-lora-bias',
+                                **lora_kwargs["bias_enabled"])
+        lora_group.add_argument('--max-loras', **lora_kwargs["max_loras"])
+        lora_group.add_argument('--max-lora-rank',
+                                **lora_kwargs["max_lora_rank"])
+        lora_group.add_argument('--lora-extra-vocab-size',
+                                **lora_kwargs["lora_extra_vocab_size"])
+        lora_group.add_argument(
             '--lora-dtype',
-            type=str,
-            default=EngineArgs.lora_dtype,
-            choices=['auto', 'float16', 'bfloat16'],
-            help=('Data type for LoRA. If auto, will default to '
-                  'base model dtype.'))
-        parser.add_argument(
-            '--long-lora-scaling-factors',
-            type=optional_str,
-            default=EngineArgs.long_lora_scaling_factors,
-            help=('Specify multiple scaling factors (which can '
-                  'be different from base model scaling factor '
-                  '- see eg. Long LoRA) to allow for multiple '
-                  'LoRA adapters trained with those scaling '
-                  'factors to be used at the same time. If not '
-                  'specified, only adapters trained with the '
-                  'base model scaling factor are allowed.'))
-        parser.add_argument(
-            '--max-cpu-loras',
-            type=int,
-            default=EngineArgs.max_cpu_loras,
-            help=('Maximum number of LoRAs to store in CPU memory. '
-                  'Must be >= than max_loras.'))
-        parser.add_argument(
-            '--fully-sharded-loras',
-            action='store_true',
-            help=('By default, only half of the LoRA computation is '
-                  'sharded with tensor parallelism. '
-                  'Enabling this will use the fully sharded layers. '
-                  'At high sequence length, max rank or '
-                  'tensor parallel size, this is likely faster.'))
-        parser.add_argument('--enable-prompt-adapter',
-                            action='store_true',
-                            help='If True, enable handling of PromptAdapters.')
-        parser.add_argument('--max-prompt-adapters',
-                            type=int,
-                            default=EngineArgs.max_prompt_adapters,
-                            help='Max number of PromptAdapters in a batch.')
-        parser.add_argument('--max-prompt-adapter-token',
-                            type=int,
-                            default=EngineArgs.max_prompt_adapter_token,
-                            help='Max number of PromptAdapters tokens')
+            **lora_kwargs["lora_dtype"],
+        )
+        lora_group.add_argument('--long-lora-scaling-factors',
+                                **lora_kwargs["long_lora_scaling_factors"])
+        lora_group.add_argument('--max-cpu-loras',
+                                **lora_kwargs["max_cpu_loras"])
+        lora_group.add_argument('--fully-sharded-loras',
+                                **lora_kwargs["fully_sharded_loras"])
+
+        # PromptAdapter related configs
+        prompt_adapter_kwargs = get_kwargs(PromptAdapterConfig)
+        prompt_adapter_group = parser.add_argument_group(
+            title="PromptAdapterConfig",
+            description=PromptAdapterConfig.__doc__,
+        )
+        prompt_adapter_group.add_argument(
+            '--enable-prompt-adapter',
+            action=argparse.BooleanOptionalAction,
+            help='If True, enable handling of PromptAdapters.')
+        prompt_adapter_group.add_argument(
+            '--max-prompt-adapters',
+            **prompt_adapter_kwargs["max_prompt_adapters"])
+        prompt_adapter_group.add_argument(
+            '--max-prompt-adapter-token',
+            **prompt_adapter_kwargs["max_prompt_adapter_token"])
 
         # Device arguments
         device_kwargs = get_kwargs(DeviceConfig)
@@ -757,12 +739,6 @@ class EngineArgs:
             description=DeviceConfig.__doc__,
         )
         device_group.add_argument("--device", **device_kwargs["device"])
-
-        parser.add_argument('--num-scheduler-steps',
-                            type=int,
-                            default=1,
-                            help=('Maximum number of forward steps per '
-                                  'scheduler call.'))
 
         # Speculative arguments
         speculative_group = parser.add_argument_group(
@@ -784,13 +760,6 @@ class EngineArgs:
             help="The pattern(s) to ignore when loading the model."
             "Default to `original/**/*` to avoid repeated loading of llama's "
             "checkpoints.")
-        parser.add_argument(
-            '--preemption-mode',
-            type=str,
-            default=None,
-            help='If \'recompute\', the engine performs preemption by '
-            'recomputing; If \'swap\', the engine performs preemption by '
-            'block swapping.')
 
         parser.add_argument(
             "--served-model-name",
@@ -870,14 +839,18 @@ class EngineArgs:
                                      **scheduler_kwargs["num_lookahead_slots"])
         scheduler_group.add_argument('--scheduler-delay-factor',
                                      **scheduler_kwargs["delay_factor"])
-        scheduler_group.add_argument(
-            '--enable-chunked-prefill',
-            **scheduler_kwargs["enable_chunked_prefill"])
+        scheduler_group.add_argument('--preemption-mode',
+                                     **scheduler_kwargs["preemption_mode"])
+        scheduler_group.add_argument('--num-scheduler-steps',
+                                     **scheduler_kwargs["num_scheduler_steps"])
         scheduler_group.add_argument(
             '--multi-step-stream-outputs',
             **scheduler_kwargs["multi_step_stream_outputs"])
         scheduler_group.add_argument('--scheduling-policy',
                                      **scheduler_kwargs["policy"])
+        scheduler_group.add_argument(
+            '--enable-chunked-prefill',
+            **scheduler_kwargs["enable_chunked_prefill"])
         scheduler_group.add_argument(
             "--disable-chunked-mm-input",
             **scheduler_kwargs["disable_chunked_mm_input"])
@@ -935,7 +908,7 @@ class EngineArgs:
             'class without changing the existing functions.')
         parser.add_argument(
             "--generation-config",
-            type=optional_str,
+            type=optional_type(str),
             default="auto",
             help="The folder path to the generation config. "
             "Defaults to 'auto', the generation config will be loaded from "
@@ -1391,7 +1364,7 @@ class EngineArgs:
             ) or envs.VLLM_ATTENTION_BACKEND == "FLASH_ATTN_VLLM_V1"
             supported = False
             if fp8_attention and will_use_fa:
-                from vllm.vllm_flash_attn.fa_utils import (
+                from vllm.attention.utils.fa_utils import (
                     flash_attn_supports_fp8)
                 supported = flash_attn_supports_fp8()
             if not supported:
@@ -1450,7 +1423,7 @@ class EngineArgs:
             if speculative_method:
                 if speculative_method in ("ngram", "[ngram]"):
                     is_ngram_enabled = True
-                elif speculative_method == "eagle":
+                elif speculative_method in ("eagle", "eagle3"):
                     is_eagle_enabled = True
             else:
                 speculative_model = self.speculative_config.get("model")

@@ -21,7 +21,6 @@ class Request:
     def __init__(
         self,
         request_id: str,
-        prompt: Optional[str],
         prompt_token_ids: list[int],
         token_type_ids: Optional[list[int]],
         multi_modal_inputs: Optional[list[MultiModalKwargs]],
@@ -56,7 +55,6 @@ class Request:
             raise ValueError(
                 "sampling_params and pooling_params can't both be set")
 
-        self.prompt = prompt
         self.prompt_token_ids = prompt_token_ids
         self.token_type_ids = token_type_ids
         self.num_prompt_tokens = len(self.prompt_token_ids)
@@ -92,7 +90,6 @@ class Request:
 
         return cls(
             request_id=request.request_id,
-            prompt=request.prompt,
             prompt_token_ids=request.prompt_token_ids,
             token_type_ids=request.token_type_ids,
             multi_modal_inputs=request.mm_inputs,

@@ -51,9 +51,6 @@ class EngineCoreRequest(
     # due to circular imports and typing we have in data.py
 
     request_id: str
-    # NOTE(ywang96): original text prompt is needed when a request is added to
-    # Detokenizer, but set to None when it is added to EngineCoreClient.
-    prompt: Optional[str]
     prompt_token_ids: list[int]
     token_type_ids: Optional[list[int]]
     mm_inputs: Optional[Sequence[Optional[MultiModalKwargs]]]

@@ -6,7 +6,7 @@ import itertools
 import pytest
 import torch
 
-from tests.kernels.utils_block import native_w8a8_block_matmul
+from tests.kernels.quant_utils import native_w8a8_block_matmul
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.fused_moe import fused_moe

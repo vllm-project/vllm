@@ -74,13 +74,6 @@ class Scheduler(SchedulerInterface):
         num_gpu_blocks = self.cache_config.num_gpu_blocks
         assert num_gpu_blocks is not None and num_gpu_blocks > 0
 
-        # Create the KV cache manager.
-        self.kv_cache_manager = KVCacheManager(
-            kv_cache_config=kv_cache_config,
-            max_model_len=self.max_model_len,
-            enable_caching=self.cache_config.enable_prefix_caching,
-            caching_hash_algo=self.cache_config.prefix_caching_hash_algo,
-            log_stats=self.log_stats)
         self.block_size = self.cache_config.block_size
 
         # req_id -> Request
@@ -122,11 +115,24 @@ class Scheduler(SchedulerInterface):
         self.encoder_cache_manager = EncoderCacheManager(
             cache_size=encoder_cache_size)
 
-        self.num_lookahead_tokens = 0
         speculative_config = vllm_config.speculative_config
-        if speculative_config and speculative_config.method == "eagle":
-            self.num_lookahead_tokens = \
-                speculative_config.num_speculative_tokens
+
+        self.use_eagle = False
+        self.num_spec_tokens = self.num_lookahead_tokens = 0
+        if speculative_config:
+            self.num_spec_tokens = speculative_config.num_speculative_tokens
+            if speculative_config.use_eagle():
+                self.use_eagle = True
+                self.num_lookahead_tokens = self.num_spec_tokens
+
+        # Create the KV cache manager.
+        self.kv_cache_manager = KVCacheManager(
+            kv_cache_config=kv_cache_config,
+            max_model_len=self.max_model_len,
+            enable_caching=self.cache_config.enable_prefix_caching,
+            caching_hash_algo=self.cache_config.prefix_caching_hash_algo,
+            use_eagle=self.use_eagle,
+            log_stats=self.log_stats)
 
     def schedule(self) -> SchedulerOutput:
         # NOTE(woosuk) on the scheduling algorithm:
@@ -316,7 +322,8 @@ class Scheduler(SchedulerInterface):
 
                 # Get already-cached tokens.
                 computed_blocks, num_computed_tokens = \
-                    self.kv_cache_manager.get_computed_blocks(request)
+                    self.kv_cache_manager.get_computed_blocks(
+                        request)
 
                 # Get externally-cached tokens if using a KVConnector.
                 num_external_tokens = (
@@ -827,7 +834,8 @@ class Scheduler(SchedulerInterface):
         if not self.log_stats:
             return None
         if spec_decoding_stats is None:
-            spec_decoding_stats = SpecDecodingStats()
-        spec_decoding_stats.observe(num_draft_tokens=num_draft_tokens,
-                                    num_accepted_tokens=num_accepted_tokens)
+            spec_decoding_stats = SpecDecodingStats.new(self.num_spec_tokens)
+        spec_decoding_stats.observe_draft(
+            num_draft_tokens=num_draft_tokens,
+            num_accepted_tokens=num_accepted_tokens)
         return spec_decoding_stats

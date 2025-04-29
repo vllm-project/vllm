@@ -115,6 +115,7 @@ class RequestState:
         cls,
         tokenizer: AnyTokenizer,
         request: EngineCoreRequest,
+        prompt: Optional[str],
         parent_req: Optional[ParentRequest],
         request_index: int,
         queue: Optional[RequestOutputCollector],
@@ -148,7 +149,7 @@ class RequestState:
             lora_name=(request.lora_request.name
                        if request.lora_request is not None else None),
             output_kind=output_kind,
-            prompt=request.prompt,
+            prompt=prompt,
             prompt_token_ids=request.prompt_token_ids,
             logprobs_processor=logprobs_processor,
             detokenizer=detokenizer,
@@ -309,6 +310,7 @@ class OutputProcessor:
     def add_request(
         self,
         request: EngineCoreRequest,
+        prompt: Optional[str],
         parent_req: Optional[ParentRequest] = None,
         request_index: int = 0,
         queue: Optional[RequestOutputCollector] = None,
@@ -320,6 +322,7 @@ class OutputProcessor:
         req_state = RequestState.from_new_request(
             tokenizer=self.tokenizer.get_lora_tokenizer(request.lora_request),
             request=request,
+            prompt=prompt,
             parent_req=parent_req,
             request_index=request_index,
             queue=queue,
