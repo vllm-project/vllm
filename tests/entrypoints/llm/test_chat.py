@@ -9,7 +9,7 @@ from vllm.distributed import cleanup_dist_env_and_memory
 from ..openai.test_vision import TEST_IMAGE_URLS
 
 
-@pytest.fixture(scope="module")
+@pytest.fixture(scope="function")
 def text_llm():
     # pytest caches the fixture so we use weakref.proxy to
     # enable garbage collection
@@ -73,7 +73,7 @@ def test_multi_chat(text_llm):
     assert len(outputs) == 2
 
 
-@pytest.fixture(scope="module")
+@pytest.fixture(scope="function")
 def vision_llm():
     # pytest caches the fixture so we use weakref.proxy to
     # enable garbage collection
@@ -146,7 +146,7 @@ def test_llm_chat_tokenization_no_double_bos(text_llm):
     assert prompt_token_ids[1] != bos_token, "Double BOS"
 
 
-@pytest.fixture(scope="module")
+@pytest.fixture(scope="function")
 def thinking_llm():
     # pytest caches the fixture so we use weakref.proxy to
     # enable garbage collection
