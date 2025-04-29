@@ -33,7 +33,8 @@ class HashableList(list):
 
 
 def _merge_mm_kwargs(model_config: "ModelConfig", **kwargs):
-    base_kwargs = model_config.mm_processor_kwargs
+    mm_config = model_config.get_multimodal_config()
+    base_kwargs = mm_config.mm_processor_kwargs
     if base_kwargs is None:
         base_kwargs = {}
 

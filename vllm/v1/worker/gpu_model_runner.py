@@ -1057,7 +1057,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 num_input_tokens = round_up(num_scheduled_tokens, tp_size)
             else:
                 num_input_tokens = num_scheduled_tokens
-        attn_metadata.num_input_tokens = num_input_tokens
 
         # _prepare_inputs may reorder the batch, so we must gather multi
         # modal outputs after that to ensure the correct order
@@ -1118,7 +1117,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         # Run the decoder.
         # Use persistent buffers for CUDA graphs.
-        with set_forward_context(attn_metadata, self.vllm_config):
+        with set_forward_context(attn_metadata,
+                                 self.vllm_config,
+                                 num_tokens=num_input_tokens):
             output = self.model(
                 input_ids=input_ids,
                 positions=positions,
