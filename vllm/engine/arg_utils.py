@@ -672,20 +672,12 @@ class EngineArgs:
         )
         multimodal_group.add_argument('--limit-mm-per-prompt',
                                       **multimodal_kwargs["limit_per_prompt"])
-
-        parser.add_argument(
+        multimodal_group.add_argument(
             '--mm-processor-kwargs',
-            default=None,
-            type=json.loads,
-            help=('Overrides for the multi-modal processor obtained from '
-                  '``AutoProcessor.from_pretrained``. The available overrides '
-                  'depend on the model that is being run.'
-                  'For example, for Phi-3-Vision: ``{"num_crops": 4}``.'))
-        parser.add_argument(
+            **multimodal_kwargs["mm_processor_kwargs"])
+        multimodal_group.add_argument(
             '--disable-mm-preprocessor-cache',
-            action='store_true',
-            help='If True, disable caching of the processed multi-modal '
-            'inputs.')
+            **multimodal_kwargs["disable_mm_preprocessor_cache"])
 
         # LoRA related configs
         lora_kwargs = get_kwargs(LoRAConfig)
