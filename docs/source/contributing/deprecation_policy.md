@@ -44,7 +44,7 @@ warning (e.g., "This will be removed in v0.10.0").
   - User-facing documentation
   - Release notes
   - GitHub Issue (RFC) for feedback
-  - Documentation for Python APIs
+  - Documentation and use of the `@typing_extensions.deprecated` decorator for Python APIs
 
 **2.Deprecated (Off By Default)**
 
