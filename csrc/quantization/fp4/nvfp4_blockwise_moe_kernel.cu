@@ -45,22 +45,24 @@ __global__ void __get_group_gemm_starts(
     ElementAccumulator* alphas_base_as_int, const int32_t* expert_offsets,
     const int32_t* sf_offsets, const int32_t* problem_sizes_as_shapes,
     const int K, const int N) {
-  int32_t expert_id = threadIdx.x;
+  int64_t expert_id = threadIdx.x;
   if (expert_id >= gridDim.x * blockDim.x) {
     return;
   }
-  int32_t expert_offset = expert_offsets[expert_id];
-  int32_t sf_offset = sf_offsets[expert_id];
+  // Originally int32_t but upcasting to int64_t to avoid overflow
+  // during offset calculations
+  int64_t expert_offset = static_cast<int64_t>(expert_offsets[expert_id]);
+  int64_t sf_offset = static_cast<int64_t>(sf_offsets[expert_id]);
   // size for block in block scale.
-  int32_t group_size = 16;
-  int32_t m = problem_sizes_as_shapes[expert_id * 3];
-  int32_t n = problem_sizes_as_shapes[expert_id * 3 + 1];
-  int32_t k = problem_sizes_as_shapes[expert_id * 3 + 2];
+  int64_t group_size = 16;
+  int64_t m = static_cast<int64_t>(problem_sizes_as_shapes[expert_id * 3]);
+  int64_t n =  static_cast<int64_t>(problem_sizes_as_shapes[expert_id * 3 + 1]);
+  int64_t k =  static_cast<int64_t>(problem_sizes_as_shapes[expert_id * 3 + 2]);
   assert((m >= 0 && n == N && k == K && k % 2 == 0) &&
          "unexpected problem sizes");
 
-  int32_t half_k = static_cast<int>(k / 2);
-  int32_t group_k = static_cast<int>(k / group_size);
+  int64_t half_k = static_cast<int64_t>(k / 2);
+  int64_t group_k = static_cast<int64_t>(k / group_size);
   // Shape of A as uint8/byte = [M, K // 2]
   // Shape of B as uint8/byte = [E, N, K // 2]
   a_offsets[expert_id] = a_base_as_int + expert_offset * half_k;
@@ -87,9 +89,15 @@ __global__ void __get_group_gemm_starts(
   LayoutSFB* layout_sfb_ptr = layout_sfb_base_as_int + expert_id;
 
   *layout_sfa_ptr =
-      ScaleConfig::tile_atom_to_shape_SFA(cute::make_shape(m, n, k, 1));
+      ScaleConfig::tile_atom_to_shape_SFA(cute::make_shape(static_cast<int>(m),
+                                                           static_cast<int>(n),
+                                                           static_cast<int>(k),
+                                                           1));
   *layout_sfb_ptr =
-      ScaleConfig::tile_atom_to_shape_SFB(cute::make_shape(m, n, k, 1));
+      ScaleConfig::tile_atom_to_shape_SFB(cute::make_shape(static_cast<int>(m),
+                                                           static_cast<int>(n),
+                                                           static_cast<int>(k),
+                                                           1));
 }
 
 #define __CALL_GET_STARTS_KERNEL_BLOCKSCALE(ELEMENT_AB_TYPE, SF_TYPE,         \
