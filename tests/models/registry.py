@@ -120,7 +120,8 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
                                          trust_remote_code=True),
     "BaichuanForCausalLM": _HfExamplesInfo("baichuan-inc/Baichuan2-7B-chat",
                                          trust_remote_code=True),
-    "BambaForCausalLM": _HfExamplesInfo("ibm-ai-platform/Bamba-9B"),
+    "BambaForCausalLM": _HfExamplesInfo("ibm-ai-platform/Bamba-9B",
+                                        extras={"tiny": "hmellor/bamba-tiny-random"}),  # noqa: E501
     "BloomForCausalLM": _HfExamplesInfo("bigscience/bloom-560m",
                                         {"1b": "bigscience/bloomz-1b1"}),
     "ChatGLMModel": _HfExamplesInfo("THUDM/chatglm3-6b",
