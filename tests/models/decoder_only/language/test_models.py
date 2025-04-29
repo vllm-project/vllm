@@ -29,7 +29,7 @@ AITER_MODEL_LIST = [
     "openbmb/MiniCPM3-4B",
     "Qwen/Qwen-7B-Chat",
     "Qwen/Qwen2.5-0.5B-Instruct",
-    "ehristoforu/Falcon3-MoE-2x7B-Insruct",
+    "TitanML/tiny-mixtral",
 ]
 
 
@@ -83,9 +83,8 @@ AITER_MODEL_LIST = [
         pytest.param("stabilityai/stablelm-3b-4e1t"),  # stablelm
         pytest.param("bigcode/starcoder2-3b"),  # starcoder2
         pytest.param(
-            "ehristoforu/Falcon3-MoE-2x7B-Insruct",  # mixtral
-            marks=[pytest.mark.cpu_model,
-                   large_gpu_mark(min_gb=48)],
+            "TitanML/tiny-mixtral",  # mixtral
+            marks=[pytest.mark.cpu_model],
         )
     ])
 @pytest.mark.parametrize("max_tokens", [32])
