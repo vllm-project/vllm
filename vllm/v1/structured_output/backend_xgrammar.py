@@ -183,14 +183,10 @@ def has_xgrammar_unsupported_json_features(schema: dict[str, Any]) -> bool:
             return True
 
         # Check for array unsupported keywords
-        if obj.get("type") == "array" and any(key in obj for key in (
-                "uniqueItems",
-                "contains",
-                "minContains",
-                "maxContains",
-                "minItems",
-                "maxItems",
-        )):
+        if obj.get("type") == "array" and any(
+                key in obj
+                for key in ("uniqueItems", "contains", "minContains",
+                            "maxContains", "minItems", "maxItems")):
             return True
 
         # Unsupported keywords for strings
@@ -198,12 +194,9 @@ def has_xgrammar_unsupported_json_features(schema: dict[str, Any]) -> bool:
             return True
 
         # Unsupported keywords for objects
-        if obj.get("type") == "object" and any(key in obj for key in (
-                "minProperties",
-                "maxProperties",
-                "propertyNames",
-                "patternProperties",
-        )):
+        if obj.get("type") == "object" and any(
+                key in obj for key in ("minProperties", "maxProperties",
+                                       "propertyNames", "patternProperties")):
             return True
 
         # Recursively check all nested objects and arrays
@@ -235,16 +228,16 @@ def validate_xgrammar_grammar(sampling_params: SamplingParams) -> None:
         try:
             xgr.Grammar.from_regex(gd_params.regex)
         except Exception as err:
-            raise ValueError(
-                f"Failed to transform regex into a grammar: {err}") from err
+            raise ValueError("Failed to transform regex into a grammar: "
+                             f"{err}") from err
 
     if gd_params.choice:
         choice_grammar = choice_as_grammar(gd_params.choice)
         try:
             xgr.Grammar.from_ebnf(choice_grammar)
         except Exception as err:
-            raise ValueError(
-                "Failed to transform choices into a grammar: {err}") from err
+            raise ValueError("Failed to transform choices into a grammar: "
+                             "{err}") from err
         gd_params.choice = None
         gd_params.grammar = choice_grammar
         return

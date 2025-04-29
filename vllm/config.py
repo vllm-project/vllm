@@ -70,16 +70,8 @@ _DEFAULT_MAX_NUM_BATCHED_TOKENS = 2048
 _POOLING_MODEL_MAX_NUM_BATCHED_TOKENS = 32768
 _MULTIMODAL_MODEL_MAX_NUM_BATCHED_TOKENS = 5120
 
-TaskOption = Literal[
-    "auto",
-    "generate",
-    "embedding",
-    "embed",
-    "classify",
-    "score",
-    "reward",
-    "transcription",
-]
+TaskOption = Literal["auto", "generate", "embedding", "embed", "classify",
+                     "score", "reward", "transcription"]
 
 _ResolvedTask = Literal["generate", "embed", "classify", "score", "reward",
                         "draft", "transcription"]
@@ -437,9 +429,8 @@ class ModelConfig:
 
         self.maybe_pull_model_tokenizer_for_s3(model, tokenizer)
 
-        if ((backend := envs.VLLM_ATTENTION_BACKEND)
-                and backend == "FLASHINFER"
-                and find_spec("flashinfer") is None):
+        if (backend := envs.VLLM_ATTENTION_BACKEND
+            ) and backend == "FLASHINFER" and find_spec("flashinfer") is None:
             raise ValueError(
                 "VLLM_ATTENTION_BACKEND is set to FLASHINFER, but flashinfer "
                 "module was not found. See "
@@ -467,13 +458,9 @@ class ModelConfig:
             raise ValueError(
                 "Sleep mode is not supported on current platform.")
 
-        hf_config = get_config(
-            self.hf_config_path or self.model,
-            trust_remote_code,
-            revision,
-            code_revision,
-            config_format,
-        )
+        hf_config = get_config(self.hf_config_path or self.model,
+                               trust_remote_code, revision, code_revision,
+                               config_format)
 
         if hf_overrides_kw:
             logger.info("Overriding HF config with %s", hf_overrides_kw)
@@ -503,11 +490,9 @@ class ModelConfig:
             isinstance(sliding_window, list) or
             (self.hf_text_config.model_type in interleaved_attn_models))
 
-        if not self.disable_sliding_window and has_interleaved_attention:
-            if (backend := envs.VLLM_ATTENTION_BACKEND) in (
-                    "XFORMERS",
-                    "FLASHINFER",
-            ):
+        if (not self.disable_sliding_window and has_interleaved_attention):
+            if (backend :=
+                    envs.VLLM_ATTENTION_BACKEND) in ("XFORMERS", "FLASHINFER"):
                 sliding_window_len_min = get_min_sliding_window(
                     self.hf_text_config.sliding_window)
 
@@ -534,8 +519,7 @@ class ModelConfig:
             disable_sliding_window=self.disable_sliding_window,
             sliding_window_len=self.get_hf_config_sliding_window(),
             spec_target_max_model_len=spec_target_max_model_len,
-            encoder_config=self.encoder_config,
-        )
+            encoder_config=self.encoder_config)
         self.served_model_name = get_served_model_name(model,
                                                        served_model_name)
         self.multimodal_config = self._init_multimodal_config(
@@ -621,13 +605,11 @@ class ModelConfig:
             )
 
         if limit_mm_per_prompt:
-            raise ValueError(
-                "`limit_mm_per_prompt` is only supported for multimodal models."
-            )
+            raise ValueError("`limit_mm_per_prompt` is only supported for "
+                             "multimodal models.")
         if mm_processor_kwargs:
-            raise ValueError(
-                "`mm_processor_kwargs` is only supported for multimodal models."
-            )
+            raise ValueError("`mm_processor_kwargs` is only supported for "
+                             "multimodal models.")
         if disable_mm_preprocessor_cache:
             raise ValueError("`disable_mm_preprocessor_cache` is only "
                              "supported for multimodal models.")
@@ -642,6 +624,7 @@ class ModelConfig:
         self,
         override_pooler_config: Optional["PoolerConfig"],
     ) -> Optional["PoolerConfig"]:
+
         if self.runner_type == "pooling":
             user_config = override_pooler_config or PoolerConfig()
 
@@ -757,10 +740,7 @@ class ModelConfig:
 
                 logger.info(
                     "This model supports multiple tasks: %s. "
-                    "Defaulting to '%s'.",
-                    supported_tasks,
-                    selected_task,
-                )
+                    "Defaulting to '%s'.", supported_tasks, selected_task)
         else:
             # Aliases
             if task_option == "embedding":
@@ -796,19 +776,9 @@ class ModelConfig:
     def _verify_quantization(self) -> None:
         supported_quantization = QUANTIZATION_METHODS
         optimized_quantization_methods = [
-            "fp8",
-            "marlin",
-            "modelopt",
-            "gptq_marlin_24",
-            "gptq_marlin",
-            "awq_marlin",
-            "fbgemm_fp8",
-            "compressed-tensors",
-            "experts_int8",
-            "quark",
-            "nvfp4",
-            "bitblas",
-            "gptq_bitblas",
+            "fp8", "marlin", "modelopt", "gptq_marlin_24", "gptq_marlin",
+            "awq_marlin", "fbgemm_fp8", "compressed-tensors", "experts_int8",
+            "quark", "nvfp4", "bitblas", "gptq_bitblas"
         ]
         if self.quantization is not None:
             self.quantization = self.quantization.lower()
@@ -879,29 +849,24 @@ class ModelConfig:
                     f"Unknown quantization method: {self.quantization}. Must "
                     f"be one of {supported_quantization}.")
             from vllm.platforms import current_platform
-
             current_platform.verify_quantization(self.quantization)
             if self.quantization not in optimized_quantization_methods:
                 logger.warning(
                     "%s quantization is not fully "
                     "optimized yet. The speed can be slower than "
-                    "non-quantized models.",
-                    self.quantization,
-                )
+                    "non-quantized models.", self.quantization)
 
     def _verify_cuda_graph(self) -> None:
         if self.max_seq_len_to_capture is None:
             self.max_seq_len_to_capture = self.max_model_len
         self.max_seq_len_to_capture = min(self.max_seq_len_to_capture,
                                           self.max_model_len)
-        ROCM_UNSUPPORTED_MODELS = ["mllama"]
+        ROCM_UNSUPPORTED_MODELS = ['mllama']
         if (self.hf_config.model_type in ROCM_UNSUPPORTED_MODELS
                 and not self.enforce_eager and current_platform.is_rocm()):
             logger.warning(
                 "CUDA graph is not supported for %s on ROCm yet, fallback "
-                "to the eager mode.",
-                self.hf_config.model_type,
-            )
+                "to the eager mode.", self.hf_config.model_type)
             self.enforce_eager = True
 
     def _verify_bnb_config(self) -> None:
@@ -958,7 +923,6 @@ class ModelConfig:
         # Reminder: Please update docs/source/features/compatibility_matrix.md
         # If the feature combo become valid
         from vllm.platforms import current_platform
-
         if not current_platform.is_async_output_supported(self.enforce_eager):
             self.use_async_output_proc = False
             return
@@ -981,6 +945,7 @@ class ModelConfig:
         self,
         parallel_config: "ParallelConfig",
     ) -> None:
+
         if parallel_config.distributed_executor_backend == "external_launcher":
             assert self.seed is not None, (
                 "Seed must be set when using external launcher backend to "
@@ -1009,7 +974,7 @@ class ModelConfig:
                 self.use_async_output_proc = False
 
     def get_hf_config_sliding_window(
-        self, ) -> Union[Optional[int], list[Optional[int]]]:
+            self) -> Union[Optional[int], list[Optional[int]]]:
         """Get the sliding window size, or None if disabled."""
 
         # Some models, like Qwen2 and Qwen1.5, use `use_sliding_window` in
@@ -1021,7 +986,8 @@ class ModelConfig:
         return getattr(self.hf_text_config, "sliding_window", None)
 
     def get_sliding_window(self) -> Optional[Union[int, list[Optional[int]]]]:
-        """Get the sliding window size, or None if disabled."""
+        """Get the sliding window size, or None if disabled.
+        """
         # If user disables sliding window, return None.
         if self.disable_sliding_window:
             return None
@@ -1038,18 +1004,15 @@ class ModelConfig:
     def is_deepseek_mla(self) -> bool:
         if not hasattr(self.hf_text_config, "model_type"):
             return False
-        elif self.hf_text_config.model_type in (
-                "deepseek_v2",
-                "deepseek_v3",
-                "deepseek_mtp",
-        ):
+        elif self.hf_text_config.model_type in \
+            ('deepseek_v2', 'deepseek_v3', 'deepseek_mtp'):
             return self.hf_text_config.kv_lora_rank is not None
-        elif self.hf_text_config.model_type == "eagle":
+        elif self.hf_text_config.model_type == 'eagle':
             # if the model is an EAGLE module, check for the
             # underlying architecture
-            return (self.hf_text_config.model.model_type
-                    in ("deepseek_v2", "deepseek_v3")
-                    and self.hf_text_config.kv_lora_rank is not None)
+            return self.hf_text_config.model.model_type in \
+                    ('deepseek_v2', 'deepseek_v3') \
+                and self.hf_text_config.kv_lora_rank is not None
         return False
 
     def get_head_size(self) -> int:
@@ -1101,17 +1064,14 @@ class ModelConfig:
                 return self.hf_config.attn_config["kv_n_heads"]
             return self.hf_config.num_attention_heads
         if self.hf_config.model_type == "dbrx":
-            return getattr(
-                self.hf_config.attn_config,
-                "kv_n_heads",
-                self.hf_config.num_attention_heads,
-            )
+            return getattr(self.hf_config.attn_config, "kv_n_heads",
+                           self.hf_config.num_attention_heads)
 
         if self.hf_config.model_type == "nemotron-nas":
             for block in self.hf_config.block_configs:
                 if not block.attention.no_op:
-                    return (self.hf_config.num_attention_heads //
-                            block.attention.n_heads_in_group)
+                    return self.hf_config.num_attention_heads \
+                        // block.attention.n_heads_in_group
 
             raise RuntimeError("Couldn't determine number of kv heads")
 
@@ -1158,7 +1118,6 @@ class ModelConfig:
     def get_layers_start_end_indices(
             self, parallel_config: "ParallelConfig") -> tuple[int, int]:
         from vllm.distributed.utils import get_pp_indices
-
         if self.hf_text_config.model_type == "deepseek_mtp":
             total_num_hidden_layers = getattr(self.hf_text_config,
                                               "num_nextn_predict_layers", 0)
@@ -1184,8 +1143,9 @@ class ModelConfig:
         # This function relies on 'layers_block_type' in hf_config,
         # for w/o this attribute, we will need to have workarounds like so
         attn_block_type = block_type == LayerBlockType.attention
-        is_transformer = (not self.is_hybrid and not self.has_noops
-                          and not self.is_attention_free)
+        is_transformer = not self.is_hybrid and \
+                            not self.has_noops and \
+                            not self.is_attention_free
         start, end = self.get_layers_start_end_indices(parallel_config)
 
         if is_transformer:
@@ -1343,8 +1303,8 @@ class ModelConfig:
 
     @property
     def is_matryoshka(self) -> bool:
-        return hasattr(self.hf_config, "matryoshka_dimensions") or getattr(
-            self.hf_config, "is_matryoshka", False)
+        return (hasattr(self.hf_config, "matryoshka_dimensions")
+                or getattr(self.hf_config, "is_matryoshka", False))
 
     @property
     def matryoshka_dimensions(self):
@@ -1558,7 +1518,7 @@ class LoadConfig:
     """Configuration for loading the model weights."""
 
     load_format: Union[str, LoadFormat,
-                       "BaseModelLoader"] = (LoadFormat.AUTO.value)
+                       "BaseModelLoader"] = LoadFormat.AUTO.value
     """The format of the model weights to load:\n
     - "auto" will try to load the weights in the safetensors format and fall
     back to the pytorch bin format if safetensors format is not available.\n
@@ -1621,8 +1581,7 @@ class LoadConfig:
         if self.ignore_patterns is not None and len(self.ignore_patterns) > 0:
             logger.info(
                 "Ignoring the following patterns when downloading weights: %s",
-                self.ignore_patterns,
-            )
+                self.ignore_patterns)
         else:
             self.ignore_patterns = ["original/**/*"]
 
@@ -1738,8 +1697,7 @@ class ParallelConfig:
             self.get_next_dp_init_port(),
             self.data_parallel_rank,
             self.data_parallel_size,
-            backend="gloo",
-        )
+            backend="gloo")
 
         return dp_group
 
@@ -1772,8 +1730,8 @@ class ParallelConfig:
         return hashlib.sha256(str(factors).encode()).hexdigest()
 
     def __post_init__(self) -> None:
-        self.world_size = (self.pipeline_parallel_size *
-                           self.tensor_parallel_size)
+        self.world_size = self.pipeline_parallel_size * \
+            self.tensor_parallel_size
 
         if self.data_parallel_size > 1:
             # Data parallel was specified in the engine args.
@@ -1791,13 +1749,11 @@ class ParallelConfig:
 
         if self.distributed_executor_backend == "external_launcher":
             import os
-
             os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
             logger.info("Disabling V1 multiprocessing for external launcher.")
 
         ray_only_devices: list[str] = []
         from vllm.platforms import current_platform
-
         if (current_platform.device_type in ray_only_devices
                 and self.world_size > 1):
             if self.distributed_executor_backend is None:
@@ -1812,7 +1768,6 @@ class ParallelConfig:
             # current node and we aren't in a ray placement group.
 
             from vllm.executor import ray_utils
-
             backend: DistributedExecutorBackend = "mp"
             ray_found = ray_utils.ray_is_available()
             if current_platform.is_neuron():
@@ -1831,10 +1786,8 @@ class ParallelConfig:
                     backend = "ray"
                 else:
                     from ray import is_initialized as ray_is_initialized
-
                     if ray_is_initialized():
                         from ray.util import get_current_placement_group
-
                         if get_current_placement_group():
                             backend = "ray"
             self.distributed_executor_backend = backend
@@ -1856,16 +1809,11 @@ class ParallelConfig:
         # Lazy import to avoid circular import
         from vllm.executor.executor_base import ExecutorBase
         from vllm.platforms import current_platform
-
         if self.distributed_executor_backend not in (
-                "ray",
-                "mp",
-                "uni",
-                "external_launcher",
-                None,
-        ) and not (isinstance(self.distributed_executor_backend, type)
-                   and issubclass(self.distributed_executor_backend,
-                                  ExecutorBase)):
+                "ray", "mp", "uni",
+                "external_launcher", None) and not (isinstance(
+                    self.distributed_executor_backend, type) and issubclass(
+                        self.distributed_executor_backend, ExecutorBase)):
             raise ValueError(
                 "Unrecognized distributed executor backend "
                 f"{self.distributed_executor_backend}. Supported "
@@ -1873,7 +1821,6 @@ class ParallelConfig:
                 " custom ExecutorBase subclass.")
         if self.use_ray:
             from vllm.executor import ray_utils
-
             ray_utils.assert_ray_available()
 
         if not current_platform.use_custom_allreduce():
@@ -1882,8 +1829,8 @@ class ParallelConfig:
                 "Disabled the custom all-reduce kernel because it is not "
                 "supported on current platform.")
         if self.ray_workers_use_nsight and not self.use_ray:
-            raise ValueError(
-                "Unable to use nsight profiling unless workers run with Ray.")
+            raise ValueError("Unable to use nsight profiling unless workers "
+                             "run with Ray.")
 
         assert isinstance(self.worker_extension_cls, str), (
             "worker_extension_cls must be a string (qualified class name).")
@@ -2033,17 +1980,13 @@ class SchedulerConfig:
             self.max_model_len = 8192
             logger.warning(
                 "max_model_len was is not set. Defaulting to arbitrary value "
-                "of %d.",
-                self.max_model_len,
-            )
+                "of %d.", self.max_model_len)
 
         if self.max_num_seqs is None:
             self.max_num_seqs = 128
             logger.warning(
                 "max_num_seqs was is not set. Defaulting to arbitrary value "
-                "of %d.",
-                self.max_num_seqs,
-            )
+                "of %d.", self.max_num_seqs)
 
         if self.max_num_batched_tokens is None:
             if self.enable_chunked_prefill:
@@ -2083,8 +2026,7 @@ class SchedulerConfig:
         if self.enable_chunked_prefill:
             logger.info(
                 "Chunked prefill is enabled with max_num_batched_tokens=%d.",
-                self.max_num_batched_tokens,
-            )
+                self.max_num_batched_tokens)
 
         self.chunked_prefill_enabled = self.enable_chunked_prefill
         if self.max_num_partial_prefills > 1:
@@ -2096,10 +2038,8 @@ class SchedulerConfig:
                 "Concurrent partial prefills enabled with "
                 "max_num_partial_prefills=%d, max_long_partial_prefills=%d, "
                 "long_prefill_token_threshold=%d",
-                self.max_num_partial_prefills,
-                self.max_long_partial_prefills,
-                self.long_prefill_token_threshold,
-            )
+                self.max_num_partial_prefills, self.max_long_partial_prefills,
+                self.long_prefill_token_threshold)
 
         self._verify_args()
 
@@ -2198,7 +2138,6 @@ class DeviceConfig:
         if self.device == "auto":
             # Automated device type detection
             from vllm.platforms import current_platform
-
             self.device_type = current_platform.device_type
             if not self.device_type:
                 raise RuntimeError(
@@ -2365,6 +2304,7 @@ class SpeculativeConfig:
         return hf_config
 
     def __post_init__(self):
+
         # Note: "method" is a new parameter that helps to extend the
         # configuration of non-model-based proposers, and the "model" parameter
         # will be used to set the draft model, eagle head, or additional weight
@@ -2376,9 +2316,9 @@ class SpeculativeConfig:
         if self.model is None and self.num_speculative_tokens is not None:
             # TODO(Shangming): Refactor mtp configuration logic when supporting
             # mtp acceleration for more models besides deepseek_v3
-            if (self.target_model_config
-                    and self.target_model_config.hf_text_config.model_type
-                    == "deepseek_v3"):
+            if self.target_model_config and \
+                self.target_model_config.hf_text_config.model_type \
+                        == "deepseek_v3":
                 # use the draft model from the same model:
                 self.model = self.target_model_config.model
             elif self.method in ("ngram", "[ngram]"):
@@ -2458,10 +2398,10 @@ class SpeculativeConfig:
                 )
 
                 # Automatically detect the method
-                if self.method in ("eagle", "eagle3"):
+                if self.method in ('eagle', 'eagle3'):
                     pass
-                elif ("eagle-" in self.draft_model_config.model.lower()
-                      or "eagle3-" in self.draft_model_config.model.lower()):
+                elif "eagle-" in self.draft_model_config.model.lower() or \
+                        "eagle3-" in self.draft_model_config.model.lower():
                     self.method = "eagle"
                 elif self.draft_model_config.hf_config.model_type == "medusa":
                     self.method = "medusa"
@@ -2480,22 +2420,20 @@ class SpeculativeConfig:
 
                     from vllm.transformers_utils.configs.eagle import (
                         EAGLEConfig)
-
                     if isinstance(self.draft_model_config.hf_config,
                                   EAGLEConfig):
                         pass
                     else:
                         eagle_config = EAGLEConfig(
                             self.draft_model_config.hf_config,
-                            method=self.method,
-                        )
+                            method=self.method)
                         self.draft_model_config.hf_config = eagle_config
 
-                if self.num_speculative_tokens is not None and hasattr(
-                        self.draft_model_config.hf_config,
-                        "num_lookahead_tokens"):
-                    self.draft_model_config.hf_config.num_lookahead_tokens = (
-                        self.num_speculative_tokens)
+                if (self.num_speculative_tokens is not None
+                        and hasattr(self.draft_model_config.hf_config,
+                                    "num_lookahead_tokens")):
+                    self.draft_model_config.hf_config.num_lookahead_tokens = \
+                    self.num_speculative_tokens
 
                 n_predict = getattr(self.draft_model_config.hf_config,
                                     "n_predict", None)
@@ -2503,19 +2441,19 @@ class SpeculativeConfig:
                     if self.num_speculative_tokens is None:
                         # Default to max value defined in draft model config.
                         self.num_speculative_tokens = n_predict
-                    elif (self.num_speculative_tokens > n_predict
-                          and self.num_speculative_tokens % n_predict != 0):
+                    elif self.num_speculative_tokens > n_predict and \
+                            self.num_speculative_tokens % n_predict != 0:
                         # Ensure divisibility for MTP module reuse.
                         raise ValueError(
                             f"num_speculative_tokens:{self.num_speculative_tokens}"
                             f" must be divisible by {n_predict=}")
 
-                self.draft_tensor_parallel_size = (
+                self.draft_tensor_parallel_size = \
                     SpeculativeConfig._verify_and_get_draft_tp(
                         self.target_parallel_config,
                         self.draft_tensor_parallel_size,
-                        self.draft_model_config.hf_config,
-                    ))
+                        self.draft_model_config.hf_config
+                )
 
                 self.draft_model_config.max_model_len = (
                     SpeculativeConfig._maybe_override_draft_max_model_len(
@@ -2527,8 +2465,7 @@ class SpeculativeConfig:
                 self.draft_parallel_config = (
                     SpeculativeConfig.create_draft_parallel_config(
                         self.target_parallel_config,
-                        self.draft_tensor_parallel_size,
-                    ))
+                        self.draft_tensor_parallel_size))
 
         if self.acceptance_method == "typical_acceptance_sampler":
             if self.posterior_threshold is None:
@@ -2557,6 +2494,7 @@ class SpeculativeConfig:
         """
 
         if speculative_max_model_len is not None:
+
             if speculative_max_model_len > draft_max_model_len:
                 raise ValueError(f"{speculative_max_model_len=} cannot be "
                                  f"larger than {draft_max_model_len=}")
@@ -2574,10 +2512,9 @@ class SpeculativeConfig:
 
     @staticmethod
     def _verify_and_get_draft_tp(
-        target_parallel_config: ParallelConfig,
-        speculative_draft_tensor_parallel_size: Optional[int],
-        draft_hf_config: PretrainedConfig,
-    ) -> int:
+            target_parallel_config: ParallelConfig,
+            speculative_draft_tensor_parallel_size: Optional[int],
+            draft_hf_config: PretrainedConfig) -> int:
         """
         Verifies and adjusts the tensor parallel size for a draft model
         specified using speculative_draft_tensor_parallel_size.
@@ -2591,15 +2528,12 @@ class SpeculativeConfig:
                     logger.warning(
                         "%s cannot currently be run with tp>1; "
                         "setting speculative_draft_tensor_parallel_size=1",
-                        draft_hf_config.model_type,
-                    )
+                        draft_hf_config.model_type)
             else:
-                speculative_draft_tensor_parallel_size = (
-                    target_parallel_config.tensor_parallel_size)
+                speculative_draft_tensor_parallel_size = \
+                    target_parallel_config.tensor_parallel_size
         elif speculative_draft_tensor_parallel_size not in (
-                1,
-                target_parallel_config.tensor_parallel_size,
-        ):
+                1, target_parallel_config.tensor_parallel_size):
             raise ValueError(
                 f"{speculative_draft_tensor_parallel_size=} cannot be "
                 f"other value than 1 or target model tensor_parallel_size")
@@ -2652,8 +2586,8 @@ class SpeculativeConfig:
                              "Expected values are rejection_sampler or "
                              "typical_acceptance_sampler.")
 
-        if (self.acceptance_method != "rejection_sampler"
-                and self.acceptance_method != "typical_acceptance_sampler"):
+        if (self.acceptance_method != 'rejection_sampler'
+                and self.acceptance_method != 'typical_acceptance_sampler'):
             raise ValueError(
                 "Expected acceptance_method to be either "
                 "rejection_sampler or typical_acceptance_sampler. Instead it "
@@ -2676,8 +2610,8 @@ class SpeculativeConfig:
                              "speculative decoding is > 1, but got "
                              f"{self.disable_by_batch_size=}")
 
-        if (self.method == "eagle3" and self.target_model_config and "llama"
-                not in self.target_model_config.hf_text_config.model_type):
+        if self.method == "eagle3" and self.target_model_config and \
+            "llama" not in self.target_model_config.hf_text_config.model_type:
             raise ValueError(
                 "Eagle3 is only supported for Llama models. "
                 f"Got {self.target_model_config.hf_text_config.model_type=}")
@@ -2837,6 +2771,7 @@ class PromptAdapterConfig:
         return hash_str
 
     def __post_init__(self):
+
         if self.max_prompt_adapters < 1:
             raise ValueError(f"max_prompt_adapters "
                              f"({self.max_prompt_adapters}) must be >= 1.")
@@ -3021,7 +2956,6 @@ def _get_and_verify_dtype(
                 torch_dtype = torch.bfloat16
 
             from vllm.platforms import current_platform
-
             if (current_platform.is_cpu()
                     and current_platform.get_cpu_architecture()
                     == CpuArchEnum.POWERPC
@@ -3114,8 +3048,8 @@ def _get_and_verify_max_len(
     for key in possible_keys:
         max_len = getattr(hf_config, key, None)
         if max_len is not None:
-            max_len_key = (key
-                           if max_len < derived_max_model_len else max_len_key)
+            max_len_key = key if max_len < derived_max_model_len \
+                else max_len_key
             derived_max_model_len = min(derived_max_model_len, max_len)
     # For Command-R / Cohere, Cohere2 / Aya Vision models
     if tmp_max_len := getattr(hf_config, "model_max_length", None):
@@ -3125,9 +3059,10 @@ def _get_and_verify_max_len(
     # If sliding window is manually disabled, max_length should be less
     # than the sliding window length in the model config.
     if disable_sliding_window and sliding_window_len is not None:
+
         sliding_window_len_min = get_min_sliding_window(sliding_window_len)
-        max_len_key = ("sliding_window" if sliding_window_len_min
-                       < derived_max_model_len else max_len_key)
+        max_len_key = "sliding_window" \
+            if sliding_window_len_min < derived_max_model_len else max_len_key
         derived_max_model_len = min(derived_max_model_len,
                                     sliding_window_len_min)
 
@@ -3147,10 +3082,8 @@ def _get_and_verify_max_len(
         logger.warning(
             "The model's config.json does not contain any of the following "
             "keys to determine the original maximum length of the model: "
-            "%s. Assuming the model's maximum length is %d.",
-            possible_keys,
-            default_max_len,
-        )
+            "%s. Assuming the model's maximum length is %d.", possible_keys,
+            default_max_len)
         derived_max_model_len = default_max_len
 
     rope_scaling = getattr(hf_config, "rope_scaling", None)
@@ -3209,9 +3142,7 @@ def _get_and_verify_max_len(
             if envs.VLLM_ALLOW_LONG_MAX_MODEL_LEN:
                 logger.warning(
                     "%s Make sure the value is correct and within the "
-                    "model context size.",
-                    msg,
-                )
+                    "model context size.", msg)
             else:
                 raise ValueError(
                     f"{msg} To allow overriding this maximum, set "
@@ -3220,7 +3151,7 @@ def _get_and_verify_max_len(
 
 
 def get_min_sliding_window(
-    sliding_window: Union[int, list[Optional[int]]], ) -> int:
+        sliding_window: Union[int, list[Optional[int]]]) -> int:
     if isinstance(sliding_window, list):
         return min(s for s in sliding_window if s is not None)
 
@@ -3320,13 +3251,11 @@ class DecodingConfig:
         if self.backend not in valid_guided_backends:
             raise ValueError(f"Invalid backend '{self.backend}',"
                              f" must be one of {valid_guided_backends}")
-        if self.disable_any_whitespace and self.backend not in (
-                "xgrammar",
-                "guidance",
-        ):
+        if (self.disable_any_whitespace
+                and self.backend not in ("xgrammar", "guidance")):
             raise ValueError("disable_any_whitespace is only supported for "
                              "xgrammar and guidance backends.")
-        if self.disable_additional_properties and self.backend != "guidance":
+        if (self.disable_additional_properties and self.backend != "guidance"):
             raise ValueError("disable_additional_properties is only supported "
                              "for the guidance backend.")
 
@@ -3352,7 +3281,6 @@ class DecodingConfig:
 @dataclass
 class ObservabilityConfig:
     """Configuration for observability - metrics and tracing."""
-
     show_hidden_metrics: bool = False
 
     otlp_traces_endpoint: Optional[str] = None
@@ -3453,10 +3381,9 @@ class KVTransferConfig(BaseModel):
         return KVTransferConfig.model_validate_json(cli_value)
 
     def model_post_init(self, __context: Any) -> None:
+
         if self.kv_role is not None and self.kv_role not in [
-                "kv_producer",
-                "kv_consumer",
-                "kv_both",
+                "kv_producer", "kv_consumer", "kv_both"
         ]:
             raise ValueError(
                 f"Unsupported kv_role: {self.kv_role}. "
@@ -3470,25 +3397,18 @@ class KVTransferConfig(BaseModel):
 
     @property
     def is_kv_transfer_instance(self) -> bool:
-        return self.kv_connector is not None and self.kv_role in [
-            "kv_producer",
-            "kv_consumer",
-            "kv_both",
-        ]
+        return self.kv_connector is not None and \
+            self.kv_role in ["kv_producer", "kv_consumer", "kv_both"]
 
     @property
     def is_kv_producer(self) -> bool:
-        return self.kv_connector is not None and self.kv_role in [
-            "kv_producer",
-            "kv_both",
-        ]
+        return self.kv_connector is not None and \
+            self.kv_role in ["kv_producer", "kv_both"]
 
     @property
     def is_kv_consumer(self) -> bool:
-        return self.kv_connector is not None and self.kv_role in [
-            "kv_consumer",
-            "kv_both",
-        ]
+        return self.kv_connector is not None and \
+            self.kv_role in ["kv_consumer", "kv_both"]
 
     def get_from_extra_config(self, key, default) -> Any:
         return self.kv_connector_extra_config.get(key, default)
@@ -3582,8 +3502,7 @@ class CompilationConfig(BaseModel):
         static shapes. However, we find the general shape compilation is
         sufficient for most cases. It might be beneficial to compile for
         certain small batchsizes, where inductor is good at optimizing.
-    """  # noqa
-
+    """ # noqa
     level: int = 0
     debug_dump_path: str = ""
     cache_dir: str = ""
@@ -3615,7 +3534,6 @@ class CompilationConfig(BaseModel):
             TODO(luka) better pass enabling system.
         - enable_sequence_parallelism: whether to enable sequence parallelism.
         """
-
         dump_graph_stages: list[str] = Field(default_factory=list)
         dump_graph_dir: Path = Field(default=Path("."))
         enable_fusion: bool = True
@@ -3629,11 +3547,8 @@ class CompilationConfig(BaseModel):
             Do not include dump_graph_* in the hash - they don't affect
             compilation.
             """
-            dict_ = self.model_dump(include={
-                "enable_fusion",
-                "enable_noop",
-                "enable_sequence_parallelism",
-            })
+            dict_ = self.model_dump(include={"enable_fusion", "enable_noop", \
+                "enable_sequence_parallelism"})
             return InductorPass.hash_dict(dict_)
 
         def model_post_init(self, __context: Any) -> None:
@@ -3711,6 +3626,7 @@ class CompilationConfig(BaseModel):
         return CompilationConfig.model_validate(dict_value)
 
     def model_post_init(self, __context: Any) -> None:
+
         count_none = self.custom_ops.count("none")
         count_all = self.custom_ops.count("all")
         assert count_none + count_all <= 1, "Can only specify 'none' or 'all'"
@@ -3724,7 +3640,7 @@ class CompilationConfig(BaseModel):
         #    https://github.com/vllm-project/vllm/issues/14703
 
         if is_torch_equal_or_newer("2.6"):
-            KEY = "enable_auto_functionalized_v2"
+            KEY = 'enable_auto_functionalized_v2'
             if KEY not in self.inductor_compile_config:
                 self.inductor_compile_config[KEY] = False
 
@@ -3735,8 +3651,8 @@ class CompilationConfig(BaseModel):
             if not isinstance(v, str):
                 assert callable(v), (
                     f"pass {k} should be callable or a qualified name")
-                self.inductor_compile_config[k] = (v if isinstance(
-                    v, InductorPass) else CallableInductorPass(v))
+                self.inductor_compile_config[k] = v if isinstance(
+                    v, InductorPass) else CallableInductorPass(v)
                 continue
 
             # resolve function from qualified name
@@ -3744,8 +3660,8 @@ class CompilationConfig(BaseModel):
             module = ".".join(names[:-1])
             func_name = names[-1]
             func = __import__(module).__dict__[func_name]
-            self.inductor_compile_config[k] = (func if isinstance(
-                func, InductorPass) else CallableInductorPass(func))
+            self.inductor_compile_config[k] = func if isinstance(
+                func, InductorPass) else CallableInductorPass(func)
 
         self.enabled_custom_ops = Counter()
         self.disabled_custom_ops = Counter()
@@ -3758,11 +3674,9 @@ class CompilationConfig(BaseModel):
             raise ValueError("No compilation level is set.")
 
         from torch._dynamo.backends.registry import list_backends
-
         torch_backends = list_backends(exclude_tags=tuple())
         if self.level in [
-                CompilationLevel.DYNAMO_AS_IS,
-                CompilationLevel.DYNAMO_ONCE,
+                CompilationLevel.DYNAMO_AS_IS, CompilationLevel.DYNAMO_ONCE
         ]:
             if self.backend == "":
                 return "eager"
@@ -3775,7 +3689,6 @@ class CompilationConfig(BaseModel):
         assert self.level == CompilationLevel.PIECEWISE
 
         from vllm.compilation.backends import VllmBackend
-
         return VllmBackend(vllm_config)
 
     def init_with_cudagraph_sizes(self,
@@ -3789,12 +3702,9 @@ class CompilationConfig(BaseModel):
             # de-duplicate the sizes provided by the config
             self.cudagraph_capture_sizes = list(
                 set(self.cudagraph_capture_sizes))
-            logger.info(
-                ("cudagraph sizes specified by model runner"
-                 " %s is overridden by config %s"),
-                cudagraph_capture_sizes,
-                self.cudagraph_capture_sizes,
-            )
+            logger.info(("cudagraph sizes specified by model runner"
+                         " %s is overridden by config %s"),
+                        cudagraph_capture_sizes, self.cudagraph_capture_sizes)
 
         computed_compile_sizes = []
         if self.compile_sizes is not None:
@@ -3802,9 +3712,9 @@ class CompilationConfig(BaseModel):
             self.compile_sizes = list(set(self.compile_sizes))
             for x in self.compile_sizes:
                 if isinstance(x, str):
-                    assert x == "cudagraph_capture_sizes", (
-                        "Unrecognized size type in compile_sizes, "
-                        f"expect 'cudagraph_capture_sizes', got {x}")
+                    assert x == "cudagraph_capture_sizes", \
+                    "Unrecognized size type in compile_sizes, " \
+                    f"expect 'cudagraph_capture_sizes', got {x}"
                     computed_compile_sizes.extend(self.cudagraph_capture_sizes)
                 else:
                     assert isinstance(x, int)
@@ -3813,8 +3723,8 @@ class CompilationConfig(BaseModel):
 
         # sort to make sure cudagraph capture sizes are in descending order
         self.cudagraph_capture_sizes.sort(reverse=True)
-        self.max_capture_size = (self.cudagraph_capture_sizes[0]
-                                 if self.cudagraph_capture_sizes else 0)
+        self.max_capture_size = self.cudagraph_capture_sizes[
+            0] if self.cudagraph_capture_sizes else 0
 
         # pre-compute the mapping from batch size to padded graph size
         self.bs_to_padded_graph_size = [
@@ -3827,8 +3737,8 @@ class CompilationConfig(BaseModel):
                     self.bs_to_padded_graph_size[bs] = start
                 else:
                     self.bs_to_padded_graph_size[bs] = end
-        self.bs_to_padded_graph_size[self.max_capture_size] = (
-            self.max_capture_size)
+        self.bs_to_padded_graph_size[
+            self.max_capture_size] = self.max_capture_size
 
     def set_splitting_ops_for_v1(self):
         # If default, override splitting ops for piecewise cudagraph on V1.
@@ -3858,8 +3768,7 @@ class VllmConfig:
     lora_config: Optional[LoRAConfig] = None
     speculative_config: SpeculativeConfig = field(default=None,
                                                   init=True)  # type: ignore
-    decoding_config: DecodingConfig = field(default_factory=DecodingConfig,
-                                            init=True)
+    decoding_config: Optional[DecodingConfig] = None
     observability_config: Optional[ObservabilityConfig] = None
     prompt_adapter_config: Optional[PromptAdapterConfig] = None
     quant_config: Optional[QuantizationConfig] = None
@@ -3891,7 +3800,6 @@ class VllmConfig:
         # summarize vllm config
         vllm_factors: list[Any] = []
         from vllm import __version__
-
         vllm_factors.append(__version__)
         vllm_factors.append(envs.VLLM_USE_V1)
         if self.model_config:
@@ -3976,11 +3884,9 @@ class VllmConfig:
             load_config: LoadConfig) -> Optional[QuantizationConfig]:
         """Get the quantization config."""
         from vllm.platforms import current_platform
-
         if model_config.quantization is not None:
             from vllm.model_executor.model_loader.weight_utils import (
                 get_quant_config)
-
             quant_config = get_quant_config(model_config, load_config)
             capability_tuple = current_platform.get_device_capability()
 
@@ -4027,13 +3933,12 @@ class VllmConfig:
         return replace(self, model_config=model_config)
 
     def __post_init__(self):
-        """Verify configs are valid & consistent with each other."""
+        """Verify configs are valid & consistent with each other.
+        """
         if self.model_config is not None:
-            self.model_config.verify_async_output_proc(
-                self.parallel_config,
-                self.speculative_config,
-                self.device_config,
-            )
+            self.model_config.verify_async_output_proc(self.parallel_config,
+                                                       self.speculative_config,
+                                                       self.device_config)
             self.model_config.verify_with_parallel_config(self.parallel_config)
 
         if self.cache_config is not None:
@@ -4047,17 +3952,17 @@ class VllmConfig:
             self.prompt_adapter_config.verify_with_model_config(
                 self.model_config)
 
-        if (self.quant_config is None and self.model_config is not None
-                and self.load_config is not None):
+        if self.quant_config is None and \
+            self.model_config is not None and self.load_config is not None:
             self.quant_config = VllmConfig._get_quantization_config(
                 self.model_config, self.load_config)
 
         from vllm.platforms import current_platform
-
-        if (self.scheduler_config is not None and self.model_config is not None
-                and self.scheduler_config.chunked_prefill_enabled
-                and self.model_config.dtype == torch.float32
-                and current_platform.get_device_capability() == (7, 5)):
+        if self.scheduler_config is not None and \
+            self.model_config is not None and \
+            self.scheduler_config.chunked_prefill_enabled and \
+            self.model_config.dtype == torch.float32 and \
+            current_platform.get_device_capability() == (7, 5):
             logger.warning_once(
                 "Turing devices tensor cores do not support float32 matmul. "
                 "To workaround this limitation, vLLM will set 'ieee' input "
@@ -4067,8 +3972,8 @@ class VllmConfig:
             self.compilation_config = CompilationConfig()
         if self.compilation_config.pass_config.enable_sequence_parallelism:
             self.compilation_config.custom_ops.append("+rms_norm")
-        if (envs.VLLM_USE_V1 and self.model_config is not None
-                and not self.model_config.enforce_eager):
+        if envs.VLLM_USE_V1 and self.model_config is not None and \
+            not self.model_config.enforce_eager:
             # NOTE(woosuk): Currently, we use inductor because the piecewise
             # CUDA graphs do not work properly with the custom CUDA kernels.
             # FIXME(woosuk): Disable inductor to reduce the compilation time
@@ -4084,25 +3989,24 @@ class VllmConfig:
             self.compilation_config.level = CompilationLevel.PIECEWISE
             self.compilation_config.set_splitting_ops_for_v1()
 
-        if (self.parallel_config is not None
-                and self.parallel_config.tensor_parallel_size > 1
-                and self.parallel_config.pipeline_parallel_size > 1
-                and self.compilation_config is not None
-                and self.compilation_config.pass_config is not None and
-                self.compilation_config.pass_config.enable_sequence_parallelism
-            ):
+        if self.parallel_config is not None and \
+            self.parallel_config.tensor_parallel_size > 1 and \
+            self.parallel_config.pipeline_parallel_size > 1 and \
+            self.compilation_config is not None and \
+                self.compilation_config.pass_config is not None and \
+            self.compilation_config.pass_config.enable_sequence_parallelism:
             logger.warning_once(
                 "Sequence parallelism is not supported with pipeline "
                 "parallelism. Disabling sequence parallelism.")
-            self.compilation_config.pass_config.enable_sequence_parallelism = (
-                False)
+            self.compilation_config.pass_config.\
+                enable_sequence_parallelism = False
 
         self._set_cudagraph_sizes()
 
-        if (self.cache_config is not None
-                and self.cache_config.cpu_offload_gb > 0
-                and self.compilation_config.level
-                != CompilationLevel.NO_COMPILATION and not envs.VLLM_USE_V1):
+        if self.cache_config is not None and \
+            self.cache_config.cpu_offload_gb > 0 and \
+            self.compilation_config.level != CompilationLevel.NO_COMPILATION \
+                and not envs.VLLM_USE_V1:
             logger.warning(
                 "CPU offload is not supported with `torch.compile` in v0 yet."
                 " Disabling `torch.compile`.")
@@ -4116,9 +4020,9 @@ class VllmConfig:
                 "Disabling `torch.compile`.")
             self.compilation_config.level = CompilationLevel.NO_COMPILATION
 
-        if (self.model_config and self.model_config.use_mla
-                and not (current_platform.is_cuda()
-                         or current_platform.is_rocm())):
+
+        if self.model_config and self.model_config.use_mla and \
+            not (current_platform.is_cuda() or current_platform.is_rocm()):
             logger.info(
                 "MLA is enabled on a non-GPU platform; forcing chunked "
                 "prefill and prefix caching to be disabled.")
@@ -4126,8 +4030,7 @@ class VllmConfig:
             self.scheduler_config.chunked_prefill_enabled = False
             self.scheduler_config.max_num_batched_tokens = max(
                 self.scheduler_config.max_model_len,
-                _DEFAULT_MAX_NUM_BATCHED_TOKENS,
-            )
+                _DEFAULT_MAX_NUM_BATCHED_TOKENS)
 
             if self.cache_config is not None:
                 self.cache_config.enable_prefix_caching = False
@@ -4149,10 +4052,8 @@ class VllmConfig:
             logger.warning(
                 "Batch sizes %s are removed because they are not "
                 "multiple of tp_size %d when "
-                "sequence parallelism is enabled",
-                removed_sizes,
-                self.parallel_config.tensor_parallel_size,
-            )
+                "sequence parallelism is enabled", removed_sizes,
+                self.parallel_config.tensor_parallel_size)
 
         return [
             size for size in possible_sizes
@@ -4191,13 +4092,13 @@ class VllmConfig:
         if not envs.VLLM_USE_V1:
             batch_size_capture_list = []
             max_batchsize_to_capture = 0
-            if (self.scheduler_config is not None
-                    and self.model_config is not None
-                    and not self.model_config.enforce_eager):
+            if self.scheduler_config is not None and \
+                self.model_config is not None and \
+                    not self.model_config.enforce_eager:
+
                 possible_sizes = [1, 2, 4] + [8 * i for i in range(1, 1025)]
-                if (self.parallel_config.tensor_parallel_size > 1
-                        and self.compilation_config.pass_config.
-                        enable_sequence_parallelism):
+                if self.parallel_config.tensor_parallel_size > 1 and \
+                    self.compilation_config.pass_config.enable_sequence_parallelism:
                     possible_sizes = self.update_sizes_for_sequence_parallelism(
                         possible_sizes)
 
@@ -4220,16 +4121,14 @@ class VllmConfig:
                 ]
         else:
             batch_size_capture_list = []
-            if (self.model_config is not None
-                    and not self.model_config.enforce_eager):
+            if self.model_config is not None and \
+                not self.model_config.enforce_eager:
                 batch_size_capture_list = [1, 2, 4
                                            ] + [i for i in range(8, 513, 8)]
-                if (self.parallel_config.tensor_parallel_size > 1
-                        and self.compilation_config.pass_config.
-                        enable_sequence_parallelism):
-                    batch_size_capture_list = (
-                        self.update_sizes_for_sequence_parallelism(
-                            batch_size_capture_list))
+                if self.parallel_config.tensor_parallel_size > 1 and \
+                    self.compilation_config.pass_config.enable_sequence_parallelism:
+                    batch_size_capture_list = \
+                        self.update_sizes_for_sequence_parallelism(batch_size_capture_list)
 
                 max_num_tokens = self.scheduler_config.max_num_batched_tokens
                 batch_size_capture_list = [
@@ -4290,7 +4189,6 @@ def set_current_vllm_config(vllm_config: VllmConfig, check_compile=False):
     global _current_vllm_config
     old_vllm_config = _current_vllm_config
     from vllm.compilation.counter import compilation_counter
-
     num_models_seen = compilation_counter.num_models_seen
     try:
         _current_vllm_config = vllm_config
@@ -4298,17 +4196,13 @@ def set_current_vllm_config(vllm_config: VllmConfig, check_compile=False):
     except Exception:
         raise
     else:
-        logger.debug(
-            "enabled custom ops: %s",
-            vllm_config.compilation_config.enabled_custom_ops,
-        )
-        logger.debug(
-            "disabled custom ops: %s",
-            vllm_config.compilation_config.disabled_custom_ops,
-        )
-        if (check_compile and vllm_config.compilation_config.level
-                == CompilationLevel.PIECEWISE
-                and compilation_counter.num_models_seen == num_models_seen):
+        logger.debug("enabled custom ops: %s",
+                     vllm_config.compilation_config.enabled_custom_ops)
+        logger.debug("disabled custom ops: %s",
+                     vllm_config.compilation_config.disabled_custom_ops)
+        if check_compile and \
+            vllm_config.compilation_config.level == CompilationLevel.PIECEWISE \
+            and compilation_counter.num_models_seen == num_models_seen:
             # If the model supports compilation,
             # compilation_counter.num_models_seen should be increased
             # by at least 1.
@@ -4318,8 +4212,7 @@ def set_current_vllm_config(vllm_config: VllmConfig, check_compile=False):
                 "`torch.compile` is turned on, but the model %s"
                 " does not support it. Please open an issue on GitHub"
                 " if you want it to be supported.",
-                vllm_config.model_config.model,
-            )
+                vllm_config.model_config.model)
     finally:
         _current_vllm_config = old_vllm_config
 
@@ -4331,7 +4224,6 @@ def get_current_vllm_config() -> VllmConfig:
         # config.
         logger.warning("Current vLLM config is not set.")
         from vllm.config import VllmConfig
-
         return VllmConfig()
     return _current_vllm_config
 
@@ -4349,7 +4241,7 @@ def contains_object_print(text):
     Returns:
         bool: True if a match is found, False otherwise
     """
-    pattern = r"at 0x[a-fA-F0-9]{2,16}>"
+    pattern = r'at 0x[a-fA-F0-9]{2,16}>'
     match = re.search(pattern, text)
     return match is not None
 

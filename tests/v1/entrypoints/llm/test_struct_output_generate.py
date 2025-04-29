@@ -72,7 +72,8 @@ class CarDescription(BaseModel):
 @pytest.mark.skip_global_cleanup
 @pytest.mark.parametrize(
     "model_name, guided_decoding_backend, tokenizer_mode, reasoning_parser",
-    PARAMS_MODELS_BACKENDS_TOKENIZER_MODE_REASONING_PARSER)
+    PARAMS_MODELS_BACKENDS_TOKENIZER_MODE_REASONING_PARSER,
+)
 def test_structured_output(
     monkeypatch: pytest.MonkeyPatch,
     sample_json_schema: dict[str, Any],
@@ -100,7 +101,6 @@ def test_structured_output(
         guided_decoding_backend=guided_decoding_backend,
         guided_decoding_disable_any_whitespace=True,
         tokenizer_mode=tokenizer_mode,
-        enable_reasoning=reasoning_parser is not None,
         reasoning_parser=reasoning_parser,
     )
 
@@ -510,7 +510,7 @@ Given the previous instructions, what is the weather in New York City?
         }
 
         sampling_params = SamplingParams(
-            temperature=0.1,  # Low temp for deterministic reasoning
+            temperature=0.1,
             max_tokens=200,
             guided_decoding=GuidedDecodingParams(json=reasoning_schema))
         outputs = llm.generate(prompts=[reasoning_prompt],
