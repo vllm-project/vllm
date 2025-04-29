@@ -542,7 +542,7 @@ See [this page](#generative-models) for more information on how to use generativ
   * ✅︎
 - * `Qwen3MoeForCausalLM`
   * Qwen3MoE
-  * `Qwen/Qwen3-MoE-15B-A2B`, etc.
+  * `Qwen/Qwen3-30B-A3B`, `Qwen/Qwen3-235B-A22B`, etc.
   * ✅︎
   * ✅︎
 - * `StableLmForCausalLM`
