@@ -14,7 +14,7 @@ from vllm.logger import init_logger
 from vllm.logits_process import LogitsProcessor
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.transformers_utils.tokenizers.mistral import MistralTokenizer
-# test
+
 logger = init_logger(__name__)
 
 _SAMPLING_EPS = 1e-5
