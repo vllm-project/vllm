@@ -1181,7 +1181,7 @@ class MiniCPMV2_6(MiniCPMVBaseModel, SupportsLoRA):
     def init_vision_module(
         self,
         config: PretrainedConfig,
-        quant_config: Optional[QuantizationConfig],
+        quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
     ) -> nn.Module:
         model = Idefics2VisionTransformer(config.vision_config,
