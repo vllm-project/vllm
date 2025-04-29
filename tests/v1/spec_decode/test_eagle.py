@@ -95,8 +95,8 @@ def test_prepare_inputs():
             7,  # Second request: 4 tokens (7-3)
             11,
             12,
-            13
-        ],  # Third request: 3 tokens (5-2)
+            13  # Third request: 3 tokens (5-2)
+        ],
         dtype=torch.int32,
         device=device)
 
@@ -109,85 +109,205 @@ def test_prepare_inputs():
 
 
 @pytest.mark.parametrize(
-    "method,eagle_model_class,proposer_helper,draft_model_dir,target_attribute_path",
-    [
-        ("eagle", 'vllm.v1.spec_decode.eagle.EagleLlamaForCausalLM',
-         lambda k: _create_proposer("eagle", k), eagle_dir, ('lm_head', )),
-        ("eagle3", 'vllm.v1.spec_decode.eagle.Eagle3LlamaForCausalLM',
-         lambda k: _create_proposer("eagle3", k), eagle3_dir,
+    "method,proposer_helper,draft_model_dir,target_attribute_path", [
+        ("eagle", lambda k: _create_proposer("eagle", k), eagle_dir,
+         ('lm_head', )),
+        ("eagle3", lambda k: _create_proposer("eagle3", k), eagle3_dir,
          ('model', 'embed_tokens')),
     ])
 @mock.patch('vllm.v1.spec_decode.eagle.set_default_torch_dtype')
 @mock.patch('vllm.v1.spec_decode.eagle.set_current_vllm_config')
 @mock.patch('vllm.v1.spec_decode.eagle.get_model_loader')
-def test_load_model(mock_get_loader, mock_set_config, mock_set_dtype, method,
-                    eagle_model_class, proposer_helper, draft_model_dir,
+@mock.patch('vllm.v1.spec_decode.eagle.ModelRegistry')
+def test_load_model(mock_registry, mock_get_loader, mock_set_config,
+                    mock_set_dtype, method, proposer_helper, draft_model_dir,
                     target_attribute_path):
-    """Test loading an Eagle/Eagle3 model"""
 
-    # Patch the appropriate Eagle model class
-    with mock.patch(eagle_model_class) as mock_eagle_class:
-        # Setup model loader mock
-        mock_loader = mock.MagicMock()
-        mock_get_loader.return_value = mock_loader
+    # Setup mock for model class
+    mock_model_cls = mock.MagicMock()
+    mock_registry.resolve_model_cls.return_value = (mock_model_cls,
+                                                    "test_arch")
 
-        # Setup model mock
-        mock_model = mock.MagicMock()
-        mock_eagle_class.return_value = mock_model
-        mock_model.to.return_value = mock_model
+    # Setup model loader mock
+    mock_loader = mock.MagicMock()
+    mock_get_loader.return_value = mock_loader
 
-        # Configure mock to test the attribute sharing path
-        if method == "eagle":
-            # For eagle, test the lm_head path
-            mock_model.load_weights.return_value = {
-                "model.embed_tokens.weight": torch.zeros(1)
-            }
+    # Setup model mock
+    mock_model = mock.MagicMock()
+    mock_model_cls.return_value = mock_model
+    mock_model.to.return_value = mock_model
+
+    # Configure mock to test the attribute sharing path
+    if method == "eagle":
+        # For eagle, test the lm_head path
+        mock_model.load_weights.return_value = {
+            "model.embed_tokens.weight": torch.zeros(1)
+        }
+    else:
+        # For eagle3, test the embed_tokens path
+        mock_model.load_weights.return_value = {}
+
+    # Setup target model with the appropriate attributes
+    target_model = mock.MagicMock()
+
+    # Create the necessary attributes on the target model
+    current_obj = target_model
+    for i, attr in enumerate(target_attribute_path):
+        if i == len(target_attribute_path) - 1:
+            # Set the last attribute in the path to a MagicMock
+            setattr(current_obj, attr, mock.MagicMock())
         else:
-            # For eagle3, test the embed_tokens path
-            mock_model.load_weights.return_value = {}
+            # Create intermediate objects if needed
+            setattr(current_obj, attr, mock.MagicMock())
+            current_obj = getattr(current_obj, attr)
 
-        # Setup target model with the appropriate attributes
-        target_model = mock.MagicMock()
+    # Create proposer using the helper function
+    proposer = proposer_helper(k=8)
 
-        # Create the necessary attributes on the target model
-        current_obj = target_model
-        for i, attr in enumerate(target_attribute_path):
-            if i == len(target_attribute_path) - 1:
-                # Set the last attribute in the path to a MagicMock
-                setattr(current_obj, attr, mock.MagicMock())
+    # Call the method under test
+    proposer.load_model(target_model)
+
+    # Verify common interactions
+    mock_get_loader.assert_called_once()
+    mock_model_cls.assert_called_once()
+    mock_model.to.assert_called_once()
+    mock_model.load_weights.assert_called_once()
+
+    # Verify the loader was called with the right config
+    mock_get_loader.assert_called_once_with(proposer.vllm_config.load_config)
+
+    # Verify the specific attribute sharing based on the method
+    if method == "eagle":
+        assert proposer.model.lm_head == target_model.lm_head
+    else:
+        assert proposer.model.model.embed_tokens == \
+            target_model.model.embed_tokens
+
+
+@pytest.mark.parametrize("num_speculative_tokens", [1, 3, 8])
+def test_propose(num_speculative_tokens):
+    # Use GPU device
+    device = torch.device('cuda')
+
+    # Setup test parameters
+    batch_size = 2
+    seq_len_1 = 5
+    seq_len_2 = 3
+    total_tokens = seq_len_1 + seq_len_2
+    vocab_size = 100
+    hidden_size = 16
+
+    # Helper to create deterministic logits that will produce specific tokens
+    def create_deterministic_logits(token_ids):
+        logits = torch.full((batch_size, vocab_size), -100.0, device=device)
+        for i, token_id in enumerate(token_ids):
+            logits[i, token_id] = 100.0
+        return logits
+
+    # We mock a model that returns deterministic logits
+    # Sequence 1: 42, 43, 44, ...
+    # Sequence 2: 60, 61, 62, ...
+    base_token_ids = [42, 60]
+
+    # Create proposer using the helper function
+    proposer = _create_proposer("eagle", num_speculative_tokens)
+
+    # Mock the model to return deterministic values
+    with mock.patch.object(proposer, 'load_model'):
+        # Create the mock model with deterministic outputs
+        model_mock = mock.MagicMock()
+
+        # Setup for model forward calls
+        forward_returns = []
+        for i in range(num_speculative_tokens):
+            if i == 0:
+                # First call uses all tokens
+                h_logits = torch.zeros(total_tokens,
+                                       hidden_size,
+                                       device=device)
+                h_states = torch.zeros(total_tokens,
+                                       hidden_size,
+                                       device=device)
             else:
-                # Create intermediate objects if needed
-                setattr(current_obj, attr, mock.MagicMock())
-                current_obj = getattr(current_obj, attr)
+                # Subsequent calls use batch_size tokens
+                h_logits = torch.zeros(batch_size, hidden_size, device=device)
+                h_states = torch.zeros(batch_size, hidden_size, device=device)
+            forward_returns.append((h_logits, h_states))
 
-        # Create proposer using the helper function
-        proposer = proposer_helper(k=8)
-
-        # Call the method under test
-        proposer.load_model(target_model)
-
-        # Verify common interactions
-        mock_get_loader.assert_called_once()
-        mock_eagle_class.assert_called_once()
-        mock_model.to.assert_called_once()
-        mock_model.load_weights.assert_called_once()
-
-        # Verify the loader was called with the right config
-        mock_get_loader.assert_called_once_with(
-            proposer.vllm_config.load_config)
-
-        # Verify model configuration
-        assert proposer.vllm_config.model_config.model == model_dir
-        assert proposer.vllm_config.speculative_config.method == method
-        assert proposer.vllm_config.speculative_config.num_speculative_tokens \
-            == 8
-
-        # Check correct draft model path
-        assert proposer.vllm_config.speculative_config.model == draft_model_dir
-
-        # Verify the specific attribute sharing based on the method
-        if method == "eagle":
-            assert proposer.model.lm_head == target_model.lm_head
+        # For single token case, we only need the first item;
+        # for multi-token, we need the sequence
+        if num_speculative_tokens == 1:
+            model_mock.return_value = forward_returns[0]
         else:
-            assert proposer.model.model.embed_tokens == \
-                target_model.model.embed_tokens
+            model_mock.side_effect = forward_returns
+
+        # Setup for compute_logits calls
+        logits_returns = []
+        for i in range(num_speculative_tokens):
+            # For each call, increment the base token IDs
+            current_tokens = [base_id + i for base_id in base_token_ids]
+            logits_returns.append(create_deterministic_logits(current_tokens))
+
+        if num_speculative_tokens == 1:
+            model_mock.compute_logits.return_value = logits_returns[0]
+        else:
+            model_mock.compute_logits.side_effect = logits_returns
+
+        # Assign the mock to the proposer
+        proposer.model = model_mock
+
+    # Create input tensors
+    cu_num_tokens = torch.tensor([0, seq_len_1, total_tokens],
+                                 dtype=torch.int32,
+                                 device=device)
+
+    target_token_ids = torch.randint(0,
+                                     vocab_size, (total_tokens, ),
+                                     device=device)
+    target_positions = torch.cat([
+        torch.arange(seq_len_1, device=device),
+        torch.arange(seq_len_2, device=device)
+    ])
+    target_hidden_states = torch.randn(total_tokens,
+                                       hidden_size,
+                                       device=device)
+    target_slot_mapping = torch.randint(0,
+                                        100, (total_tokens, ),
+                                        device=device)
+    next_token_ids = torch.randint(0,
+                                   vocab_size, (batch_size, ),
+                                   device=device)
+    block_table = torch.randint(0, 10, (batch_size, 10), device=device)
+
+    sampling_metadata = mock.MagicMock()
+
+    # Call the method under test
+    result = proposer.propose(target_token_ids=target_token_ids,
+                              target_positions=target_positions,
+                              target_hidden_states=target_hidden_states,
+                              target_slot_mapping=target_slot_mapping,
+                              next_token_ids=next_token_ids,
+                              cu_num_tokens=cu_num_tokens,
+                              block_table=block_table,
+                              sampling_metadata=sampling_metadata)
+
+    assert result.shape == (batch_size, num_speculative_tokens)
+
+    # Create expected tokens based on our token pattern
+    if num_speculative_tokens == 1:
+        # Example for num_speculative_tokens=1:
+        # [[42], [60]]
+        expected_tokens = torch.tensor(
+            [[base_token_ids[0]], [base_token_ids[1]]], device=device)
+    else:
+        # Example for num_speculative_tokens=3:
+        # [[42, 43, 44], [60, 61, 62]]
+        expected_tokens = torch.zeros((batch_size, num_speculative_tokens),
+                                      dtype=torch.int64,
+                                      device=device)
+        for i in range(batch_size):
+            for j in range(num_speculative_tokens):
+                expected_tokens[i, j] = base_token_ids[i] + j
+
+    # Verify all tokens match our expectations
+    assert torch.equal(result, expected_tokens)
