@@ -416,6 +416,7 @@ def unified_attention_with_output(
     kv_cache = self.kv_cache[forward_context.virtual_engine]
     has_input_scale = hasattr(self, "input_scale")
     print(f"unified_attention_with_output->has_input_scale={has_input_scale}")
+    print(f"self.impl.forward={self.impl.forward}")
     self.impl.input_scale = self.input_scale
     self.impl.forward(self,
                       query,
