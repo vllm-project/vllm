@@ -344,3 +344,10 @@ class RocmPlatform(Platform):
     def get_cu_count(cls, device_id: int = 0) -> int:
         return torch.cuda.get_device_properties(
             device_id).multi_processor_count
+
+    @classmethod
+    def has_cdna_target(cls):
+        import triton
+        ROCM_CDNA_TARGETS = ["gfx940", "gfx941", "gfx942", "gfx90a", "gfx908"]
+        return triton.runtime.driver.active.get_current_target(
+        ).arch in ROCM_CDNA_TARGETS

@@ -649,18 +649,8 @@ def get_general_autotune_configs():
     ]
 
 
-def has_cdna_target():
-    ROCM_CDNA_TARGETS = ["gfx940", "gfx941", "gfx942", "gfx90a", "gfx908"]
-    return triton.runtime.driver.active.get_current_target(
-    ).arch in ROCM_CDNA_TARGETS
-
-
-def is_rocm_cdna():
-    return current_platform.is_rocm() and has_cdna_target()
-
-
 def get_autotune_configs():
-    if is_rocm_cdna():
+    if current_platform.query_platform("has_cdna_target"):
         return get_cdna_autotune_configs()
     elif current_platform.is_rocm():
         return get_rdna_autotune_configs()

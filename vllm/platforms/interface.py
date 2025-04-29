@@ -192,6 +192,14 @@ class Platform:
         return current_capability.to_int() >= capability
 
     @classmethod
+    def query_platform(cls, property):
+        if hasattr(cls, property):
+            has_property_fn = getattr(cls, property)
+            if callable(has_property_fn):
+                return has_property_fn()
+        return False
+
+    @classmethod
     def get_device_name(cls, device_id: int = 0) -> str:
         """Get the name of a device."""
         raise NotImplementedError
