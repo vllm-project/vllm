@@ -123,10 +123,9 @@ class PplxDispatchCombine(mk.FusedMoEQuantizeDispatchCombine):
         apply_router_weight_on_input: bool,
     ) -> None:
         # This argument is optional
-        #num_tokens = output.shape[0]   # M
-        #bound_m = torch.tensor([num_tokens], dtype=torch.uint32,
-        #                       device=fused_expert_output.device)
-        bound_m = None
+        num_tokens = output.shape[0]   # M
+        bound_m = torch.tensor([num_tokens], dtype=torch.uint32,
+                               device=fused_expert_output.device)
 
         assert output.shape[0] <= self.max_num_tokens
         assert output.shape[1] == fused_expert_output.shape[-1]
