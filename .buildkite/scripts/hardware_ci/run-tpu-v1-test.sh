@@ -2,6 +2,10 @@
 
 set -xue
 
+docker images -a
+docker ps -a
+df -h
+
 # Build the docker image.
 docker build -f docker/Dockerfile.tpu -t vllm-tpu .
 
