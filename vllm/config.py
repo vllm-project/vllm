@@ -2792,7 +2792,7 @@ class MultiModalConfig:
     :code:`{"images": 16, "videos": 2}`
     """
 
-    mm_processor_kwargs: dict[str, object] = field(default_factory=dict)
+    mm_processor_kwargs: Optional[dict[str, object]] = None
     """
     Overrides for the multi-modal processor obtained from
     :meth:`transformers.AutoProcessor.from_pretrained`.
