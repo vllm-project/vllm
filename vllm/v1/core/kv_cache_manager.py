@@ -48,6 +48,7 @@ class KVCacheManager:
         self.specialized_manager = get_specialized_manager(
             kv_cache_spec=kv_cache_spec,
             block_pool=self.block_pool,
+            use_eagle=self.use_eagle,
         )
 
         # Mapping from request ID to blocks to track the blocks allocated
