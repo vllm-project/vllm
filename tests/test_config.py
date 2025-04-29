@@ -6,7 +6,7 @@ from typing import Literal, Union
 import pytest
 import json
 
-from vllm.config import ModelConfig, PoolerConfig, config, get_field
+from vllm.config import ModelConfig, PoolerConfig, config, get_field, VllmConfig, LoadConfig
 from vllm.model_executor.layers.pooler import PoolingType
 from vllm.platforms import current_platform
 
@@ -415,17 +415,12 @@ def test_generation_config_loading():
 @pytest.mark.parametrize(("model_id", "pt_load_map_location"), [
     ("facebook/opt-125m", None),
     ("facebook/opt-125m", "cuda"),
+    ("facebook/opt-125m", "{'': 'cuda'}"),
     ("jerryzh/opt-125m-int4wo", "cuda")
 ])
 def test_load_config_pt_load_map_location(model_id, pt_load_map_location):
-    config = ModelConfig(
-        model_id,
-        task="auto",
-        tokenizer=model_id,
-        tokenizer_mode="auto",
-        trust_remote_code=False,
-        dtype="float16",
-        seed=0,
-    )
+    load_config = LoadConfig(pt_load_map_location=pt_load_map_location)
+    config = VllmConfig(load_config=load_config)
 
-    assert config.is_encoder_decoder == is_encoder_decoder
+    print(config.load_config.pt_load_map_location)
+    assert config.load_config.pt_load_map_location == pt_load_map_location
