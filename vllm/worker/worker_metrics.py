@@ -2,8 +2,7 @@
 import threading
 import time
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, List
-from typing import Union
+from typing import TYPE_CHECKING, List, Union
 
 import prometheus_client
 from prometheus_client import Summary
@@ -17,6 +16,7 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 prometheus_client.disable_created_metrics()
+
 
 @dataclass
 class VllmWorkerMetadata:
@@ -49,9 +49,7 @@ class VllmWorkerStatsMonitor:
         The function will return the latest states between the current
         call and the previous call.
         """
-        ret = VllmWorkerStats(
-            self.total_prefill_token,
-        )
+        ret = VllmWorkerStats(self.total_prefill_token, )
         self._clear()
         return ret
 
@@ -79,11 +77,10 @@ class PrometheusLogger:
         )
 
     def _log_gauge(self, gauge, data: Union[int, float]) -> None:
-        # Convenience function for logging to gauge.
         gauge.labels(**self.labels).set(data)
 
-    def _log_summary(self, summary: Summary, data:  Union[List[int],
-                                                    List[float]]) -> None:
+    def _log_summary(self, summary: Summary, data: Union[List[int],
+                                                         List[float]]) -> None:
         for value in data:
             summary.labels(**self.labels).observe(value)
 
@@ -104,7 +101,7 @@ class PrometheusLogger:
     def GetOrCreate(metadata: VllmWorkerMetadata) -> "PrometheusLogger":
         if PrometheusLogger._instance is None:
             PrometheusLogger._instance = PrometheusLogger(metadata)
-            logger.info(f"PrometheusLogger created for {metadata}")
+            logger.info("PrometheusLogger created for %s", metadata)
         if PrometheusLogger._instance.metadata != metadata:
             logger.error("PrometheusLogger instance already created with"
                          "different metadata. This should not happen except "
@@ -133,4 +130,3 @@ class VllmWorkerStatsLogger:
     def shutdown(self):
         self.is_running = False
         self.thread.join()
-

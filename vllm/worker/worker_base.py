@@ -21,7 +21,6 @@ from vllm.utils import (enable_trace_function_call_for_thread,
                         resolve_obj_by_qualname, run_method,
                         update_environment_variables,
                         warn_for_unimplemented_methods)
-from vllm.worker.worker_metrics import VllmWorkerStatsLogger, VllmWorkerMetadata
 from vllm.worker.model_runner_base import (BroadcastableModelInput,
                                            ModelRunnerBase,
                                            ModelRunnerInputBase)
@@ -55,8 +54,6 @@ class WorkerBase:
         self.compilation_config = vllm_config.compilation_config
         from vllm.platforms import current_platform
         self.current_platform = current_platform
-        metadata = VllmWorkerMetadata(self.model_config.model, self.parallel_config.world_size, self.parallel_config.rank)
-        self.stat_logger = VllmWorkerStatsLogger(metadata, log_interval=10)
 
     def init_device(self) -> None:
         """Initialize device state, such as loading the model or other on-device

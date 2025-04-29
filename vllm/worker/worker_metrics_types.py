@@ -7,4 +7,3 @@ from typing import List
 @dataclass
 class VllmWorkerStats:
     summary_total_prefill_token: List[int]
-

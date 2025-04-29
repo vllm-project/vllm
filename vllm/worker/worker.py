@@ -31,6 +31,8 @@ from vllm.worker.model_runner import GPUModelRunnerBase, ModelRunner
 from vllm.worker.pooling_model_runner import PoolingModelRunner
 from vllm.worker.worker_base import (LocalOrDistributedWorkerBase, WorkerBase,
                                      WorkerInput)
+from vllm.worker.worker_metrics import (VllmWorkerMetadata,
+                                        VllmWorkerStatsLogger)
 
 logger = init_logger(__name__)
 
@@ -115,9 +117,10 @@ class Worker(LocalOrDistributedWorkerBase):
         else:
             self.profiler = None
 
-        from vllm.worker.worker_metrics import VllmWorkerMetadata
-        metadata = VllmWorkerMetadata(self.model_config.model, self.parallel_config.world_size, self.parallel_config.rank)
-        from vllm.worker.worker_metrics import VllmWorkerStatsLogger
+        metadata = VllmWorkerMetadata(self.model_config.model,
+                                      self.parallel_config.world_size,
+                                      self.parallel_config.rank)
+        # TODO(maobaolong): Remove this hard-coded value future
         self.stat_logger = VllmWorkerStatsLogger(metadata, log_interval=10)
 
     def start_profile(self):
