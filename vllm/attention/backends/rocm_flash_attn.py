@@ -651,6 +651,8 @@ class ROCmFlashAttentionImpl(AttentionImpl):
         """
         assert output is not None, "Output tensor must be provided."
 
+        # import traceback
+        # traceback.print_stack()
         query = query.view(-1, self.num_heads, self.head_size)
         if key is not None:
             assert value is not None
@@ -772,6 +774,8 @@ class ROCmFlashAttentionImpl(AttentionImpl):
                     full_scales = (
                         layer._q_scale, layer._k_scale, layer._v_scale,
                         layer._prob_scale) if use_fp8_scales else None
+                    # has_input_scale = hasattr(self, "input_scale")
+                    # print(f"has_input_scale --> {has_input_scale}")
                     self.triton_attn_func(
                         query,
                         key,
@@ -786,6 +790,7 @@ class ROCmFlashAttentionImpl(AttentionImpl):
                         attn_masks[0][None]
                         if attn_masks is not None else None,
                         full_scales,
+                        input_scale = self.input_scale,
                     )
                 elif self.use_naive_attn:
                     if self.num_kv_heads != self.num_heads:

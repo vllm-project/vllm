@@ -1350,6 +1350,7 @@ def triton_attention(
     fp8_scales: Optional[tuple[float, ...]] = None,
     input_scale: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
+    print(f"triton_attention:o.dtype={o.dtype}")
     if fp8_scales is not None:
         q_descale, k_descale, v_descale, p_scale = fp8_scales
     else:
@@ -1372,4 +1373,7 @@ def triton_attention(
     if fp8_scales is not None:
         q, k, v = check_and_maybe_quantize_qkv(q, k, v, fp8_scales)
 
-    return triton_attention_rocm(q, k, v, o, attn_metadata)
+
+    triton_attention_rocm(q, k, v, o, attn_metadata)
+    print(f"triton_attention:o.dtype={o.dtype}")
+    return output
