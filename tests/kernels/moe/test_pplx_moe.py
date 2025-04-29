@@ -6,7 +6,7 @@ Run `pytest tests/kernels/test_pplx_moe.py`.
 import dataclasses
 import os
 import traceback
-from typing import Callable, Concatenate, Optional, ParamSpec
+from typing import Callable, Optional
 
 import pytest
 import torch
@@ -16,6 +16,7 @@ from pplx_kernels.nvshmem import (nvshmem_alloc_empty_unique_id,
                                   nvshmem_init)
 from torch.multiprocessing import (
     spawn)  # pyright: ignore[reportPrivateImportUsage]
+from typing_extensions import Concatenate, ParamSpec
 
 import vllm.model_executor.layers.fused_moe  # noqa
 from vllm.config import VllmConfig, set_current_vllm_config
@@ -169,7 +170,7 @@ def torch_dispatch(
     tokens_per_expert = torch.bincount(topk_ids.view(-1),
                                        minlength=num_experts)
     if max_num_tokens is None:
-        max_num_tokens = tokens_per_expert.max()
+        max_num_tokens = int(tokens_per_expert.max().item())
 
     b_a = torch.zeros((num_experts, max_num_tokens, a.shape[1]),
                       dtype=a.dtype,
