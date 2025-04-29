@@ -2815,23 +2815,23 @@ class MultiModalConfig:
     Defaults to 1 (V0) or 999 (V1) for each modality.
 
     For example, to allow up to 16 images and 2 videos per prompt:
-    :code:`{"images": 16, "videos": 2}`
+    `{"images": 16, "videos": 2}`
     """
 
     mm_processor_kwargs: Optional[dict[str, object]] = None
     """
     Overrides for the multi-modal processor obtained from
-    :meth:`transformers.AutoProcessor.from_pretrained`.
+    `transformers.AutoProcessor.from_pretrained`.
 
     The available overrides depend on the model that is being run.
 
     For example, for Phi-3-Vision:
-    :code:`{"num_crops": 4}`.
+    `{"num_crops": 4}`.
     """
 
     disable_mm_preprocessor_cache: bool = False
     """
-    If :code:`True`, disable caching of the processed multi-modal inputs.
+    If `True`, disable caching of the processed multi-modal inputs.
     """
 
     def compute_hash(self) -> str:
