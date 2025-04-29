@@ -32,7 +32,7 @@ class MultiModalHasher:
         if isinstance(obj, bytes):
             return obj
         if isinstance(obj, Image.Image):
-            return obj.tobytes()
+            return obj.convert("RGBA").tobytes()
 
         # Convertible to NumPy arrays
         if isinstance(obj, torch.Tensor):
