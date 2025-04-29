@@ -66,6 +66,7 @@ def test_contains_type(type_hints, type, expected):
     ({int, float}, int, int),
     ({int, float}, str, None),
     ({str, Literal["x", "y"]}, Literal, Literal["x", "y"]),
+    ({Literal["x", "y"], Literal["z"]}, Literal, Literal["x", "y"]),
 ])
 def test_get_type(type_hints, type, expected):
     assert get_type(type_hints, type) == expected
