@@ -27,7 +27,8 @@ from transformers import PretrainedConfig
 import vllm.envs as envs
 from vllm.compilation.inductor_pass import CallableInductorPass, InductorPass
 from vllm.logger import init_logger
-from vllm.model_executor.layers.quantization import (QuantizationMethods,
+from vllm.model_executor.layers.quantization import (QUANTIZATION_METHODS,
+                                                     QuantizationMethods,
                                                      get_quantization_config)
 from vllm.model_executor.models import ModelRegistry
 from vllm.platforms import CpuArchEnum, current_platform
@@ -222,7 +223,7 @@ class ModelConfig:
     """Name or path of the Hugging Face model to use. It is also used as the
     content for `model_name` tag in metrics output when `served_model_name` is
     not specified."""
-    task: Union[TaskOption, Literal["draft"]] = "auto"
+    task: Literal[TaskOption, Literal["draft"]] = "auto"
     """The task to use the model for. Each vLLM instance only supports one
     task, even if the same model can be used for multiple tasks. When the model
     only supports one task, "auto" can be used to select it; otherwise, you
@@ -709,7 +710,7 @@ class ModelConfig:
 
     def _resolve_task(
         self,
-        task_option: Union[TaskOption, Literal["draft"]],
+        task_option: Literal[TaskOption, Literal["draft"]],
     ) -> tuple[set[_ResolvedTask], _ResolvedTask]:
         if task_option == "draft":
             return {"draft"}, "draft"
@@ -781,7 +782,7 @@ class ModelConfig:
         return quant_cfg
 
     def _verify_quantization(self) -> None:
-        supported_quantization = get_args(QuantizationMethods)
+        supported_quantization = QUANTIZATION_METHODS
         optimized_quantization_methods = [
             "fp8", "marlin", "modelopt", "gptq_marlin_24", "gptq_marlin",
             "awq_marlin", "fbgemm_fp8", "compressed-tensors", "experts_int8",
@@ -820,25 +821,6 @@ class ModelConfig:
             # them at the start of the list so custom overrides have preference
             # over the built in ones.
             quantization_methods = quantization_methods + overrides
-
-            # Quantization methods which are overrides (i.e. they have a
-            # `override_quantization_method` method) must be checked in order
-            # of preference (this is particularly important for GPTQ).
-            overrides = [
-                "marlin",
-                "bitblas",
-                "gptq_marlin_24",
-                "gptq_marlin",
-                "gptq_bitblas",
-                "awq_marlin",
-                "ipex",
-                "moe_wna16",
-            ]
-            quantization_methods = [
-                q for q in get_args(QuantizationMethods) if q not in overrides
-            ]
-            # We check the overrides first
-            quantization_methods = overrides + quantization_methods
 
             # Detect which checkpoint is it
             for name in quantization_methods:
