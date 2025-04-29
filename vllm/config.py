@@ -3768,7 +3768,8 @@ class VllmConfig:
     lora_config: Optional[LoRAConfig] = None
     speculative_config: SpeculativeConfig = field(default=None,
                                                   init=True)  # type: ignore
-    decoding_config: Optional[DecodingConfig] = None
+    decoding_config: DecodingConfig = field(default_factory=DecodingConfig,
+                                            init=True)
     observability_config: Optional[ObservabilityConfig] = None
     prompt_adapter_config: Optional[PromptAdapterConfig] = None
     quant_config: Optional[QuantizationConfig] = None

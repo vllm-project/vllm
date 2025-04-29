@@ -88,8 +88,7 @@ class XgrammarBackend(StructuredOutputBackend):
         elif request_type == StructuredOutputOptions.JSON_OBJECT:
             ctx = self.compiler.compile_json_schema(
                 '{"type": "object"}',
-                any_whitespace=not self.disable_any_whitespace,
-            )
+                any_whitespace=not self.disable_any_whitespace)
         elif request_type == StructuredOutputOptions.GRAMMAR:
             ctx = self.compiler.compile_grammar(grammar_spec)
         elif request_type == StructuredOutputOptions.REGEX:
@@ -152,16 +151,13 @@ class XgrammarGrammar(StructuredOutputGrammar):
             if not self.matcher.accept_token(token):
                 logger.error(
                     "Failed to advance FSM for request %s "
-                    "for tokens %s. Please file an issue.",
-                    request_id,
-                    token,
-                )
+                    "for tokens %s. Please file an issue.", request_id, token)
                 return False
             self.num_processed_tokens += 1
         return True
 
-    def fill_bitmask(self, bitmask: torch.Tensor, idx: int) -> None:
-        self.matcher.fill_next_token_bitmask(bitmask, idx)
+    def fill_bitmask(self, bitmask: torch.Tensor, batch_index: int) -> None:
+        self.matcher.fill_next_token_bitmask(bitmask, batch_index)
 
     def is_terminated(self) -> bool:
         return self.matcher.is_terminated()
