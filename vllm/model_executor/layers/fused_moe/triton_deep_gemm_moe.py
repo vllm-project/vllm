@@ -37,21 +37,20 @@ class TritonOrDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
 
     def workspace_shapes(
         self,
-        a_dtype: torch.dtype,
+        a: torch.Tensor,
         M: int,
         N: int,
         K: int,
         topk: int,
         num_experts: int,
-        a: torch.Tensor,
     ) -> Tuple[int, int, torch.dtype]:
         # Note: the deep gemm workspaces are strictly larger than the triton
         # workspaces so we can be pessimistic here and allocate for DeepGemm
         # even if we fall back to triton later, e.g. if expert maps are set.
         if self.allow_deep_gemm and _valid_deep_gemm_shape(M, N, K):
-            return self.deep_gemm_expert.workspace_shapes(a_dtype, M, N, K, topk, num_experts, a)
+            return self.deep_gemm_expert.workspace_shapes(a, M, N, K, topk, num_experts)
         else:
-            return self.triton_expert.workspace_shapes(a_dtype, M, N, K, topk, num_experts, a)
+            return self.triton_expert.workspace_shapes(a, M, N, K, topk, num_experts)
 
     def apply(
         self,
