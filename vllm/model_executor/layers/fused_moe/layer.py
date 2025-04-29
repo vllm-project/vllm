@@ -35,6 +35,7 @@ if current_platform.is_cuda_alike():
     from .fused_batched_moe import BatchedDispatchCombine, BatchedTritonExperts
     from .fused_moe import TritonExperts, fused_experts
     from .modular_kernel import (FusedMoEModularKernel,
+                                 FusedMoEPermuteExpertsUnpermute,
                                  FusedMoEQuantizeDispatchCombine)
     from .pplx_dispatch_combine import PplxDispatchCombine
 else:
@@ -264,6 +265,8 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         assert self.fused_experts == fused_experts
 
         #block_m = MOE_DP_CHUNK_SIZE * (self.moe.ep_size // self.moe.dp_size)
+
+        experts: FusedMoEPermuteExpertsUnpermute = None
 
         if isinstance(dispatch_combine,
                       (BatchedDispatchCombine, PplxDispatchCombine)):
@@ -645,6 +648,8 @@ class FusedMoE(torch.nn.Module):
 
         assert quant_method is not None
         self.quant_method = quant_method
+
+        dispatch_combine: FusedMoEQuantizeDispatchCombine = None
 
         # TODO: move to method?
         if self.dp_size > 1:
