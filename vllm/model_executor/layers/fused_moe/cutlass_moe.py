@@ -194,6 +194,8 @@ class CutlassExperts(mk.FusedMoEPermuteExpertsUnpermute):
     ) -> torch.Tensor:
         a1q = hidden_states
 
+        assert w1_scale is not None
+        assert w2_scale is not None
         assert w1.dtype == torch.float8_e4m3fn
         assert w2.dtype == torch.float8_e4m3fn
         assert a1q.shape[1] == w1.shape[1], "Hidden size mismatch w1"
