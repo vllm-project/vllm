@@ -10,7 +10,7 @@ import torch
 
 import vllm.envs
 from vllm.logger import init_logger
-from vllm.sampling_params import GuidedDecodingParams, SamplingParams
+from vllm.sampling_params import SamplingParams
 from vllm.transformers_utils.tokenizers.mistral import MistralTokenizer
 from vllm.utils import LazyLoader
 from vllm.v1.structured_output.backend_types import (StructuredOutputBackend,
@@ -32,16 +32,8 @@ logger = init_logger(__name__)
 class XgrammarBackend(StructuredOutputBackend):
 
     def __post_init__(self):
-        self.disable_any_whitespace = False
-        backend_options = GuidedDecodingParams(
-            backend=self.vllm_config.decoding_config.guided_decoding_backend
-        ).backend_options()
-        for option in backend_options:
-            if option == "disable-any-whitespace":
-                self.disable_any_whitespace = True
-            else:
-                raise ValueError(
-                    f"Unsupported option for the xgrammar backend: {option}")
+        self.disable_any_whitespace = \
+            self.vllm_config.decoding_config.disable_any_whitespace
 
         if isinstance(self.tokenizer, MistralTokenizer):
             # NOTE: ideally, xgrammar should handle this accordingly.

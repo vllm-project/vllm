@@ -56,15 +56,15 @@ class StructuredOutputManager:
         # NOTE: We only support a single backend. We do NOT support different
         # backends on a per-request basis in V1 (for now, anyway...).
         if self.backend is None:
-            backend_name = request.sampling_params.guided_decoding.backend_name
+            backend = request.sampling_params.guided_decoding.backend
             vocab_size = self.vllm_config.model_config.get_vocab_size()
-            if backend_name == "xgrammar":
+            if backend == "xgrammar":
                 self.backend = XgrammarBackend(
                     self.vllm_config,
                     tokenizer=self.tokenizer,
                     vocab_size=vocab_size,
                 )
-            elif backend_name == "guidance":
+            elif backend == "guidance":
                 self.backend = GuidanceBackend(
                     self.vllm_config,
                     tokenizer=self.tokenizer,
@@ -72,7 +72,7 @@ class StructuredOutputManager:
                 )
             else:
                 raise ValueError(
-                    f"Unsupported structured output backend: {backend_name}")
+                    f"Unsupported structured output backend: {backend}")
 
         grammar = self.executor.submit(self._async_create_grammar, request)
         request.structured_output_request.grammar = grammar  # type: ignore[assignment]
@@ -140,8 +140,6 @@ class StructuredOutputManager:
         if not jf_string:
             return None
 
-        original_output_ids = list(request.output_token_ids)
-
         # NOTE: max_rollback_window determines the size
         # of the tokenes from all_token_ids to be used for retokenization.
         # Note that we don't need to whole token_ids
@@ -159,9 +157,9 @@ class StructuredOutputManager:
                 request.prompt_token_ids[-1]) + 1
             retokenized_output_ids = retokenized_output_ids[prompt_boundary:]
 
-        original_output_ids = original_output_ids[
+        original_output_ids = request.output_token_ids[
             max(0,
-                len(original_output_ids) - len(retokenized_output_ids)):]
+                len(request.output_token_ids) - len(retokenized_output_ids)):]
 
         # Find the prefix match length
         k = sum(1 for _ in itertools.takewhile(

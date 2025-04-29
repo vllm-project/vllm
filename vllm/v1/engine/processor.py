@@ -51,8 +51,7 @@ class Processor:
         self.mm_input_cache_client = MirroredProcessingCache(self.model_config)
 
         # Multi-modal hasher (for images)
-        self.use_hash = (
-            not self.model_config.disable_mm_preprocessor_cache) or \
+        self.use_hash = self.mm_input_cache_client.use_cache or \
             self.cache_config.enable_prefix_caching
 
     def _validate_logprobs(
@@ -145,7 +144,7 @@ class Processor:
         if not params.guided_decoding or not self.decoding_config:
             return
 
-        engine_level_backend = self.decoding_config.guided_decoding_backend
+        engine_level_backend = self.decoding_config.backend
         if params.guided_decoding.backend:
             # Request-level backend selection is not supported in V1.
             # The values may differ if `params` is reused and was set
@@ -153,8 +152,8 @@ class Processor:
             # request. We remember that it was set as a result of `auto`
             # using the `_auto` option set on the backend in the params.
             if (params.guided_decoding.backend != engine_level_backend
-                    and not (engine_level_backend == "auto" and "_auto"
-                             in params.guided_decoding.backend_options())):
+                    and not (engine_level_backend == "auto"
+                             and params.guided_decoding.backend_was_auto)):
                 raise ValueError(
                     "Request-level structured output backend selection is no "
                     "longer supported. The request specified "
@@ -190,7 +189,7 @@ class Processor:
                 # are not supported in xgrammar. Fall back to guidance.
                 params.guided_decoding.backend = "guidance"
             # Remember that this backend was set automatically
-            params.guided_decoding.add_option("_auto")
+            params.guided_decoding.backend_was_auto = True
 
     def process_inputs(
         self,

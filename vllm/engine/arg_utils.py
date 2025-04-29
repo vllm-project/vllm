@@ -18,9 +18,9 @@ from vllm import version
 from vllm.config import (BlockSize, CacheConfig, CacheDType, CompilationConfig,
                          ConfigFormat, ConfigType, DecodingConfig, Device,
                          DeviceConfig, DistributedExecutorBackend,
-                         GuidedDecodingBackendV1, HfOverrides,
-                         KVTransferConfig, LoadConfig, LoadFormat, LoRAConfig,
-                         ModelConfig, ModelImpl, MultiModalConfig,
+                         GuidedDecodingBackend, GuidedDecodingBackendV1,
+                         HfOverrides, KVTransferConfig, LoadConfig, LoadFormat,
+                         LoRAConfig, ModelConfig, ModelImpl, MultiModalConfig,
                          ObservabilityConfig, ParallelConfig, PoolerConfig,
                          PrefixCachingHashAlgo, PromptAdapterConfig,
                          SchedulerConfig, SchedulerPolicy, SpeculativeConfig,
@@ -116,6 +116,18 @@ def get_type(type_hints: set[TypeHint], type: TypeHintT) -> TypeHintT:
     return next((th for th in type_hints if is_type(th, type)), None)
 
 
+def literal_to_kwargs(type_hints: set[TypeHint]) -> dict[str, Any]:
+    """Convert Literal type hints to argparse kwargs."""
+    type_hint = get_type(type_hints, Literal)
+    choices = get_args(type_hint)
+    choice_type = type(choices[0])
+    if not all(isinstance(choice, choice_type) for choice in choices):
+        raise ValueError(
+            "All choices must be of the same type. "
+            f"Got {choices} with types {[type(c) for c in choices]}")
+    return {"type": choice_type, "choices": sorted(choices)}
+
+
 def is_not_builtin(type_hint: TypeHint) -> bool:
     """Check if the class is not a built-in type."""
     return type_hint.__module__ != "builtins"
@@ -151,15 +163,7 @@ def get_kwargs(cls: ConfigType) -> dict[str, Any]:
             # Creates --no-<name> and --<name> flags
             kwargs[name]["action"] = argparse.BooleanOptionalAction
         elif contains_type(type_hints, Literal):
-            # Creates choices from Literal arguments
-            type_hint = get_type(type_hints, Literal)
-            choices = sorted(get_args(type_hint))
-            kwargs[name]["choices"] = choices
-            choice_type = type(choices[0])
-            assert all(type(c) is choice_type for c in choices), (
-                "All choices must be of the same type. "
-                f"Got {choices} with types {[type(c) for c in choices]}")
-            kwargs[name]["type"] = choice_type
+            kwargs[name].update(literal_to_kwargs(type_hints))
         elif contains_type(type_hints, tuple):
             type_hint = get_type(type_hints, tuple)
             types = get_args(type_hint)
@@ -190,6 +194,11 @@ def get_kwargs(cls: ConfigType) -> dict[str, Any]:
         else:
             raise ValueError(
                 f"Unsupported type {type_hints} for argument {name}.")
+
+        # If the type hint was a sequence of literals, use the helper function
+        # to update the type and choices
+        if get_origin(kwargs[name].get("type")) is Literal:
+            kwargs[name].update(literal_to_kwargs({kwargs[name]["type"]}))
 
         # If None is in type_hints, make the argument optional.
         # But not if it's a bool, argparse will handle this better.
@@ -308,7 +317,12 @@ class EngineArgs:
         bool] = SchedulerConfig.enable_chunked_prefill
     disable_chunked_mm_input: bool = SchedulerConfig.disable_chunked_mm_input
 
-    guided_decoding_backend: str = DecodingConfig.guided_decoding_backend
+    guided_decoding_backend: GuidedDecodingBackend = DecodingConfig.backend
+    guided_decoding_disable_fallback: bool = DecodingConfig.disable_fallback
+    guided_decoding_disable_any_whitespace: bool = \
+        DecodingConfig.disable_any_whitespace
+    guided_decoding_disable_additional_properties: bool = \
+        DecodingConfig.disable_additional_properties
     logits_processor_pattern: Optional[str] = None
 
     speculative_config: Optional[Dict[str, Any]] = None
@@ -489,9 +503,17 @@ class EngineArgs:
             title="DecodingConfig",
             description=DecodingConfig.__doc__,
         )
+        guided_decoding_group.add_argument("--guided-decoding-backend",
+                                           **guided_decoding_kwargs["backend"])
         guided_decoding_group.add_argument(
-            '--guided-decoding-backend',
-            **guided_decoding_kwargs["guided_decoding_backend"])
+            "--guided-decoding-disable-fallback",
+            **guided_decoding_kwargs["disable_fallback"])
+        guided_decoding_group.add_argument(
+            "--guided-decoding-disable-any-whitespace",
+            **guided_decoding_kwargs["disable_any_whitespace"])
+        guided_decoding_group.add_argument(
+            "--guided-decoding-disable-additional-properties",
+            **guided_decoding_kwargs["disable_additional_properties"])
         guided_decoding_group.add_argument(
             "--reasoning-parser",
             # This choices is a special case because it's not static
@@ -672,20 +694,12 @@ class EngineArgs:
         )
         multimodal_group.add_argument('--limit-mm-per-prompt',
                                       **multimodal_kwargs["limit_per_prompt"])
-
-        parser.add_argument(
+        multimodal_group.add_argument(
             '--mm-processor-kwargs',
-            default=None,
-            type=json.loads,
-            help=('Overrides for the multi-modal processor obtained from '
-                  '``AutoProcessor.from_pretrained``. The available overrides '
-                  'depend on the model that is being run.'
-                  'For example, for Phi-3-Vision: ``{"num_crops": 4}``.'))
-        parser.add_argument(
+            **multimodal_kwargs["mm_processor_kwargs"])
+        multimodal_group.add_argument(
             '--disable-mm-preprocessor-cache',
-            action='store_true',
-            help='If True, disable caching of the processed multi-modal '
-            'inputs.')
+            **multimodal_kwargs["disable_mm_preprocessor_cache"])
 
         # LoRA related configs
         lora_kwargs = get_kwargs(LoRAConfig)
@@ -874,7 +888,7 @@ class EngineArgs:
                             '-O',
                             type=CompilationConfig.from_cli,
                             default=None,
-                            help='torch.compile configuration for the model.'
+                            help='torch.compile configuration for the model. '
                             'When it is a number (0, 1, 2, 3), it will be '
                             'interpreted as the optimization level.\n'
                             'NOTE: level 0 is the default level without '
@@ -1243,7 +1257,11 @@ class EngineArgs:
                                         if self.enable_prompt_adapter else None
 
         decoding_config = DecodingConfig(
-            guided_decoding_backend=self.guided_decoding_backend,
+            backend=self.guided_decoding_backend,
+            disable_fallback=self.guided_decoding_disable_fallback,
+            disable_any_whitespace=self.guided_decoding_disable_any_whitespace,
+            disable_additional_properties=\
+                self.guided_decoding_disable_additional_properties,
             reasoning_backend=self.reasoning_parser
             if self.enable_reasoning else None,
         )
@@ -1334,9 +1352,8 @@ class EngineArgs:
                                recommend_to_remove=True)
             return False
 
-        # remove backend options when doing this check
-        if self.guided_decoding_backend.split(':')[0] \
-            not in get_args(GuidedDecodingBackendV1):
+        if self.guided_decoding_backend not in get_args(
+                GuidedDecodingBackendV1):
             _raise_or_fallback(
                 feature_name=
                 f"--guided-decoding-backend={self.guided_decoding_backend}",
