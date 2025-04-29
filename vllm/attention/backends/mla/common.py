@@ -205,6 +205,7 @@ from vllm.attention.backends.utils import (PAD_SLOT_ID, compute_slot_mapping,
                                            compute_slot_mapping_start_idx,
                                            is_block_tables_empty)
 from vllm.attention.ops.merge_attn_states import merge_attn_states
+from vllm.attention.utils.fa_utils import get_flash_attn_version
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                LinearBase, RowParallelLinear,
                                                UnquantizedLinearMethod)
@@ -214,7 +215,6 @@ from vllm.multimodal import MultiModalPlaceholderMap
 from vllm.platforms import current_platform
 from vllm.triton_utils import HAS_TRITON
 from vllm.utils import async_tensor_h2d, cdiv, make_tensor_with_pad, round_down
-from vllm.vllm_flash_attn.fa_utils import get_flash_attn_version
 
 if HAS_TRITON:
     from vllm.attention.ops.triton_flash_attention import triton_attention
@@ -1091,7 +1091,14 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
                 q,
                 k,
                 maybe_padded_v,
-                **kwargs,
+                None,  # output
+                kwargs["cu_seqlens_q"],
+                kwargs["cu_seqlens_k"],
+                kwargs["max_seqlen_q"],
+                kwargs["max_seqlen_k"],
+                kwargs["causal"],
+                softmax_scale,
+                None,  # bias
             )
         if is_vllm_fa:
             attn_out = self.flash_attn_varlen_func(
