@@ -17,7 +17,8 @@ from dataclasses import (MISSING, dataclass, field, fields, is_dataclass,
 from importlib.util import find_spec
 from pathlib import Path
 from typing import (TYPE_CHECKING, Any, Callable, ClassVar, Final, Literal,
-                    Optional, Protocol, TypeVar, Union, cast, get_args)
+                    Optional, Protocol, TypeVar, Union, cast, get_args,
+                    get_origin)
 
 import torch
 from pydantic import BaseModel, Field, PrivateAttr
@@ -177,9 +178,19 @@ def config(cls: ConfigT) -> ConfigT:
             raise ValueError(
                 f"Field '{f.name}' in {cls.__name__} must have a default value."
             )
+
         if f.name not in attr_docs:
             raise ValueError(
                 f"Field '{f.name}' in {cls.__name__} must have a docstring.")
+
+        if get_origin(f.type) is Union:
+            args = get_args(f.type)
+            literal_args = [arg for arg in args if get_origin(arg) is Literal]
+            if len(literal_args) > 1:
+                raise ValueError(
+                    f"Field '{f.name}' in {cls.__name__} must use a single "
+                    "Literal type. Please use 'Literal[Literal1, Literal2]' "
+                    "instead of 'Union[Literal1, Literal2]'.")
     return cls
 
 
