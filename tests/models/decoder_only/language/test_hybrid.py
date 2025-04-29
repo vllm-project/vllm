@@ -28,7 +28,7 @@ HYBRID_MODELS = [
     # not compatible with pip-compile.
     "pfnet/plamo-2-1b",
     "Zyphra/Zamba2-1.2B-instruct",
-    "ibm-ai-platform/Bamba-9B",
+    "hmellor/bamba-tiny-random",
 ]
 
 # Avoid OOM
