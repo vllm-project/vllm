@@ -628,15 +628,6 @@ class EngineArgs:
             help=('Use padding-aware scheduling. If True, the scheduler '
                   'will consider padded tokens in prefill. '
                   'By default this is set to False on non-HPU devices. '))
-        parser.add_argument(
-            '--num-lookahead-slots',
-            type=int,
-            default=EngineArgs.num_lookahead_slots,
-            help='Experimental scheduling config necessary for '
-            'speculative decoding. This will be replaced by '
-            'speculative config in the future; it is present '
-            'to enable correctness tests until then.')
-
         parser.add_argument('--seed',
                             type=int,
                             default=EngineArgs.seed,
