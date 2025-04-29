@@ -11,9 +11,9 @@ from typing import Callable, Optional
 import torch
 import torch.utils.benchmark as TBenchmark
 from torch.utils.benchmark import Measurement as TMeasurement
+from utils import make_rand_tensors
 from weight_shapes import WEIGHT_SHAPES
 
-from utils import make_rand_tensors
 from vllm import _custom_ops as ops
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     w8a8_block_fp8_matmul,
