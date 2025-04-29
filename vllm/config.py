@@ -334,7 +334,7 @@ class ModelConfig:
     def __init__(
         self,
         model: str,
-        task: Union[TaskOption, Literal["draft"]],
+        task: Literal[TaskOption, Literal["draft"]],
         tokenizer: str,
         tokenizer_mode: str,
         trust_remote_code: bool,
@@ -677,7 +677,7 @@ class ModelConfig:
 
     def _resolve_task(
         self,
-        task_option: Union[TaskOption, Literal["draft"]],
+        task_option: Literal[TaskOption, Literal["draft"]],
     ) -> tuple[set[_ResolvedTask], _ResolvedTask]:
         if task_option == "draft":
             return {"draft"}, "draft"
@@ -3102,7 +3102,8 @@ def get_served_model_name(model: str,
 GuidedDecodingBackendV0 = Literal["auto", "outlines", "lm-format-enforcer",
                                   "xgrammar", "guidance"]
 GuidedDecodingBackendV1 = Literal["auto", "xgrammar", "guidance"]
-GuidedDecodingBackend = Union[GuidedDecodingBackendV0, GuidedDecodingBackendV1]
+GuidedDecodingBackend = Literal[GuidedDecodingBackendV0,
+                                GuidedDecodingBackendV1]
 
 
 @config
