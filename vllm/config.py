@@ -17,7 +17,7 @@ from dataclasses import (MISSING, dataclass, field, fields, is_dataclass,
 from importlib.util import find_spec
 from pathlib import Path
 from typing import (TYPE_CHECKING, Any, Callable, ClassVar, Final, Literal,
-                    Optional, Protocol, TypeVar, Union, get_args)
+                    Optional, Protocol, TypeVar, Union, get_args, get_origin)
 
 import torch
 from pydantic import BaseModel, Field, PrivateAttr
@@ -177,9 +177,19 @@ def config(cls: ConfigT) -> ConfigT:
             raise ValueError(
                 f"Field '{f.name}' in {cls.__name__} must have a default value."
             )
+
         if f.name not in attr_docs:
             raise ValueError(
                 f"Field '{f.name}' in {cls.__name__} must have a docstring.")
+
+        if get_origin(f.type) is Union:
+            args = get_args(f.type)
+            literal_args = [arg for arg in args if get_origin(arg) is Literal]
+            if len(literal_args) > 1:
+                raise ValueError(
+                    f"Field '{f.name}' in {cls.__name__} must use a single "
+                    "Literal type. Please use 'Literal[Literal1, Literal2]' "
+                    "instead of 'Union[Literal1, Literal2]'.")
     return cls
 
 
@@ -3166,6 +3176,8 @@ def get_served_model_name(model: str,
 GuidedDecodingBackendV0 = Literal["auto", "outlines", "lm-format-enforcer",
                                   "xgrammar", "guidance"]
 GuidedDecodingBackendV1 = Literal["auto", "xgrammar", "guidance"]
+GuidedDecodingBackend = Literal[GuidedDecodingBackendV0,
+                                GuidedDecodingBackendV1]
 
 
 @config
@@ -3173,9 +3185,8 @@ GuidedDecodingBackendV1 = Literal["auto", "xgrammar", "guidance"]
 class DecodingConfig:
     """Dataclass which contains the decoding strategy of the engine."""
 
-    guided_decoding_backend: Union[
-        GuidedDecodingBackendV0,
-        GuidedDecodingBackendV1] = "auto" if envs.VLLM_USE_V1 else "xgrammar"
+    guided_decoding_backend: GuidedDecodingBackend = \
+        "auto" if envs.VLLM_USE_V1 else "xgrammar"
     """Which engine will be used for guided decoding (JSON schema / regex etc)
     by default. With "auto", we will make opinionated choices based on request
     contents and what the backend libraries currently support, so the behavior
