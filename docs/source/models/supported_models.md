@@ -793,6 +793,8 @@ or `--limit-mm-per-prompt` (online serving). For example, to enable passing up t
 Offline inference:
 
 ```python
+from vllm import LLM
+
 llm = LLM(
     model="Qwen/Qwen2-VL-7B-Instruct",
     limit_mm_per_prompt={"image": 4},
@@ -890,6 +892,13 @@ See [this page](#generative-models) for more information on how to use generativ
   * GLM-4V
   * T + I
   * `THUDM/glm-4v-9b`, `THUDM/cogagent-9b-20241220` etc.
+  * ✅︎
+  * ✅︎
+  * ✅︎
+- * `GraniteSpeechForConditionalGeneration`
+  * Granite Speech
+  * T + A
+  * `ibm-granite/granite-speech-3.3-8b`
   * ✅︎
   * ✅︎
   * ✅︎
