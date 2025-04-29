@@ -429,11 +429,6 @@ class EngineArgs:
                                  help=model_kwargs["hf_token"]["help"])
         model_group.add_argument("--hf-overrides",
                                  **model_kwargs["hf_overrides"])
-        model_group.add_argument("--mm-processor-kwargs",
-                                 **model_kwargs["mm_processor_kwargs"])
-        model_group.add_argument(
-            "--disable-mm-preprocessor-cache",
-            **model_kwargs["disable_mm_preprocessor_cache"])
         model_group.add_argument("--override-neuron-config",
                                  **model_kwargs["override_neuron_config"])
         model_group.add_argument("--override-pooler-config",
@@ -567,6 +562,12 @@ class EngineArgs:
         )
         multimodal_group.add_argument('--limit-mm-per-prompt',
                                       **multimodal_kwargs["limit_per_prompt"])
+        multimodal_group.add_argument(
+            '--mm-processor-kwargs',
+            **multimodal_kwargs["mm_processor_kwargs"])
+        multimodal_group.add_argument(
+            '--disable-mm-preprocessor-cache',
+            **multimodal_kwargs["disable_mm_preprocessor_cache"])
 
         # LoRA related configs
         lora_kwargs = get_kwargs(LoRAConfig)
@@ -721,7 +722,7 @@ class EngineArgs:
                             '-O',
                             type=CompilationConfig.from_cli,
                             default=None,
-                            help='torch.compile configuration for the model.'
+                            help='torch.compile configuration for the model. '
                             'When it is a number (0, 1, 2, 3), it will be '
                             'interpreted as the optimization level.\n'
                             'NOTE: level 0 is the default level without '

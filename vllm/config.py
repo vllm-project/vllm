@@ -406,7 +406,6 @@ class ModelConfig:
         factors.append(self.max_logprobs)
         factors.append(self.disable_sliding_window)
         factors.append(self.trust_remote_code)
-        factors.append(self.mm_processor_kwargs)
         factors.append(self.generation_config)
         factors.append(self.model_impl)
         factors.append(self.override_generation_config)
@@ -595,11 +594,21 @@ class ModelConfig:
 
     def _init_multimodal_config(self) -> Optional["MultiModalConfig"]:
         if self.registry.is_multimodal_model(self.architectures):
-            return MultiModalConfig(limit_per_prompt=self.limit_mm_per_prompt)
+            return MultiModalConfig(
+                limit_per_prompt=self.limit_mm_per_prompt,
+                mm_processor_kwargs=self.mm_processor_kwargs,
+                disable_mm_preprocessor_cache=self.
+                disable_mm_preprocessor_cache)
 
         if self.limit_mm_per_prompt:
             raise ValueError("`limit_mm_per_prompt` is only supported for "
                              "multimodal models.")
+        if self.mm_processor_kwargs:
+            raise ValueError("`mm_processor_kwargs` is only supported for "
+                             "multimodal models.")
+        if self.disable_mm_preprocessor_cache:
+            raise ValueError("`disable_mm_preprocessor_cache` is only "
+                             "supported for multimodal models.")
 
         return None
 
@@ -2430,7 +2439,8 @@ class SpeculativeConfig:
                         pass
                     else:
                         eagle_config = EAGLEConfig(
-                            self.draft_model_config.hf_config)
+                            self.draft_model_config.hf_config,
+                            method=self.method)
                         self.draft_model_config.hf_config = eagle_config
 
                 if (self.num_speculative_tokens is not None
@@ -2805,7 +2815,23 @@ class MultiModalConfig:
     Defaults to 1 (V0) or 999 (V1) for each modality.
 
     For example, to allow up to 16 images and 2 videos per prompt:
-    ``{"images": 16, "videos": 2}``
+    :code:`{"images": 16, "videos": 2}`
+    """
+
+    mm_processor_kwargs: Optional[dict[str, object]] = None
+    """
+    Overrides for the multi-modal processor obtained from
+    :meth:`transformers.AutoProcessor.from_pretrained`.
+
+    The available overrides depend on the model that is being run.
+
+    For example, for Phi-3-Vision:
+    :code:`{"num_crops": 4}`.
+    """
+
+    disable_mm_preprocessor_cache: bool = False
+    """
+    If :code:`True`, disable caching of the processed multi-modal inputs.
     """
 
     def compute_hash(self) -> str:
@@ -4105,8 +4131,6 @@ class VllmConfig:
             f"enable_prefix_caching={self.cache_config.enable_prefix_caching}, "
             f"chunked_prefill_enabled={self.scheduler_config.chunked_prefill_enabled}, "  # noqa
             f"use_async_output_proc={self.model_config.use_async_output_proc}, "
-            f"disable_mm_preprocessor_cache={self.model_config.disable_mm_preprocessor_cache!r}, "  # noqa
-            f"mm_processor_kwargs={self.model_config.mm_processor_kwargs}, "
             f"pooler_config={self.model_config.pooler_config!r}, "
             f"compilation_config={self.compilation_config!r}")
 
