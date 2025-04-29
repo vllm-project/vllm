@@ -15,7 +15,6 @@
 # limitations under the License.
 """Wrapper around `transformers` models"""
 import re
-from itertools import chain
 from typing import Iterable, Literal, Optional, Union
 
 import torch
@@ -166,11 +165,8 @@ class TransformersModel(nn.Module):
         # Initialize buffers (e.g. rotary embedding inverse frequency)
         self.init_buffers(self.model)
 
-        # Initialize parameters
+        # Initialize any parameters that have not had their modules replaced
         self.init_parameters(self.model)
-
-        # Move remaining meta tensors to device (should happen last)
-        self.meta_to_empty(self.model)
 
         self.make_empty_intermediate_tensors = (
             make_empty_intermediate_tensors_factory(["hidden_states"],
@@ -319,14 +315,6 @@ class TransformersModel(nn.Module):
                 setattr(module, name, new_param)
         for child in module.children():
             self.init_parameters(child)
-
-    def meta_to_empty(self, module: nn.Module):
-        tensors = list(chain(module.buffers(), module.parameters()))
-        if tensors and all(t.device == torch.device("meta") for t in tensors):
-            module.to_empty(device=self.device_config.device)
-            return  # We can stop recursing because to_empty is recursive
-        for child in module.children():
-            self.meta_to_empty(child)
 
     def get_input_embeddings(self) -> nn.Module:
         return self.model.get_input_embeddings()
