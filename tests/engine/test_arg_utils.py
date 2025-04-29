@@ -11,7 +11,8 @@ import pytest
 from vllm.config import PoolerConfig, config
 from vllm.engine.arg_utils import (EngineArgs, contains_type, get_kwargs,
                                    get_type, is_not_builtin, is_type,
-                                   nullable_kvs, optional_type)
+                                   literal_to_kwargs, nullable_kvs,
+                                   optional_type)
 from vllm.utils import FlexibleArgumentParser
 
 
@@ -69,6 +70,21 @@ def test_contains_type(type_hints, type, expected):
 ])
 def test_get_type(type_hints, type, expected):
     assert get_type(type_hints, type) == expected
+
+
+@pytest.mark.parametrize(("type_hints", "expected"), [
+    ({Literal[1, 2]}, {
+        "type": int,
+        "choices": [1, 2]
+    }),
+    ({Literal[1, "a"]}, Exception),
+])
+def test_literal_to_kwargs(type_hints, expected):
+    context = nullcontext()
+    if expected is Exception:
+        context = pytest.raises(expected)
+    with context:
+        assert literal_to_kwargs(type_hints) == expected
 
 
 @config
