@@ -403,7 +403,7 @@ class InputPreprocessor:
             )
 
         if prompt_token_ids is None:
-            prompt_token_ids = self._tokenize_prompt_async(
+            prompt_token_ids = await self._tokenize_prompt_async(
                 prompt_text,
                 lora_request=lora_request,
             )
