@@ -84,9 +84,11 @@ class FusedMoEQuantizeDispatchCombine(ABC):
         a1: torch.Tensor,
         a1_scale: Optional[torch.Tensor],
         a2_scale: Optional[torch.Tensor],
+        topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
         num_experts: int,
         expert_map: Optional[torch.Tensor],
+        apply_router_weight_on_input: bool,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor]]:
         """
         Perform any quantization (and/or) dispatching needed
@@ -95,7 +97,8 @@ class FusedMoEQuantizeDispatchCombine(ABC):
         - a1_scale: Optional scales for a1
         - a2_scale: Optional scales for the second MoE gemm.  Required to make
           sure the quantization is consistent for both gemms.
-        - topk_ids: The topk_ids.
+        - topk_ids: The topk ids.
+        - topk_weights: The topk weights.
         - num_experts: The total number of experts in the global expert space.
         - expert_map: A tensor mapping expert indices from the global expert
           space to the local expert space of the expert parallel shard.
@@ -113,6 +116,7 @@ class FusedMoEQuantizeDispatchCombine(ABC):
         fused_expert_output: torch.Tensor,
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
+        apply_router_weight_on_input: bool,
     ) -> None:
         """
         Perform any combine plus apply weights and perform a reduction on the
@@ -169,7 +173,7 @@ class FusedMoEPermuteExpertsUnpermute(ABC):
     @abstractmethod
     def apply(
         self,
-        a1q: torch.Tensor,
+        hidden_states: torch.Tensor,
         w1: torch.Tensor,
         w2: torch.Tensor,
         topk_ids: torch.Tensor,
@@ -191,7 +195,8 @@ class FusedMoEPermuteExpertsUnpermute(ABC):
         (MoE) layer using two sets of weights, w1 and w2.
 
         Parameters:
-        - a1q: (torch.Tensor): The (quantized) input tensor to the MoE layer.
+        - hidden_states: (torch.Tensor): The (quantized) input tensor to the MoE
+          layer.
         - w1 (torch.Tensor): The first set of expert weights.
         - w2 (torch.Tensor): The second set of expert weights.
         - topk_ids (torch.Tensor): A map of row to expert id.
@@ -263,6 +268,7 @@ class FusedMoEModularKernel(torch.nn.Module):
         w2_zp: Optional[torch.Tensor] = None,
         a1_scale: Optional[torch.Tensor] = None,
         a2_scale: Optional[torch.Tensor] = None,
+        apply_router_weight_on_input: bool = False,
     ) -> torch.Tensor:
         """
         This function computes a Mixture of Experts (MoE) layer using two sets
@@ -292,6 +298,9 @@ class FusedMoEModularKernel(torch.nn.Module):
           w2.
         - a1_scale (Optional[torch.Tensor]): Optional scale to be used for a1.
         - a2_scale (Optional[torch.Tensor]): Optional scale to be used for a2.
+        - apply_router_weight_on_input (bool): When true, the topk weights are
+          applied directly on the inputs. This is only applicable when topk is
+          1.
 
         Returns:
         - torch.Tensor: The output tensor after applying the MoE layer.
@@ -318,34 +327,29 @@ class FusedMoEModularKernel(torch.nn.Module):
                                  dtype=workspace_dtype)
 
         a1q, a1q_scale, expert_num_tokens = self.dispatch_combine.dispatch(
-            a1,
-            a1_scale,
-            a2_scale,
-            topk_ids,
-            global_num_experts,
-            expert_map,
-        )
+            a1, a1_scale, a2_scale, topk_weights, topk_ids, global_num_experts,
+            expert_map, apply_router_weight_on_input)
 
         fused_out = self.fused_experts.apply(
             a1q,
             w1,
             w2,
             topk_ids,
-            activation,
-            global_num_experts,
-            expert_map,
-            w1_scale,
-            w2_scale,
-            w1_zp,
-            w2_zp,
-            a1q_scale,
-            a2_scale,
+            activation=activation,
+            global_num_experts=global_num_experts,
+            expert_map=expert_map,
+            w1_scale=w1_scale,
+            w2_scale=w2_scale,
+            w1_zp=w1_zp,
+            w2_zp=w2_zp,
+            a1q_scale=a1q_scale,
+            a2_scale=a2_scale,
             workspace13=workspace13,
             workspace2=workspace2,
             expert_num_tokens=expert_num_tokens,
         )
 
         self.dispatch_combine.combine(output, fused_out, topk_weights,
-                                      topk_ids)
+                                      topk_ids, apply_router_weight_on_input)
 
         return output

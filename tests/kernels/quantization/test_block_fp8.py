@@ -11,7 +11,7 @@ from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.fused_moe import fused_moe
 from vllm.model_executor.layers.fused_moe.deep_gemm_moe import (
-    _valid_deep_gemm_shape, deep_gemm_moe_fp8)
+    _valid_deep_gemm_shape, deep_gemm_moe_fp8, modular_deep_gemm_fused_moe_fp8)
 from vllm.model_executor.layers.fused_moe.fused_moe import fused_topk
 from vllm.model_executor.layers.fused_moe.moe_align_block_size import (
     moe_align_block_size)
@@ -211,6 +211,9 @@ def test_w8a8_block_fp8_fused_moe(M, N, K, E, topk, block_size, dtype, seed):
 
     # Set the context to avoid lots of warning spam.
     vllm_config = VllmConfig()
+    vllm_config.scheduler_config.max_num_seqs = 128
+    vllm_config.scheduler_config.max_model_len = 8192
+
     with set_current_vllm_config(vllm_config):
         out = fused_moe(
             a,
@@ -387,8 +390,6 @@ def test_w8a8_block_fp8_deep_gemm_fused_moe(M, N, K, E, topk, seed):
     if not _valid_deep_gemm_shape(M, N, K):
         pytest.skip(f"Skipping test: invalid size m={M}, n={N}, k={K}")
 
-    vllm_config = VllmConfig()
-
     torch.manual_seed(seed)
     fp8_info = torch.finfo(torch.float8_e4m3fn)
     fp8_max, fp8_min = fp8_info.max, fp8_info.min
@@ -425,7 +426,26 @@ def test_w8a8_block_fp8_deep_gemm_fused_moe(M, N, K, E, topk, seed):
         w1[i], w1_s[i] = per_block_cast_to_fp8(w1_bf16[i])
         w2[i], w2_s[i] = per_block_cast_to_fp8(w2_bf16[i])
 
+    if True:
+        dgm = modular_deep_gemm_fused_moe_fp8()
+
+        def deep_gemm_moe_fp8_fn(a, w1, w2, w1_s, w2_s, topk_weights,
+                                 topk_ids):
+            return dgm(a,
+                       w1,
+                       w2,
+                       topk_weights,
+                       topk_ids,
+                       w1_scale=w1_s,
+                       w2_scale=w2_s)
+    else:
+        deep_gemm_moe_fp8_fn = deep_gemm_moe_fp8
+
     # Set the context to avoid lots of warning spam.
+    vllm_config = VllmConfig()
+    vllm_config.scheduler_config.max_num_seqs = 128
+    vllm_config.scheduler_config.max_model_len = 8192
+
     with set_current_vllm_config(vllm_config):
         if M >= 128:
             ref_out = deep_gemm_w8a8_block_fp8_moe(M, K, a, w1, w2, w1_s, w2_s,
@@ -437,7 +457,8 @@ def test_w8a8_block_fp8_deep_gemm_fused_moe(M, N, K, E, topk, seed):
         topk_weights, topk_ids, token_expert_indices = fused_topk(
             a, score.float(), topk, False)
 
-        out = deep_gemm_moe_fp8(a, w1, w2, w1_s, w2_s, topk_weights, topk_ids)
+        out = deep_gemm_moe_fp8_fn(a, w1, w2, w1_s, w2_s, topk_weights,
+                                   topk_ids)
 
     #print(f"{out.sum()=}")
     #print(f"{ref_out.sum()=}")

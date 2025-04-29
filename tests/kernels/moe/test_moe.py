@@ -11,7 +11,9 @@ from transformers import MixtralConfig
 from transformers.models.mixtral.modeling_mixtral import MixtralSparseMoeBlock
 
 import vllm.model_executor.layers.fused_moe  # noqa
-from tests.kernels.utils import opcheck, stack_and_dev, torch_moe
+from tests.kernels.utils import (opcheck, stack_and_dev, torch_moe,
+                                 torch_moe_single)
+from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.model_executor.layers.fused_moe import fused_moe
 from vllm.model_executor.layers.fused_moe.fused_moe import fused_topk
 from vllm.model_executor.layers.fused_moe.moe_torch_iterative import (
@@ -31,6 +33,10 @@ from vllm.scalar_type import ScalarType, scalar_types
 NUM_EXPERTS = [8, 64]
 EP_SIZE = [1, 4]
 TOP_KS = [2, 6]
+
+vllm_config = VllmConfig()
+vllm_config.scheduler_config.max_num_seqs = 128
+vllm_config.scheduler_config.max_model_len = 8192
 
 
 @pytest.mark.parametrize("m", [1, 33, 64, 222, 1024 * 128])
@@ -70,7 +76,6 @@ def test_fused_moe(
     else:
         e_map = None
 
-    vllm_config = VllmConfig()
     with set_current_vllm_config(vllm_config):
         torch_output = torch_moe(a, w1, w2, score, topk, e_map)
         iterative_output = iterative_moe(a,
@@ -197,22 +202,24 @@ def test_fused_moe_wn16(m: int, n: int, k: int, e: int, topk: int,
     else:
         e_map = None
 
-    triton_output = fused_moe(a,
-                              w1_qweight,
-                              w2_qweight,
-                              score,
-                              topk,
-                              renormalize=False,
-                              use_int4_w4a16=weight_bits == 4,
-                              use_int8_w8a16=weight_bits == 8,
-                              global_num_experts=e,
-                              expert_map=e_map,
-                              w1_scale=w1_scales,
-                              w2_scale=w2_scales,
-                              w1_zp=w1_qzeros if has_zp else None,
-                              w2_zp=w2_qzeros if has_zp else None,
-                              block_shape=[0, group_size])
-    torch_output = torch_moe(a, w1_ref, w2_ref, score, topk, e_map)
+    with set_current_vllm_config(vllm_config):
+        triton_output = fused_moe(a,
+                                  w1_qweight,
+                                  w2_qweight,
+                                  score,
+                                  topk,
+                                  renormalize=False,
+                                  use_int4_w4a16=weight_bits == 4,
+                                  use_int8_w8a16=weight_bits == 8,
+                                  global_num_experts=e,
+                                  expert_map=e_map,
+                                  w1_scale=w1_scales,
+                                  w2_scale=w2_scales,
+                                  w1_zp=w1_qzeros if has_zp else None,
+                                  w2_zp=w2_qzeros if has_zp else None,
+                                  block_shape=[0, group_size])
+        torch_output = torch_moe(a, w1_ref, w2_ref, score, topk, e_map)
+
     torch.testing.assert_close(triton_output, torch_output, atol=2e-2, rtol=0)
 
 

@@ -91,7 +91,7 @@ class DeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
 
     def apply(
         self,
-        a1q: torch.Tensor,
+        hidden_states: torch.Tensor,
         w1: torch.Tensor,
         w2: torch.Tensor,
         topk_ids: torch.Tensor,
@@ -110,6 +110,7 @@ class DeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
     ) -> torch.Tensor:
         import deep_gemm as dg
 
+        a1q = hidden_states
         _, N, K = w1.shape
 
         assert global_num_experts != -1
@@ -137,7 +138,8 @@ class DeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
 
         a2q_scale: Optional[torch.Tensor] = None
 
-        a2q, a2q_scale = _fp8_quantize(workspace2, a2_scale, self.block_shape)
+        a2q, a2q_scale = _fp8_quantize(workspace2, a2_scale, False,
+                                       self.block_shape)
 
         dg.m_grouped_gemm_fp8_fp8_bf16_nt_contiguous(
             (a2q, a2q_scale), (w2, w2_scale), workspace3, expert_ids)
@@ -169,6 +171,7 @@ def deep_gemm_moe_fp8(
     expert_map: Optional[torch.Tensor] = None,
     a1_scale: Optional[torch.Tensor] = None,
     a2_scale: Optional[torch.Tensor] = None,
+    apply_router_weight_on_input=False,
 ) -> torch.Tensor:
     """
     This function computes a a8w8-quantized Mixture of Experts (MoE) layer
@@ -222,4 +225,5 @@ def deep_gemm_moe_fp8(
         w2_scale=w2_scale,
         a1_scale=a1_scale,
         a2_scale=a2_scale,
+        apply_router_weight_on_input=apply_router_weight_on_input,
     )

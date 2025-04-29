@@ -6,7 +6,8 @@ import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.forward_context import get_forward_context
-from vllm.model_executor.layers.fused_moe.utils import _fp8_quantize
+from vllm.model_executor.layers.fused_moe.utils import (
+    moe_kernel_quantize_input)
 
 
 # Note use: layer.get_all_to_all() to get an AllToAll instance
@@ -34,27 +35,33 @@ class PplxDispatchCombine(mk.FusedMoEQuantizeDispatchCombine):
         a1: torch.Tensor,
         a1_scale: Optional[torch.Tensor],
         a2_scale: Optional[torch.Tensor],
+        rank_topk_weights: torch.Tensor,
         rank_topk_ids: torch.Tensor,
         num_experts: int,
         expert_map: Optional[torch.Tensor],
+        apply_router_weight_on_input: bool = False,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         # Is this always going to be a1.device?
         device = a1.device
 
-        if self.quant_dtype == torch.float8_e4m3fn:
-            per_act_token = a1_scale.numel(
-            ) != 1 if a1_scale is not None else (
-                a2_scale.numel() != 1 if a2_scale is not None else False)
+        assert expert_map is None, "NYI"
 
-            a1q, a1q_scale = _fp8_quantize(
-                a1,
-                a1_scale,
-                self.block_shape,
-                per_act_token,
-            )
-        else:
-            a1q = a1
-            a1q_scale = a1_scale
+        # TBD
+        assert not apply_router_weight_on_input
+        if apply_router_weight_on_input:
+            topk = rank_topk_ids.shape[1]
+            # TODO: this only works for topK=1, will need to update for topK>1
+            assert topk == 1, \
+                "apply_router_weight_on_input is only implemented for topk=1"
+            a1 = a1 * rank_topk_weights.to(a1.dtype)
+
+        per_act_token = a1_scale.numel() != 1 if a1_scale is not None else (
+            a2_scale.numel() != 1 if a2_scale is not None else False)
+
+        a1q, a1q_scale = moe_kernel_quantize_input(a1, a1_scale,
+                                                   self.quant_dtype,
+                                                   per_act_token,
+                                                   self.block_shape)
 
         expert_num_tokens = torch.empty(
             num_experts,
@@ -103,12 +110,18 @@ class PplxDispatchCombine(mk.FusedMoEQuantizeDispatchCombine):
         fused_expert_output: torch.Tensor,
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
+        apply_router_weight_on_input: bool,
     ) -> None:
         # This argument is optional
         bound_m = get_forward_context().dp_metadata.dp_rank_num_tokens
 
         assert output.shape[0] == self.max_num_tokens
         assert output.shape[1] == fused_expert_output.shape[-1]
+
+        # Set weights to 1?
+        assert not apply_router_weight_on_input
+        if apply_router_weight_on_input:
+            topk_weights = torch.ones_like(topk_weights)
 
         self.a2a.combine(out_tokens=output,
                          indices=topk_ids,
