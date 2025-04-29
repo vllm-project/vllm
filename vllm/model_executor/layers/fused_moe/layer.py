@@ -230,7 +230,8 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
                 activation=activation,
                 apply_router_weight_on_input=apply_router_weight_on_input,
                 global_num_experts=global_num_experts,
-                expert_map=expert_map)
+                expert_map=expert_map,
+                use_ck_moe_2stages=self.rocm_aiter_2stage_moe_enabled)
 
         return fused_experts(
             hidden_states=x,

@@ -87,10 +87,9 @@ if TYPE_CHECKING:
     VLLM_ROCM_USE_AITER_PAGED_ATTN: bool = False
     VLLM_ROCM_USE_AITER_RMSNORM: bool = True
     VLLM_ROCM_USE_AITER_MOE: bool = True
-    VLLM_ROCM_USE_AITER_2STAGE_MOE: bool = False
+    VLLM_ROCM_USE_AITER_2STAGE_MOE: bool = True
     VLLM_ROCM_USE_AITER_LINEAR: bool = True
     VLLM_ROCM_USE_AITER_MLA: bool = True
-    VLLM_ROCM_USE_AITER_BLOCK_GEMM: bool = False
     VLLM_ROCM_USE_SKINNY_GEMM: bool = True
     VLLM_ROCM_FP8_PADDING: bool = True
     VLLM_ROCM_MOE_PADDING: bool = True
@@ -603,7 +602,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
 
     # use aiter ck fused moe op if ater ops are enabled
     "VLLM_ROCM_USE_AITER_2STAGE_MOE":
-    lambda: (os.getenv("VLLM_ROCM_USE_AITER_2STAGE_MOE", "False").lower() in
+    lambda: (os.getenv("VLLM_ROCM_USE_AITER_2STAGE_MOE", "True").lower() in
              ("true", "1")),
 
     # use aiter linear op if aiter ops are enabled
@@ -617,11 +616,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # By default is enabled.
     "VLLM_ROCM_USE_AITER_MLA":
     lambda: (os.getenv("VLLM_ROCM_USE_AITER_MLA", "True").lower() in
-             ("true", "1")),
-
-    # use aiter w8a8 block gemm op if enabled. Disabled by default.
-    "VLLM_ROCM_USE_AITER_BLOCK_GEMM":
-    lambda: (os.getenv("VLLM_ROCM_USE_AITER_BLOCK_GEMM", "False").lower() in
              ("true", "1")),
 
     # use rocm skinny gemms

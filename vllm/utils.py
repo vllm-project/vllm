@@ -1934,11 +1934,6 @@ def aiter_2stage_moe_enabled() -> bool:
 
 
 @cache
-def aiter_fp8_block_moe_enabled() -> bool:
-    return aiter_moe_enabled() and envs.VLLM_ROCM_USE_AITER_FP8_BLOCK_MOE
-
-
-@cache
 def aiter_paged_attn_enabled() -> bool:
     return aiter_enabled() and envs.VLLM_ROCM_USE_AITER_PAGED_ATTN
 
@@ -1951,11 +1946,6 @@ def aiter_mla_enabled() -> bool:
 @cache
 def aiter_linear_enabled() -> bool:
     return aiter_enabled() and envs.VLLM_ROCM_USE_AITER_LINEAR
-
-
-@cache
-def aiter_block_gemm_enabled() -> bool:
-    return aiter_enabled() and envs.VLLM_ROCM_USE_AITER_BLOCK_GEMM
 
 
 def weak_ref_tensors(
