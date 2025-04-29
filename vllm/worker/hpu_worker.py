@@ -87,7 +87,6 @@ class HPUWorker(LocalOrDistributedWorkerBase):
             ModelRunnerClass = HPUPoolingModelRunner
         elif is_encoder_decoder_model:
             ModelRunnerClass = HPUEncoderDecoderModelRunner
-            is_causal = False
         self.model_runner: HPUModelRunnerBase = ModelRunnerClass(
             vllm_config=vllm_config,
             kv_cache_dtype=self.cache_config.cache_dtype,
