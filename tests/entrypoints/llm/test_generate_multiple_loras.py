@@ -40,7 +40,6 @@ def llm(request, monkeypatch_module):
     # enable garbage collection
     llm = LLM(model=MODEL_NAME,
               tensor_parallel_size=1,
-              max_model_len=8192,
               enable_lora=True,
               max_loras=4,
               max_lora_rank=64,
