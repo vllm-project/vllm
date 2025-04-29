@@ -159,6 +159,10 @@ class StructuredOutputManager:
                 request.prompt_token_ids[-1]) + 1
             retokenized_output_ids = retokenized_output_ids[prompt_boundary:]
 
+        original_output_ids = original_output_ids[
+            max(0,
+                len(original_output_ids) - len(retokenized_output_ids)):]
+
         # Find the prefix match length
         k = sum(1 for _ in itertools.takewhile(
             lambda pair: pair[0] == pair[1],
