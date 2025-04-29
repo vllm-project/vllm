@@ -262,7 +262,8 @@ class MultiModalRegistry:
         if tokenizer is None:
             tokenizer = cached_tokenizer_from_config(model_config)
         if disable_cache is None:
-            disable_cache = model_config.disable_mm_preprocessor_cache
+            mm_config = model_config.get_multimodal_config()
+            disable_cache = mm_config.disable_mm_preprocessor_cache
 
         model_cls = self._get_model_cls(model_config)
         factories = self._processor_factories[model_cls]
