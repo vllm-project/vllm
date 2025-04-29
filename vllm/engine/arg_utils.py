@@ -273,8 +273,10 @@ class EngineArgs:
         get_field(TokenizerPoolConfig, "extra_config")
     limit_mm_per_prompt: dict[str, int] = \
         get_field(MultiModalConfig, "limit_per_prompt")
-    mm_processor_kwargs: Optional[Dict[str, Any]] = None
-    disable_mm_preprocessor_cache: bool = False
+    mm_processor_kwargs: Optional[Dict[str, Any]] = \
+        MultiModalConfig.mm_processor_kwargs
+    disable_mm_preprocessor_cache: bool = \
+        MultiModalConfig.disable_mm_preprocessor_cache
     # LoRA fields
     enable_lora: bool = False
     enable_lora_bias: bool = LoRAConfig.bias_enabled
