@@ -737,7 +737,7 @@ tqdm==4.66.6
     #   transformers
 tqdm-multiprocess==0.0.11
     # via lm-eval
-transformers==4.51.1
+transformers==4.51.3
     # via
     #   -r requirements/test.in
     #   genai-perf

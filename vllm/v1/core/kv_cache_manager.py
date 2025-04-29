@@ -25,6 +25,7 @@ class KVCacheManager:
         max_model_len: int,
         enable_caching: bool = True,
         caching_hash_algo: str = "builtin",
+        use_eagle: bool = False,
         log_stats: bool = False,
     ) -> None:
         assert len(kv_cache_config.kv_cache_groups) == 1, (
@@ -38,6 +39,7 @@ class KVCacheManager:
 
         self.enable_caching = enable_caching
         self.caching_hash_fn = sha256 if caching_hash_algo == "sha256" else hash
+        self.use_eagle = use_eagle
         self.log_stats = log_stats
         # FIXME: make prefix cache stats conditional on log_stats
         self.prefix_cache_stats = PrefixCacheStats() if log_stats else None
@@ -134,6 +136,14 @@ class KVCacheManager:
 
         computed_blocks = (
             self.specialized_manager.find_longest_cache_hit(block_hashes))
+
+        if self.use_eagle and len(computed_blocks) > 0:
+            # Drop the last matched block if (1) eagle is enabled and
+            # (2) there is a cache hit.
+            # This is to recompute the last block to get the required
+            # hidden states for eagle drafting head.
+            computed_blocks.pop()
+
         if self.log_stats:
             assert self.prefix_cache_stats is not None
             self.prefix_cache_stats.queries += len(block_hashes)
