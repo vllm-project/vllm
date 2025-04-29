@@ -112,13 +112,8 @@ def contains_type(type_hints: set[TypeHint], type: TypeHintT) -> bool:
 
 
 def get_type(type_hints: set[TypeHint], type: TypeHintT) -> TypeHintT:
-    """Get the specific type from the type hints.
-
-    If there are multiple type hints that match, return the most specific one
-    (i.e. the one with the most arguments)."""
-    key = lambda th: len(get_args(th))
-    ths_sorted = sorted(type_hints, key=key, reverse=True)
-    return next((th for th in ths_sorted if is_type(th, type)), None)
+    """Get the specific type from the type hints."""
+    return next((th for th in type_hints if is_type(th, type)), None)
 
 
 def literal_to_kwargs(type_hints: set[TypeHint]) -> dict[str, Any]:
