@@ -312,14 +312,12 @@ def _build_mistral3_processor(
     dummy_inputs: BaseDummyInputsBuilder[_I],
     *,
     cache: Optional[ProcessingCache] = None,
-    enable_sanity_checks: bool = True,
 ) -> BaseMultiModalProcessor:
     assert isinstance(info, Mistral3ProcessingInfo)
     return Mistral3MultiModalProcessor(
         info,
         dummy_inputs,  # type: ignore
         cache=cache,
-        enable_sanity_checks=enable_sanity_checks,
     )
 
 
