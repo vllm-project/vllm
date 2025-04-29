@@ -66,9 +66,9 @@ class GuidanceBackend(StructuredOutputBackend):
         self.vocab_size = vllm_config.model_config.get_vocab_size()
 
         self.disable_any_whitespace = \
-            vllm_config.decoding_config.disable_any_whitespace
+            vllm_config.structured_output_config.disable_any_whitespace
         self.disable_additional_properties = \
-            vllm_config.decoding_config.disable_additional_properties
+            vllm_config.structured_output_config.disable_additional_properties
 
         tokenizer = tokenizer_group.get_lora_tokenizer(None)
         self.ll_tokenizer = llguidance_hf.from_tokenizer(

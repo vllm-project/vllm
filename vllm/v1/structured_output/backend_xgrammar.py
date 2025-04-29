@@ -38,7 +38,7 @@ class XgrammarBackend(StructuredOutputBackend):
             lora_config=vllm_config.lora_config)  # type: ignore[arg-type]
 
         self.disable_any_whitespace = \
-            vllm_config.decoding_config.disable_any_whitespace
+            vllm_config.structured_output_config.disable_any_whitespace
 
         self.num_speculative_tokens = 0
         if self.vllm_config.speculative_config is not None:

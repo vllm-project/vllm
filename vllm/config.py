@@ -1640,11 +1640,11 @@ class ParallelConfig:
     ray_workers_use_nsight: bool = False
     """Whether to profile Ray workers with nsight, see https://docs.ray.io/en/latest/ray-observability/user-guides/profiling.html#profiling-nsight-profiler."""
 
-    placement_group: Optional["PlacementGroup"] = None
+    placement_group: Optional[PlacementGroup] = None
     """ray distributed model workers placement group."""
 
     distributed_executor_backend: Optional[Union[DistributedExecutorBackend,
-                                                 type["ExecutorBase"]]] = None
+                                                 type[ExecutorBase]]] = None
     """Backend to use for distributed model
     workers, either "ray" or "mp" (multiprocessing). If the product
     of pipeline_parallel_size and tensor_parallel_size is less than
@@ -1687,7 +1687,7 @@ class ParallelConfig:
         self.data_parallel_master_port += 1
         return answer
 
-    def stateless_init_dp_group(self) -> "ProcessGroup":
+    def stateless_init_dp_group(self) -> ProcessGroup:
         from vllm.distributed.utils import (
             stateless_init_torch_distributed_process_group)
 
@@ -1702,7 +1702,7 @@ class ParallelConfig:
         return dp_group
 
     @staticmethod
-    def has_unfinished_dp(dp_group: "ProcessGroup",
+    def has_unfinished_dp(dp_group: ProcessGroup,
                           has_unfinished: bool) -> bool:
         tensor = torch.tensor([has_unfinished],
                               dtype=torch.int32,
@@ -3174,31 +3174,33 @@ def get_served_model_name(model: str,
     return served_model_name
 
 
-GuidedDecodingBackendV0 = Literal["auto", "outlines", "lm-format-enforcer",
-                                  "xgrammar", "guidance"]
-GuidedDecodingBackendV1 = Literal["auto", "xgrammar", "guidance"]
-GuidedDecodingBackend = Literal[GuidedDecodingBackendV0,
-                                GuidedDecodingBackendV1]
+StructuredOutputBackendV0 = Literal["auto", "outlines", "lm-format-enforcer",
+                                    "xgrammar", "guidance"]
+StructuredOutputBackendV1 = Literal["auto", "xgrammar", "guidance"]
+StructuredOutputBackend = Literal[StructuredOutputBackendV0,
+                                  StructuredOutputBackendV1]
 
 
 @config
 @dataclass
-class DecodingConfig:
-    """Dataclass which contains the decoding strategy of the engine."""
+class StructuredOutputConfig:
+    """Dataclass which contains the structured outputs decoding
+    strategy of the engine."""
 
     @property
     @deprecated(
         "`guided_decoding_backend` is deprecated and has been renamed to "
         "`backend`. This will be removed in v0.10.0. Please use the "
         "`backend` argument instead.")
-    def guided_decoding_backend(self) -> GuidedDecodingBackend:
+    def guided_decoding_backend(self) -> StructuredOutputBackend:
         return self.backend
 
     @guided_decoding_backend.setter
-    def guided_decoding_backend(self, value: GuidedDecodingBackend):
+    def guided_decoding_backend(self, value: StructuredOutputBackend):
         self.backend = value
 
-    backend: GuidedDecodingBackend = "auto" if envs.VLLM_USE_V1 else "xgrammar"
+    backend: StructuredOutputBackend = \
+        "auto" if envs.VLLM_USE_V1 else "xgrammar"
     """Which engine will be used for guided decoding (JSON schema / regex etc)
     by default. With "auto", we will make opinionated choices based on request
     contents and what the backend libraries currently support, so the behavior
@@ -3245,9 +3247,9 @@ class DecodingConfig:
             self._extract_backend_options()
 
         if envs.VLLM_USE_V1:
-            valid_guided_backends = get_args(GuidedDecodingBackendV1)
+            valid_guided_backends = get_args(StructuredOutputBackendV1)
         else:
-            valid_guided_backends = get_args(GuidedDecodingBackendV0)
+            valid_guided_backends = get_args(StructuredOutputBackendV0)
         if self.backend not in valid_guided_backends:
             raise ValueError(f"Invalid backend '{self.backend}',"
                              f" must be one of {valid_guided_backends}")
@@ -3260,15 +3262,12 @@ class DecodingConfig:
                              "for the guidance backend.")
 
     @deprecated(
-        "Passing guided decoding backend options inside backend in the format "
-        "'backend:...' is deprecated. This will be removed in v0.10.0. Please "
-        "use the dedicated arguments '--disable-fallback', "
-        "'--disable-any-whitespace' and '--disable-additional-properties' "
-        "instead.")
+        "Passing guided decoding backend options inside backend in the format 'backend:...' is deprecated. This will be removed in v0.10.0. Please set specific arguments in `--structured-output-config '{}'` instead."  # noqa: E501
+    )
     def _extract_backend_options(self):
         """Extract backend options from the backend string."""
         backend, options = self.backend.split(":")
-        self.backend = cast(GuidedDecodingBackend, backend)
+        self.backend = cast(StructuredOutputBackend, backend)
         options_set = set(options.strip().split(","))
         if "no-fallback" in options_set:
             self.disable_fallback = True
@@ -3276,6 +3275,15 @@ class DecodingConfig:
             self.disable_any_whitespace = True
         if "no-additional-properties" in options_set:
             self.disable_additional_properties = True
+
+
+# For backward compatibility, should remove in v0.10.0
+# given that vllm.config is considered public
+@deprecated(
+    "DecodingConfig is deprecated. Uses 'from vllm.config import StructuredOutputConfig' instead"  # noqa: E501
+)
+class DecodingConfig(StructuredOutputConfig):
+    pass
 
 
 @dataclass
@@ -3768,7 +3776,8 @@ class VllmConfig:
     lora_config: Optional[LoRAConfig] = None
     speculative_config: SpeculativeConfig = field(default=None,
                                                   init=True)  # type: ignore
-    decoding_config: Optional[DecodingConfig] = None
+    structured_output_config: StructuredOutputConfig = field(
+        default_factory=StructuredOutputConfig)
     observability_config: Optional[ObservabilityConfig] = None
     prompt_adapter_config: Optional[PromptAdapterConfig] = None
     quant_config: Optional[QuantizationConfig] = None
@@ -3839,8 +3848,8 @@ class VllmConfig:
             vllm_factors.append(self.speculative_config.compute_hash())
         else:
             vllm_factors.append("None")
-        if self.decoding_config:
-            vllm_factors.append(self.decoding_config.compute_hash())
+        if self.structured_output_config:
+            vllm_factors.append(self.structured_output_config.compute_hash())
         else:
             vllm_factors.append("None")
         if self.observability_config:
@@ -3932,9 +3941,21 @@ class VllmConfig:
 
         return replace(self, model_config=model_config)
 
+    @property
+    @deprecated(
+        "decoding_config is deprecated. Uses 'structured_output_config' instead"  # noqa: E501
+    )
+    def decoding_config(self) -> StructuredOutputConfig:
+        return self.structured_output_config
+
+    @decoding_config.setter
+    def decoding_config(self, value: StructuredOutputConfig):
+        self.structured_output_config = value
+
     def __post_init__(self):
         """Verify configs are valid & consistent with each other.
         """
+
         if self.model_config is not None:
             self.model_config.verify_async_output_proc(self.parallel_config,
                                                        self.speculative_config,
@@ -4161,7 +4182,7 @@ class VllmConfig:
             f"enforce_eager={self.model_config.enforce_eager}, "
             f"kv_cache_dtype={self.cache_config.cache_dtype}, "
             f" device_config={self.device_config.device}, "
-            f"decoding_config={self.decoding_config!r}, "
+            f"structured_output_config={self.structured_output_config!r}, "
             f"observability_config={self.observability_config!r}, "
             f"seed={self.model_config.seed}, "
             f"served_model_name={self.model_config.served_model_name}, "

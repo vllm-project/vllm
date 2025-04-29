@@ -3,6 +3,8 @@
 
 Run `pytest tests/models/test_mistral.py`.
 """
+from __future__ import annotations
+
 import copy
 import json
 
@@ -277,47 +279,40 @@ def test_mistral_function_calling(vllm_runner, model: str, dtype: str) -> None:
 
 
 @pytest.mark.parametrize("model", MODELS)
-@pytest.mark.parametrize("guided_backend",
-                         ["outlines", "lm-format-enforcer", "xgrammar"])
-def test_mistral_guided_decoding(
-    monkeypatch: pytest.MonkeyPatch,
+@pytest.mark.parametrize("structured_output_backend", ["guidance", "xgrammar"])
+def test_mistral_structured_output(
     vllm_runner,
     model: str,
-    guided_backend: str,
+    structured_output_backend: str,
 ) -> None:
-    with monkeypatch.context() as m:
-        # Guided JSON not supported in xgrammar + V1 yet
-        m.setenv("VLLM_USE_V1", "0")
+    with vllm_runner(
+            model,
+            dtype='bfloat16',
+            tokenizer_mode="mistral",
+            structured_output_config=dict(backend=structured_output_backend),
+    ) as vllm_model:
+        guided_decoding = GuidedDecodingParams(json=SAMPLE_JSON_SCHEMA)
+        params = SamplingParams(max_tokens=512,
+                                temperature=0.7,
+                                guided_decoding=guided_decoding)
 
-        with vllm_runner(
-                model,
-                dtype='bfloat16',
-                tokenizer_mode="mistral",
-                guided_decoding_backend=guided_backend,
-        ) as vllm_model:
-            guided_decoding = GuidedDecodingParams(json=SAMPLE_JSON_SCHEMA)
-            params = SamplingParams(max_tokens=512,
-                                    temperature=0.7,
-                                    guided_decoding=guided_decoding)
+        messages = [{
+            "role": "system",
+            "content": "you are a helpful assistant"
+        }, {
+            "role":
+            "user",
+            "content":
+            f"Give an example JSON for an employee profile that "
+            f"fits this schema: {SAMPLE_JSON_SCHEMA}"
+        }]
+        outputs = vllm_model.model.chat(messages, sampling_params=params)
 
-            messages = [{
-                "role": "system",
-                "content": "you are a helpful assistant"
-            }, {
-                "role":
-                "user",
-                "content":
-                f"Give an example JSON for an employee profile that "
-                f"fits this schema: {SAMPLE_JSON_SCHEMA}"
-            }]
-            outputs = vllm_model.model.chat(messages, sampling_params=params)
+    generated_text = outputs[0].outputs[0].text
+    json_response = json.loads(generated_text)
+    assert outputs is not None
 
-        generated_text = outputs[0].outputs[0].text
-        json_response = json.loads(generated_text)
-        assert outputs is not None
-
-        try:
-            jsonschema.validate(instance=json_response,
-                                schema=SAMPLE_JSON_SCHEMA)
-        except jsonschema.exceptions.ValidationError:
-            pytest.fail("Generated response is not valid with JSON schema")
+    try:
+        jsonschema.validate(instance=json_response, schema=SAMPLE_JSON_SCHEMA)
+    except jsonschema.exceptions.ValidationError:
+        pytest.fail("Generated response is not valid with JSON schema")

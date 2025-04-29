@@ -64,7 +64,7 @@ class CarDescription(BaseModel):
 
 @pytest.mark.skip_global_cleanup
 @pytest.mark.parametrize(
-    "model_name, guided_decoding_backend, tokenizer_mode, speculative_config",
+    "model_name, structured_output_backend, tokenizer_mode, speculative_config",
     PARAMS_MODELS_BACKENDS_TOKENIZER_MODE)
 def test_structured_output(
     monkeypatch: pytest.MonkeyPatch,
@@ -74,7 +74,7 @@ def test_structured_output(
     sample_sql_lark: str,
     sample_regex: str,
     sample_guided_choice: str,
-    guided_decoding_backend: str,
+    structured_output_backend: str,
     tokenizer_mode: str,
     model_name: str,
     speculative_config: dict[str, Any],
@@ -92,7 +92,10 @@ def test_structured_output(
               guided_decoding_backend=guided_decoding_backend,
               guided_decoding_disable_any_whitespace=True,
               tokenizer_mode=tokenizer_mode,
-              speculative_config=speculative_config)
+              speculative_config=speculative_config,
+              structured_output_config=dict(backend=structured_output_backend,
+                                            disable_any_whitespace=True),
+              tokenizer_mode=tokenizer_mode)
 
     #
     # Test 1: Generate JSON output based on a provided schema
@@ -158,7 +161,7 @@ def test_structured_output(
         temperature=1.0,
         max_tokens=1000,
         guided_decoding=GuidedDecodingParams(json=unsupported_json_schema))
-    if guided_decoding_backend.startswith("xgrammar"):
+    if structured_output_backend == "xgrammar":
         with pytest.raises(ValueError,
                            match="The provided JSON schema contains features "
                            "not supported by xgrammar."):
@@ -416,7 +419,7 @@ def test_structured_output(
 
     prompt = """
 You have access to the following function to retrieve the weather in a city:
-         
+
     {
         "name": "get_weather",
         "parameters": {
@@ -427,7 +430,7 @@ You have access to the following function to retrieve the weather in a city:
             }
         }
     }
-         
+
 If a you choose to call a function ONLY reply in the following format:
 <{start_tag}={function_name}>{parameters}{end_tag}
 where
@@ -448,7 +451,7 @@ Reminder:
 - Always add your sources when using search results to answer the user query
 
 You are a helpful assistant.
-         
+
 Given the previous instructions, what is the weather in New York City?
 """
 
@@ -498,7 +501,7 @@ def test_structured_output_auto_mode(
 
     llm = LLM(model=model_name,
               max_model_len=1024,
-              guided_decoding_backend="auto",
+              structured_output_config=dict(backend="auto"),
               tokenizer_mode=tokenizer_mode)
 
     sampling_params = SamplingParams(

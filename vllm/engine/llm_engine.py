@@ -16,9 +16,9 @@ import torch
 from typing_extensions import TypeVar, deprecated
 
 import vllm.envs as envs
-from vllm.config import (DecodingConfig, LoRAConfig, ModelConfig,
-                         ObservabilityConfig, ParallelConfig, SchedulerConfig,
-                         VllmConfig)
+from vllm.config import (LoRAConfig, ModelConfig, ObservabilityConfig,
+                         ParallelConfig, SchedulerConfig,
+                         StructuredOutputConfig, VllmConfig)
 from vllm.core.scheduler import ScheduledSequenceGroup, SchedulerOutputs
 from vllm.engine.arg_utils import EngineArgs
 from vllm.engine.metrics_types import StatLoggerBase, Stats
@@ -231,7 +231,7 @@ class LLMEngine:
         self.device_config = vllm_config.device_config
         self.speculative_config = vllm_config.speculative_config  # noqa
         self.load_config = vllm_config.load_config
-        self.decoding_config = vllm_config.decoding_config or DecodingConfig(  # noqa
+        self.decoding_config = vllm_config.decoding_config or StructuredOutputConfig(  # noqa
         )
         self.prompt_adapter_config = vllm_config.prompt_adapter_config  # noqa
         self.observability_config = vllm_config.observability_config or ObservabilityConfig(  # noqa
@@ -903,7 +903,7 @@ class LLMEngine:
         """Gets the parallel configuration."""
         return self.parallel_config
 
-    def get_decoding_config(self) -> DecodingConfig:
+    def get_decoding_config(self) -> StructuredOutputConfig:
         """Gets the decoding configuration."""
         return self.decoding_config
 

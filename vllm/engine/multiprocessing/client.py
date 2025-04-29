@@ -16,7 +16,7 @@ from zmq import Frame  # type: ignore[attr-defined]
 from zmq.asyncio import Socket
 
 from vllm import PoolingParams
-from vllm.config import DecodingConfig, ModelConfig, VllmConfig
+from vllm.config import ModelConfig, StructuredOutputConfig, VllmConfig
 from vllm.core.scheduler import SchedulerOutputs
 # yapf conflicts with isort for this block
 # yapf: disable
@@ -380,7 +380,7 @@ class MQLLMEngineClient(EngineClient):
     async def get_vllm_config(self) -> VllmConfig:
         return self.vllm_config
 
-    async def get_decoding_config(self) -> DecodingConfig:
+    async def get_decoding_config(self) -> StructuredOutputConfig:
         return self.decoding_config
 
     async def get_model_config(self) -> ModelConfig:
@@ -617,7 +617,7 @@ class MQLLMEngineClient(EngineClient):
                     tokenizer=await self.get_tokenizer(lora_request),
                     default_guided_backend=(self.decoding_config.backend
                         if self.decoding_config
-                        else DecodingConfig.backend),
+                        else StructuredOutputConfig.backend),
                     model_config=self.model_config,
                     reasoning_backend=self.decoding_config.reasoning_backend,
                 )

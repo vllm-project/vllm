@@ -16,16 +16,17 @@ from typing_extensions import TypeIs, deprecated
 import vllm.envs as envs
 from vllm import version
 from vllm.config import (BlockSize, CacheConfig, CacheDType, CompilationConfig,
-                         ConfigFormat, ConfigType, DecodingConfig, Device,
-                         DeviceConfig, DistributedExecutorBackend,
-                         GuidedDecodingBackend, GuidedDecodingBackendV1,
-                         HfOverrides, KVTransferConfig, LoadConfig, LoadFormat,
-                         LoRAConfig, ModelConfig, ModelImpl, MultiModalConfig,
+                         ConfigFormat, ConfigType, Device, DeviceConfig,
+                         DistributedExecutorBackend, HfOverrides,
+                         KVTransferConfig, LoadConfig, LoadFormat, LoRAConfig,
+                         ModelConfig, ModelImpl, MultiModalConfig,
                          ObservabilityConfig, ParallelConfig, PoolerConfig,
                          PrefixCachingHashAlgo, PromptAdapterConfig,
                          SchedulerConfig, SchedulerPolicy, SpeculativeConfig,
-                         TaskOption, TokenizerPoolConfig, VllmConfig,
-                         get_attr_docs, get_field)
+                         StructuredOutputBackend, StructuredOutputBackendV1,
+                         StructuredOutputConfig, TaskOption,
+                         TokenizerPoolConfig, VllmConfig, get_attr_docs,
+                         get_field)
 from vllm.executor.executor_base import ExecutorBase
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS
@@ -317,12 +318,17 @@ class EngineArgs:
         bool] = SchedulerConfig.enable_chunked_prefill
     disable_chunked_mm_input: bool = SchedulerConfig.disable_chunked_mm_input
 
-    guided_decoding_backend: GuidedDecodingBackend = DecodingConfig.backend
-    guided_decoding_disable_fallback: bool = DecodingConfig.disable_fallback
+    structured_output_config: Optional[Dict[str, Any]] = None
+    # To be removed in v0.10.x
+    guided_decoding_backend: StructuredOutputBackend = \
+        StructuredOutputConfig.backend
+    guided_decoding_disable_fallback: bool = \
+        StructuredOutputConfig.disable_fallback
     guided_decoding_disable_any_whitespace: bool = \
-        DecodingConfig.disable_any_whitespace
+        StructuredOutputConfig.disable_any_whitespace
     guided_decoding_disable_additional_properties: bool = \
-        DecodingConfig.disable_additional_properties
+        StructuredOutputConfig.disable_additional_properties
+
     logits_processor_pattern: Optional[str] = None
 
     speculative_config: Optional[Dict[str, Any]] = None
@@ -352,7 +358,7 @@ class EngineArgs:
 
     additional_config: Optional[Dict[str, Any]] = None
     enable_reasoning: Optional[bool] = None
-    reasoning_parser: Optional[str] = DecodingConfig.reasoning_backend
+    reasoning_parser: Optional[str] = StructuredOutputConfig.reasoning_backend
     use_tqdm_on_load: bool = LoadConfig.use_tqdm_on_load
 
     def __post_init__(self):
@@ -498,27 +504,49 @@ class EngineArgs:
                             '- 1K → 1024\n')
 
         # Guided decoding arguments
-        guided_decoding_kwargs = get_kwargs(DecodingConfig)
-        guided_decoding_group = parser.add_argument_group(
+        structured_output_kwargs = get_kwargs(StructuredOutputConfig)
+        structured_output_group = parser.add_argument_group(
             title="DecodingConfig",
-            description=DecodingConfig.__doc__,
+            description=StructuredOutputConfig.__doc__,
         )
-        guided_decoding_group.add_argument("--guided-decoding-backend",
-                                           **guided_decoding_kwargs["backend"])
-        guided_decoding_group.add_argument(
+        structured_output_group.add_argument(
+            '--structured-output-config',
+            type=json.loads,
+            default=None,
+            help='The configurations for structured output config.'
+            ' Should be a JSON string.')
+        structured_output_group.add_argument(
+            "--guided-decoding-backend",
+            help=
+            f"""[DEPRECATED] will be remove in v0.10.x. Use --structured-output-config '{"backend": "auto"}' instead. {structured_output_kwargs['backend']['help']}""",  # noqa: E501
+            **structured_output_kwargs["backend"],
+        )
+        structured_output_group.add_argument(
             "--guided-decoding-disable-fallback",
-            **guided_decoding_kwargs["disable_fallback"])
-        guided_decoding_group.add_argument(
+            help=
+            f"""[DEPRECATED] will be remove in v0.10.x. Use --structured-output-config '{"disable_fallback": false}' instead. {structured_output_kwargs['disable_fallback']['help']}""",  # noqa: E501
+            **structured_output_kwargs["disable_fallback"],
+        )
+        structured_output_group.add_argument(
             "--guided-decoding-disable-any-whitespace",
-            **guided_decoding_kwargs["disable_any_whitespace"])
-        guided_decoding_group.add_argument(
+            help=
+            f"""[DEPRECATED] will be remove in v0.10.x. Use --structured-output-config '{"disable_any_whitespace": true}' instead. {structured_output_kwargs['disable_any_whitespace']['help']}""",  # noqa: E501
+            **structured_output_kwargs["disable_any_whitespace"],
+        )
+        structured_output_group.add_argument(
             "--guided-decoding-disable-additional-properties",
-            **guided_decoding_kwargs["disable_additional_properties"])
-        guided_decoding_group.add_argument(
+            help=
+            f"""[DEPRECATED] will be remove in v0.10.x. Use --structured-output-config '{"disable_additional_properties": true}' instead. {structured_output_kwargs['disable_additional_properties']['help']}""",  # noqa: E501
+            **structured_output_kwargs["disable_additional_properties"],
+        )
+        structured_output_group.add_argument(
             "--reasoning-parser",
             # This choices is a special case because it's not static
             choices=list(ReasoningParserManager.reasoning_parsers),
-            **guided_decoding_kwargs["reasoning_backend"])
+            help=
+            f"""[DEPRECATED] will be remove in v0.10.x. Use --structured-output-config '{"reasoning_backend": "deepseek_r1"}'. {structured_output_kwargs['reasoning_backend']['help']}""",  # noqa: E501
+            **structured_output_kwargs["reasoning_backend"],
+        )
 
         parser.add_argument(
             '--logits-processor-pattern',
@@ -1256,15 +1284,23 @@ class EngineArgs:
             max_prompt_adapter_token=self.max_prompt_adapter_token) \
                                         if self.enable_prompt_adapter else None
 
-        decoding_config = DecodingConfig(
-            backend=self.guided_decoding_backend,
-            disable_fallback=self.guided_decoding_disable_fallback,
-            disable_any_whitespace=self.guided_decoding_disable_any_whitespace,
-            disable_additional_properties=\
-                self.guided_decoding_disable_additional_properties,
-            reasoning_backend=self.reasoning_parser
-            if self.enable_reasoning else None,
-        )
+        if self.structured_output_config is not None:
+            logger.warning_once(
+                "'structured-output-config' is specified. Other structured outputs related arguments will be ignored"  # noqa: E501
+            )
+            structured_output_config = StructuredOutputConfig(
+                **self.structured_output_config)
+        else:
+            # To be removed in v0.10.x
+            structured_output_config = StructuredOutputConfig(
+                backend=self.guided_decoding_backend,
+                disable_fallback=self.guided_decoding_disable_fallback,
+                disable_any_whitespace=self.guided_decoding_disable_any_whitespace,
+                disable_additional_properties=\
+                    self.guided_decoding_disable_additional_properties,
+                reasoning_backend=self.reasoning_parser
+                if self.enable_reasoning else None,
+            )
 
         show_hidden_metrics = False
         if self.show_hidden_metrics_for_version is not None:
@@ -1297,7 +1333,7 @@ class EngineArgs:
             lora_config=lora_config,
             speculative_config=speculative_config,
             load_config=load_config,
-            decoding_config=decoding_config,
+            structured_output_config=structured_output_config,
             observability_config=observability_config,
             prompt_adapter_config=prompt_adapter_config,
             compilation_config=self.compilation_config,
@@ -1353,7 +1389,7 @@ class EngineArgs:
             return False
 
         if self.guided_decoding_backend not in get_args(
-                GuidedDecodingBackendV1):
+                StructuredOutputBackendV1):
             _raise_or_fallback(
                 feature_name=
                 f"--guided-decoding-backend={self.guided_decoding_backend}",
@@ -1693,7 +1729,7 @@ def _warn_or_fallback(feature_name: str) -> bool:
 def human_readable_int(value):
     """Parse human-readable integers like '1k', '2M', etc.
     Including decimal values with decimal multipliers.
-    
+
     Examples:
     - '1k' -> 1,000
     - '1K' -> 1,024
