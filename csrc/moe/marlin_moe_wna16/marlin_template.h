@@ -209,8 +209,8 @@ __device__ inline typename ScalarType<half>::FragB dequant<half, 4>(
   const int HI = 0x00f000f0;
   const int EX = 0x64006400;
   // Guarantee that the `(a & b) | c` operations are LOP3s.
-  int lo = lop3 < (0xf0 & 0xcc) | 0xaa > (q, LO, EX);
-  int hi = lop3 < (0xf0 & 0xcc) | 0xaa > (q, HI, EX);
+  int lo = lop3<(0xf0 & 0xcc) | 0xaa>(q, LO, EX);
+  int hi = lop3<(0xf0 & 0xcc) | 0xaa>(q, HI, EX);
   // We want signed int4 outputs, hence we fuse the `-8` symmetric zero point
   // directly into `SUB` and `ADD`.
   const int SUB = 0x64086408;
@@ -233,9 +233,9 @@ dequant<nv_bfloat16, 4>(int q,
 
   // Guarantee that the `(a & b) | c` operations are LOP3s.
 
-  int lo = lop3 < (0xf0 & 0xcc) | 0xaa > (q, MASK, EX);
+  int lo = lop3<(0xf0 & 0xcc) | 0xaa>(q, MASK, EX);
   q >>= 4;
-  int hi = lop3 < (0xf0 & 0xcc) | 0xaa > (q, MASK, EX);
+  int hi = lop3<(0xf0 & 0xcc) | 0xaa>(q, MASK, EX);
 
   static constexpr uint32_t MUL = 0x3F803F80;
   static constexpr uint32_t ADD = 0xC308C308;
