@@ -1818,6 +1818,12 @@ __global__ void Marlin(
       is_first_matmul_in_slice = true;
       init_slice();
 
+      // Should we load A matrix in next slice?
+      // `slice_col == 0`: when move to a new moe block
+      // `old_slice_row > 0`: when the last slice is not starting from k_index == 0
+      //    (only happen when it is the first slice of a threadblock)
+      // `prob_k > thread_k_blocks * 16 * stages * max_num_stage_groups`:
+      //    when the required shared memory size is larger than the remaining shared memory
       if (slice_col == 0 || old_slice_row ||
           prob_k > thread_k_blocks * 16 * stages * max_num_stage_groups) {
         should_load_a = true;
