@@ -12,7 +12,7 @@ UNSUPPORTED_MODELS_V1 = [
     "openai/whisper-large-v3",  # transcription
     "facebook/bart-large-cnn",  # encoder decoder
     "mistralai/Mamba-Codestral-7B-v0.1",  # mamba
-    "ibm-ai-platform/Bamba-9B",  # hybrid
+    "hmellor/bamba-tiny-random",  # hybrid
     "BAAI/bge-m3",  # embedding
 ]
 
