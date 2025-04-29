@@ -66,8 +66,8 @@ def test_basic(
 
 
 @pytest.mark.skipif(not current_platform.is_tpu(),
-                    reason="This is a basic test for TPU only")
-def test_gemma3_with_mm_on_multichip(
+                    reason="This is a test for TPU only")
+def test_gemma3_27b_with_text_input_and_tp(
     vllm_runner: type[VllmRunner],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
