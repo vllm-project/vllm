@@ -2234,7 +2234,11 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
             graphs = graph == 't'
             if graphs:
                 self.graphed_buckets.add((int(bs), int(seq_len), is_prompt))
-            self.warmup_scenario(int(bs), int(seq_len), is_prompt, True)
+            self.warmup_scenario(int(bs),
+                                 int(seq_len),
+                                 is_prompt,
+                                 kv_caches,
+                                 is_pt_profiler_run=True)
             raise AssertionError("Finished profiling")
         if not htorch.utils.internal.is_lazy() and not self.enforce_eager:
             multiplier = 3 if os.getenv('VLLM_REGIONAL_COMPILATION',
