@@ -155,7 +155,6 @@ def uid() -> str:
                         }, {
                             "enforce_eager": True
                         }])
-@pytest_asyncio.fixture(scope="module")
 async def async_engine(request):
     # We cannot use monkeypatch since this is a module
     # scoped fixture and monkeypatch is function scoped.
