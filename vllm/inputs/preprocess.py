@@ -671,6 +671,9 @@ class InputPreprocessor:
     ) -> DecoderOnlyInputs:
         if (prompt_inputs["type"] == "token"
                 or prompt_inputs["type"] == "multimodal"):
+            # Mypy does not do type inference well with typedicts and Literal
+            # values
+            assert not is_embeds_inputs(prompt_inputs)
             prompt_inputs["prompt_token_ids"] = self._apply_prompt_adapter(
                 prompt_inputs["prompt_token_ids"],
                 prompt_adapter_request=prompt_adapter_request,
