@@ -88,8 +88,7 @@ class XgrammarBackend(StructuredOutputBackend):
             cache_limit_bytes=vllm.envs.VLLM_XGRAMMAR_CACHE_MB * 1024 * 1024,
         )
 
-        self.num_speculative_tokens = \
-            self.vllm_config.scheduler_config.max_num_seqs
+        self.num_speculative_tokens = 0
         if self.vllm_config.speculative_config is not None:
             self.num_speculative_tokens = \
                 self.vllm_config.speculative_config.num_speculative_tokens
