@@ -446,6 +446,19 @@ VLM_TEST_SETTINGS = {
         hf_output_post_proc=model_utils.minicpmv_trunc_hf_output,
         patch_hf_runner=model_utils.minicpmv_26_patch_hf_runner,
     ),
+    "minimax_vl_01": VLMTestInfo(
+        models=["MiniMaxAI/MiniMax-VL-01"],
+        prompt_formatter=lambda img_prompt: f"<beginning_of_sentence>user: {img_prompt} assistant:<end_of_sentence>", # noqa: E501
+        img_idx_to_prompt=lambda _: "<image>",
+        test_type=(VLMTestType.IMAGE, VLMTestType.MULTI_IMAGE),
+        max_model_len=8192,
+        max_num_seqs=4,
+        dtype="bfloat16",
+        hf_output_post_proc=model_utils.minimax_vl_01_hf_output,
+        patch_hf_runner=model_utils.minimax_vl_01_patch_hf_runner,
+        auto_cls=AutoModelForImageTextToText,
+        marks=[large_gpu_mark(min_gb=80)],
+    ),
     "molmo": VLMTestInfo(
         models=["allenai/Molmo-7B-D-0924"],
         test_type=(VLMTestType.IMAGE, VLMTestType.MULTI_IMAGE),
