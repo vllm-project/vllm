@@ -270,6 +270,7 @@ def _test_processing_correctness_mistral(
     "openbmb/MiniCPM-Llama3-V-2_5",
     "openbmb/MiniCPM-o-2_6",
     "openbmb/MiniCPM-V-2_6",
+    "MiniMaxAI/MiniMax-VL-01",
     "allenai/Molmo-7B-D-0924",
     "allenai/Molmo-7B-O-0924",
     "nvidia/NVLM-D-72B",

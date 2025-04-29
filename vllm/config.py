@@ -17,7 +17,7 @@ from dataclasses import (MISSING, dataclass, field, fields, is_dataclass,
 from importlib.util import find_spec
 from pathlib import Path
 from typing import (TYPE_CHECKING, Any, Callable, ClassVar, Final, Literal,
-                    Optional, Protocol, TypeVar, Union, get_args)
+                    Optional, Protocol, TypeVar, Union, get_args, get_origin)
 
 import torch
 from pydantic import BaseModel, Field, PrivateAttr
@@ -28,6 +28,7 @@ import vllm.envs as envs
 from vllm.compilation.inductor_pass import CallableInductorPass, InductorPass
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import (QUANTIZATION_METHODS,
+                                                     QuantizationMethods,
                                                      get_quantization_config)
 from vllm.model_executor.models import ModelRegistry
 from vllm.platforms import CpuArchEnum, current_platform
@@ -176,9 +177,19 @@ def config(cls: ConfigT) -> ConfigT:
             raise ValueError(
                 f"Field '{f.name}' in {cls.__name__} must have a default value."
             )
+
         if f.name not in attr_docs:
             raise ValueError(
                 f"Field '{f.name}' in {cls.__name__} must have a docstring.")
+
+        if get_origin(f.type) is Union:
+            args = get_args(f.type)
+            literal_args = [arg for arg in args if get_origin(arg) is Literal]
+            if len(literal_args) > 1:
+                raise ValueError(
+                    f"Field '{f.name}' in {cls.__name__} must use a single "
+                    "Literal type. Please use 'Literal[Literal1, Literal2]' "
+                    "instead of 'Union[Literal1, Literal2]'.")
     return cls
 
 
@@ -262,6 +273,10 @@ class ModelConfig:
             the model name will be the same as `model`.
         limit_mm_per_prompt: Maximum number of data items per modality
             per prompt. Only applicable for multimodal models.
+        mm_processor_kwargs: Overrides for the multi-modal processor obtained
+            from `AutoProcessor.from_pretrained`.
+        disable_mm_preprocessor_cache: If True, disable caching of the
+            processed multi-modal inputs.
         use_async_output_proc: Whether to use async output processor.
             Defaults to True.
         config_format: The config format which shall be loaded.
@@ -272,10 +287,6 @@ class ModelConfig:
         hf_overrides: If a dictionary, contains arguments to be forwarded to the
             HuggingFace config. If a callable, it is called to update the
             HuggingFace config.
-        mm_processor_kwargs: Arguments to be forwarded to the model's processor
-            for multi-modal data, e.g., image processor.
-        disable_mm_preprocessor_cache: If true, then disables caching of the
-            multi-modal preprocessor/mapper. (not recommended)
         override_neuron_config: Initialize non default neuron config or
             override default neuron config that are specific to Neuron devices,
             this argument will be used to configure the neuron config that
@@ -319,7 +330,6 @@ class ModelConfig:
         factors.append(self.max_logprobs)
         factors.append(self.disable_sliding_window)
         factors.append(self.trust_remote_code)
-        factors.append(self.mm_processor_kwargs)
         factors.append(self.generation_config)
         factors.append(self.model_impl)
         factors.append(self.override_generation_config)
@@ -358,12 +368,12 @@ class ModelConfig:
         skip_tokenizer_init: bool = False,
         served_model_name: Optional[Union[str, list[str]]] = None,
         limit_mm_per_prompt: Optional[dict[str, int]] = None,
+        mm_processor_kwargs: Optional[dict[str, Any]] = None,
+        disable_mm_preprocessor_cache: bool = False,
         use_async_output_proc: bool = True,
         config_format: ConfigFormat = ConfigFormat.AUTO,
         hf_token: Optional[Union[bool, str]] = None,
         hf_overrides: Optional[HfOverrides] = None,
-        mm_processor_kwargs: Optional[dict[str, Any]] = None,
-        disable_mm_preprocessor_cache: bool = False,
         override_neuron_config: Optional[dict[str, Any]] = None,
         override_pooler_config: Optional["PoolerConfig"] = None,
         logits_processor_pattern: Optional[str] = None,
@@ -468,8 +478,6 @@ class ModelConfig:
             self.model, hf_token=hf_token, revision=revision)
         self.dtype = _get_and_verify_dtype(self.hf_config, dtype)
         self.use_async_output_proc = use_async_output_proc
-        self.mm_processor_kwargs = mm_processor_kwargs
-        self.disable_mm_preprocessor_cache = disable_mm_preprocessor_cache
 
         # Set enforce_eager to False if the value is unset.
         if self.enforce_eager is None:
@@ -514,7 +522,10 @@ class ModelConfig:
         self.served_model_name = get_served_model_name(model,
                                                        served_model_name)
         self.multimodal_config = self._init_multimodal_config(
-            limit_mm_per_prompt)
+            limit_mm_per_prompt=limit_mm_per_prompt,
+            mm_processor_kwargs=mm_processor_kwargs,
+            disable_mm_preprocessor_cache=disable_mm_preprocessor_cache,
+        )
         if not self.skip_tokenizer_init:
             self._verify_tokenizer_mode()
 
@@ -580,14 +591,27 @@ class ModelConfig:
                 self.tokenizer = s3_tokenizer.dir
 
     def _init_multimodal_config(
-        self, limit_mm_per_prompt: Optional[dict[str, int]]
+        self,
+        limit_mm_per_prompt: Optional[dict[str, int]],
+        mm_processor_kwargs: Optional[dict[str, Any]],
+        disable_mm_preprocessor_cache: bool,
     ) -> Optional["MultiModalConfig"]:
         if self.registry.is_multimodal_model(self.architectures):
-            return MultiModalConfig(limit_per_prompt=limit_mm_per_prompt or {})
+            return MultiModalConfig(
+                limit_per_prompt=limit_mm_per_prompt or {},
+                mm_processor_kwargs=mm_processor_kwargs or {},
+                disable_mm_preprocessor_cache=disable_mm_preprocessor_cache,
+            )
 
         if limit_mm_per_prompt:
             raise ValueError("`limit_mm_per_prompt` is only supported for "
                              "multimodal models.")
+        if mm_processor_kwargs:
+            raise ValueError("`mm_processor_kwargs` is only supported for "
+                             "multimodal models.")
+        if disable_mm_preprocessor_cache:
+            raise ValueError("`disable_mm_preprocessor_cache` is only "
+                             "supported for multimodal models.")
 
         return None
 
@@ -752,9 +776,8 @@ class ModelConfig:
         supported_quantization = QUANTIZATION_METHODS
         optimized_quantization_methods = [
             "fp8", "marlin", "modelopt", "gptq_marlin_24", "gptq_marlin",
-            "awq_marlin", "fbgemm_fp8", "compressed_tensors",
-            "compressed-tensors", "experts_int8", "quark", "nvfp4", "bitblas",
-            "gptq_bitblas"
+            "awq_marlin", "fbgemm_fp8", "compressed-tensors", "experts_int8",
+            "quark", "nvfp4", "bitblas", "gptq_bitblas"
         ]
         if self.quantization is not None:
             self.quantization = self.quantization.lower()
@@ -764,13 +787,47 @@ class ModelConfig:
 
         if quant_cfg is not None:
             quant_method = quant_cfg.get("quant_method", "").lower()
+            quant_method = quant_method.replace("compressed_tensors",
+                                                "compressed-tensors")
+            quant_cfg["quant_method"] = quant_method
+
+            # Quantization methods which are overrides (i.e. they have a
+            # `override_quantization_method` method) must be checked in order
+            # of preference (this is particularly important for GPTQ).
+            overrides = [
+                "marlin",
+                "bitblas",
+                "gptq_marlin_24",
+                "gptq_marlin",
+                "gptq_bitblas",
+                "awq_marlin",
+                "ipex",
+                "moe_wna16",
+            ]
+            quantization_methods = [
+                q for q in supported_quantization if q not in overrides
+            ]
+            # Any custom overrides will be in quantization_methods so we place
+            # them at the start of the list so custom overrides have preference
+            # over the built in ones.
+            quantization_methods = quantization_methods + overrides
 
             # Detect which checkpoint is it
-            for name in QUANTIZATION_METHODS:
+            for name in quantization_methods:
                 method = get_quantization_config(name)
                 quantization_override = method.override_quantization_method(
                     quant_cfg, self.quantization)
-                if quantization_override:
+                if quantization_override is not None:
+                    # Raise error if the override is not custom (custom would
+                    # be in QUANTIZATION_METHODS but not QuantizationMethods)
+                    # and hasn't been added to the overrides list.
+                    if (name in get_args(QuantizationMethods)
+                            and name not in overrides):
+                        raise ValueError(
+                            f"Quantization method {name} is an override but "
+                            "is has not been added to the `overrides` list "
+                            "above. This is necessary to ensure that the "
+                            "overrides are checked in order of preference.")
                     quant_method = quantization_override
                     self.quantization = quantization_override
                     break
@@ -2367,7 +2424,8 @@ class SpeculativeConfig:
                         pass
                     else:
                         eagle_config = EAGLEConfig(
-                            self.draft_model_config.hf_config)
+                            self.draft_model_config.hf_config,
+                            method=self.method)
                         self.draft_model_config.hf_config = eagle_config
 
                 if (self.num_speculative_tokens is not None
@@ -2741,7 +2799,23 @@ class MultiModalConfig:
     Defaults to 1 (V0) or 999 (V1) for each modality.
 
     For example, to allow up to 16 images and 2 videos per prompt:
-    ``{"images": 16, "videos": 2}``
+    :code:`{"images": 16, "videos": 2}`
+    """
+
+    mm_processor_kwargs: Optional[dict[str, object]] = None
+    """
+    Overrides for the multi-modal processor obtained from
+    :meth:`transformers.AutoProcessor.from_pretrained`.
+
+    The available overrides depend on the model that is being run.
+
+    For example, for Phi-3-Vision:
+    :code:`{"num_crops": 4}`.
+    """
+
+    disable_mm_preprocessor_cache: bool = False
+    """
+    If :code:`True`, disable caching of the processed multi-modal inputs.
     """
 
     def compute_hash(self) -> str:
@@ -3102,6 +3176,8 @@ def get_served_model_name(model: str,
 GuidedDecodingBackendV0 = Literal["auto", "outlines", "lm-format-enforcer",
                                   "xgrammar", "guidance"]
 GuidedDecodingBackendV1 = Literal["auto", "xgrammar", "guidance"]
+GuidedDecodingBackend = Literal[GuidedDecodingBackendV0,
+                                GuidedDecodingBackendV1]
 
 
 @config
@@ -3109,9 +3185,8 @@ GuidedDecodingBackendV1 = Literal["auto", "xgrammar", "guidance"]
 class DecodingConfig:
     """Dataclass which contains the decoding strategy of the engine."""
 
-    guided_decoding_backend: Union[
-        GuidedDecodingBackendV0,
-        GuidedDecodingBackendV1] = "auto" if envs.VLLM_USE_V1 else "xgrammar"
+    guided_decoding_backend: GuidedDecodingBackend = \
+        "auto" if envs.VLLM_USE_V1 else "xgrammar"
     """Which engine will be used for guided decoding (JSON schema / regex etc)
     by default. With "auto", we will make opinionated choices based on request
     contents and what the backend libraries currently support, so the behavior
@@ -4045,8 +4120,6 @@ class VllmConfig:
             f"enable_prefix_caching={self.cache_config.enable_prefix_caching}, "
             f"chunked_prefill_enabled={self.scheduler_config.chunked_prefill_enabled}, "  # noqa
             f"use_async_output_proc={self.model_config.use_async_output_proc}, "
-            f"disable_mm_preprocessor_cache={self.model_config.disable_mm_preprocessor_cache!r}, "  # noqa
-            f"mm_processor_kwargs={self.model_config.mm_processor_kwargs}, "
             f"pooler_config={self.model_config.pooler_config!r}, "
             f"compilation_config={self.compilation_config!r}")
 
