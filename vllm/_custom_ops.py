@@ -158,8 +158,13 @@ def rotary_embedding(
     cos_sin_cache: torch.Tensor,
     is_neox: bool,
 ) -> None:
-    torch.ops._C.rotary_embedding(positions, query, key, head_size,
-                                  cos_sin_cache, is_neox)
+    # TODO: Remove this contiguous call when the kernel is updated to support tensor slices
+    query_contiguous = query.contiguous()
+    key_contiguous = key.contiguous()
+    torch.ops._C.rotary_embedding(positions, query_contiguous, key_contiguous,
+                                  head_size, cos_sin_cache, is_neox)
+    query.copy_(query_contiguous)
+    key.copy_(key_contiguous)
 
 
 def batched_rotary_embedding(positions: torch.Tensor, query: torch.Tensor,
@@ -167,9 +172,15 @@ def batched_rotary_embedding(positions: torch.Tensor, query: torch.Tensor,
                              cos_sin_cache: torch.Tensor, is_neox: bool,
                              rot_dim: int,
                              cos_sin_cache_offsets: torch.Tensor) -> None:
-    torch.ops._C.batched_rotary_embedding(positions, query, key, head_size,
+    # TODO: Remove this contiguous call when the kernel is updated to support tensor slices
+    query_contiguous = query.contiguous()
+    key_contiguous = key.contiguous()
+    torch.ops._C.batched_rotary_embedding(positions, query_contiguous,
+                                          key_contiguous, head_size,
                                           cos_sin_cache, is_neox, rot_dim,
                                           cos_sin_cache_offsets)
+    query.copy_(query_contiguous)
+    key.copy_(key_contiguous)
 
 
 # layer norm ops
