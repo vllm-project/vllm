@@ -2401,7 +2401,8 @@ class SpeculativeConfig:
                         pass
                     else:
                         eagle_config = EAGLEConfig(
-                            self.draft_model_config.hf_config)
+                            self.draft_model_config.hf_config,
+                            method=self.method)
                         self.draft_model_config.hf_config = eagle_config
 
                 if (self.num_speculative_tokens is not None

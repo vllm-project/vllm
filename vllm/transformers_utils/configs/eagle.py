@@ -15,6 +15,7 @@ class EAGLEConfig(PretrainedConfig):
     def __init__(self,
                  model: Union[PretrainedConfig, dict, None] = None,
                  truncated_vocab_size: Optional[int] = None,
+                 method: Optional[str] = 'eagle',
                  **kwargs):
 
         model_config: Union[PretrainedConfig, DeepseekV2Config, None]
@@ -45,7 +46,23 @@ class EAGLEConfig(PretrainedConfig):
         if not envs.VLLM_USE_V1:
             kwargs["architectures"] = ["EAGLEModel"]
         else:
-            kwargs["architectures"] = ["EagleLlamaForCausalLM"]
+            # Eagle model name should follow naming convention of
+            # LlamaForCausalLM -> EagleLlamaForCausalLM
+            if method == "eagle":
+                assert self.model is not None, \
+                    "model should not be None when method is eagle"
+                kwargs["architectures"] = [
+                    f"Eagle{arch}" for arch in self.model.architectures
+                ]
+            elif method == "eagle3":
+                assert self.model is not None, \
+                    "model should not be None when method is eagle3"
+                kwargs["architectures"] = [
+                    f"Eagle3{arch}" for arch in self.model.architectures
+                ]
+            else:
+                raise ValueError(f"Invalid method {method}. \
+                    Supported methods are eagle and eagle3.")
 
         super().__init__(**kwargs)
 
