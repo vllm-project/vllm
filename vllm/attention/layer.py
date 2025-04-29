@@ -190,7 +190,6 @@ class Attention(nn.Module):
         if self.use_output:
             output_shape = (output_shape
                             if output_shape is not None else query.shape)
-            print(f"query.dtype={query.dtype}")
             output = torch.empty(output_shape,
                                  dtype=torch.float8_e4m3fnuz,
                                  device=query.device)
@@ -414,9 +413,6 @@ def unified_attention_with_output(
     attn_metadata = forward_context.attn_metadata
     self = forward_context.no_compile_layers[layer_name]
     kv_cache = self.kv_cache[forward_context.virtual_engine]
-    has_input_scale = hasattr(self, "input_scale")
-    print(f"unified_attention_with_output->has_input_scale={has_input_scale}")
-    print(f"self.impl.forward={self.impl.forward}")
     self.impl.input_scale = self.input_scale
     self.impl.forward(self,
                       query,

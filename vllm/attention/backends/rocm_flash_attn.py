@@ -539,7 +539,6 @@ class ROCmFlashAttentionImpl(AttentionImpl):
         # NOTE: Allow for switching between Triton and CK. Defaulting to triton.
         self.use_triton_flash_attn = envs.VLLM_USE_TRITON_FLASH_ATTN
         if self.use_triton_flash_attn:
-            print(f"ROCmFlashAttention:using triton flash attn")
             if logits_soft_cap is not None:
                 raise ValueError(
                     "ROCm Triton FlashAttention does not support attention"
@@ -572,7 +571,6 @@ class ROCmFlashAttentionImpl(AttentionImpl):
                     self.use_naive_attn = True
 
             if self.use_naive_attn:
-                print(f"ROCmFlashAttention:using naive")
                 if logits_soft_cap is not None:
                     raise ValueError(
                         "ROCm Naive FlashAttention does not support "
@@ -651,11 +649,8 @@ class ROCmFlashAttentionImpl(AttentionImpl):
         Returns:
             shape = [num_tokens, num_heads * head_size]
         """
-        print("FORWARD")
         assert output is not None, "Output tensor must be provided."
 
-        # import traceback
-        # traceback.print_stack()
         query = query.view(-1, self.num_heads, self.head_size)
         if key is not None:
             assert value is not None
@@ -740,7 +735,6 @@ class ROCmFlashAttentionImpl(AttentionImpl):
             value = value[:num_prefill_tokens]
 
         if prefill_meta := attn_metadata.prefill_metadata:
-            print(f"PREFILL META")
             # Prompt run.
             # normal attention and DECODER
             if self.attn_type == AttentionType.DECODER and (
@@ -766,7 +760,6 @@ class ROCmFlashAttentionImpl(AttentionImpl):
                 # prompt, and they have the same length.
                 attn_masks = None
                 if self.use_triton_flash_attn:
-                    print(f"USE TRITON FLASH ATTN")
                     if self.alibi_slopes is not None:
                         attn_masks = _make_alibi_bias(
                             self.alibi_slopes,
@@ -779,8 +772,6 @@ class ROCmFlashAttentionImpl(AttentionImpl):
                     full_scales = (
                         layer._q_scale, layer._k_scale, layer._v_scale,
                         layer._prob_scale) if use_fp8_scales else None
-                    # has_input_scale = hasattr(self, "input_scale")
-                    # print(f"has_input_scale --> {has_input_scale}")
                     self.triton_attn_func(
                         query,
                         key,
@@ -798,7 +789,6 @@ class ROCmFlashAttentionImpl(AttentionImpl):
                         input_scale = self.input_scale,
                     )
                 elif self.use_naive_attn:
-                    print(f"USE NAIVE FLASH ATTN")
                     if self.num_kv_heads != self.num_heads:
                         # Interleave for MQA workaround.
                         key = self.repeat_kv(key, self.num_queries_per_kv)
@@ -826,7 +816,6 @@ class ROCmFlashAttentionImpl(AttentionImpl):
                         attn_masks,
                     )
                 else:
-                    print(f"NOT USING NAIVE OR FLASH")
                     # upstream FA does not support an output arg, copy
                     output[:num_prefill_tokens] = self.fa_attn_func(
                         q=query,
@@ -844,7 +833,6 @@ class ROCmFlashAttentionImpl(AttentionImpl):
                     )
 
             else:
-                print(f"USING FORWARD PREFIX")
                 # prefix-enabled attention -
                 # not applicable for encoder-only models
                 if self.attn_type != AttentionType.ENCODER_ONLY:
@@ -867,7 +855,6 @@ class ROCmFlashAttentionImpl(AttentionImpl):
         # Skip decode phase for encoder-only models
         if (decode_meta := attn_metadata.decode_metadata) and (
                 self.attn_type != AttentionType.ENCODER_ONLY):
-            print(f"DECODING RUN")
             # Decoding run.
             # Whether to use rocm custom paged attention or not
             num_seqs, num_heads, head_size = decode_query.shape
@@ -921,6 +908,7 @@ class ROCmFlashAttentionImpl(AttentionImpl):
                     self.kv_cache_dtype,
                     layer._k_scale,
                     layer._v_scale,
+                    self.input_scale,
                 )
             else:
                 output[num_prefill_tokens:] = paged_attn.forward_decode(
