@@ -300,7 +300,7 @@ def torch_pplx_dispatch_combine(pgi, dp_size, a, w1, w2, scores, topk):
     rank_num_tokens = rank_chunk(num_tokens, rank, world_size)
     max_num_tokens = num_tokens
 
-    ata = AllToAll(
+    ata = AllToAll.internode(
         max_num_tokens=max_num_tokens,
         num_experts=num_experts,
         experts_per_token=topk,
@@ -448,7 +448,7 @@ def torch_pplx_moe(pgi, dp_size, a, w1, w2, scores, topk):
     rank_num_tokens = rank_chunk(num_tokens, rank, world_size)
     max_num_tokens = num_tokens
 
-    ata = AllToAll(
+    ata = AllToAll.internode(
         max_num_tokens=max_num_tokens,
         num_experts=num_experts,
         experts_per_token=topk,
