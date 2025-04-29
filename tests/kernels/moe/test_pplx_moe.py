@@ -471,10 +471,9 @@ def torch_pplx_moe(pgi, dp_size, a, w1, w2, scores, topk):
         pgi.world_size,
         dp_size,
         rank,
-        a.dtype,
     )
 
-    experts = BatchedExperts(rank, pgi.world_size, max_num_tokens)
+    experts = BatchedExperts(max_num_tokens)
 
     fused_experts = FusedMoEModularKernel(
         dispatch_combine,
