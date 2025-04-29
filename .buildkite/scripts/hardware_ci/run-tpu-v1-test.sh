@@ -2,7 +2,7 @@
 
 set -xue
 
-du -sh ~/.cache/vllm/xla_cache
+du -sh ~/.cache/
 rm -r ~/.cache/vllm/xla_cache
 docker images -a
 docker ps -a
