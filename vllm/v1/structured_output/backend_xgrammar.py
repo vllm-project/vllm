@@ -10,7 +10,7 @@ import torch
 
 import vllm.envs
 from vllm.logger import init_logger
-from vllm.sampling_params import GuidedDecodingParams, SamplingParams
+from vllm.sampling_params import SamplingParams
 from vllm.transformers_utils.tokenizers.mistral import MistralTokenizer
 from vllm.utils import LazyLoader
 from vllm.v1.structured_output.backend_types import (StructuredOutputBackend,
@@ -32,16 +32,8 @@ logger = init_logger(__name__)
 class XgrammarBackend(StructuredOutputBackend):
 
     def __post_init__(self):
-        self.disable_any_whitespace = False
-        backend_options = GuidedDecodingParams(
-            backend=self.vllm_config.decoding_config.guided_decoding_backend
-        ).backend_options()
-        for option in backend_options:
-            if option == "disable-any-whitespace":
-                self.disable_any_whitespace = True
-            else:
-                raise ValueError(
-                    f"Unsupported option for the xgrammar backend: {option}")
+        self.disable_any_whitespace = (
+            self.vllm_config.decoding_config.disable_any_whitespace)
 
         if isinstance(self.tokenizer, MistralTokenizer):
             # NOTE: ideally, xgrammar should handle this accordingly.
@@ -57,10 +49,10 @@ class XgrammarBackend(StructuredOutputBackend):
                         )
                     ]
                 stop_token_ids = None
-                if hasattr(
+                if (hasattr(
                         self.tokenizer,
                         "eos_token_id",
-                ) and self.tokenizer.eos_token_id is not None:
+                ) and self.tokenizer.eos_token_id is not None):
                     stop_token_ids = [self.tokenizer.eos_token_id]
             except AttributeError as e:
                 raise ValueError(
@@ -96,7 +88,8 @@ class XgrammarBackend(StructuredOutputBackend):
         elif request_type == StructuredOutputOptions.JSON_OBJECT:
             ctx = self.compiler.compile_json_schema(
                 '{"type": "object"}',
-                any_whitespace=not self.disable_any_whitespace)
+                any_whitespace=not self.disable_any_whitespace,
+            )
         elif request_type == StructuredOutputOptions.GRAMMAR:
             ctx = self.compiler.compile_grammar(grammar_spec)
         elif request_type == StructuredOutputOptions.REGEX:
@@ -159,7 +152,10 @@ class XgrammarGrammar(StructuredOutputGrammar):
             if not self.matcher.accept_token(token):
                 logger.error(
                     "Failed to advance FSM for request %s "
-                    "for tokens %s. Please file an issue.", request_id, token)
+                    "for tokens %s. Please file an issue.",
+                    request_id,
+                    token,
+                )
                 return False
             self.num_processed_tokens += 1
         return True
@@ -187,10 +183,14 @@ def has_xgrammar_unsupported_json_features(schema: dict[str, Any]) -> bool:
             return True
 
         # Check for array unsupported keywords
-        if obj.get("type") == "array" and any(
-                key in obj
-                for key in ("uniqueItems", "contains", "minContains",
-                            "maxContains", "minItems", "maxItems")):
+        if obj.get("type") == "array" and any(key in obj for key in (
+                "uniqueItems",
+                "contains",
+                "minContains",
+                "maxContains",
+                "minItems",
+                "maxItems",
+        )):
             return True
 
         # Unsupported keywords for strings
@@ -198,9 +198,12 @@ def has_xgrammar_unsupported_json_features(schema: dict[str, Any]) -> bool:
             return True
 
         # Unsupported keywords for objects
-        if obj.get("type") == "object" and any(
-                key in obj for key in ("minProperties", "maxProperties",
-                                       "propertyNames", "patternProperties")):
+        if obj.get("type") == "object" and any(key in obj for key in (
+                "minProperties",
+                "maxProperties",
+                "propertyNames",
+                "patternProperties",
+        )):
             return True
 
         # Recursively check all nested objects and arrays
@@ -232,16 +235,16 @@ def validate_xgrammar_grammar(sampling_params: SamplingParams) -> None:
         try:
             xgr.Grammar.from_regex(gd_params.regex)
         except Exception as err:
-            raise ValueError("Failed to transform regex into a grammar: "
-                             f"{err}") from err
+            raise ValueError(
+                f"Failed to transform regex into a grammar: {err}") from err
 
     if gd_params.choice:
         choice_grammar = choice_as_grammar(gd_params.choice)
         try:
             xgr.Grammar.from_ebnf(choice_grammar)
         except Exception as err:
-            raise ValueError("Failed to transform choices into a grammar: "
-                             "{err}") from err
+            raise ValueError(
+                "Failed to transform choices into a grammar: {err}") from err
         gd_params.choice = None
         gd_params.grammar = choice_grammar
         return

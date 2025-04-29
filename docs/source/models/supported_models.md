@@ -542,8 +542,8 @@ See [this page](#generative-models) for more information on how to use generativ
   * ✅︎
 - * `Qwen3MoeForCausalLM`
   * Qwen3MoE
-  * `Qwen/Qwen3-MoE-15B-A2B`, etc.
-  * ✅︎
+  * `Qwen/Qwen3-30B-A3B`, etc.
+  *
   * ✅︎
 - * `StableLmForCausalLM`
   * StableLM
@@ -977,6 +977,13 @@ See [this page](#generative-models) for more information on how to use generativ
   * T + I<sup>E+</sup> + V<sup>E+</sup>
   * `openbmb/MiniCPM-V-2` (see note), `openbmb/MiniCPM-Llama3-V-2_5`, `openbmb/MiniCPM-V-2_6`, etc.
   * ✅︎
+  * ✅︎
+  * ✅︎
+- * `MiniMaxVL01ForConditionalGeneration`
+  * MiniMax-VL
+  * T + I<sup>E+</sup>
+  * `MiniMaxAI/MiniMax-VL-01`, etc.
+  *
   * ✅︎
   * ✅︎
 - * `Mistral3ForConditionalGeneration`
