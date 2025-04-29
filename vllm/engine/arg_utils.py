@@ -179,6 +179,9 @@ def get_kwargs(cls: ConfigType) -> dict[str, Any]:
             kwargs[name]["nargs"] = "+"
         elif contains_type(type_hints, int):
             kwargs[name]["type"] = int
+            # Special case for large integers
+            if name in {"max_model_len"}:
+                kwargs[name]["type"] = human_readable_int
         elif contains_type(type_hints, float):
             kwargs[name]["type"] = float
         elif contains_type(type_hints, dict):
