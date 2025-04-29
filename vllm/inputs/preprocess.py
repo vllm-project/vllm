@@ -19,8 +19,8 @@ from vllm.transformers_utils.tokenizer_group import TokenizerGroup
 from .data import (DecoderOnlyInputs, EmbedsInputs, EncoderDecoderInputs,
                    ProcessorInputs, PromptType, SingletonInputs,
                    SingletonPrompt, TokenInputs, embeds_inputs, token_inputs)
-from .parse import (ParsedEmbedsPrompt, is_explicit_encoder_decoder_prompt,
-                    parse_singleton_prompt)
+from .parse import (ParsedEmbedsPrompt, is_embeds_inputs,
+                    is_explicit_encoder_decoder_prompt, parse_singleton_prompt)
 
 logger = init_logger(__name__)
 
@@ -596,6 +596,8 @@ class InputPreprocessor:
             # For multimodal model, override decoder prompt from processor
             # with explicit decoder prompt.
             if self.model_config.is_multimodal_model:
+                assert decoder_inputs is None or not is_embeds_inputs(
+                    decoder_inputs)
                 encoder_inputs, decoder_inputs = (
                     self._separate_enc_dec_inputs_from_mm_processor_outputs(
                         encoder_inputs, decoder_inputs))
@@ -608,9 +610,12 @@ class InputPreprocessor:
                         inputs))
             else:
                 encoder_inputs = inputs
-
                 decoder_inputs = None
 
+        # Mypy does not do type inference well with TypedDicts with Literal
+        # values.
+        assert not is_embeds_inputs(encoder_inputs)
+        assert decoder_inputs is None or not is_embeds_inputs(decoder_inputs)
         return self._build_enc_dec_llm_inputs(encoder_inputs, decoder_inputs)
 
     async def _process_encoder_decoder_prompt_async(
@@ -637,6 +642,8 @@ class InputPreprocessor:
             # For multimodal model, override decoder prompt from processor
             # with explicit decoder prompt.
             if self.model_config.is_multimodal_model:
+                assert decoder_inputs is None or not is_embeds_inputs(
+                    decoder_inputs)
                 encoder_inputs, decoder_inputs = (
                     self._separate_enc_dec_inputs_from_mm_processor_outputs(
                         encoder_inputs, decoder_inputs))
@@ -649,9 +656,12 @@ class InputPreprocessor:
                         inputs))
             else:
                 encoder_inputs = inputs
-
                 decoder_inputs = None
 
+        # Mypy does not do type inference well with TypedDicts with Literal
+        # values.
+        assert not is_embeds_inputs(encoder_inputs)
+        assert decoder_inputs is None or not is_embeds_inputs(decoder_inputs)
         return self._build_enc_dec_llm_inputs(encoder_inputs, decoder_inputs)
 
     def _build_decoder_only_llm_inputs(

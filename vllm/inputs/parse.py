@@ -6,9 +6,9 @@ from typing_extensions import TypeIs
 
 from vllm.utils import is_list_of
 
-from .data import (EmbedsPrompt, ExplicitEncoderDecoderPrompt, ProcessorInputs,
-                   PromptType, SingletonInputs, SingletonPrompt, TextPrompt,
-                   TokensPrompt)
+from .data import (EmbedsInputs, EmbedsPrompt, ExplicitEncoderDecoderPrompt,
+                   ProcessorInputs, PromptType, SingletonInputs,
+                   SingletonPrompt, TextPrompt, TokensPrompt)
 
 
 class ParsedText(TypedDict):
@@ -90,6 +90,26 @@ class ParsedEmbedsPrompt(TypedDict):
     content: EmbedsPrompt
 
 
+@overload
+def parse_singleton_prompt(prompt: str) -> ParsedStrPrompt:
+    ...
+
+
+@overload
+def parse_singleton_prompt(prompt: TextPrompt) -> ParsedTextPrompt:
+    ...
+
+
+@overload
+def parse_singleton_prompt(prompt: TokensPrompt) -> ParsedTokensPrompt:
+    ...
+
+
+@overload
+def parse_singleton_prompt(prompt: EmbedsPrompt) -> ParsedEmbedsPrompt:
+    ...
+
+
 def parse_singleton_prompt(
     prompt: SingletonPrompt,
 ) -> Union[ParsedStrPrompt, ParsedTextPrompt, ParsedTokensPrompt,
@@ -112,14 +132,20 @@ def parse_singleton_prompt(
 
 
 def is_token_prompt(prompt: PromptType) -> TypeIs[TokensPrompt]:
-    return isinstance(
-        prompt, dict
-    ) and "prompt_token_ids" in prompt and "prompt_embeds" not in prompt
+    return isinstance(prompt, dict) and "prompt_token_ids" in prompt
+
+
+def is_embeds_prompt(prompt: PromptType) -> TypeIs[EmbedsPrompt]:
+    return isinstance(prompt, dict) and "prompt_embeds" in prompt
 
 
 def is_explicit_encoder_decoder_prompt(
         prompt: PromptType) -> TypeIs[ExplicitEncoderDecoderPrompt]:
     return isinstance(prompt, dict) and "encoder_prompt" in prompt
+
+
+def is_embeds_inputs(inputs: SingletonInputs) -> TypeIs[EmbedsInputs]:
+    return isinstance(inputs, dict) and inputs["type"] == "embeds"
 
 
 def split_enc_dec_inputs(

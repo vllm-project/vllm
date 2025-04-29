@@ -67,6 +67,7 @@ Set of possible schemas for a single prompt:
 
 - A text prompt (:class:`str` or :class:`TextPrompt`)
 - A tokenized prompt (:class:`TokensPrompt`)
+- An embeddings prompt (:class:`EmbedsPrompt`)
 
 Note that "singleton" is as opposed to a data structure
 which encapsulates multiple prompts, i.e. of the sort
@@ -127,6 +128,7 @@ both decoder-only and encoder/decoder input types:
 
 - A text prompt (:class:`str` or :class:`TextPrompt`)
 - A tokenized prompt (:class:`TokensPrompt`)
+- An embeddings prompt (:class:`EmbedsPrompt`)
 - A single data structure containing both an encoder and a decoder prompt
   (:class:`ExplicitEncoderDecoderPrompt`)
 """
