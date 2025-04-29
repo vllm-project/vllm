@@ -66,7 +66,7 @@ class CompilerManager:
                                        disable_cache=disable_cache)
 
     def save_to_file(self):
-        if self.disable_cache:
+        if self.disable_cache or os.path.exists(self.cache_file_path):
             return
         with open(self.cache_file_path, "w") as f:
             printer = pprint.PrettyPrinter(indent=4)
