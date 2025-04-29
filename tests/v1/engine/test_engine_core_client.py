@@ -8,7 +8,6 @@ from typing import Optional
 
 import psutil
 import pytest
-import zmq
 from transformers import AutoTokenizer
 
 from vllm import SamplingParams
@@ -201,54 +200,57 @@ async def test_engine_core_client_asyncio(monkeypatch: pytest.MonkeyPatch):
             log_stats=True,
         )
 
-        MAX_TOKENS = 20
-        params = SamplingParams(max_tokens=MAX_TOKENS)
-        """Normal Request Cycle."""
+        try:
+            MAX_TOKENS = 20
+            params = SamplingParams(max_tokens=MAX_TOKENS)
+            """Normal Request Cycle."""
 
-        requests = [make_request(params) for _ in range(10)]
-        request_ids = [req.request_id for req in requests]
+            requests = [make_request(params) for _ in range(10)]
+            request_ids = [req.request_id for req in requests]
 
-        # Add requests to the engine.
-        for request in requests:
-            await client.add_request_async(request)
-            await asyncio.sleep(0.01)
+            # Add requests to the engine.
+            for request in requests:
+                await client.add_request_async(request)
+                await asyncio.sleep(0.01)
 
-        outputs: dict[str, list] = {req_id: [] for req_id in request_ids}
-        await loop_until_done_async(client, outputs)
+            outputs: dict[str, list] = {req_id: [] for req_id in request_ids}
+            await loop_until_done_async(client, outputs)
 
-        for req_id in request_ids:
-            assert len(outputs[req_id]) == MAX_TOKENS, (
-                f"{outputs[req_id]=}, {MAX_TOKENS=}")
-        """Abort Request Cycle."""
-
-        # Add requests to the engine.
-        for idx, request in enumerate(requests):
-            await client.add_request_async(request)
-            await asyncio.sleep(0.01)
-            if idx % 2 == 0:
-                await client.abort_requests_async([request.request_id])
-
-        outputs = {req_id: [] for req_id in request_ids}
-        await loop_until_done_async(client, outputs)
-
-        for idx, req_id in enumerate(request_ids):
-            if idx % 2 == 0:
-                assert len(outputs[req_id]) < MAX_TOKENS, (
-                    f"{len(outputs[req_id])=}, {MAX_TOKENS=}")
-            else:
+            for req_id in request_ids:
                 assert len(outputs[req_id]) == MAX_TOKENS, (
-                    f"{len(outputs[req_id])=}, {MAX_TOKENS=}")
-        """Utility method invocation"""
+                    f"{outputs[req_id]=}, {MAX_TOKENS=}")
+            """Abort Request Cycle."""
 
-        core_client: AsyncMPClient = client
+            # Add requests to the engine.
+            for idx, request in enumerate(requests):
+                await client.add_request_async(request)
+                await asyncio.sleep(0.01)
+                if idx % 2 == 0:
+                    await client.abort_requests_async([request.request_id])
 
-        result = await core_client.call_utility_async("echo", "testarg")
-        assert result == "testarg"
+            outputs = {req_id: [] for req_id in request_ids}
+            await loop_until_done_async(client, outputs)
 
-        with pytest.raises(Exception) as e_info:
-            await core_client.call_utility_async("echo", None, "help!")
+            for idx, req_id in enumerate(request_ids):
+                if idx % 2 == 0:
+                    assert len(outputs[req_id]) < MAX_TOKENS, (
+                        f"{len(outputs[req_id])=}, {MAX_TOKENS=}")
+                else:
+                    assert len(outputs[req_id]) == MAX_TOKENS, (
+                        f"{len(outputs[req_id])=}, {MAX_TOKENS=}")
+            """Utility method invocation"""
 
-        assert str(e_info.value) == "Call to echo method failed: help!"
+            core_client: AsyncMPClient = client
+
+            result = await core_client.call_utility_async("echo", "testarg")
+            assert result == "testarg"
+
+            with pytest.raises(Exception) as e_info:
+                await core_client.call_utility_async("echo", None, "help!")
+
+            assert str(e_info.value) == "Call to echo method failed: help!"
+        finally:
+            client.shutdown()
 
 
 @pytest.mark.parametrize(
@@ -333,10 +335,6 @@ def test_kv_cache_events(
                 "Token ids should be the same as the custom tokens")
         finally:
             client.shutdown()
-            subscriber.close()
-            # TODO hack to try and fix CI hang
-            ctx = zmq.Context.instance()
-            ctx.term()
         return
 
 
