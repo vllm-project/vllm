@@ -14,7 +14,7 @@ from vllm.logger import init_logger
 from vllm.logits_process import LogitsProcessor
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.transformers_utils.tokenizers.mistral import MistralTokenizer
-
+# test
 logger = init_logger(__name__)
 
 _SAMPLING_EPS = 1e-5
@@ -72,6 +72,36 @@ class GuidedDecodingParams:
             whitespace_pattern=whitespace_pattern,
             structural_tag=structural_tag,
         )
+
+    @property
+    def backend_name(self) -> str:
+        """Return the backend name without any options.
+
+        For example if the backend is "xgrammar:no-fallback", returns "xgrammar"
+        """
+        return (self.backend or "").split(":")[0]
+
+    def backend_options(self) -> list[str]:
+        """Return the backend options as a list of strings."""
+        if not self.backend or ":" not in self.backend:
+            return []
+        return self.backend.split(":")[1].split(",")
+
+    def add_option(self, opt_name: str) -> None:
+        """Adds an option to the backend options."""
+        if not self.backend:
+            self.backend = f":{opt_name}"
+        elif ":" not in self.backend:
+            self.backend += f":{opt_name}"
+        else:
+            options = set(self.backend_options())
+            options.add(opt_name)
+            self.backend = f"{self.backend_name}:{','.join(sorted(options))}"
+
+    def no_fallback(self) -> bool:
+        """Returns True if the "no-fallback" option is supplied for the guided
+        decoding backend"""
+        return "no-fallback" in self.backend_options()
 
     def __post_init__(self):
         """Validate that some fields are mutually exclusive."""
