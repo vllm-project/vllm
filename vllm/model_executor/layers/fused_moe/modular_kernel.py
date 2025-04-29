@@ -67,8 +67,8 @@ def _moe_problem_size(
         M = a1.shape[0]
     else:
         assert a1.dim() == 3
-        assert E == a1.shape[0]
-        M = a1.shape[1] # This is max_num_tokens
+        assert a1.shape[0] == E
+        M = a1.shape[1]  # This is max_num_tokens
 
     assert topk_ids.dim() == 2
     topk = topk_ids.shape[1]

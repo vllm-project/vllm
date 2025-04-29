@@ -11,7 +11,7 @@ from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.fused_moe import fused_moe
 from vllm.model_executor.layers.fused_moe.deep_gemm_moe import (
-    _valid_deep_gemm_shape, deep_gemm_moe_fp8, modular_deep_gemm_fused_moe_fp8)
+    _valid_deep_gemm_shape, deep_gemm_moe_fp8)
 from vllm.model_executor.layers.fused_moe.fused_moe import fused_topk
 from vllm.model_executor.layers.fused_moe.moe_align_block_size import (
     moe_align_block_size)
@@ -439,8 +439,7 @@ def test_w8a8_block_fp8_deep_gemm_fused_moe(M, N, K, E, topk, seed):
         topk_weights, topk_ids, token_expert_indices = fused_topk(
             a, score.float(), topk, False)
 
-        out = deep_gemm_moe_fp8(a, w1, w2, w1_s, w2_s, topk_weights,
-                                topk_ids)
+        out = deep_gemm_moe_fp8(a, w1, w2, w1_s, w2_s, topk_weights, topk_ids)
 
     #print(f"{out.sum()=}")
     #print(f"{ref_out.sum()=}")
