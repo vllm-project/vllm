@@ -158,22 +158,9 @@ class EngineCore:
         logger.info(("init engine (profile, create kv cache, "
                      "warmup model) took %.2f seconds"), elapsed)
 
-        is_cuda = vllm_config.device_config.device_type == "cuda"
-        driver_worker = getattr(self.model_executor, "driver_worker", None)
-        model_runner = getattr(driver_worker, "model_runner", None)
-        if is_cuda and model_runner:
-            model_gpu_load_time = getattr(model_runner, "model_load_time", 0.0)
-            cuda_graph_capture_time = getattr(model_runner,
-                                              "cuda_graph_capture_time", 0.0)
-            compilation_config: CompilationConfig = (
-                vllm_config.compilation_config)
-            torch_compile_time = compilation_config.compilation_time
-            total_gpu_load_time = (elapsed + model_gpu_load_time +
-                                   torch_compile_time +
-                                   cuda_graph_capture_time)
-            logger.info(("GPU model loading (loading model weights, "
-                         "torch.compile, capturing graphs, init engine) "
-                         "took %.2f seconds"), total_gpu_load_time)
+        # Log GPU load time if using CUDA
+        if vllm_config.device_config.device_type == "cuda":
+            self.log_gpu_load_time(vllm_config, elapsed)
 
         return num_gpu_blocks, num_cpu_blocks, scheduler_kv_cache_config
 
@@ -265,6 +252,33 @@ class EngineCore:
                 scheduler_output, model_output)
 
         return engine_core_outputs
+
+    def log_gpu_load_time(self, vllm_config: VllmConfig,
+                          elapsed: float) -> None:
+        """Calculate and log the total GPU model loading time.
+
+        Args:
+            vllm_config: The vLLM configuration.
+            elapsed: The elapsed time for engine initialization.
+        """
+        driver_worker = getattr(self.model_executor, "driver_worker", None)
+        model_runner = getattr(driver_worker, "model_runner", None)
+
+        if model_runner:
+            model_gpu_load_time = getattr(model_runner, "model_load_time", 0.0)
+            cuda_graph_capture_time = getattr(model_runner,
+                                              "cuda_graph_capture_time", 0.0)
+            compilation_config: CompilationConfig = vllm_config.\
+                                    compilation_config
+            torch_compile_time = compilation_config.compilation_time
+
+            total_gpu_load_time = (elapsed + model_gpu_load_time +
+                                   torch_compile_time +
+                                   cuda_graph_capture_time)
+
+            logger.info(("GPU model loading (loading model weights, "
+                         "torch.compile, capturing graphs, init engine) "
+                         "took %.2f seconds"), total_gpu_load_time)
 
     def shutdown(self):
         if self.model_executor:
