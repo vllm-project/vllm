@@ -1591,8 +1591,9 @@ class TritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
         topk: int,
         num_experts: int,
     ) -> Tuple[int, int, torch.dtype]:
-        workspace1 = M * topk * max(N * 2, K)
-        workspace2 = M * topk * N
+        factor = num_experts if a.dim() == 3 else 1
+        workspace1 = M * topk * max(N * 2, K) * factor
+        workspace2 = M * topk * N * factor
         return (workspace1, workspace2, a.dtype)
 
     def apply(
@@ -1683,16 +1684,15 @@ class TritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
                     global_num_experts, expert_map
                 ))
         else:
-            #stride = hidden_states.shape[1]
-            sorted_token_ids = torch.arange(0, num_tokens*hidden_states.shape[1], device=hidden_states.device, dtype=torch.int)
+            max_num_tokens = hidden_states.shape[1]
+            sorted_token_ids = torch.arange(0, hidden_states.shape[0] * max_num_tokens, device=hidden_states.device, dtype=torch.int)
             sorted_token_ids = sorted_token_ids.flatten()
-            nans = torch.isnan(hidden_states).sum(dim=(1,2))
-            expert_ids = torch.where((nans > 0).flatten(), -1, torch.arange(0, nans.numel(), device=hidden_states.device, dtype=torch.int32))
-            #expert_ids = torch.repeat_interleave(expert_ids, hidden_states.shape[1], dim=0)
-            #print(f"EXPERT_IDS {nans.shape} {expert_ids}")
+            expert_ids = torch.arange(0, global_num_experts, device=hidden_states.device, dtype=torch.int)
+            expert_ids = torch.repeat_interleave(expert_ids, max_num_tokens, dim=0)
+            print(f"EXPERT_IDS {expert_ids}")
             #num_tokens_post_padded = torch.tensor([num_tokens], device=hidden_states.device, dtype=torch.int32)
             num_tokens_post_padded = torch.zeros(1, device=hidden_states.device, dtype=torch.int32)
-            num_tokens_post_padded.fill_(num_tokens)
+            num_tokens_post_padded.fill_(max_num_tokens)
             hidden_states = hidden_states.view(-1, hidden_states.shape[-1])
             #print(f"P = {sorted_token_ids}, {hidden_states.shape}")
 
@@ -1854,19 +1854,18 @@ class BatchedExperts(mk.FusedMoEPermuteExpertsUnpermute):
 
     def workspace_shapes(
         self,
-        a_dtype: torch.dtype,
+        a: torch.Tensor,
         M: int,
         N: int,
         K: int,
         topk: int,
         num_experts: int,
-        a: torch.Tensor,
     ) -> Tuple[int, int, torch.dtype]:
         #assert self.max_num_tokens >= a.shape[1]
         max_num_tokens = a.shape[1] if self.max_num_tokens is None else self.max_num_tokens
         workspace13 = num_experts * max_num_tokens * K * topk * 2 # TODO: *2 is a hack
         workspace2 = max_num_tokens * N
-        return (workspace13, workspace2, a_dtype)
+        return (workspace13, workspace2, a.dtype)
 
     def apply(
         self,

@@ -265,6 +265,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             logger.info(f"BatchedExperts {self.moe}")
             experts = BatchedExperts() #rank=self.moe.ep_rank, world_size=self.moe.ep_size)
         else:
+            logger.info(f"TritonExperts {self.moe}")
             experts = TritonExperts(
                 use_fp8_w8a8 = False,
                 use_int8_w8a16 = False,
@@ -1036,21 +1037,20 @@ class FusedMoE(torch.nn.Module):
                 router_logits: torch.Tensor):
         if self.use_direct_call:
             return self.forward_impl(hidden_states, router_logits)
-        else:
+        elif True:
             return torch.ops.vllm.moe_forward(hidden_states, router_logits,
                                               self.layer_name)
 
     def forward_impl_chunked(self, full_hidden_states: torch.Tensor,
                              full_router_logits: torch.Tensor):
 
-        max_tokens_across_dp = get_forward_context(
-        ).dp_metadata.max_tokens_across_dp
-        cu_tokens_across_dp_cpu = get_forward_context(
-        ).dp_metadata.cu_tokens_across_dp_cpu
-        num_tokens_across_dp = get_forward_context(
-        ).dp_metadata.num_tokens_across_dp
+        ctx = get_forward_context()
 
-        #print(f"max/num/rank_num = {max_tokens_across_dp}/{num_tokens_across_dp}/{get_forward_context().dp_metadata.dp_rank_num_tokens}")
+        max_tokens_across_dp = ctx.dp_metadata.max_tokens_across_dp
+        #cu_tokens_across_dp_cpu = ctx.dp_metadata.cu_tokens_across_dp_cpu
+        num_tokens_across_dp = ctx.dp_metadata.num_tokens_across_dp
+
+        #print(f"max/num/rank_num = {max_tokens_across_dp}/{num_tokens_across_dp}/{ctx.dp_metadata.dp_rank_num_tokens}")
 
         #In this function we define two ranges:
         # 1. chunk_range - The current iteration of the loops's range over the DP world tokens
@@ -1067,16 +1067,18 @@ class FusedMoE(torch.nn.Module):
         #print(f"ORIGINAL SHAPE {full_hidden_states.shape}")
         #print(f"moe_dp_chunk_size_per_rank = {moe_dp_chunk_size_per_rank}")
 
+        assert full_hidden_states.shape[0] == full_router_logits.shape[0]
+
         for iter in range(0, max_tokens_across_dp, moe_dp_chunk_size_per_rank):
             hidden_states = full_hidden_states[chunk_start:chunk_end, :]
             router_logits = full_router_logits[chunk_start:chunk_end, :]
-
-            #print(f"loop {iter}: {chunk_start}:{chunk_end}, {hidden_states.shape}")
 
             cu_tokens_across_dp_this_iter = torch.cumsum(
                 num_tokens_remaining_across_dp.clamp(
                     max=moe_dp_chunk_size_per_rank),
                 dim=0)
+
+            print(f"loop {iter}: {chunk_start}:{chunk_end}, {hidden_states.shape} {cu_tokens_across_dp_this_iter}")
 
             hidden_states = self.naive_multicast(
                 hidden_states, cu_tokens_across_dp_this_iter)
@@ -1112,14 +1114,14 @@ class FusedMoE(torch.nn.Module):
                     final_hidden_states)
                 final_hidden_states = all_hidden_states[start:end, :]
 
-                #print(f"final2 (AR) = {final_hidden_states.shape}")
+                print(f"final2 (AR) = {final_hidden_states.shape}")
 
             if self.reduce_results and (self.tp_size > 1 or self.ep_size > 1):
                 # Default set to False. (May have to add shared expert outputs.)
                 final_hidden_states = tensor_model_parallel_all_reduce(
                     final_hidden_states)
 
-                #print(f"final3 (AR) = {final_hidden_states.shape}")
+                print(f"final3 (AR) = {final_hidden_states.shape}")
 
             full_final_hidden_states[chunk_start:chunk_end, :].copy_(
                 final_hidden_states)
