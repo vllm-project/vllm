@@ -2,7 +2,7 @@
 
 import warnings
 from collections.abc import Sequence
-from typing import Any, NamedTuple, Optional, Union
+from typing import TYPE_CHECKING, Any, NamedTuple, Optional, Union
 
 import torch
 import torch.nn.functional as F
@@ -11,8 +11,10 @@ from vllm.config import ModelConfig, TaskOption
 from vllm.inputs import InputContext
 from vllm.sequence import Logprob, PromptLogprobs, SampleLogprobs
 
-from ..conftest import HfRunner
 from .registry import HF_EXAMPLE_MODELS
+
+if TYPE_CHECKING:
+    from ..conftest import HfRunner
 
 TokensText = tuple[list[int], str]
 
@@ -337,7 +339,7 @@ class EmbedModelInfo(NamedTuple):
 
 
 def run_embedding_correctness_test(
-    hf_model: HfRunner,
+    hf_model: "HfRunner",
     inputs: list[str],
     vllm_outputs: Sequence[list[float]],
     dimensions: Optional[int] = None,
