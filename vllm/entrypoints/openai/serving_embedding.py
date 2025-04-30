@@ -22,7 +22,8 @@ from vllm.entrypoints.openai.serving_engine import (EmbeddingServeContext,
 from vllm.entrypoints.openai.serving_models import OpenAIServingModels
 from vllm.entrypoints.utils import _validate_truncation_size
 from vllm.logger import init_logger
-from vllm.outputs import (EmbeddingOutput, EmbeddingRequestOutput,
+from vllm.outputs import (EmbeddingOutput, 
+                          EmbeddingRequestOutput,
                           PoolingRequestOutput)
 
 logger = init_logger(__name__)
@@ -43,7 +44,98 @@ def _get_embedding(
     assert_never(encoding_format)
 
 
-class OpenAIServingEmbedding(OpenAIServing):
+class EmbeddingMixin(OpenAIServing):
+
+    async def _preprocess(
+        self,
+        ctx: ServeContext,
+    ) -> Optional[ErrorResponse]:
+        ctx = cast(EmbeddingServeContext, ctx)
+        try:
+            (
+                ctx.lora_request,
+                ctx.prompt_adapter_request,
+            ) = self._maybe_get_adapters(ctx.request)
+
+            tokenizer = await self.engine_client.get_tokenizer(ctx.lora_request
+                                                               )
+
+            if ctx.prompt_adapter_request is not None:
+                raise NotImplementedError("Prompt adapter is not supported "
+                                          "for embedding models")
+
+            if isinstance(ctx.request, EmbeddingChatRequest):
+                (
+                    _,
+                    ctx.request_prompts,
+                    ctx.engine_prompts,
+                ) = await self._preprocess_chat(
+                    ctx.request,
+                    tokenizer,
+                    ctx.request.messages,
+                    chat_template=ctx.request.chat_template
+                    or ctx.chat_template,
+                    chat_template_content_format=ctx.
+                    chat_template_content_format,
+                    # In embedding requests, we are not generating tokens,
+                    # so there is no need to append extra tokens to the input
+                    add_generation_prompt=False,
+                    continue_final_message=False,
+                    truncate_prompt_tokens=ctx.truncate_prompt_tokens,
+                    add_special_tokens=ctx.request.add_special_tokens,
+                )
+            else:
+                (ctx.request_prompts,
+                 ctx.engine_prompts) = await self._preprocess_completion(
+                     ctx.request,
+                     tokenizer,
+                     ctx.request.input,
+                     truncate_prompt_tokens=ctx.truncate_prompt_tokens,
+                     add_special_tokens=ctx.request.add_special_tokens,
+                 )
+            return None
+        except (ValueError, TypeError) as e:
+            logger.exception("Error in preprocessing prompt inputs")
+            return self.create_error_response(str(e))
+
+    def _build_response(
+        self,
+        ctx: ServeContext,
+    ) -> Union[EmbeddingResponse, ErrorResponse]:
+        items: list[EmbeddingResponseData] = []
+        num_prompt_tokens = 0
+
+        final_res_batch_checked = cast(list[PoolingRequestOutput],
+                                       ctx.final_res_batch)
+
+        for idx, final_res in enumerate(final_res_batch_checked):
+            embedding_res = EmbeddingRequestOutput.from_base(final_res)
+
+            item = EmbeddingResponseData(
+                index=idx,
+                embedding=_get_embedding(embedding_res.outputs,
+                                         ctx.request.encoding_format),
+            )
+            prompt_token_ids = final_res.prompt_token_ids
+
+            items.append(item)
+            num_prompt_tokens += len(prompt_token_ids)
+
+        usage = UsageInfo(
+            prompt_tokens=num_prompt_tokens,
+            total_tokens=num_prompt_tokens,
+        )
+
+        return EmbeddingResponse(
+            id=ctx.request_id,
+            created=ctx.created_time,
+            model=ctx.model_name,
+            data=items,
+            usage=usage,
+        )
+
+
+class OpenAIServingEmbedding(EmbeddingMixin):
     request_id_prefix = "embd"
 
     def __init__(
@@ -84,6 +176,8 @@ class OpenAIServingEmbedding(OpenAIServing):
             raw_request=raw_request,
             model_name=model_name,
             request_id=request_id,
+            chat_template=self.chat_template,
+            chat_template_content_format=self.chat_template_content_format,
         )
 
         return await super().handle(ctx)  # type: ignore
@@ -106,6 +200,7 @@ class OpenAIServingEmbedding(OpenAIServing):
             return self.create_error_response(str(e))
 
         return None
+<<<<<<< HEAD
 
     @override
     async def _preprocess(
@@ -197,3 +292,5 @@ class OpenAIServingEmbedding(OpenAIServing):
             data=items,
             usage=usage,
         )
+=======
+>>>>>>> 6f72a5c2b (Refactor to use mixin)

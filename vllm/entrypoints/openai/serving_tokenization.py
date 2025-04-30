@@ -18,7 +18,7 @@ from vllm.entrypoints.openai.protocol import (DetokenizeRequest,
                                               TokenizeRequest,
                                               TokenizeResponse)
 # yapf: enable
-from vllm.entrypoints.openai.serving_engine import OpenAIServing, ServeContext
+from vllm.entrypoints.openai.serving_engine import OpenAIServing
 from vllm.entrypoints.openai.serving_models import OpenAIServingModels
 from vllm.logger import init_logger
 
@@ -109,18 +109,6 @@ class OpenAIServingTokenization(OpenAIServing):
         return TokenizeResponse(tokens=input_ids,
                                 count=len(input_ids),
                                 max_model_len=self.max_model_len)
-
-    async def _preprocess(
-            self,
-            ctx: ServeContext[TokenizeRequest]) -> Optional[ErrorResponse]:
-        # TODO: real preprocessing later
-        return self.create_error_response("Tokenization not implemented")
-
-    def _build_response(
-        self, ctx: ServeContext[TokenizeRequest]
-    ) -> Union[TokenizeResponse, ErrorResponse]:
-        # TODO: real builder later
-        return self.create_error_response("Tokenization not implemented")
 
     async def create_detokenize(
         self,

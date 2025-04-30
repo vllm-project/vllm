@@ -5,7 +5,6 @@ from typing import Optional, Union, cast
 
 import numpy as np
 from fastapi import Request
-from typing_extensions import override
 
 from vllm.config import ModelConfig
 from vllm.engine.protocol import EngineClient
@@ -25,51 +24,17 @@ from vllm.outputs import ClassificationOutput, PoolingRequestOutput
 logger = init_logger(__name__)
 
 
-class ServingClassification(OpenAIServing):
-    request_id_prefix = "classify"
+class ClassificationMixin(OpenAIServing):
 
-    def __init__(
-        self,
-        engine_client: EngineClient,
-        model_config: ModelConfig,
-        models: OpenAIServingModels,
-        *,
-        request_logger: Optional[RequestLogger],
-    ) -> None:
-        super().__init__(
-            engine_client=engine_client,
-            model_config=model_config,
-            models=models,
-            request_logger=request_logger,
-        )
-
-    async def create_classify(
-        self,
-        request: ClassificationRequest,
-        raw_request: Request,
-    ) -> Union[ClassificationResponse, ErrorResponse]:
-        model_name = self._get_model_name(request.model)
-        request_id = (f"{self.request_id_prefix}-"
-                      f"{self._base_request_id(raw_request)}")
-
-        ctx = ClassificationServeContext(
-            request=request,
-            raw_request=raw_request,
-            model_name=model_name,
-            request_id=request_id,
-        )
-
-        return await super().handle(ctx)  # type: ignore
-
-    @override
     async def _preprocess(
         self,
-        ctx: ServeContext[ClassificationRequest],
+        ctx: ServeContext,
     ) -> Optional[ErrorResponse]:
         """
         Process classification inputs: tokenize text, resolve adapters,
         and prepare model-specific inputs.
         """
+        ctx = cast(ClassificationServeContext, ctx)
         if isinstance(ctx.request.input, str) and not ctx.request.input:
             return self.create_error_response(
                 "Input cannot be empty for classification",
@@ -109,12 +74,15 @@ class ServingClassification(OpenAIServing):
             logger.exception("Error in preprocessing prompt inputs")
             return self.create_error_response(str(e))
 
-    @override
-    def _build_response(self, ctx: ServeContext[ClassificationRequest]):
+    def _build_response(
+        self,
+        ctx: ServeContext,
+    ) -> Union[ClassificationResponse, ErrorResponse]:
         """
         Convert model outputs to a formatted classification response
         with probabilities and labels.
         """
+        ctx = cast(ClassificationServeContext, ctx)
         items: list[ClassificationData] = []
         num_prompt_tokens = 0
 
@@ -152,3 +120,40 @@ class ServingClassification(OpenAIServing):
             data=items,
             usage=usage,
         )
+
+
+class ServingClassification(ClassificationMixin):
+    request_id_prefix = "classify"
+
+    def __init__(
+        self,
+        engine_client: EngineClient,
+        model_config: ModelConfig,
+        models: OpenAIServingModels,
+        *,
+        request_logger: Optional[RequestLogger],
+    ) -> None:
+        super().__init__(
+            engine_client=engine_client,
+            model_config=model_config,
+            models=models,
+            request_logger=request_logger,
+        )
+
+    async def create_classify(
+        self,
+        request: ClassificationRequest,
+        raw_request: Request,
+    ) -> Union[ClassificationResponse, ErrorResponse]:
+        model_name = self._get_model_name(request.model)
+        request_id = (f"{self.request_id_prefix}-"
+                      f"{self._base_request_id(raw_request)}")
+
+        ctx = ClassificationServeContext(
+            request=request,
+            raw_request=raw_request,
+            model_name=model_name,
+            request_id=request_id,
+        )
+
+        return await super().handle(ctx)  # type: ignore

@@ -2,7 +2,6 @@
 
 import json
 import time
-from abc import abstractmethod
 from collections.abc import (AsyncGenerator, Iterable, Iterator, Mapping,
                              Sequence)
 from concurrent.futures.thread import ThreadPoolExecutor
@@ -105,9 +104,10 @@ class RequestProcessingMixin(BaseModel):
     Mixin for request processing, 
     handling prompt preparation and engine input.
     """
-    request_prompts: Optional[Sequence[RequestPrompt]] = Field(
-        default_factory=list)
-    engine_prompts: Optional[list[TokensPrompt]] = Field(default_factory=list)
+    request_prompts: Optional[Sequence[RequestPrompt]] = \
+                            Field(default_factory=list)
+    engine_prompts: Optional[list[TokensPrompt]] = \
+                            Field(default_factory=list)
 
     class Config:
         arbitrary_types_allowed = True
@@ -153,6 +153,8 @@ class ClassificationServeContext(ServeContext[ClassificationRequest]):
 
 
 class EmbeddingServeContext(ServeContext[EmbeddingRequest]):
+    chat_template: Optional[str] = None
+    chat_template_content_format: ChatTemplateContentFormatOption
 
     class Config:
         arbitrary_types_allowed = True
@@ -200,18 +202,25 @@ class OpenAIServing:
             self._tokenize_prompt_input_or_inputs,
             executor=self._tokenizer_executor)
 
-    @abstractmethod
-    async def _preprocess(self, ctx: ServeContext) -> Optional[ErrorResponse]:
-        """Preprocess the request context before response generation."""
-        ...
+    async def _preprocess(
+        self,
+        ctx: ServeContext,
+    ) -> Optional[ErrorResponse]:
+        """
+        Default preprocessing hook. Subclasses may override
+        to prepare `ctx` (classification, embedding, etc.).
+        """
+        return None
 
-    @abstractmethod
     def _build_response(
         self,
         ctx: ServeContext,
     ) -> Union[AnyResponse, ErrorResponse]:
-        """Build the final response from the processed context."""
-        ...
+        """
+        Default response builder. Subclass may override this method
+        to return the appropriate response object.
+        """
+        return self.create_error_response("unimplemented endpoint")
 
     async def handle(
         self,

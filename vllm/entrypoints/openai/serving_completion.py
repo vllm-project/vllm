@@ -25,7 +25,6 @@ from vllm.entrypoints.openai.protocol import (CompletionLogProbs,
                                               UsageInfo)
 # yapf: enable
 from vllm.entrypoints.openai.serving_engine import (OpenAIServing,
-                                                    ServeContext,
                                                     clamp_prompt_logprobs)
 from vllm.entrypoints.openai.serving_models import OpenAIServingModels
 from vllm.logger import init_logger
@@ -244,18 +243,6 @@ class OpenAIServingCompletion(OpenAIServing):
             return fake_stream_generator()
 
         return response
-
-    async def _preprocess(
-            self,
-            ctx: ServeContext[CompletionRequest]) -> Optional[ErrorResponse]:
-        # TODO: real preprocessing later
-        return self.create_error_response("Completion not implemented")
-
-    def _build_response(
-        self, ctx: ServeContext[CompletionRequest]
-    ) -> Union[CompletionResponse, ErrorResponse]:
-        # TODO: real builder later
-        return self.create_error_response("Completion not implemented")
 
     async def completion_stream_generator(
         self,

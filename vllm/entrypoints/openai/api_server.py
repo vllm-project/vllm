@@ -412,6 +412,7 @@ async def get_server_load_metrics(request: Request):
     # - /v1/audio/transcriptions
     # - /v1/embeddings
     # - /pooling
+    # - /classify
     # - /score
     # - /v1/score
     # - /rerank

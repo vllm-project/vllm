@@ -14,7 +14,7 @@ from vllm.entrypoints.openai.protocol import (ErrorResponse, RerankDocument,
                                               RerankResult, RerankUsage,
                                               ScoreRequest, ScoreResponse,
                                               ScoreResponseData, UsageInfo)
-from vllm.entrypoints.openai.serving_engine import OpenAIServing, ServeContext
+from vllm.entrypoints.openai.serving_engine import OpenAIServing
 from vllm.entrypoints.openai.serving_models import OpenAIServingModels
 from vllm.entrypoints.score_utils import (_cosine_similarity,
                                           _validate_score_input_lens)
@@ -137,17 +137,6 @@ class ServingScores(OpenAIServing):
                                              embed_2=emb_texts_2)
 
         return final_res_batch
-
-    async def _preprocess(
-            self, ctx: ServeContext[ScoreRequest]) -> Optional[ErrorResponse]:
-        # TODO: real preprocessing later
-        return self.create_error_response("Score not implemented")
-
-    def _build_response(
-        self, ctx: ServeContext[ScoreRequest]
-    ) -> Union[ScoreResponse, ErrorResponse]:
-        # TODO: real builder later
-        return self.create_error_response("Score not implemented")
 
     async def _cross_encoding_score(
         self,
