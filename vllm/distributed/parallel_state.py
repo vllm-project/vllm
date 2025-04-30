@@ -23,7 +23,7 @@ If you only need to use the distributed environment without model/pipeline
 """
 import contextlib
 import gc
-import importlib
+import importlib.util
 import pickle
 import weakref
 from collections import namedtuple
@@ -949,7 +949,7 @@ def pplx_init(rank, world_size):
                                           nvshmem_get_unique_id, nvshmem_init)
         try:
             global PPLX_DID_INIT
-            logger.debug("PPLX_INIT %s %d", rank, world_size)
+            logger.info("PPLX_INIT rank=%d world=%d", rank, world_size)
             uid = nvshmem_get_unique_id(
             ) if rank == 0 else nvshmem_alloc_empty_unique_id()
             uid_gpu = uid.cuda()
@@ -967,7 +967,7 @@ def pplx_finalize():
     global PPLX_DID_INIT
     if PPLX_DID_INIT:
         from pplx_kernels.nvshmem import nvshmem_finalize
-        logger.debug("PPLX finalize")
+        logger.info("PPLX finalize")
         nvshmem_finalize()
 
 
