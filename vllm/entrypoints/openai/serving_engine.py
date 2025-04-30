@@ -446,6 +446,12 @@ class OpenAIServing:
 
         if truncate_prompt_tokens is None:
             encoded = tokenizer(prompt, add_special_tokens=add_special_tokens)
+        elif truncate_prompt_tokens < 0:
+            # Negative means we cap at the model's max length
+            encoded = tokenizer(prompt,
+                                add_special_tokens=add_special_tokens,
+                                truncation=True,
+                                max_length=self.max_model_len)
         else:
             encoded = tokenizer(prompt,
                                 add_special_tokens=add_special_tokens,
@@ -467,6 +473,8 @@ class OpenAIServing:
     ) -> TextTokensPrompt:
         if truncate_prompt_tokens is None:
             input_ids = prompt_ids
+        elif truncate_prompt_tokens < 0:
+            input_ids = prompt_ids[-self.max_model_len:]
         else:
             input_ids = prompt_ids[-truncate_prompt_tokens:]
 
