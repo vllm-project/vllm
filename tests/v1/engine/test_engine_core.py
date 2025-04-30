@@ -40,6 +40,7 @@ def make_request() -> EngineCoreRequest:
         eos_token_id=None,
         arrival_time=time.time(),
         lora_request=None,
+        cache_salt=None,
     )
 
 

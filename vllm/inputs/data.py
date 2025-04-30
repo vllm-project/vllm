@@ -28,6 +28,11 @@ class TextPrompt(TypedDict):
     to pass the mm_processor_kwargs to each of them.
     """
 
+    cache_salt: NotRequired[str]
+    """
+    Optional cache salt to be used for prefix caching.
+    """
+
 
 class TokensPrompt(TypedDict):
     """Schema for a tokenized prompt."""
@@ -50,6 +55,11 @@ class TokensPrompt(TypedDict):
     multimodal input mapper & processor. Note that if multiple modalities
     have registered mappers etc for the model being considered, we attempt
     to pass the mm_processor_kwargs to each of them.
+    """
+
+    cache_salt: NotRequired[str]
+    """
+    Optional cache salt to be used for prefix caching.
     """
 
 
@@ -141,11 +151,17 @@ class TokenInputs(TypedDict):
     The original prompt text corresponding to the token IDs, if available.
     """
 
+    cache_salt: NotRequired[str]
+    """
+    Optional cache salt to be used for prefix caching.
+    """
+
 
 def token_inputs(
     prompt_token_ids: list[int],
     token_type_ids: Optional[list[int]] = None,
     prompt: Optional[str] = None,
+    cache_salt: Optional[str] = None,
 ) -> TokenInputs:
     """Construct :class:`TokenInputs` from optional values."""
     inputs = TokenInputs(type="token", prompt_token_ids=prompt_token_ids)
@@ -154,6 +170,8 @@ def token_inputs(
         inputs["prompt"] = prompt
     if token_type_ids is not None:
         inputs["token_type_ids"] = token_type_ids
+    if cache_salt is not None:
+        inputs["cache_salt"] = cache_salt
 
     return inputs
 
@@ -217,7 +235,7 @@ def zip_enc_dec_prompts(
     """
     Zip encoder and decoder prompts together into a list of
     :class:`ExplicitEncoderDecoderPrompt` instances.
-    
+
     ``mm_processor_kwargs`` may also be provided; if a dict is passed, the same
     dictionary will be used for every encoder/decoder prompt. If an iterable is
     provided, it will be zipped with the encoder/decoder prompts.
