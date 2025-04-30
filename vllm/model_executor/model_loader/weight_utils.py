@@ -718,7 +718,8 @@ def maybe_remap_kv_scale_name(name: str, params_dict: dict) -> Optional[str]:
             logger.warning_once(
                 "Found kv_scale in the checkpoint (e.g. %s), but not found the expected name in the model (e.g. %s). kv_scale is not loaded.",  #  noqa: E501
                 name,
-                remapped_name)
+                remapped_name,
+            )
             return None
         return remapped_name
 
@@ -741,7 +742,8 @@ def maybe_remap_kv_scale_name(name: str, params_dict: dict) -> Optional[str]:
                     scale_name,
                     name,
                     remapped_name,
-                    scale_name)
+                    scale_name,
+                )
                 return None
             return remapped_name
 

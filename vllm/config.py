@@ -278,7 +278,7 @@ class ModelConfig:
     max_model_len: int = None  # type: ignore
     """Model context length (prompt and output). If unspecified, will be
     automatically derived from the model config.
-    
+
     When passing via `--max-model-len`, supports k/m/g/K/M/G in human-readable
     format. Examples:\n
     - 1k -> 1000\n
@@ -518,7 +518,7 @@ class ModelConfig:
                     self.hf_text_config.sliding_window)
 
                 logger.warning_once(
-                    "%s has interleaved attention, which is currently not supported by the %s backend. Disabling sliding window and capping the max length to the sliding window size (%s).",  # noqa: E501
+                    "%s has interleaved attention, which is currently not supported by the %s backend. Disabling sliding window and capping the max length to the sliding window size (%d).",  # noqa: E501
                     self.hf_text_config.model_type,
                     backend,
                     sliding_window_len_min,
