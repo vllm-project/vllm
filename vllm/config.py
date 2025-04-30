@@ -1647,11 +1647,11 @@ class ParallelConfig:
     ray_workers_use_nsight: bool = False
     """Whether to profile Ray workers with nsight, see https://docs.ray.io/en/latest/ray-observability/user-guides/profiling.html#profiling-nsight-profiler."""
 
-    placement_group: Optional[PlacementGroup] = None
+    placement_group: Optional["PlacementGroup"] = None
     """ray distributed model workers placement group."""
 
     distributed_executor_backend: Optional[Union[DistributedExecutorBackend,
-                                                 type[ExecutorBase]]] = None
+                                                 type["ExecutorBase"]]] = None
     """Backend to use for distributed model
     workers, either "ray" or "mp" (multiprocessing). If the product
     of pipeline_parallel_size and tensor_parallel_size is less than
@@ -1694,7 +1694,7 @@ class ParallelConfig:
         self.data_parallel_master_port += 1
         return answer
 
-    def stateless_init_dp_group(self) -> ProcessGroup:
+    def stateless_init_dp_group(self) -> "ProcessGroup":
         from vllm.distributed.utils import (
             stateless_init_torch_distributed_process_group)
 
@@ -1709,7 +1709,7 @@ class ParallelConfig:
         return dp_group
 
     @staticmethod
-    def has_unfinished_dp(dp_group: ProcessGroup,
+    def has_unfinished_dp(dp_group: "ProcessGroup",
                           has_unfinished: bool) -> bool:
         tensor = torch.tensor([has_unfinished],
                               dtype=torch.int32,

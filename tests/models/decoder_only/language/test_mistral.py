@@ -296,16 +296,18 @@ def test_mistral_structured_output(
                                 temperature=0.7,
                                 guided_decoding=guided_decoding)
 
-        messages = [{
-            "role": "system",
-            "content": "you are a helpful assistant"
-        }, {
-            "role":
-            "user",
-            "content":
-            f"Give an example JSON for an employee profile that "
-            f"fits this schema: {SAMPLE_JSON_SCHEMA}"
-        }]
+        # yapf: disable
+        messages = [
+            {
+                "role": "system",
+                "content": "you are a helpful assistant"
+            },
+            {
+                "role": "user",
+                "content": f"Give an example JSON for an employee profile that fits this schema: {SAMPLE_JSON_SCHEMA}"  # noqa: E501
+            }
+        ]
+        # yapf: enable
         outputs = vllm_model.model.chat(messages, sampling_params=params)
 
     generated_text = outputs[0].outputs[0].text
