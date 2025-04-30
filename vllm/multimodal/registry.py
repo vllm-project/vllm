@@ -100,7 +100,7 @@ class MultiModalRegistry:
         model_config: "ModelConfig",
     ) -> Mapping[str, int]:
         """
-        Get the maximum number of tokens per data item from each modality based 
+        Get the maximum number of tokens per data item from each modality based
         on underlying model configuration.
         """
         if not model_config.is_multimodal_model:
@@ -126,11 +126,11 @@ class MultiModalRegistry:
     ) -> Mapping[str, int]:
         """
         Get the maximum number of tokens per data item from each modality based
-        on underlying model configuration, excluding modalities that user 
+        on underlying model configuration, excluding modalities that user
         explicitly disabled via `limit_mm_per_prompt`.
 
         Note:
-            This is currently directly used only in V1 for profiling the memory 
+            This is currently directly used only in V1 for profiling the memory
             usage of a model.
         """
         mm_limits = self.get_mm_limits_per_prompt(model_config)
@@ -316,7 +316,9 @@ class MultiModalRegistry:
         token_ids = dummy_data.prompt_token_ids
         if len(token_ids) < seq_len:
             logger.warning_once(
-                f"Expected at least {seq_len} dummy encoder tokens for "
-                f"profiling, but found {len(token_ids)} tokens instead.")
+                "Expected at least %d dummy encoder tokens for profiling, but found %d tokens instead.",  # noqa: E501
+                seq_len,
+                len(token_ids),
+            )
 
         return dummy_data

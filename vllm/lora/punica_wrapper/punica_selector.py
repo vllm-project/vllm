@@ -15,6 +15,5 @@ def get_punica_wrapper(*args, **kwargs) -> PunicaWrapperBase:
     punica_wrapper = punica_wrapper_cls(*args, **kwargs)
     assert punica_wrapper is not None, \
         "the punica_wrapper_qualname(" + punica_wrapper_qualname + ") is wrong."
-    logger.info_once("Using " + punica_wrapper_qualname.rsplit(".", 1)[1] +
-                     ".")
+    logger.info_once("Using %s.", punica_wrapper_qualname.rsplit(".", 1)[1])
     return punica_wrapper
