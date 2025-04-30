@@ -611,6 +611,7 @@ void marlin_mm(const void* A, const void* B, void* C, void* C_tmp, void* s,
   auto kernel = get_marlin_kernel<scalar_t>(
       q_type, thread_m_blocks, thread_n_blocks, thread_k_blocks, m_block_size_8,
       has_act_order, has_zp, group_blocks, num_threads, is_zp_float);
+
   if (kernel == MarlinDefault) {
     TORCH_CHECK(false, "Unsupported shapes: MNK = [", prob_m, ", ", prob_n,
                 ", ", prob_k, "]", ", has_act_order = ", has_act_order,
