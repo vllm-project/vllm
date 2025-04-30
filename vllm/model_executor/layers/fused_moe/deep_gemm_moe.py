@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+import functools
 import importlib.util
 from typing import Optional, Tuple
 
@@ -19,6 +20,7 @@ logger = init_logger(__name__)
 has_deep_gemm = importlib.util.find_spec("deep_gemm") is not None
 
 
+@functools.cache
 def deep_gemm_block_shape() -> list[int]:
     # Lazy import to avoid CUDA initialization problems.
     import deep_gemm as dg

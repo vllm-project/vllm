@@ -28,6 +28,7 @@ class PplxDispatchCombine(mk.FusedMoEQuantizeDispatchCombine):
                  quant_dtype: Optional[torch.dtype] = None,
                  block_shape: Optional[List[int]] = None):
         super().__init__()
+        assert max_num_tokens > 0
         self.a2a = a2a
         self.block_shape = block_shape
         self.max_num_tokens = max_num_tokens
@@ -47,12 +48,14 @@ class PplxDispatchCombine(mk.FusedMoEQuantizeDispatchCombine):
         expert_map: Optional[torch.Tensor],
         apply_router_weight_on_input: bool,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor]]:
-        # Is this always going to be a1.device?
-        device = a1.device
+        num_tokens = a1.shape[0]  # M
         hidden_dim = a1.shape[-1]  # K
 
-        # ??
+        assert rank_topk_ids.shape[0] == num_tokens
         # assert expert_map is None, "NYI"
+
+        # Is this always going to be a1.device?
+        device = a1.device
 
         if apply_router_weight_on_input:
             topk = rank_topk_ids.shape[1]
@@ -102,7 +105,6 @@ class PplxDispatchCombine(mk.FusedMoEQuantizeDispatchCombine):
             )
 
         # This argument is optional, defaults to indices.shape[0]
-        num_tokens = a1.shape[0]  # M
         bound_m = torch.tensor([num_tokens], dtype=torch.uint32, device=device)
 
         # TODO: optimize this?
@@ -133,7 +135,9 @@ class PplxDispatchCombine(mk.FusedMoEQuantizeDispatchCombine):
                                dtype=torch.uint32,
                                device=fused_expert_output.device)
 
-        assert output.shape[0] <= self.max_num_tokens
+        assert topk_ids.shape[0] <= num_tokens
+        assert output.shape[0] <= self.max_num_tokens, \
+            f"{output.shape[0]} <= {self.max_num_tokens}"
         assert output.shape[1] == fused_expert_output.shape[-1]
 
         # Set weights to 1 if we did them in dispatch. This is hacky.
