@@ -21,7 +21,8 @@ def make_request(request_id,
                  prompt_token_ids,
                  mm_positions=None,
                  mm_hashes=None,
-                 prompt_logprobs: Optional[int] = None):
+                 prompt_logprobs: Optional[int] = None,
+                 cache_salt: Optional[str] = None):
     if mm_positions is None:
         multi_modal_inputs = None
     else:
@@ -38,6 +39,7 @@ def make_request(request_id,
         eos_token_id=100,
         arrival_time=0,
         lora_request=None,
+        cache_salt=cache_salt,
     )
 
 
@@ -603,6 +605,66 @@ def test_mm_prefix_caching():
     assert num_computed_tokens == 3 * 16
 
 
+def test_cache_key_salting():
+    """
+    This tests that cache salts are applied during hashing and the cache
+    is separated cache as expected.
+    """
+    block_size = 16
+    manager = KVCacheManager(
+        make_kv_cache_config(block_size, 11),
+        max_model_len=8192,
+        enable_caching=True,
+    )
+
+    # 3 complete blocks and an incomplete block with 11 tokens.
+    common_token_ids = [i for i in range(3) for _ in range(block_size)]
+    token_ids = common_token_ids + [3] * 11
+    req0 = make_request("0", token_ids, cache_salt="salt1")
+    computed_blocks, num_computed_tokens = manager.get_computed_blocks(req0)
+
+    # Completed block should have hashes with extra keys.
+    assert not computed_blocks
+    assert num_computed_tokens == 0
+    block_hashes = manager.req_to_block_hashes[req0.request_id]
+    assert len(block_hashes) == 3
+    assert block_hashes[0].extra_keys == ("salt1", )
+    assert block_hashes[1].extra_keys is None
+    assert block_hashes[2].extra_keys is None
+
+    blocks = manager.allocate_slots(req0, 59, computed_blocks)
+    assert [b.block_id for b in blocks] == [1, 2, 3, 4]
+    req0.num_computed_tokens = 59
+
+    # Append slots without allocating a new block.
+    for _ in range(5):
+        req0.append_output_token_ids(8)
+    new_blocks = manager.allocate_slots(req0, 5)
+    assert new_blocks is not None and len(new_blocks) == 0
+
+    # Now one more block that should not have extra keys.
+    assert len(block_hashes) == 4
+    assert block_hashes[3].extra_keys is None
+
+    # Test cache hit with a new request that has the same salt.
+    token_ids = common_token_ids + [4] * 11
+    req1 = make_request("1", token_ids, cache_salt="salt1")
+    computed_blocks, num_computed_tokens = manager.get_computed_blocks(req1)
+    # Should match only a prefix of 3 blocks.
+    assert len(computed_blocks) == 3
+    assert num_computed_tokens == 3 * block_size
+
+    # Test cache miss with same content but different salt.
+    token_ids = common_token_ids + [4] * 11
+    req2 = make_request("2", token_ids, cache_salt="salt2")
+    computed_blocks, num_computed_tokens = manager.get_computed_blocks(req2)
+    assert len(computed_blocks) == 0
+    assert num_computed_tokens == 0
+    block_hashes = manager.req_to_block_hashes[req2.request_id]
+    assert len(block_hashes) == 3
+    assert block_hashes[0].extra_keys == ("salt2", )
+
+
 def test_prefill_not_enough_free_blocks_with_computed_blocks():
     """
     This is a unit test that tests the correctness of the allocate_slots
@@ -719,3 +781,60 @@ def test_prefix_cache_stats_disabled():
 
     # Ensure prefix_cache_stats remains None
     assert manager.prefix_cache_stats is None
+
+
+def test_eagle_enabled_removes_last_block():
+    """Verify Eagle does NOT remove blocks when request 
+    length is divisible by block size."""
+    block_size = 16
+    manager = KVCacheManager(
+        make_kv_cache_config(block_size, num_blocks=10),
+        max_model_len=8192,
+        enable_caching=True,
+        use_eagle=True,
+    )
+
+    # Request with 3 full blocks (48 tokens)
+    token_ids = [0] * (3 * block_size)
+    req = make_request("divisible_request", token_ids)
+
+    # Prime the cache
+    computed_blocks, _ = manager.get_computed_blocks(req)
+    manager.allocate_slots(req, len(token_ids), computed_blocks)
+    manager.free(req)
+
+    # New request with same tokens + Eagle enabled
+    req_eagle = make_request("eagle_divisible", token_ids)
+    computed_blocks, num_tokens = manager.get_computed_blocks(req_eagle)
+
+    # Should retain 2 blocks:
+    # 1. Original 3 blocks → pop last hash → 2 matched blocks
+    # 2. last_block_hash is not None → Eagle pop is not SKIPPED
+    assert len(computed_blocks) == 1
+    assert num_tokens == 1 * block_size  # 32 tokens
+
+
+def test_eagle_with_partial_blocks():
+    """Test Eagle behavior with requests containing partial blocks."""
+    block_size = 16
+    manager = KVCacheManager(
+        make_kv_cache_config(block_size, num_blocks=10),
+        max_model_len=8192,
+        enable_caching=True,
+        use_eagle=True,
+    )
+    # 2 full blocks + 5 tokens (non-divisible length)
+    token_ids = [0] * (2 * block_size + 5)
+    req = make_request("partial_block_test", token_ids)
+
+    # Prime the cache
+    computed_blocks, _ = manager.get_computed_blocks(req)
+    manager.allocate_slots(req, len(token_ids), computed_blocks)
+    manager.free(req)
+
+    # New request with Eagle enabled
+    req_eagle = make_request("partial_eagle", token_ids)
+    computed_blocks, num_tokens = manager.get_computed_blocks(req_eagle)
+    # Original match: 2 full blocks → Eagle removes 1 → 1 remaining
+    assert len(computed_blocks) == 1
+    assert num_tokens == 1 * block_size
