@@ -85,6 +85,7 @@ def benchmark_sync(
         tokenizer=args.tokenizer if args.tokenizer else args.model,
         tokenizer_mode=args.tokenizer_mode,
         trust_remote_code=args.trust_remote_code,
+        guided_decoding_backend=args.structured_output_backend,
     )
 
     start = perf_counter()
