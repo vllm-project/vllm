@@ -4,6 +4,7 @@ from collections import defaultdict
 from collections.abc import Iterable
 from typing import Optional
 
+from vllm.distributed.kv_events import KVCacheEvent
 from vllm.logger import init_logger
 from vllm.utils import cdiv, sha256
 from vllm.v1.core.block_pool import BlockPool
@@ -27,6 +28,7 @@ class KVCacheManager:
         caching_hash_algo: str = "builtin",
         use_eagle: bool = False,
         log_stats: bool = False,
+        enable_kv_cache_events: bool = False,
     ) -> None:
         assert len(kv_cache_config.kv_cache_groups) == 1, (
             "KVCacheManager does not support hybrid models with more than 1 "
@@ -44,7 +46,9 @@ class KVCacheManager:
         # FIXME: make prefix cache stats conditional on log_stats
         self.prefix_cache_stats = PrefixCacheStats() if log_stats else None
 
-        self.block_pool = BlockPool(self.num_gpu_blocks, enable_caching)
+        self.block_pool = BlockPool(self.num_gpu_blocks, enable_caching,
+                                    enable_kv_cache_events)
+
         self.specialized_manager = get_specialized_manager(
             kv_cache_spec=kv_cache_spec,
             block_pool=self.block_pool,
@@ -383,3 +387,11 @@ class KVCacheManager:
         is finished, not when it is preempted.
         """
         self.req_to_block_hashes.pop(request.request_id, None)
+
+    def take_events(self) -> list[KVCacheEvent]:
+        """Take the KV cache events from the block pool.
+
+        Returns:
+            A list of KV cache events.
+        """
+        return self.block_pool.take_events()
