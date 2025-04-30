@@ -14,6 +14,8 @@ import zmq
 from vllm.config import KVTransferConfig
 from vllm.distributed.device_communicators.pynccl_wrapper import (
     NCCLLibrary, buffer_type, cudaStream_t, ncclComm_t, ncclDataTypeEnum)
+from vllm.distributed.kv_transfer.tensor_memory_pool import (
+    CudaPinnedMemoryPool)
 from vllm.utils import current_stream, get_ip
 
 logger = logging.getLogger(__name__)
@@ -72,6 +74,8 @@ class P2pNcclPipe:
         self.send_stream = torch.cuda.Stream()
         self.recv_stream = torch.cuda.Stream()
 
+        self.pool = CudaPinnedMemoryPool(max_block_size=100 * 1024**3)  # 100GB
+
         # The sending type includes tree mutually exclusive options:
         # PUT, GET, PUT_ASYNC.
         self.send_type = self.config.get_from_extra_config("send_type", "PUT")
@@ -87,8 +91,8 @@ class P2pNcclPipe:
                                                      daemon=True)
                 self._send_thread.start()
 
-        self.recv_store: Dict[str,
-                              torch.Tensor] = {}  # tensor_id: torch.Tensor
+        # tensor_id: torch.Tensor/(addr, dtype, shape)
+        self.recv_store: Dict[str, Any] = {}
         self.socks: Dict[str, Any] = {}  # remote_address: client socket
         self.comms: Dict[str, Any] = {}  # remote_address: (ncclComm_t, rank)
 
@@ -191,9 +195,15 @@ class P2pNcclPipe:
                 while len(self.recv_store) > 10000:
                     self.recv_store.pop(next(iter(self.recv_store)))
 
-            duration = time.time() - start_time
             if tensor is not None:
-                self.buffer_size -= (tensor.element_size() * tensor.numel())
+                if isinstance(tensor, tuple):
+                    addr, dtype, shape = tensor
+                    tensor = self.pool.load_tensor(addr, dtype, shape)
+                    self.pool.free(addr)
+                else:
+                    self.buffer_size -= (tensor.element_size() *
+                                         tensor.numel())
+                duration = time.time() - start_time
                 logger.info(
                     "🔵[PUT]Recv From %s, tensor_id:%s, shape:%s, "
                     "duration:%.3fms, size:%.3fGB, rank:%d", remote_address,
@@ -201,6 +211,7 @@ class P2pNcclPipe:
                     tensor.element_size() * tensor.numel() / 1024**3,
                     self.rank)
             else:
+                duration = time.time() - start_time
                 logger.warning(
                     "🔴[PUT]Recv From %s, tensor_id:%s, duration:%.3fms, "
                     "rank:%d", remote_address, tensor_id, duration * 1000,
@@ -268,24 +279,22 @@ class P2pNcclPipe:
                                              dtype=getattr(
                                                  torch, data["dtype"]),
                                              device=self.device)
-
+                        self.router_socket.send_multipart(
+                            [remote_address, b"0"])
+                        comm, rank = self.comms[remote_address.decode()]
+                        self._recv(comm, tensor, rank ^ 1, self.recv_stream)
                         tensor_size = tensor.element_size() * tensor.numel()
                         if (self.buffer_size + tensor_size
                                 > self.buffer_size_threshold):
-                            self.router_socket.send_multipart(
-                                [remote_address, b"2"])
+                            # Store Tensor in memory pool
+                            addr = self.pool.store_tensor(tensor)
+                            tensor = (addr, tensor.dtype, tensor.shape)
                             logger.warning(
                                 "🔴[PUT]Recv Tensor, Out Of Threshold, "
                                 "%s👈%s, data:%s", self.zmq_address,
                                 remote_address.decode(), data)
-                            tensor = None
                         else:
                             self.buffer_size += tensor_size
-                            self.router_socket.send_multipart(
-                                [remote_address, b"0"])
-                            comm, rank = self.comms[remote_address.decode()]
-                            self._recv(comm, tensor, rank ^ 1,
-                                       self.recv_stream)
                             logger.info(
                                 "🔵[PUT]Recv Tensor, %s👈%s, MyRank:%s, "
                                 "data:%s, shape:%s", self.zmq_address,
