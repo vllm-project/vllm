@@ -317,6 +317,7 @@ class Processor:
             eos_token_id=eos_token_id,
             arrival_time=arrival_time,
             lora_request=lora_request,
+            cache_salt=decoder_inputs.get("cache_salt"),
         )
 
     def _validate_model_inputs(self,

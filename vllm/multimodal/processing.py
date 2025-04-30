@@ -1789,7 +1789,7 @@ class EncDecMultiModalProcessor(BaseMultiModalProcessor[_I]):
         mm_data: MultiModalDataDict,
     ) -> Union[str, list[int]]:
         """
-        Create input prompt for the encoder. HF processor will be applied on 
+        Create input prompt for the encoder. HF processor will be applied on
         this prompt during profiling and generation.
         """
         raise NotImplementedError
