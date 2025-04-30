@@ -519,9 +519,7 @@ class EngineArgs:
             # This choices is a special case because it's not static
             # By default, no option is selected
             choices=list(ReasoningParserManager.reasoning_parsers),
-            **(guided_decoding_kwargs["reasoning_backend"] | {
-                "default": ""
-            }))
+            **guided_decoding_kwargs["reasoning_backend"])
 
         # Parallel arguments
         parallel_kwargs = get_kwargs(ParallelConfig)
