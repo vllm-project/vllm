@@ -130,8 +130,9 @@ class AWQMarlinConfig(QuantizationConfig):
             # Check if the layer is supported by AWQMarlin.
             if not check_marlin_supports_layer(layer, self.group_size):
                 logger.warning_once(
-                    f"Layer '{prefix}' is not supported by AWQMarlin. "
-                    "Falling back to unoptimized AWQ kernels.")
+                    "Layer '%s' is not supported by AWQMarlin. Falling back to unoptimized AWQ kernels.",  # noqa: E501
+                    prefix,
+                )
                 return AWQConfig.from_config(
                     self.full_config).get_quant_method(layer, prefix)
             return AWQMarlinLinearMethod(self)
