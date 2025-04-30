@@ -3382,7 +3382,6 @@ class CompilationConfig(BaseModel):
             - 1: dynamo as is.
             - 2: dynamo once.
             - 3: piecewise compilation.
-            - 4: full compilation.
         - debug_dump_path: the path to dump the debug information.
         - cache_dir: the directory to store the compiled graph, to
             accelerate Inductor compilation. By default, it will use
@@ -3575,7 +3574,7 @@ class CompilationConfig(BaseModel):
     @classmethod
     def from_cli(cls, cli_value: str) -> "CompilationConfig":
         """Parse the CLI value for the compilation config."""
-        if cli_value in ["0", "1", "2", "3", "4"]:
+        if cli_value in ["0", "1", "2", "3"]:
             return cls(level=int(cli_value))
         # do not use `eval`, it is dangerous and can execute arbitrary code
         dict_value = ast.literal_eval(cli_value)
@@ -3642,7 +3641,7 @@ class CompilationConfig(BaseModel):
 
         # TODO: pass user-specified backend to piecewise compilation
         # merge with the config use_inductor
-        assert self.level >= CompilationLevel.PIECEWISE
+        assert self.level == CompilationLevel.PIECEWISE
 
         from vllm.compilation.backends import VllmBackend
         return VllmBackend(vllm_config)
@@ -4167,7 +4166,7 @@ def set_current_vllm_config(vllm_config: VllmConfig, check_compile=False):
         logger.debug("disabled custom ops: %s",
                      vllm_config.compilation_config.disabled_custom_ops)
         if check_compile and \
-            vllm_config.compilation_config.level >= CompilationLevel.PIECEWISE \
+            vllm_config.compilation_config.level == CompilationLevel.PIECEWISE \
             and compilation_counter.num_models_seen == num_models_seen:
             # If the model supports compilation,
             # compilation_counter.num_models_seen should be increased

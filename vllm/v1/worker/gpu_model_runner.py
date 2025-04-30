@@ -205,7 +205,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         )
 
         self.use_cuda_graph = (self.vllm_config.compilation_config.level
-                               >= CompilationLevel.PIECEWISE
+                               == CompilationLevel.PIECEWISE
                                and not self.model_config.enforce_eager)
         # TODO(woosuk): Provide an option to tune the max cudagraph batch size.
         # The convention is different.

@@ -140,6 +140,6 @@ Then it will only capture cudagraph for the specified sizes. It can be useful to
 
 ### Full Cudagraph capture
 
-It is possible to include attention as part of the cudagraph if using an attention backend that is cudagraph compatible. This can improve performance in some cases such as decode speed for smaller models.
+It is possible to include attention as part of the cudagraph if using an attention backend that is cudagraph compatible. This can improve performance in some cases such as decode speed for smaller models. Enable this using `--compilation-config {"'full_cuda_graph': True"}`
 
 Currently only FlashAttention 3 is compatible, and only when cascade attention is disabled.
