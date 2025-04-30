@@ -260,6 +260,7 @@ async def async_request_openai_completions(
                 if request_func_input.model_name else request_func_input.model,
             "prompt": request_func_input.prompt,
             "temperature": 0.0,
+            "repetition_penalty": 1.0,
             "max_tokens": request_func_input.output_len,
             "logprobs": request_func_input.logprobs,
             "stream": True,
