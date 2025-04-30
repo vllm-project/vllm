@@ -1107,22 +1107,22 @@ class EngineArgs:
                                         if self.enable_prompt_adapter else None
 
         if self.structured_output_config is not None:
-            logger.warning_once(
-                "'structured-output-config' is specified. Other structured outputs related arguments will be ignored"  # noqa: E501
+            logger.info_once(
+                "'structured_output_config' is specified. Other structured outputs related arguments will be ignored"  # noqa: E501
             )
             structured_output_config = StructuredOutputConfig(
                 **self.structured_output_config)
         else:
             # To be removed in v0.10.x
+            # yapf: disable
             structured_output_config = StructuredOutputConfig(
                 backend=self.guided_decoding_backend,
                 disable_fallback=self.guided_decoding_disable_fallback,
                 disable_any_whitespace=self.guided_decoding_disable_any_whitespace,
-                disable_additional_properties=\
-                    self.guided_decoding_disable_additional_properties,
-                reasoning_backend=self.reasoning_parser
-                if self.enable_reasoning else None,
+                disable_additional_properties=self.guided_decoding_disable_additional_properties,  # noqa: E501
+                reasoning_backend=self.reasoning_parser,
             )
+            # yapf: enable
 
         show_hidden_metrics = False
         if self.show_hidden_metrics_for_version is not None:
