@@ -2,7 +2,7 @@
 import asyncio
 from collections.abc import AsyncGenerator, Mapping
 from copy import copy
-from typing import Optional, Union
+from typing import Any, Optional, Union
 
 import numpy as np
 
@@ -201,6 +201,7 @@ class AsyncLLM(EngineClient):
         params: Union[SamplingParams, PoolingParams],
         arrival_time: Optional[float] = None,
         lora_request: Optional[LoRARequest] = None,
+        tokenization_kwargs: Optional[dict[str, Any]] = None,
         trace_headers: Optional[Mapping[str, str]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
         priority: int = 0,
@@ -219,7 +220,8 @@ class AsyncLLM(EngineClient):
         # Convert Input --> Request.
         prompt_str, request = self.processor.process_inputs(
             request_id, prompt, params, arrival_time, lora_request,
-            trace_headers, prompt_adapter_request, priority)
+            tokenization_kwargs, trace_headers, prompt_adapter_request,
+            priority)
 
         if params.n == 1:
             await self._add_request(request, prompt_str, None, 0, queue)

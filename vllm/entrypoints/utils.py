@@ -3,6 +3,7 @@
 import asyncio
 import functools
 import os
+from typing import Any, Optional
 
 from fastapi import Request
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -134,3 +135,26 @@ def cli_env_setup():
     if "VLLM_WORKER_MULTIPROC_METHOD" not in os.environ:
         logger.debug("Setting VLLM_WORKER_MULTIPROC_METHOD to 'spawn'")
         os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
+
+
+def _validate_truncation_size(
+    max_model_len: int,
+    truncate_prompt_tokens: Optional[int],
+    tokenization_kwargs: Optional[dict[str, Any]] = None,
+) -> Optional[int]:
+
+    if truncate_prompt_tokens is not None:
+        if truncate_prompt_tokens <= -1:
+            truncate_prompt_tokens = max_model_len
+
+        if truncate_prompt_tokens > max_model_len:
+            raise ValueError(
+                f"truncate_prompt_tokens value ({truncate_prompt_tokens}) "
+                f"is greater than max_model_len ({max_model_len})."
+                f" Please, select a smaller truncation size.")
+
+        if tokenization_kwargs is not None:
+            tokenization_kwargs["truncation"] = True
+            tokenization_kwargs["max_length"] = truncate_prompt_tokens
+
+    return truncate_prompt_tokens
