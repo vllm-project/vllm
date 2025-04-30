@@ -5,7 +5,7 @@ import os
 import pytest
 
 from vllm import LLM, SamplingParams
-from vllm.config import CompilationConfig, CompilationLevel
+from vllm.config import CompilationConfig
 
 MODEL = "Qwen/Qwen2-1.5B-Instruct"
 
@@ -31,17 +31,13 @@ def temporary_environ(env_vars):
 
 @pytest.fixture(scope="module")
 def full_cudagraph_llm():
-
     with temporary_environ({
             "VLLM_USE_V1": "1",
             "VLLM_FLASH_ATTN_VERSION": "3"
     }):
         return LLM(model=MODEL,
                    gpu_memory_utilization=0.2,
-                   compilation_config=CompilationConfig(
-                       level=CompilationLevel.FULL_GRAPH,
-                       use_cudagraph=True,
-                   ))
+                   compilation_config=CompilationConfig(full_cuda_graph=True))
 
 
 @pytest.fixture(scope="module")
@@ -52,26 +48,18 @@ def piecewise_llm():
     }):
         return LLM(model=MODEL,
                    gpu_memory_utilization=0.5,
-                   compilation_config=CompilationConfig(
-                       level=CompilationLevel.PIECEWISE,
-                       use_cudagraph=True,
-                   ))
+                   compilation_config=CompilationConfig())
 
 
 def generate_text(llm: LLM, batch_size: int, max_tokens: int):
-    prompts = ["Hello, my name is"] * batch_size
+    prompts = ["I pledge allegiance to"] * batch_size
     sampling_params = SamplingParams(temperature=0.0, max_tokens=max_tokens)
 
     return llm.generate(prompts, sampling_params)
 
 
-@pytest.mark.parametrize(("batch_size", "max_tokens"), [(1, 10), (7, 10),
-                                                        (16, 10), (25, 10),
-                                                        (32, 10), (45, 10),
-                                                        (64, 10), (25, 5),
-                                                        (25, 20)])
-def test_full_cudagraph(batch_size, max_tokens, full_cudagraph_llm,
-                        piecewise_llm):
+@pytest.mark.parametrize("batch_size", [1, 7, 16, 25, 32, 45, 64])
+def test_full_cudagraph(batch_size, full_cudagraph_llm, piecewise_llm):
     """
     Load full cudagraph model and piecewise model once, and at the same time to
     reuse them across various test cases.
@@ -79,6 +67,11 @@ def test_full_cudagraph(batch_size, max_tokens, full_cudagraph_llm,
     Test various batch sizes and max_tokens to ensure that the full cudagraph
     compilation works for padded cases too.
     """
+
+    # For batch size > 1, PyTorch is not always deterministic so keep the
+    # output short and use a predictable prompt such as "I pledge allegiance to"
+    # See https://github.com/vllm-project/vllm/issues/5898
+    max_tokens = 5
     piecewise_responses = generate_text(piecewise_llm,
                                         batch_size=batch_size,
                                         max_tokens=max_tokens)
@@ -90,3 +83,13 @@ def test_full_cudagraph(batch_size, max_tokens, full_cudagraph_llm,
     for i in range(len(piecewise_responses)):
         assert piecewise_responses[i].outputs[
             0].text == full_cudagraph_responses[i].outputs[0].text
+
+
+def test_full_cudagraph_with_invalid_backend():
+    with temporary_environ({
+            "VLLM_USE_V1": "1",
+            "VLLM_FLASH_ATTN_VERSION":
+            "2"  #FA2 not supported with full_cuda_graph
+    }), pytest.raises(RuntimeError):
+        LLM(model=MODEL,
+            compilation_config=CompilationConfig(full_cuda_graph=True))

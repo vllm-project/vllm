@@ -12,6 +12,7 @@ import torch.nn as nn
 
 from vllm.attention import AttentionType, get_attn_backend
 from vllm.attention.layer import Attention
+from vllm.attention.utils.fa_utils import get_flash_attn_version
 from vllm.config import (CompilationLevel, VllmConfig,
                          get_layers_from_vllm_config)
 from vllm.distributed.kv_transfer import (get_kv_transfer_group,
@@ -46,7 +47,6 @@ from vllm.v1.spec_decode.utils import is_spec_decode_supported
 from vllm.v1.utils import bind_kv_cache
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
-from vllm.vllm_flash_attn.fa_utils import get_flash_attn_version
 
 from .utils import (gather_mm_placeholders, sanity_check_mm_encoder_outputs,
                     scatter_mm_placeholders)
@@ -139,14 +139,15 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             raise NotImplementedError(
                 "Non-Attention backend is not supported by V1 GPUModelRunner.")
 
-        if self.vllm_config.compilation_config.level == CompilationLevel.FULL_GRAPH:  # noqa: E501
+        if self.vllm_config.compilation_config.full_cuda_graph:
             attn_backend_name = self.attn_backend.__name__
             flash_attn_version = get_flash_attn_version()
-            assert attn_backend_name == "FlashAttentionBackend" and \
-                flash_attn_version == 3, \
-                (f"CompilationLevel.FULL_GRAPH (-O4) is only supported with "
-                 f"FA3. Current attention backend is {attn_backend_name} and "
-                 f"FlashAttention version is {flash_attn_version}.")
+            if attn_backend_name != "FlashAttentionBackend" or \
+                flash_attn_version != 3:
+                raise ValueError(
+                    f"full_cuda_graph is only supported with "
+                    f"FA3. Current attention backend is {attn_backend_name}, "
+                    f"FlashAttention version is {flash_attn_version}.")
 
         self.attn_metadata_builder = self.attn_backend.get_builder_cls()(
             weakref.proxy(self))
@@ -1710,9 +1711,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         if not self.use_cuda_graph:
             logger.warning(
                 "Skipping CUDA graph capture. Please add "
-                "-O %s for piecewise CUDA graphs (attention is skipped) or "
-                "-O %s for full CUDA graphs (attention included).",
-                CompilationLevel.PIECEWISE, CompilationLevel.FULL_GRAPH)
+                "-O %s to use CUDA graphs.", CompilationLevel.PIECEWISE)
             return
 
         start_time = time.perf_counter()
