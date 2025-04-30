@@ -1,14 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
 
+from __future__ import annotations
+
 # yapf: disable
 import argparse
 import dataclasses
 import json
 import re
+import sys
 import threading
 from dataclasses import MISSING, dataclass, fields
 from typing import (Any, Callable, Dict, List, Literal, Optional, Type,
-                    TypeVar, Union, cast, get_args, get_origin)
+                    TypeVar, Union, cast, get_args, get_origin, get_type_hints)
 
 import torch
 from typing_extensions import TypeIs, deprecated
@@ -136,28 +139,34 @@ def is_not_builtin(type_hint: TypeHint) -> bool:
 
 def get_kwargs(cls: ConfigType) -> dict[str, Any]:
     cls_docs = get_attr_docs(cls)
+    resolved = get_type_hints(
+        cls,
+        globalns=sys.modules[cls.__module__].__dict__,
+        include_extras=True,
+    )
     kwargs = {}
     for field in fields(cls):
         # Get the default value of the field
         default = field.default
         if field.default_factory is not MISSING:
             default = field.default_factory()
+        annotation = resolved[field.name]
 
         # Get the help text for the field
         name = field.name
-        help = cls_docs[name]
+        help_str = cls_docs[name]
         # Escape % for argparse
-        help = help.replace("%", "%%")
+        help_str = help_str.replace("%", "%%")
 
         # Initialise the kwargs dictionary for the field
-        kwargs[name] = {"default": default, "help": help}
+        kwargs[name] = {"default": default, "help": help_str}
 
         # Get the set of possible types for the field
         type_hints: set[TypeHint] = set()
-        if get_origin(field.type) is Union:
-            type_hints.update(get_args(field.type))
+        if get_origin(annotation) is Union:
+            type_hints.update(get_args(annotation))
         else:
-            type_hints.add(field.type)
+            type_hints.add(annotation)
 
         # Set other kwargs based on the type hints
         if contains_type(type_hints, bool):
@@ -886,7 +895,7 @@ class EngineArgs:
         target_parallel_config: ParallelConfig,
         enable_chunked_prefill: bool,
         disable_log_stats: bool,
-    ) -> Optional["SpeculativeConfig"]:
+    ) -> Optional[SpeculativeConfig]:
         """Initializes and returns a SpeculativeConfig object based on
         `speculative_config`.
 
@@ -1516,7 +1525,7 @@ def _warn_or_fallback(feature_name: str) -> bool:
 def human_readable_int(value):
     """Parse human-readable integers like '1k', '2M', etc.
     Including decimal values with decimal multipliers.
-    
+
     Examples:
     - '1k' -> 1,000
     - '1K' -> 1,024

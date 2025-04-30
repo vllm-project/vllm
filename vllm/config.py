@@ -1,3 +1,4 @@
+# ruff: noqa: E501
 # SPDX-License-Identifier: Apache-2.0
 
 from __future__ import annotations
@@ -58,9 +59,7 @@ if TYPE_CHECKING:
 
     ConfigType = type[DataclassInstance]
 else:
-    PretrainedConfig = Any
-    QuantizationConfig = None
-    ConfigType = type
+    ConfigType = BaseModelLoader = PretrainedConfig = QuantizationConfig = ExecutorBase = PlacementGroup = Any
 
 logger = init_logger(__name__)
 
