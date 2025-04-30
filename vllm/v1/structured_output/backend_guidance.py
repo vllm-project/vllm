@@ -10,7 +10,7 @@ import torch
 
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
-from vllm.sampling_params import GuidedDecodingParams, SamplingParams
+from vllm.sampling_params import SamplingParams
 from vllm.transformers_utils.tokenizer_group import init_tokenizer_from_configs
 from vllm.utils import LazyLoader
 from vllm.v1.structured_output.backend_types import (StructuredOutputBackend,
@@ -65,19 +65,10 @@ class GuidanceBackend(StructuredOutputBackend):
         self.vllm_config = vllm_config
         self.vocab_size = vllm_config.model_config.get_vocab_size()
 
-        self.disable_any_whitespace = False
-        self.no_additional_properties = False
-        backend_options = GuidedDecodingParams(
-            backend=vllm_config.decoding_config.guided_decoding_backend
-        ).backend_options()
-        for option in backend_options:
-            if option == "disable-any-whitespace":
-                self.disable_any_whitespace = True
-            elif option == "no-additional-properties":
-                self.no_additional_properties = True
-            else:
-                raise ValueError(
-                    f"Unsupported option for the guidance backend: {option}")
+        self.disable_any_whitespace = \
+            vllm_config.decoding_config.disable_any_whitespace
+        self.disable_additional_properties = \
+            vllm_config.decoding_config.disable_additional_properties
 
         tokenizer = tokenizer_group.get_lora_tokenizer(None)
         self.ll_tokenizer = llguidance_hf.from_tokenizer(
@@ -87,7 +78,7 @@ class GuidanceBackend(StructuredOutputBackend):
                         grammar_spec: str) -> StructuredOutputGrammar:
         self.serialized_grammar = serialize_guidance_grammar(
             request_type, grammar_spec, self.disable_any_whitespace,
-            self.no_additional_properties)
+            self.disable_additional_properties)
 
         ll_matcher = llguidance.LLMatcher(
             self.ll_tokenizer,
@@ -171,11 +162,11 @@ def serialize_guidance_grammar(
     request_type: StructuredOutputOptions,
     grammar_spec: Union[str, dict[str, Any]],
     disable_any_whitespace: bool = False,
-    no_additional_properties: bool = False,
+    disable_additional_properties: bool = False,
 ) -> str:
 
     def _process_schema(grammar_spec: Union[str, dict[str, Any]], ) -> str:
-        if no_additional_properties:
+        if disable_additional_properties:
             grammar_spec = process_for_additional_properties(grammar_spec)
         return llguidance.LLMatcher.grammar_from_json_schema(
             grammar_spec,
