@@ -188,6 +188,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             max_num_reqs=self.max_num_reqs,
             max_model_len=self.max_model_len,
             max_num_blocks_per_req=self.max_num_blocks_per_req,
+            max_num_batched_tokens=self.max_num_tokens,
             device=self.device,
             pin_memory=self.pin_memory,
             vocab_size=model_config.get_vocab_size(),
@@ -266,11 +267,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                                          device="cpu",
                                          pin_memory=self.pin_memory)
         self.positions_np = self.positions_cpu.numpy()
-        self.slot_mapping_cpu = torch.zeros(self.max_num_tokens,
-                                            dtype=torch.int32,
-                                            device="cpu",
-                                            pin_memory=self.pin_memory)
-        self.slot_mapping_np = self.slot_mapping_cpu.numpy()
         self.query_start_loc_cpu = torch.zeros(self.max_num_reqs + 1,
                                                dtype=torch.int32,
                                                device="cpu",
@@ -561,7 +557,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         block_offsets = positions_np % self.block_size
         np.add(block_numbers * self.block_size,
                block_offsets,
-               out=self.slot_mapping_np[:total_num_scheduled_tokens])
+               out=self.input_batch.block_table.
+               slot_mapping_np[:total_num_scheduled_tokens])
 
         # Prepare the attention metadata.
         self.query_start_loc_np[0] = 0
