@@ -40,6 +40,10 @@ pre-commit install --hook-type pre-commit --hook-type commit-msg
 # You can manually run pre-commit with
 pre-commit run --all-files
 
+# To manually run something from CI that does not run
+# locally by default, you can run:
+pre-commit run mypy-3.9 --hook-stage manual --all-files
+
 # Unit tests
 pytest tests/
 ```
