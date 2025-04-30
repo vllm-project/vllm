@@ -5,9 +5,7 @@ from ...utils import check_logprobs_close
 
 # Path of the checkpoints
 MODELS = [
-    "/code/granite/granite-4_0-tiny-base-pipecleaner-hf",
-    #"/code/granite/granite-4_0-small-base-pipecleaner-hf",
-    # "/code/granite/granite-4_0-medium-base-pipecleaner-hf",
+    "ibm-research/granite-4.0-tiny-test",
 ]
 
 @pytest.mark.parametrize("model", MODELS)
