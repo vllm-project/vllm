@@ -17,7 +17,8 @@ from vllm.sequence import SampleLogprobs
 from ....conftest import (IMAGE_ASSETS, HfRunner, PromptImageInput, VllmRunner,
                           _ImageAssets)
 from ....quantization.utils import is_quant_method_supported
-from ....utils import large_gpu_test
+from ....utils import (create_new_process_for_each_test, large_gpu_test,
+                       multi_gpu_test)
 from ...utils import check_logprobs_close
 
 _LIMIT_IMAGE_PER_PROMPT = 3
@@ -391,6 +392,37 @@ def test_models_interleaved_images(hf_runner, vllm_runner, image_assets, model,
             num_logprobs=num_logprobs,
             tensor_parallel_size=1,
         )
+
+
+@create_new_process_for_each_test()
+@multi_gpu_test(num_gpus=2)
+@pytest.mark.parametrize("distributed_executor_backend", ["ray", "mp"])
+@pytest.mark.parametrize("model", models)
+@pytest.mark.parametrize("dtype", ["bfloat16"])
+@pytest.mark.parametrize("max_tokens", [64])
+@pytest.mark.parametrize("num_logprobs", [5])
+def test_models_distributed(
+    hf_runner,
+    vllm_runner,
+    image_assets,
+    distributed_executor_backend,
+    model,
+    dtype,
+    max_tokens,
+    num_logprobs,
+) -> None:
+    run_test(
+        hf_runner,
+        vllm_runner,
+        image_assets,
+        model=model,
+        size_factors=[0.25, 0.5, 1.0],
+        dtype=dtype,
+        max_tokens=max_tokens,
+        num_logprobs=num_logprobs,
+        tensor_parallel_size=2,
+        distributed_executor_backend=distributed_executor_backend,
+    )
 
 
 @large_gpu_test(min_gb=48)

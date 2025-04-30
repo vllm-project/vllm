@@ -1,15 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Compare the outputs of HF and vLLM for Whisper models using greedy sampling.
-
-Run `pytest tests/models/encoder_decoder/audio/test_whisper.py`.
-"""
 from typing import Optional
 
 import pytest
 
-from vllm import LLM, SamplingParams
+from vllm import SamplingParams
 from vllm.assets.audio import AudioAsset
 
+from ....conftest import VllmRunner
 from ....utils import create_new_process_for_each_test, multi_gpu_test
 
 PROMPTS = [
@@ -92,6 +89,7 @@ EXPECTED = {
 
 
 def run_test(
+    vllm_runner: type[VllmRunner],
     model: str,
     *,
     tensor_parallel_size: int,
@@ -100,19 +98,21 @@ def run_test(
     prompt_list = PROMPTS * 10
     expected_list = EXPECTED[model] * 10
 
-    llm = LLM(
-        model=model,
-        tensor_parallel_size=tensor_parallel_size,
-        distributed_executor_backend=distributed_executor_backend,
-    )
+    with vllm_runner(
+            model,
+            max_model_len=448,
+            tensor_parallel_size=tensor_parallel_size,
+            distributed_executor_backend=distributed_executor_backend,
+    ) as vllm_model:
+        llm = vllm_model.model
 
-    sampling_params = SamplingParams(
-        temperature=0,
-        top_p=1.0,
-        max_tokens=200,
-    )
+        sampling_params = SamplingParams(
+            temperature=0,
+            top_p=1.0,
+            max_tokens=200,
+        )
 
-    outputs = llm.generate(prompt_list, sampling_params)
+        outputs = llm.generate(prompt_list, sampling_params)
 
     for output, expected in zip(outputs, expected_list):
         print(output.outputs[0].text)
@@ -123,15 +123,27 @@ def run_test(
 @pytest.mark.core_model
 @pytest.mark.parametrize(
     "model", ["openai/whisper-small", "openai/whisper-large-v3-turbo"])
-def test_models(model) -> None:
-    run_test(model, tensor_parallel_size=1)
+def test_models(vllm_runner, model) -> None:
+    run_test(
+        vllm_runner,
+        model,
+        tensor_parallel_size=1,
+    )
 
 
+@create_new_process_for_each_test()
 @multi_gpu_test(num_gpus=2)
 @pytest.mark.core_model
 @pytest.mark.parametrize("model", ["openai/whisper-large-v3-turbo"])
 @pytest.mark.parametrize("distributed_executor_backend", ["ray", "mp"])
-def test_models_distributed(model, distributed_executor_backend) -> None:
-    run_test(model,
-             tensor_parallel_size=2,
-             distributed_executor_backend=distributed_executor_backend)
+def test_models_distributed(
+    vllm_runner,
+    model,
+    distributed_executor_backend,
+) -> None:
+    run_test(
+        vllm_runner,
+        model,
+        tensor_parallel_size=2,
+        distributed_executor_backend=distributed_executor_backend,
+    )

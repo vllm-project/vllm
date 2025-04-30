@@ -11,7 +11,6 @@ import pytest_asyncio
 from scipy.spatial.distance import cosine
 
 import vllm
-import vllm.config
 from vllm.utils import STR_BACKEND_ENV_VAR
 
 from ....utils import RemoteOpenAIServer
@@ -88,16 +87,16 @@ def run_llm_encode(
     llm: vllm.LLM,
     queries: list[str],
     instruction: str,
-) -> list[float]:
-    outputs = llm.encode([instruction + q for q in queries], )
+) -> list[list[float]]:
+    outputs = llm.embed([instruction + q for q in queries])
     return [output.outputs.embedding for output in outputs]
 
 
 async def run_client_embeddings(
-    client: vllm.LLM,
+    client: openai.AsyncOpenAI,
     queries: list[str],
     instruction: str,
-) -> list[float]:
+) -> list[list[float]]:
     outputs = await client.embeddings.create(
         model=MODEL_NAME,
         input=[instruction + q for q in queries],
@@ -132,7 +131,7 @@ def get_test_data():
     return queries, q_instruction, documents, d_instruction
 
 
-def validate_embed_output(q_rep: list[float], d_rep: list[float]):
+def validate_embed_output(q_rep: list[list[float]], d_rep: list[list[float]]):
     cosine_sim_q0_d0 = 1 - cosine(q_rep[0], d_rep[0])
     assert math.isclose(cosine_sim_q0_d0, 0.609, abs_tol=0.001)
 

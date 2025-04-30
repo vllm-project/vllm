@@ -289,23 +289,25 @@ def test_multistep_correctness(
 @multi_gpu_test(num_gpus=2)
 @pytest.mark.parametrize("model", [SSM_MODELS[0], HYBRID_MODELS[0]])
 @pytest.mark.parametrize("max_tokens", [64])
-def test_hybrid_distributed_produces_identical_generation(
+@pytest.mark.parametrize("num_logprobs", [5])
+def test_distributed_correctness(
     vllm_runner,
     example_prompts,
     model: str,
     max_tokens: int,
+    num_logprobs: int,
 ) -> None:
-    with vllm_runner(model, tensor_parallel_size=2,
-                     max_num_seqs=2) as vllm_model:
-        vllm_outputs_tp_2 = vllm_model.generate_greedy(example_prompts,
-                                                       max_tokens)
-
     with vllm_runner(model, tensor_parallel_size=1,
                      max_num_seqs=2) as vllm_model:
-        vllm_outputs_tp_1 = vllm_model.generate_greedy(example_prompts,
-                                                       max_tokens)
+        vllm_outputs_tp_1 = vllm_model.generate_greedy_logprobs(
+            example_prompts, max_tokens, num_logprobs)
 
-    check_outputs_equal(
+    with vllm_runner(model, tensor_parallel_size=2,
+                     max_num_seqs=2) as vllm_model:
+        vllm_outputs_tp_2 = vllm_model.generate_greedy_logprobs(
+            example_prompts, max_tokens, num_logprobs)
+
+    check_logprobs_close(
         outputs_0_lst=vllm_outputs_tp_1,
         outputs_1_lst=vllm_outputs_tp_2,
         name_0="vllm_tp_1",
