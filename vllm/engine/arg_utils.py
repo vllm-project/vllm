@@ -517,7 +517,6 @@ class EngineArgs:
         guided_decoding_group.add_argument(
             "--reasoning-parser",
             # This choices is a special case because it's not static
-            # By default, no option is selected
             choices=list(ReasoningParserManager.reasoning_parsers),
             **guided_decoding_kwargs["reasoning_backend"])
 
