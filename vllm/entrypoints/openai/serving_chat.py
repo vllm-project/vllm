@@ -58,7 +58,6 @@ class OpenAIServingChat(OpenAIServing):
         chat_template: Optional[str],
         chat_template_content_format: ChatTemplateContentFormatOption,
         return_tokens_as_token_ids: bool = False,
-        enable_reasoning: bool = False,
         reasoning_parser: Optional[str] = None,
         enable_auto_tools: bool = False,
         tool_parser: Optional[str] = None,
@@ -82,18 +81,18 @@ class OpenAIServingChat(OpenAIServing):
                 " the parallel_tool_calls client option is preset for "
                 "compatibility reasons, it will be ignored.")
 
-        self.enable_reasoning: bool = enable_reasoning
         self.reasoning_parser: Optional[Callable[[AnyTokenizer],
                                                  ReasoningParser]] = None
-        if self.enable_reasoning:
+        if reasoning_parser:
             try:
                 self.reasoning_parser = (
                     ReasoningParserManager.get_reasoning_parser(
                         reasoning_parser))
+                self.enable_reasoning = True
             except Exception as e:
-                raise TypeError("Error: --enable-reasoning requires "
-                                f"reasoning_parser:'{reasoning_parser}' "
-                                "which has not been registered") from e
+                raise TypeError(
+                    f"Error: reasoning_parser:'{reasoning_parser}' "
+                    "which has not been registered") from e
         self.tool_parser: Optional[Callable[[AnyTokenizer], ToolParser]] = None
         if self.enable_auto_tools:
             try:

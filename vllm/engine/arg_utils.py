@@ -49,6 +49,18 @@ TypeHint = Union[type[Any], object]
 TypeHintT = Union[type[T], object]
 
 
+class DeprecatedAction(argparse.Action):
+
+    def __init__(self, option_strings, dest, message=None, **kwargs):
+        super().__init__(option_strings, dest, nargs=0, help=argparse.SUPPRESS)
+        self.message = message or \
+            f"The parameter --{option_strings[0][2:]}"" is deprecated."
+
+    def __call__(self, parser, namespace, values, option_string=None):
+        logger.warning(self.message)
+        setattr(namespace, self.dest, None)
+
+
 def optional_type(
         return_type: Callable[[str], T]) -> Callable[[str], Optional[T]]:
 
@@ -364,8 +376,11 @@ class EngineArgs:
     calculate_kv_scales: bool = CacheConfig.calculate_kv_scales
 
     additional_config: Optional[Dict[str, Any]] = None
+
+    # Deprecated, use reasoning_parser instead
     enable_reasoning: Optional[bool] = None
     reasoning_parser: Optional[str] = DecodingConfig.reasoning_backend
+
     use_tqdm_on_load: bool = LoadConfig.use_tqdm_on_load
 
     def __post_init__(self):
@@ -502,8 +517,11 @@ class EngineArgs:
         guided_decoding_group.add_argument(
             "--reasoning-parser",
             # This choices is a special case because it's not static
+            # By default, no option is selected
             choices=list(ReasoningParserManager.reasoning_parsers),
-            **guided_decoding_kwargs["reasoning_backend"])
+            **(guided_decoding_kwargs["reasoning_backend"] | {
+                "default": ""
+            }))
 
         # Parallel arguments
         parallel_kwargs = get_kwargs(ParallelConfig)
@@ -799,9 +817,13 @@ class EngineArgs:
 
         parser.add_argument(
             "--enable-reasoning",
-            action="store_true",
+            action=DeprecatedAction,
             default=False,
-            help="Whether to enable reasoning_content for the model. "
+            help=
+            "[DEPRECATED] Use --reasoning-parser instead. " \
+            "When --reasoning-parser is specified, " \
+            "it is automatically set to True. "
+            "Whether to enable reasoning_content for the model. "
             "If enabled, the model will be able to generate reasoning content."
         )
 
@@ -1091,7 +1113,6 @@ class EngineArgs:
             disable_additional_properties=\
                 self.guided_decoding_disable_additional_properties,
             reasoning_backend=self.reasoning_parser
-            if self.enable_reasoning else None,
         )
 
         show_hidden_metrics = False

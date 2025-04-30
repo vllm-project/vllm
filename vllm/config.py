@@ -3225,8 +3225,7 @@ class DecodingConfig:
 
     reasoning_backend: Optional[str] = None
     """Select the reasoning parser depending on the model that you're using.
-    This is used to parse the reasoning content into OpenAI API format.
-    Required for `--enable-reasoning`."""
+    This is used to parse the reasoning content into OpenAI API format."""
 
     def compute_hash(self) -> str:
         """
