@@ -95,6 +95,11 @@ def device_id_to_physical_device_id(device_id: int) -> int:
         return device_id
 
 
+def on_mi250_mi300() -> bool:
+    GPU_ARCH = torch.cuda.get_device_properties("cuda").gcnArchName
+    return any(arch in GPU_ARCH for arch in ["gfx90a", "gfx942"])
+
+
 @cache
 def use_rocm_custom_paged_attention(qtype: torch.dtype, head_size: int,
                                     block_size: int, gqa_ratio: int,
