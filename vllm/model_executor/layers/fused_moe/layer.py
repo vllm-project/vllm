@@ -1048,39 +1048,15 @@ class FusedMoE(torch.nn.Module):
             return torch.ops.vllm.moe_forward(hidden_states, router_logits,
                                               self.layer_name)
 
+
     def forward_impl_chunked(self, full_hidden_states: torch.Tensor,
                              full_router_logits: torch.Tensor):
 
-        ctx = get_forward_context()
-
-        max_tokens_across_dp = ctx.dp_metadata.max_tokens_across_dp
-        #cu_tokens_across_dp_cpu = ctx.dp_metadata.cu_tokens_across_dp_cpu
-        num_tokens_across_dp = ctx.dp_metadata.num_tokens_across_dp
-
-        #In this function we define two ranges:
-        # 1. chunk_range - The current iteration of the loops's range over the
-        #    DP world tokens
-        # 2. my_tokens_in_chunk - The tokens within chunk_range that this DP
-        #    rank owns.
-
-        moe_dp_chunk_size_per_rank = MOE_DP_CHUNK_SIZE // self.dp_size
-
-        num_tokens_remaining_across_dp = num_tokens_across_dp
-        chunk_start = 0
-        chunk_end = min(moe_dp_chunk_size_per_rank,
-                        full_hidden_states.shape[0])
         full_final_hidden_states = torch.empty_like(full_hidden_states)
 
-        assert full_hidden_states.shape[0] == full_router_logits.shape[0]
-
-        for iter in range(0, max_tokens_across_dp, moe_dp_chunk_size_per_rank):
+        def process_chunk(chunk_start, chunk_end, skip_result_store = False):
             hidden_states = full_hidden_states[chunk_start:chunk_end, :]
             router_logits = full_router_logits[chunk_start:chunk_end, :]
-
-            cu_tokens_across_dp_this_iter = torch.cumsum(
-                num_tokens_remaining_across_dp.clamp(
-                    max=moe_dp_chunk_size_per_rank),
-                dim=0)
 
             # TODO: still may be needed for non-pplx, put into dispatcher class.
             if False:
@@ -1127,30 +1103,22 @@ class FusedMoE(torch.nn.Module):
                 final_hidden_states = tensor_model_parallel_all_reduce(
                     final_hidden_states)
 
-            full_final_hidden_states[chunk_start:chunk_end, :].copy_(
-                final_hidden_states)
+            if not skip_result_store:
+                full_final_hidden_states[chunk_start:chunk_end, :].copy_(
+                    final_hidden_states)
 
-            # Update bounds
-            num_tokens_remaining_across_dp = torch.clamp(
-                num_tokens_remaining_across_dp - moe_dp_chunk_size_per_rank,
-                min=0)
+        max_tokens_across_dp = get_forward_context().dp_metadata.max_tokens_across_dp
+        moe_dp_chunk_size_per_rank = MOE_DP_CHUNK_SIZE // self.dp_size
 
-            # HACK FIX
-            if num_tokens_remaining_across_dp.sum() == 0:
-                break
+        num_tokens = full_hidden_states.size(0)
+        for chunk_start_ in range(0, max_tokens_across_dp, moe_dp_chunk_size_per_rank):
+            chunk_start = chunk_start_ 
+            chunk_end =  min(chunk_start + moe_dp_chunk_size_per_rank, max_tokens_across_dp)
+            # clamp start and end
+            chunk_start = min(chunk_start, num_tokens - 1)
+            chunk_end = min(chunk_end, num_tokens)
 
-            def update_chunk_bound(x: int):
-                return min(x + moe_dp_chunk_size_per_rank,
-                           full_hidden_states.shape[0])
-
-            #chunk_start = update_chunk_bound(chunk_start)
-            #chunk_end = update_chunk_bound(chunk_end)
-            if chunk_end == full_hidden_states.shape[0]:
-                # simply redo computation
-                pass
-            else:
-                chunk_start = update_chunk_bound(chunk_start)
-                chunk_end = update_chunk_bound(chunk_end)
+            process_chunk(chunk_start, chunk_end, skip_result_store = chunk_start_ >= num_tokens)
 
         return full_final_hidden_states
 
