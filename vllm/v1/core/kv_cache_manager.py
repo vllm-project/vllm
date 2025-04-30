@@ -147,7 +147,7 @@ class KVCacheManager:
     def allocate_slots(
         self,
         request: Request,
-        num_tokens: int,
+        num_new_tokens: int,
         new_computed_blocks: Optional[list[KVCacheBlock]] = None,
         num_lookahead_tokens: int = 0,
     ) -> Optional[list[KVCacheBlock]]:
@@ -155,7 +155,7 @@ class KVCacheManager:
 
         Args:
             request: The request to allocate slots.
-            num_tokens: The number of tokens to allocate, including external
+            num_new_tokens: The number of tokens to allocate, including external
                 tokens. Note that this does not include tokens that have
                 already been computed locally (i.e. new_computed_blocks).
             new_computed_blocks: A list of new computed blocks just hitting the
@@ -179,8 +179,8 @@ class KVCacheManager:
         Returns:
             A list of new allocated blocks.
         """
-        if num_tokens == 0:
-            raise ValueError("num_tokens must be greater than 0")
+        if num_new_tokens == 0:
+            raise ValueError("num_new_tokens must be greater than 0")
 
         new_computed_blocks = new_computed_blocks or []
 
@@ -197,7 +197,7 @@ class KVCacheManager:
         # the new prefix caching hits
         num_computed_tokens = (request.num_computed_tokens +
                                len(new_computed_blocks) * self.block_size)
-        num_tokens_need_slot = (num_computed_tokens + num_tokens +
+        num_tokens_need_slot = (num_computed_tokens + num_new_tokens +
                                 num_lookahead_tokens)
         num_blocks_to_allocate = (
             self.single_type_manager.get_num_blocks_to_allocate(
@@ -229,10 +229,13 @@ class KVCacheManager:
         if not self.enable_caching:
             return new_blocks
 
+        # Speculated tokens might be rejected in the future, so we does
+        # not cache any speculated tokens. We only cache blocks with
+        # generated (accepted) tokens.
         self.single_type_manager.cache_blocks(
             request, new_computed_blocks,
-            self.req_to_block_hashes[request.request_id], num_computed_tokens,
-            num_tokens)
+            self.req_to_block_hashes[request.request_id],
+            num_computed_tokens + num_new_tokens - len(request.spec_token_ids))
 
         return new_blocks
 

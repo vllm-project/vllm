@@ -76,7 +76,8 @@ class SingleTypeKVCacheManager(ABC):
 
         Args:
             request_id: The request ID.
-            num_tokens: The total number of tokens that need a slot.
+            num_tokens: The total number of tokens that need a slot (including 
+                tokens that are already allocated).
             new_computed_blocks: The new computed blocks just hitting the
                 prefix caching.
 
@@ -106,19 +107,28 @@ class SingleTypeKVCacheManager(ABC):
         Args:
             request_id: The request ID.
             new_computed_blocks: The new computed blocks just hitting the
-                prefix caching.
+                prefix cache.
         """
-        self.req_to_blocks[request_id].extend(new_computed_blocks)
+        if request_id not in self.num_cached_block:
+            # A new request.
+            req_to_blocks = self.req_to_blocks[request_id]
+            assert len(req_to_blocks) == 0
+            req_to_blocks.extend(new_computed_blocks)
+            self.num_cached_block[request_id] = len(new_computed_blocks)
+        else:
+            # A running request. Should not have new computed blocks.
+            assert len(new_computed_blocks) == 0
 
     def allocate_new_blocks(self, request_id: str,
                             num_tokens: int) -> list[KVCacheBlock]:
         """
-        Allocate new blocks for the request that needs `num_tokens` new token 
-        slots.
+        Allocate new blocks for the request to give it at least `num_tokens` 
+        token slots.
 
         Args:
             request_id: The request ID.
-            num_tokens: The number of tokens to allocate.
+            num_tokens: The total number of tokens that need a slot (including 
+                tokens that are already allocated).
 
         Returns:
             The new allocated blocks.
@@ -145,30 +155,32 @@ class SingleTypeKVCacheManager(ABC):
     def cache_blocks(self, request: Request,
                      new_computed_blocks: list[KVCacheBlock],
                      block_hashes: list[BlockHashType],
-                     num_computed_tokens: int, num_tokens: int) -> None:
-        # TODO: add docstring
-        # Use `new_computed_blocks` for a new request, and
-        # `num_cached_block` for a running request.
-        num_cached_blocks = self.num_cached_block.get(request.request_id,
-                                                      len(new_computed_blocks))
-        # Speculated tokens might be rejected in the future, so we does
-        # not cache any speculated tokens. We only cache blocks with
-        # generated (accepted) tokens.
-        num_full_blocks_after_append = (num_computed_tokens + num_tokens - len(
-            request.spec_token_ids)) // self.block_size
+                     num_tokens: int) -> None:
+        """
+        Cache the blocks for the request.
+
+        Args:
+            request: The request.
+            new_computed_blocks: The new computed blocks just hitting the
+                prefix cache.
+            block_hashes: The block hashes of the request.
+            num_tokens: The total number of tokens that need to be cached 
+                (including tokens that are already cached).
+        """
+        num_cached_blocks = self.num_cached_block[request.request_id]
+        num_full_blocks = num_tokens // self.block_size
 
         self.block_pool.cache_full_blocks(
             request=request,
             blocks=self.req_to_blocks[request.request_id],
             block_hashes=block_hashes,
             num_cached_blocks=num_cached_blocks,
-            num_full_blocks=num_full_blocks_after_append,
+            num_full_blocks=num_full_blocks,
             block_size=self.block_size,
             hash_fn=self.caching_hash_fn,
         )
 
-        self.num_cached_block[
-            request.request_id] = num_full_blocks_after_append
+        self.num_cached_block[request.request_id] = num_full_blocks
 
     def free(self, request_id: str) -> None:
         # Default to [] in case a request is freed (aborted) before alloc.
