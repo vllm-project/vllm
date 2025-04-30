@@ -18,6 +18,7 @@ class SpecializedManager(ABC):
         self,
         kv_cache_spec: KVCacheSpec,
         block_pool: BlockPool,
+        use_eagle: bool,
     ) -> None:
         """
         Initializes the SpecializedManager.
@@ -30,12 +31,17 @@ class SpecializedManager(ABC):
         self.kv_cache_spec = kv_cache_spec
         self.block_pool = block_pool
 
+        # Needs special handling for find_longest_cache_hit if eagle is enabled
+        self.use_eagle = use_eagle
+
     @abstractmethod
     def find_longest_cache_hit(
             self, block_hashes: list[BlockHashType]) -> list[KVCacheBlock]:
         """
         Get the longest cache hit prefix of the blocks. If no cache hit is 
-        found, return an empty list.
+        found, return an empty list. if eagle is enabled, drop the last matched 
+        block to force recompute the last block to get the required hidden 
+        states for eagle drafting head.
 
         Args:
             block_hashes: The block hashes of the request.
@@ -79,6 +85,8 @@ class FullAttentionManager(SpecializedManager):
                 computed_blocks.append(cached_block)
             else:
                 break
+        if self.use_eagle and len(computed_blocks) > 0:
+            computed_blocks.pop()
         return computed_blocks
 
     def remove_skipped_blocks(self, blocks: list[KVCacheBlock],
@@ -89,14 +97,20 @@ class FullAttentionManager(SpecializedManager):
 
 class SlidingWindowManager(SpecializedManager):
 
-    def __init__(self, kv_cache_spec: SlidingWindowSpec,
-                 block_pool: BlockPool):
-        super().__init__(kv_cache_spec, block_pool)
+    def __init__(self, kv_cache_spec: SlidingWindowSpec, block_pool: BlockPool,
+                 use_eagle: bool):
+        super().__init__(kv_cache_spec, block_pool, use_eagle)
         self.sliding_window = kv_cache_spec.sliding_window
         # The number of contiguous blocks needed for prefix cache hit.
         # -1 since the input token itself is also included in the window
         self.sliding_window_contiguous_blocks = cdiv(
             (kv_cache_spec.sliding_window - 1), self.block_size)
+        if self.use_eagle:
+            # Need to drop the last matched block if eagle is enabled. For
+            # sliding window layer, we achieve this by increasing the number of
+            # contiguous blocks needed for prefix cache hit by one and dropping
+            # the last matched block.
+            self.sliding_window_contiguous_blocks += 1
         self._null_block = block_pool.null_block
 
     def find_longest_cache_hit(
@@ -109,6 +123,7 @@ class SlidingWindowManager(SpecializedManager):
         computed_blocks = [self._null_block] * len(block_hashes)
         num_contiguous_blocks = 0
 
+        match_found = False
         # Search from right to left and early stop when a match is found.
         for i in range(len(block_hashes) - 1, -1, -1):
             if cached_block := self.block_pool.get_cached_block(
@@ -121,12 +136,16 @@ class SlidingWindowManager(SpecializedManager):
                     # E.g., [NULL, NULL, 8, 3, NULL, 9] -> [NULL, NULL, 8, 3]
                     # when sliding_window_contiguous_blocks=2.
                     del computed_blocks[i + num_contiguous_blocks:]
-                    return computed_blocks
+                    match_found = True
+                    break
             else:
                 num_contiguous_blocks = 0
-        # The first `num_contiguous_blocks` is a cache hit even if
-        # `num_contiguous_blocks < sliding_window_contiguous_blocks`.
-        del computed_blocks[num_contiguous_blocks:]
+        if not match_found:
+            # The first `num_contiguous_blocks` is a cache hit even if
+            # `num_contiguous_blocks < sliding_window_contiguous_blocks`.
+            del computed_blocks[num_contiguous_blocks:]
+        if self.use_eagle and len(computed_blocks) > 0:
+            computed_blocks.pop()
         return computed_blocks
 
     def remove_skipped_blocks(self, blocks: list[KVCacheBlock],
@@ -155,7 +174,7 @@ spec_manager_map: dict[type[KVCacheSpec], type[SpecializedManager]] = {
 
 
 def get_specialized_manager(kv_cache_spec: KVCacheSpec,
-                            block_pool: BlockPool) -> SpecializedManager:
+                            **kwargs) -> SpecializedManager:
     manager_class = spec_manager_map[type(kv_cache_spec)]
-    manager = manager_class(kv_cache_spec, block_pool)
+    manager = manager_class(kv_cache_spec, **kwargs)
     return manager

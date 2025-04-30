@@ -19,7 +19,9 @@ def test_sliding_window_possible_cached_prefix():
     )
 
     block_pool = BlockPool(num_gpu_blocks=100, enable_caching=True)
-    manager = SlidingWindowManager(sliding_window_spec, block_pool)
+    manager = SlidingWindowManager(sliding_window_spec,
+                                   block_pool,
+                                   use_eagle=False)
 
     def run_one_case(block_is_cached, expect_length):
         block_hash_list = [
@@ -79,7 +81,9 @@ def test_sliding_window_remove_skipped_blocks():
 
     block_pool = BlockPool(num_gpu_blocks=2000, enable_caching=True)
 
-    manager = SlidingWindowManager(sliding_window_spec, block_pool)
+    manager = SlidingWindowManager(sliding_window_spec,
+                                   block_pool,
+                                   use_eagle=False)
 
     null_block_id = block_pool.null_block.block_id
 
