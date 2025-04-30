@@ -88,6 +88,9 @@ def benchmark_sync(
         trust_remote_code=args.trust_remote_code,
         guided_decoding_backend=args.structured_output_backend,
     )
+    structured_output_request_indices = set(
+        random.sample(range(len(input_requests)),
+                      int(len(input_requests) * args.structured_output_ratio)))
     if args.profile:
         llm.start_profile()
 
@@ -97,8 +100,9 @@ def benchmark_sync(
         sampling_params=[
             SamplingParams(
                 ignore_eos=args.ignore_eos,
-                guided_decoding=_to_vllm_guided_decoding_params(args, req),
-            ) for req in input_requests
+                guided_decoding=_to_vllm_guided_decoding_params(args, req)
+                if i in structured_output_request_indices else None,
+            ) for i, req in enumerate(input_requests)
         ],
         use_tqdm=not args.disable_tqdm)
     end = perf_counter()
@@ -126,6 +130,9 @@ async def benchmark_async(
             trust_remote_code=args.trust_remote_code,
             guided_decoding_backend=args.structured_output_backend,
         ))
+    structured_output_request_indices = set(
+        random.sample(range(len(input_requests)),
+                      int(len(input_requests) * args.structured_output_ratio)))
     if args.profile:
         await engine.start_profile()
 
@@ -134,7 +141,7 @@ async def benchmark_async(
     outputs = []
     streams = []
     if vllm.envs.VLLM_USE_V1:
-        for req in input_requests:
+        for i, req in enumerate(input_requests):
             streams.append(
                 engine.generate(
                     request_id=str(uuid.uuid4()),
@@ -142,17 +149,18 @@ async def benchmark_async(
                     sampling_params=SamplingParams(
                         ignore_eos=args.ignore_eos,
                         guided_decoding=_to_vllm_guided_decoding_params(
-                            args, req),
+                            args, req)
+                        if i in structured_output_request_indices else None,
                     )))
     else:
-        for req in input_requests:
+        for i, req in enumerate(input_requests):
             streams.append(await engine.add_request(
                 request_id=str(uuid.uuid4()),
                 prompt=input_requests[0].prompt,
                 params=SamplingParams(
                     ignore_eos=args.ignore_eos,
-                    guided_decoding=_to_vllm_guided_decoding_params(args, req),
-                )))
+                    guided_decoding=_to_vllm_guided_decoding_params(args, req)
+                    if i in structured_output_request_indices else None)))
     for stream in streams:
         async for output in stream:
             if output.finished:
