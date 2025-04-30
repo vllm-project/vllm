@@ -206,7 +206,6 @@ def get_kwargs(cls: ConfigType) -> dict[str, Any]:
             kwargs[name]["type"] = float
         elif contains_type(type_hints, dict) and (contains_type(type_hints, str)
               or any(is_not_builtin(th) for th in type_hints)):
-            print("option union dict and str type", type_hints)
             kwargs[name]["type"] = optional_union_dict_and_str
         elif contains_type(type_hints, dict):
             # Dict arguments will always be optional
