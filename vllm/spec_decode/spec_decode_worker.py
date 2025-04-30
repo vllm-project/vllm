@@ -29,8 +29,8 @@ from vllm.spec_decode.batch_expansion import BatchExpansionTop1Scorer
 
 if current_platform.is_cuda_alike():
     from vllm.spec_decode.draft_model_runner import TP1DraftModelRunner
-if current_platform.is_hpu():
-    from vllm.spec_decode.hpu_draft_model_runner import HPUTP1DraftModelRunner
+else:
+    from vllm.spec_decode.draft_model_runner import GeneralTP1DraftModelRunner
 
 from vllm.spec_decode.interfaces import (SpeculativeProposals,
                                          SpeculativeScorer, SpeculativeScores)
@@ -190,7 +190,7 @@ class SpecDecodeWorker(LoRANotSupportedWorkerBase):
                             "model_runner_cls"] = TP1DraftModelRunner
                     elif current_platform.is_hpu():
                         draft_worker_kwargs[
-                            "model_runner_cls"] = HPUTP1DraftModelRunner
+                            "model_runner_cls"] = GeneralTP1DraftModelRunner
                 else:
                     if draft_model_config.hf_config.model_type == "eagle":
                         raise NotImplementedError(

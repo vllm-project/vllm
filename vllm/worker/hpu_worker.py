@@ -63,9 +63,6 @@ class HPUWorker(LocalOrDistributedWorkerBase):
         self.rank = rank
         self.distributed_init_method = distributed_init_method
         self.is_driver_worker = is_driver_worker
-        if self.parallel_config and self.is_driver_worker:
-            assert self.rank % self.parallel_config.tensor_parallel_size == 0, \
-            "The driver worker must have rank 0."
 
         if self.model_config.trust_remote_code:
             # note: lazy import to avoid importing torch before initializing
@@ -77,8 +74,8 @@ class HPUWorker(LocalOrDistributedWorkerBase):
         speculative_config = self.speculative_config
         model_config = self.model_config
         speculative_args = {} if speculative_config is None \
-            or (speculative_config.draft_model_config.model ==
-                model_config.model) \
+            or (speculative_config.draft_model_config.hf_config.model_type \
+                == model_config.hf_config.model_type) \
             or (speculative_config.draft_model_config.hf_config.model_type
                 not in ["medusa", "mlp_speculator", "eagle"]) \
                     else {"return_hidden_states": True}
@@ -90,7 +87,6 @@ class HPUWorker(LocalOrDistributedWorkerBase):
             ModelRunnerClass = HPUPoolingModelRunner
         elif is_encoder_decoder_model:
             ModelRunnerClass = HPUEncoderDecoderModelRunner
-            is_causal = False
         self.model_runner: HPUModelRunnerBase = ModelRunnerClass(
             vllm_config=vllm_config,
             kv_cache_dtype=self.cache_config.cache_dtype,
