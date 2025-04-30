@@ -412,13 +412,12 @@ def test_generation_config_loading():
 
     assert model_config.get_diff_sampling_param() == override_generation_config
 
-@pytest.mark.parametrize(("model_id", "pt_load_map_location"), [
-    ("facebook/opt-125m", None),
-    ("facebook/opt-125m", "cuda"),
-    ("facebook/opt-125m", "{'': 'cuda'}"),
-    ("jerryzh/opt-125m-int4wo", "cuda")
+@pytest.mark.parametrize("pt_load_map_location", [
+    None,
+    "cuda",
+    '{"": "cuda"}',
 ])
-def test_load_config_pt_load_map_location(model_id, pt_load_map_location):
+def test_load_config_pt_load_map_location(pt_load_map_location):
     load_config = LoadConfig(pt_load_map_location=pt_load_map_location)
     config = VllmConfig(load_config=load_config)
 

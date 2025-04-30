@@ -75,6 +75,12 @@ def optional_int(val: str) -> Optional[int]:
 def optional_float(val: str) -> Optional[float]:
     return optional_arg(val, float)
 
+def optional_union_dict_and_str(val: str) -> Optional[Union[str, dict[str, str]]]:
+    if not re.match("^{.*}$", val):
+        return str(val)
+    else:
+        return optional_type(json.loads)(val)
+
 
 def nullable_kvs(val: str) -> Optional[dict[str, int]]:
     """NOTE: This function is deprecated, args should be passed as JSON
@@ -198,6 +204,10 @@ def get_kwargs(cls: ConfigType) -> dict[str, Any]:
                 kwargs[name]["type"] = human_readable_int
         elif contains_type(type_hints, float):
             kwargs[name]["type"] = float
+        elif contains_type(type_hints, dict) and (contains_type(type_hints, str)
+              or any(is_not_builtin(th) for th in type_hints)):
+            print("option union dict and str type", type_hints)
+            kwargs[name]["type"] = optional_union_dict_and_str
         elif contains_type(type_hints, dict):
             # Dict arguments will always be optional
             kwargs[name]["type"] = optional_type(json.loads)
@@ -897,6 +907,7 @@ class EngineArgs:
 
         if self.quantization == "bitsandbytes":
             self.load_format = "bitsandbytes"
+
         return LoadConfig(
             load_format=self.load_format,
             download_dir=self.download_dir,
