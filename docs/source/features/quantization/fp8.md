@@ -44,6 +44,12 @@ To produce performant FP8 quantized models with vLLM, you'll need to install the
 pip install llmcompressor
 ```
 
+Additionally, install `vllm` and `lm-evaluation-harness` for evaluation:
+
+```console
+pip install vllm lm-eval==0.4.4
+```
+
 ## Quantization Process
 
 The quantization process involves three main steps:
@@ -93,12 +99,6 @@ tokenizer.save_pretrained(SAVE_DIR)
 ```
 
 ### 3. Evaluating Accuracy
-
-Install `vllm` and `lm-evaluation-harness`:
-
-```console
-pip install vllm lm-eval==0.4.4
-```
 
 Load and run the model in `vllm`:
 
