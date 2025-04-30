@@ -26,6 +26,8 @@ You can monitor the number of preemption requests through Prometheus metrics exp
 
 In vLLM V1, the default preemption mode is `RECOMPUTE` rather than `SWAP`, as recomputation has lower overhead in the V1 architecture.
 
+(chunked-prefill)=
+
 ## Chunked Prefill
 
 Chunked prefill allows vLLM to process large prefills in smaller chunks and batch them together with decode requests. This feature helps improve both throughput and latency by better balancing compute-bound (prefill) and memory-bound (decode) operations.
@@ -34,6 +36,11 @@ In vLLM V1, **chunked prefill is always enabled by default**. This is different 
 
 With chunked prefill enabled, the scheduling policy prioritizes decode requests. It batches all pending decode requests before scheduling any prefill operations. When there are available tokens in the `max_num_batched_tokens` budget, it schedules pending prefills. If a pending prefill request cannot fit into `max_num_batched_tokens`, it automatically chunks it.
 
+This policy has two benefits:
+
+- It improves ITL and generation decode because decode requests are prioritized.
+- It helps achieve better GPU utilization by locating compute-bound (prefill) and memory-bound (decode) requests to the same batch.
+
 ### Performance Tuning with Chunked Prefill
 
 You can tune the performance by adjusting `max_num_batched_tokens`:
@@ -41,6 +48,7 @@ You can tune the performance by adjusting `max_num_batched_tokens`:
 - Smaller values (e.g., 2048) achieve better inter-token latency (ITL) because there are fewer prefills slowing down decodes.
 - Higher values achieve better time to first token (TTFT) as you can process more prefill tokens in a batch.
 - For optimal throughput, we recommend setting `max_num_batched_tokens > 8096` especially for smaller models on large GPUs.
+- If `max_num_batched_tokens` is the same as `max_model_len`, that's almost the equivalent to the V0 default scheduling policy (except that it still prioritizes decodes).
 
 ```python
 from vllm import LLM
@@ -48,6 +56,8 @@ from vllm import LLM
 # Set max_num_batched_tokens to tune performance
 llm = LLM(model="meta-llama/Llama-3.1-8B-Instruct", max_num_batched_tokens=16384)
 ```
+
+See related papers for more details (<https://arxiv.org/pdf/2401.08671> or <https://arxiv.org/pdf/2308.16369>).
 
 ## Parallelism Strategies
 
