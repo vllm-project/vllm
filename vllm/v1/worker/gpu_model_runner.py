@@ -1125,6 +1125,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 positions=positions,
                 intermediate_tensors=intermediate_tensors,
                 inputs_embeds=inputs_embeds,
+                **model_kwargs,
             )
 
         if self.use_aux_hidden_state_outputs:
@@ -1563,7 +1564,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 hidden_states = outputs
 
         logit_indices = np.cumsum(num_scheduled_tokens) - 1
-        return hidden_states[logit_indices]
+        return hidden_states, hidden_states[logit_indices], num_reqs
 
     @torch.inference_mode()
     def _dummy_sampler_run(

@@ -240,17 +240,19 @@ class PoolerHead(nn.Module):
     def forward(self, pooled_data: Union[list[torch.Tensor], torch.Tensor],
                 pooling_metadata: PoolingMetadata):
 
-        dimensions_list = [
-            pooling_param.dimensions
-            for _, pooling_param in pooling_metadata.seq_groups
-        ]
-        if any(d is not None for d in dimensions_list):
-            # change the output dimension
-            assert len(pooled_data) == len(dimensions_list)
-            pooled_data = [
-                vecs if d is None else vecs[..., :d]
-                for vecs, d in zip(pooled_data, dimensions_list)
+        if isinstance(pooling_metadata, V0PoolingMetadata):
+            # TODO: enable matryoshka for V1
+            dimensions_list = [
+                pooling_param.dimensions
+                for _, pooling_param in pooling_metadata.seq_groups
             ]
+            if any(d is not None for d in dimensions_list):
+                # change the output dimension
+                assert len(pooled_data) == len(dimensions_list)
+                pooled_data = [
+                    vecs if d is None else vecs[..., :d]
+                    for vecs, d in zip(pooled_data, dimensions_list)
+                ]
 
         if self.normalize:
             if isinstance(pooled_data, list):
