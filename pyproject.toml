@@ -54,8 +54,8 @@ ignore_patterns = [
 ]
 
 [tool.ruff]
-# Allow lines to be as long as 80.
-line-length = 80
+# Allow lines to be as long as 119
+line-length = 119
 exclude = [
     # External file, leaving license intact
     "examples/other/fp8/quantizer/quantize.py",
@@ -115,6 +115,8 @@ ignore = [
     "UP032",
     # Can remove once 3.10+ is the minimum Python version
     "UP007",
+    # Line too long
+    "E501",
 ]
 
 [tool.mypy]
