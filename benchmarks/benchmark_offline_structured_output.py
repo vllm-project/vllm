@@ -55,9 +55,17 @@ def _to_request_output(
 def _to_vllm_guided_decoding_params(
         args: argparse.Namespace,
         request: SampleRequest) -> GuidedDecodingParams:
+    if args.dataset in ["grammar", "regex", "json", "choice"]:
+        field_name = args.dataset
+    elif "grammar" in args.dataset:
+        field_name = "grammar"
+    elif "json" in args.dataset:
+        field_name = "json"
+    else:
+        raise ValueError(f"Unsupported dataset: {args.dataset}")
     kwargs = {
         "backend": args.structured_output_backend,
-        args.dataset: request.schema
+        field_name: request.schema
     }
     return GuidedDecodingParams(**kwargs)
 
