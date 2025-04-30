@@ -364,7 +364,7 @@ class EngineArgs:
     calculate_kv_scales: bool = CacheConfig.calculate_kv_scales
 
     additional_config: Optional[Dict[str, Any]] = None
-
+    enable_reasoning: Optional[bool] = None  # DEPRECATED
     reasoning_parser: str = DecodingConfig.reasoning_backend
 
     use_tqdm_on_load: bool = LoadConfig.use_tqdm_on_load
@@ -808,7 +808,7 @@ class EngineArgs:
             "Use --reasoning-parser to specify " \
             "the reasoning parser backend instead. "
             "This flag (--enable-reasoning) will be " \
-            "removed in a future version. "
+            "removed in v0.10.0. "
             "When --reasoning-parser is specified, " \
             "reasoning mode is automatically enabled."
         )
