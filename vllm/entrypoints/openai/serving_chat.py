@@ -450,7 +450,8 @@ class OpenAIServingChat(OpenAIServing):
             # because the should_stream_with_reasoning_parsing check
             # already ensures that the reasoning_parser is not None.
             # but the pre-commit hook requires it.
-            if should_stream_with_reasoning_parsing:
+            if should_stream_with_reasoning_parsing and \
+                self.reasoning_parser:
                 reasoning_parser = self.reasoning_parser(tokenizer)
         except RuntimeError as e:
             logger.exception("Error in reasoning parser creation.")
@@ -937,7 +938,8 @@ class OpenAIServingChat(OpenAIServing):
             # call. The same is not true for named function calls
             auto_tools_called = False
 
-            if should_stream_with_reasoning_parsing:
+            if should_stream_with_reasoning_parsing and \
+                self.reasoning_parser:
                 try:
                     reasoning_parser = self.reasoning_parser(tokenizer)
                 except RuntimeError as e:
