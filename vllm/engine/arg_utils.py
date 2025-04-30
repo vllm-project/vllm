@@ -7,6 +7,7 @@ import json
 import re
 import threading
 from dataclasses import MISSING, dataclass, fields
+from itertools import permutations
 from typing import (Any, Callable, Dict, List, Literal, Optional, Type,
                     TypeVar, Union, cast, get_args, get_origin)
 
@@ -688,6 +689,14 @@ class EngineArgs:
         observability_group.add_argument(
             "--otlp-traces-endpoint",
             **observability_kwargs["otlp_traces_endpoint"])
+        # TODO: generalise this special case
+        choices = observability_kwargs["collect_detailed_traces"]["choices"]
+        metavar = f"{{{','.join(choices)}}}"
+        observability_kwargs["collect_detailed_traces"]["metavar"] = metavar
+        observability_kwargs["collect_detailed_traces"]["choices"] += [
+            ",".join(p)
+            for p in permutations(get_args(DetailedTraceModules), r=2)
+        ]
         observability_group.add_argument(
             "--collect-detailed-traces",
             **observability_kwargs["collect_detailed_traces"])

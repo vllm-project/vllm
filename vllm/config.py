@@ -3283,11 +3283,7 @@ class DecodingConfig:
             self.disable_additional_properties = True
 
 
-DetailedTraceModulesDeprecated = Literal["model,worker", "model,all",
-                                         "worker,model", "worker,all",
-                                         "all,model", "all,worker"]
-DetailedTraceModules = Literal[Literal["model", "worker", "all"],
-                               DetailedTraceModulesDeprecated]
+DetailedTraceModules = Literal["model", "worker", "all"]
 
 
 @config
@@ -3368,10 +3364,6 @@ class ObservabilityConfig:
                 "'otlp_traces_endpoint'. Ensure OpenTelemetry packages are "
                 f"installed. Original error:\n{otel_import_error_traceback}")
 
-    @deprecated(
-        "Passing comma-separated values to '--collect-detailed-traces' is "
-        "deprecated. This will be removed in v0.10.0. Please use something "
-        "like '--collect-detailed-traces model worker' instead. ")
     def _parse_collect_detailed_traces(self):
         assert isinstance(self.collect_detailed_traces, list)
         self.collect_detailed_traces = cast(
