@@ -77,9 +77,9 @@ getting_started/v1_user_guide
 :caption: Models
 :maxdepth: 1
 
+models/supported_models
 models/generative_models
 models/pooling_models
-models/supported_models
 models/extensions/index
 :::
 
@@ -132,6 +132,7 @@ serving/integrations/index
 :caption: Deployment
 :maxdepth: 1
 
+deployment/security
 deployment/docker
 deployment/k8s
 deployment/nginx
@@ -180,6 +181,7 @@ design/v1/metrics
 :maxdepth: 2
 
 contributing/overview
+contributing/deprecation_policy
 contributing/profiling/profiling_index
 contributing/dockerfile/dockerfile
 contributing/model/index

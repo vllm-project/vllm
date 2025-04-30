@@ -110,10 +110,14 @@ class CompilerManager:
         compiled_graph = self.load(graph, example_inputs, graph_index,
                                    runtime_shape)
         if compiled_graph is not None:
-            if graph_index == 0:
-                # adds some info logging for the first graph
-                logger.info("Directly load the compiled graph for shape %s "
-                            "from the cache", str(runtime_shape))  # noqa
+            if graph_index == num_graphs - 1:
+                # after loading the last graph for this shape, record the time.
+                # there can be multiple graphs due to piecewise compilation.
+                now = time.time()
+                elapsed = now - compilation_start_time
+                logger.info(
+                    "Directly load the compiled graph(s) for shape %s "
+                    "from the cache, took %.3f s", str(runtime_shape), elapsed)
             return compiled_graph
 
         # no compiler cached the graph, or the cache is disabled,
@@ -335,7 +339,7 @@ class VllmBackend:
 
     def configure_post_pass(self):
         config = self.compilation_config
-        self.post_grad_pass_manager.configure(config.pass_config)
+        self.post_grad_pass_manager.configure(self.vllm_config)
 
         # Post-grad custom passes are run using the post_grad_custom_post_pass
         # hook. If a pass for that hook exists, add it to the pass manager.
@@ -343,8 +347,12 @@ class VllmBackend:
         PASS_KEY = "post_grad_custom_post_pass"
         if PASS_KEY in inductor_config:
             # Config should automatically wrap all inductor passes
-            assert isinstance(inductor_config[PASS_KEY], InductorPass)
-            self.post_grad_pass_manager.add(inductor_config[PASS_KEY])
+            if isinstance(inductor_config[PASS_KEY], PostGradPassManager):
+                assert (inductor_config[PASS_KEY].uuid() ==
+                        self.post_grad_pass_manager.uuid())
+            else:
+                assert isinstance(inductor_config[PASS_KEY], InductorPass)
+                self.post_grad_pass_manager.add(inductor_config[PASS_KEY])
         inductor_config[PASS_KEY] = self.post_grad_pass_manager
 
     def __call__(self, graph: fx.GraphModule, example_inputs) -> Callable:
@@ -378,6 +386,10 @@ class VllmBackend:
             hash_content = []
             for filepath in forward_code_files:
                 hash_content.append(filepath)
+                if filepath == "<string>":
+                    # This means the function was dynamically generated, with
+                    # e.g. exec(). We can't actually check these.
+                    continue
                 with open(filepath) as f:
                     hash_content.append(f.read())
             import hashlib
@@ -400,8 +412,13 @@ class VllmBackend:
             )
             self.compilation_config.cache_dir = cache_dir
 
-        cache_dir = self.compilation_config.cache_dir
+        if compilation_counter.num_graphs_seen > 0:
+            cache_dir = self.compilation_config.cache_dir + \
+                f'-{compilation_counter.num_graphs_seen}'
+        else:
+            cache_dir = self.compilation_config.cache_dir
         os.makedirs(cache_dir, exist_ok=True)
+        self.compilation_config.cache_dir = cache_dir
         rank = vllm_config.parallel_config.rank
         dp_rank = vllm_config.parallel_config.data_parallel_rank
         local_cache_dir = os.path.join(cache_dir, f"rank_{rank}_{dp_rank}")

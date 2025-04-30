@@ -21,9 +21,6 @@ from .interface import DeviceCapability, Platform, PlatformEnum, _Backend
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig, VllmConfig
-else:
-    ModelConfig = None
-    VllmConfig = None
 
 logger = init_logger(__name__)
 
@@ -101,7 +98,7 @@ class CudaPlatformBase(Platform):
         return True
 
     @classmethod
-    def is_full_nvlink(cls, device_ids: List[int]) -> bool:
+    def is_fully_connected(cls, device_ids: List[int]) -> bool:
         raise NotImplementedError
 
     @classmethod
@@ -109,7 +106,7 @@ class CudaPlatformBase(Platform):
         pass
 
     @classmethod
-    def check_and_update_config(cls, vllm_config: VllmConfig) -> None:
+    def check_and_update_config(cls, vllm_config: "VllmConfig") -> None:
         parallel_config = vllm_config.parallel_config
         scheduler_config = vllm_config.scheduler_config
         compilation_config = vllm_config.compilation_config
@@ -213,6 +210,9 @@ class CudaPlatformBase(Platform):
                         return ("vllm.attention.backends."
                                 "flashmla.FlashMLABackend")
         if use_v1:
+            if selected_backend == _Backend.FLASHINFER:
+                logger.info_once("Using FlashInfer backend on V1 engine.")
+                return "vllm.v1.attention.backends.flashinfer.FlashInferBackend"
             if selected_backend == _Backend.TRITON_ATTN_VLLM_V1:
                 logger.info_once("Using Triton backend on V1 engine.")
                 return ("vllm.v1.attention.backends."
@@ -305,7 +305,11 @@ class CudaPlatformBase(Platform):
         return cls.has_device_capability(89)
 
     @classmethod
-    def supports_v1(cls, model_config: ModelConfig) -> bool:
+    def supports_v1(cls, model_config: "ModelConfig") -> bool:
+        return True
+
+    @classmethod
+    def use_custom_allreduce(cls) -> bool:
         return True
 
 
@@ -362,7 +366,7 @@ class NvmlCudaPlatform(CudaPlatformBase):
 
     @classmethod
     @with_nvml_context
-    def is_full_nvlink(cls, physical_device_ids: List[int]) -> bool:
+    def is_fully_connected(cls, physical_device_ids: List[int]) -> bool:
         """
         query if the set of gpus are fully connected by nvlink (1 hop)
         """
@@ -427,7 +431,7 @@ class NonNvmlCudaPlatform(CudaPlatformBase):
         return device_props.total_memory
 
     @classmethod
-    def is_full_nvlink(cls, physical_device_ids: List[int]) -> bool:
+    def is_fully_connected(cls, physical_device_ids: List[int]) -> bool:
         logger.exception(
             "NVLink detection not possible, as context support was"
             " not found. Assuming no NVLink available.")

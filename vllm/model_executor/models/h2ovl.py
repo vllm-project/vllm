@@ -19,8 +19,8 @@ from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import MultiModalKwargs
 from vllm.multimodal.parse import (ImageEmbeddingItems, ImageProcessorItems,
                                    MultiModalDataItems)
-from vllm.multimodal.processing import (PromptReplacement, PromptUpdate,
-                                        PromptUpdateDetails)
+from vllm.multimodal.processing import (MultiModalHashes, PromptReplacement,
+                                        PromptUpdate, PromptUpdateDetails)
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 
 from .intern_vit import InternVisionModel
@@ -257,7 +257,7 @@ class H2OVLProcessor(BaseInternVLProcessor):
         repl_features = IMG_CONTEXT * feature_size
         repl_full = IMG_START + repl_features + IMG_END
 
-        return PromptUpdateDetails(full=repl_full, features=repl_features)
+        return PromptUpdateDetails.select_text(repl_full, IMG_CONTEXT)
 
     def resolve_min_max_num(
         self,
@@ -412,19 +412,6 @@ class H2OVLProcessingInfo(BaseInternVLProcessingInfo):
             **kwargs,
         )
 
-    def get_mm_max_tokens_per_item(
-        self,
-        seq_len: int,
-        mm_counts: Mapping[str, int],
-    ) -> Mapping[str, int]:
-        max_tokens_one_image = self.get_max_image_tokens(use_msac=None)
-        if mm_counts.get("image", 0) <= 1:
-            max_tokens_per_image = max_tokens_one_image
-        else:
-            max_tokens_per_image = self.get_max_image_tokens(use_msac=False)
-
-        return {"image": max_tokens_per_image}
-
     def get_num_image_tokens(
         self,
         *,
@@ -439,16 +426,6 @@ class H2OVLProcessingInfo(BaseInternVLProcessingInfo):
         return processor.get_num_image_tokens(
             image_width=image_width,
             image_height=image_height,
-            use_msac=use_msac,
-        )
-
-    def get_max_image_tokens(self, use_msac: Optional[bool] = None) -> int:
-        target_width, target_height = self.get_image_size_with_most_features()
-
-        return self.get_num_image_tokens(
-            image_width=target_width,
-            image_height=target_height,
-            processor=None,
             use_msac=use_msac,
         )
 
@@ -511,24 +488,26 @@ class H2OVLMultiModalProcessor(InternVLMultiModalProcessor[H2OVLProcessingInfo]
         prompt: Union[str, list[int]],
         mm_data_items: MultiModalDataItems,
         hf_processor_mm_kwargs: Mapping[str, object],
-    ) -> tuple[list[int], MultiModalKwargs, bool]:
+        *,
+        return_mm_hashes: bool,
+    ) -> tuple[list[int], MultiModalKwargs, Optional[MultiModalHashes], bool]:
         # The processor logic is different for len(images) <= 1 vs > 1
         # Since the processing cache assumes that the processor output is
         # invariant of how many images are passed per prompt, we only
         # perform caching for the most common case
         if mm_data_items.get_count("image", strict=False) > 1:
-            # This code path corresponds to the cache being disabled
-            return self._apply_hf_processor_main(
+            return self._apply_hf_processor(
                 prompt=prompt,
-                mm_items=mm_data_items,
+                mm_data_items=mm_data_items,
                 hf_processor_mm_kwargs=hf_processor_mm_kwargs,
-                enable_hf_prompt_update=True,
+                return_mm_hashes=return_mm_hashes,
             )
 
         return super()._cached_apply_hf_processor(
             prompt=prompt,
             mm_data_items=mm_data_items,
             hf_processor_mm_kwargs=hf_processor_mm_kwargs,
+            return_mm_hashes=return_mm_hashes,
         )
 
 

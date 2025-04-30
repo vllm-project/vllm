@@ -25,11 +25,12 @@ from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                ReplicatedLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
+from vllm.model_executor.layers.mamba.mamba2_metadata import (
+    Mamba2Metadata, prepare_mamba2_metadata)
 from vllm.model_executor.layers.mamba.mamba_mixer2 import (
     MambaMixer2, extra_groups_for_head_shards)
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
-from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     DEFAULT_VOCAB_PADDING_SIZE, ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
@@ -39,7 +40,7 @@ from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
 
 from .interfaces import HasInnerState, IsHybrid, SupportsV0Only
-from .utils import maybe_prefix
+from .utils import AutoWeightsLoader, WeightsMapper, maybe_prefix
 
 
 class Zamba2LoRA(nn.Module):
@@ -495,7 +496,6 @@ class Zamba2MambaDecoderLayer(nn.Module):
             head_dim=intermediate_size // config.n_mamba_heads,
             rms_norm_eps=config.rms_norm_eps,
             activation="silu",
-            chunk_size=config.chunk_size,
             quant_config=quant_config,
         )
 
@@ -507,7 +507,7 @@ class Zamba2MambaDecoderLayer(nn.Module):
         self,
         hidden_states: torch.Tensor,
         mamba_cache_params: MambaCacheParams,
-        sequence_idx: Optional[torch.Tensor] = None,
+        mamba2_metadata: Mamba2Metadata,
         transformer_hidden_states: Optional[torch.Tensor] = None,
         positions: Optional[torch.Tensor] = None,
         original_hidden_states: Optional[torch.Tensor] = None,
@@ -547,7 +547,7 @@ class Zamba2MambaDecoderLayer(nn.Module):
         hidden_states = self.mamba(
             hidden_states,
             mamba_cache_params=mamba_cache_params,
-            sequence_idx=sequence_idx,
+            mamba2_metadata=mamba2_metadata,
         )
 
         # residual connection after mamba
@@ -594,8 +594,8 @@ class Zamba2HybridLayer(nn.Module):
         hidden_states: torch.Tensor,
         original_hidden_states: torch.Tensor,
         positions: torch.Tensor,
-        mamba_cache_params: Optional[MambaCacheParams] = None,
-        sequence_idx: Optional[torch.Tensor] = None,
+        mamba_cache_params: MambaCacheParams,
+        mamba2_metadata: Mamba2Metadata,
     ) -> torch.Tensor:
         """Forward pass through the hybrid layer.
         
@@ -634,7 +634,7 @@ class Zamba2HybridLayer(nn.Module):
             hidden_states,
             transformer_hidden_states=transformer_hidden_states,
             mamba_cache_params=mamba_cache_params,
-            sequence_idx=sequence_idx,
+            mamba2_metadata=mamba2_metadata,
         )
 
         return layer_outputs
@@ -747,20 +747,13 @@ class Zamba2Model(nn.Module):
             inputs_embeds = self.get_input_embeddings(input_ids)
         hidden_states = inputs_embeds
 
-        # pass a sequence index tensor, that is required for
-        # proper continuous batching computation including
-        # chunked prefill
-        seq_idx = None
         attn_metadata = get_forward_context().attn_metadata
-        if attn_metadata.num_prefills > 0:
-            seq_idx = torch.zeros_like(input_ids, dtype=torch.int32)
-            for i, (srt, end) in enumerate(
-                    zip(
-                        attn_metadata.query_start_loc,
-                        attn_metadata.query_start_loc[1:],
-                    )):
-                seq_idx[srt:end] = i
-            seq_idx.unsqueeze_(0)
+
+        mamba2_metadata = prepare_mamba2_metadata(
+            chunk_size=self.config.chunk_size,
+            input_ids=input_ids,
+            attn_metadata=attn_metadata,
+        )
 
         # Process through layers
         original_hidden_states = torch.clone(hidden_states)
@@ -770,12 +763,43 @@ class Zamba2Model(nn.Module):
                 original_hidden_states=original_hidden_states,
                 positions=positions,
                 mamba_cache_params=mamba_cache_params.at_layer_idx(layer_idx),
-                sequence_idx=seq_idx,
+                mamba2_metadata=mamba2_metadata,
             )
             hidden_states = layer_outputs
 
         hidden_states = self.final_layernorm(hidden_states)
         return hidden_states
+
+    def load_weights(self, weights: Iterable[Tuple[str,
+                                                   torch.Tensor]]) -> Set[str]:
+        stacked_params_mapping = [
+            # (param_name, shard_name, shard_id)
+            ("qkv_proj", "q_proj", "q"),
+            ("qkv_proj", "k_proj", "k"),
+            ("qkv_proj", "v_proj", "v"),
+        ]
+
+        params_dict = dict(self.named_parameters())
+        loaded_params: Set[str] = set()
+        for chkpt_weight_name, loaded_weight in weights:
+            for param_name, weight_name, shard_id in stacked_params_mapping:
+                if weight_name not in chkpt_weight_name:
+                    continue
+                chkpt_weight_name = chkpt_weight_name.replace(
+                    weight_name, param_name)
+                param = params_dict[chkpt_weight_name]
+                weight_loader = param.weight_loader
+                weight_loader(param, loaded_weight, shard_id)
+                break
+            else:
+                if chkpt_weight_name not in params_dict:
+                    continue
+                param = params_dict[chkpt_weight_name]
+                weight_loader = getattr(param, "weight_loader",
+                                        default_weight_loader)
+                weight_loader(param, loaded_weight)
+            loaded_params.add(chkpt_weight_name)
+        return loaded_params
 
 
 class Zamba2ForCausalLM(nn.Module, HasInnerState, IsHybrid, SupportsV0Only):
@@ -787,6 +811,12 @@ class Zamba2ForCausalLM(nn.Module, HasInnerState, IsHybrid, SupportsV0Only):
     - Support for model parallelism and quantization
     - Sampling capabilities for text generation
     """
+    # To ensure correct weight loading and mapping.
+    hf_to_vllm_mapper = WeightsMapper(orig_to_new_substr={
+        "A_log": "A",
+        "0.weight": "A.weight",
+        "1.weight": "B.weight",
+    })
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         """Initialize the Zamba2 model for causal language modeling.
@@ -839,7 +869,6 @@ class Zamba2ForCausalLM(nn.Module, HasInnerState, IsHybrid, SupportsV0Only):
         # Initialize logits processing and sampling
         self.logits_processor = LogitsProcessor(self.unpadded_vocab_size,
                                                 config.vocab_size)
-        self.sampler = get_sampler()
 
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         """Convert input token IDs to embeddings.
@@ -973,59 +1002,7 @@ class Zamba2ForCausalLM(nn.Module, HasInnerState, IsHybrid, SupportsV0Only):
                                        sampling_metadata)
         return logits
 
-    def sample(
-        self,
-        logits: Optional[torch.Tensor],
-        sampling_metadata: SamplingMetadata,
-    ) -> Optional[SamplerOutput]:
-        """Sample next tokens from computed logits.
-        
-        Args:
-            logits: Computed logits for next token prediction
-            sampling_metadata: Metadata for sampling process
-            
-        Returns:
-            Sampled tokens and related sampling information
-        """
-        next_tokens = self.sampler(logits, sampling_metadata)
-        return next_tokens
-
     def load_weights(self, weights: Iterable[Tuple[str,
                                                    torch.Tensor]]) -> Set[str]:
-        stacked_params_mapping = [
-            # (param_name, shard_name, shard_id)
-            ("qkv_proj", "q_proj", "q"),
-            ("qkv_proj", "k_proj", "k"),
-            ("qkv_proj", "v_proj", "v"),
-        ]
-
-        weights_dict = {}
-        for key, loaded_weight in weights:
-            if "A_log" in key:
-                key = key.replace("A_log", "A")
-            elif "adapter_list" in key:
-                key = key.replace("0.weight", "A.weight")
-                key = key.replace("1.weight", "B.weight")
-            weights_dict[key] = loaded_weight
-
-        params_dict = dict(self.named_parameters())
-        loaded_params: Set[str] = set()
-        for chkpt_weight_name, loaded_weight in weights_dict.items():
-            for param_name, weight_name, shard_id in stacked_params_mapping:
-                if weight_name not in chkpt_weight_name:
-                    continue
-                chkpt_weight_name = chkpt_weight_name.replace(
-                    weight_name, param_name)
-                param = params_dict[chkpt_weight_name]
-                weight_loader = param.weight_loader
-                weight_loader(param, loaded_weight, shard_id)
-                break
-            else:
-                if chkpt_weight_name not in params_dict:
-                    continue
-                param = params_dict[chkpt_weight_name]
-                weight_loader = getattr(param, "weight_loader",
-                                        default_weight_loader)
-                weight_loader(param, loaded_weight)
-            loaded_params.add(chkpt_weight_name)
-        return loaded_params
+        loader = AutoWeightsLoader(self)
+        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)

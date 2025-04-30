@@ -92,6 +92,7 @@ class RMSNorm(CustomOp):
         eps: float = 1e-6,
         var_hidden_size: Optional[int] = None,
         has_weight: bool = True,
+        dtype: Optional[torch.dtype] = None,
     ) -> None:
         super().__init__()
 
@@ -100,8 +101,10 @@ class RMSNorm(CustomOp):
         self.variance_size_override = (None if var_hidden_size == hidden_size
                                        else var_hidden_size)
         self.has_weight = has_weight
-
-        self.weight = torch.ones(hidden_size)
+        if dtype is not None:
+            self.weight = torch.ones(hidden_size, dtype=dtype)
+        else:
+            self.weight = torch.ones(hidden_size)
         if self.has_weight:
             self.weight = nn.Parameter(self.weight)
 
@@ -165,7 +168,8 @@ class RMSNorm(CustomOp):
         x: torch.Tensor,
         residual: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
-        from vllm_hpu_extension.ops import HPUFusedRMSNorm
+        from vllm_hpu_extension.kernels import rms_norm
+        HPUFusedRMSNorm = rms_norm()
         if HPUFusedRMSNorm is None:
             return self.forward_native(x, residual)
         if residual is not None:
@@ -237,7 +241,10 @@ class GemmaRMSNorm(CustomOp):
         """PyTorch-native implementation equivalent to forward()."""
         orig_dtype = x.dtype
         if residual is not None:
-            x = x + residual
+            if orig_dtype == torch.float16:
+                x = x + residual.float()
+            else:
+                x = x + residual
             residual = x
 
         x = x.float()

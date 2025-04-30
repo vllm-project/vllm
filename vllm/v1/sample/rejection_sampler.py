@@ -107,7 +107,6 @@ class RejectionSampler(nn.Module):
     @staticmethod
     def parse_output(
         output_token_ids: torch.Tensor,
-        ignored_req_idxs: list[int],
         vocab_size: int,
     ) -> list[list[int]]:
         """Parse the output of the rejection sampler.
@@ -117,9 +116,6 @@ class RejectionSampler(nn.Module):
                 [batch_size, max_spec_len + 1]. The rejected tokens are
                 replaced with `PLACEHOLDER_TOKEN_ID` by the rejection sampler
                 and will be filtered out in this function.
-            ignored_req_idxs: The indices of the requests that should not be
-                sampled. This is usually because the request is still in the
-                prefill phase.
             vocab_size: The size of the vocabulary.
 
         Returns:
@@ -129,11 +125,8 @@ class RejectionSampler(nn.Module):
         # Create mask for valid tokens.
         valid_mask = ((output_token_ids_np != PLACEHOLDER_TOKEN_ID) &
                       (output_token_ids_np < vocab_size))
-
-        ignored_req_idx_set = set(ignored_req_idxs)
         outputs = [
             row[valid_mask[i]].tolist()
-            if i not in ignored_req_idx_set else []
             for i, row in enumerate(output_token_ids_np)
         ]
         return outputs
@@ -233,7 +226,7 @@ def rejection_sample(
         is_greedy,
         max_spec_len,
         vocab_size,
-        IS_NGRAM=draft_probs is None,
+        NO_DRAFT_PROBS=draft_probs is None,
         num_warps=1,
     )
     return output_token_ids
@@ -430,7 +423,7 @@ def sample_recovered_tokens(
         q,
         vocab_size,
         triton.next_power_of_2(vocab_size),
-        IS_NGRAM=draft_probs is None,
+        NO_DRAFT_PROBS=draft_probs is None,
     )
     return recovered_token_ids
 
@@ -497,7 +490,7 @@ def rejection_random_sample_kernel(
     is_greedy_ptr,  # [batch_size]
     max_spec_len,
     vocab_size,
-    IS_NGRAM: tl.constexpr,
+    NO_DRAFT_PROBS: tl.constexpr,
 ):
     req_idx = tl.program_id(0)
     is_greedy = tl.load(is_greedy_ptr + req_idx)
@@ -516,7 +509,7 @@ def rejection_random_sample_kernel(
     for pos in range(num_draft_tokens):
         if not rejected:
             draft_token_id = tl.load(draft_token_ids_ptr + start_idx + pos)
-            if IS_NGRAM:
+            if NO_DRAFT_PROBS:
                 draft_prob = 1
             else:
                 draft_prob = tl.load(draft_probs_ptr +
@@ -582,7 +575,7 @@ def sample_recovered_tokens_kernel(
     q_ptr,  # [batch_size, vocab_size]
     vocab_size,
     PADDED_VOCAB_SIZE: tl.constexpr,
-    IS_NGRAM: tl.constexpr,
+    NO_DRAFT_PROBS: tl.constexpr,
 ):
     req_idx = tl.program_id(0)
     if req_idx == 0:
@@ -598,7 +591,7 @@ def sample_recovered_tokens_kernel(
         return
 
     vocab_offset = tl.arange(0, PADDED_VOCAB_SIZE)
-    if IS_NGRAM:
+    if NO_DRAFT_PROBS:
         draft_token_id = tl.load(draft_token_ids_ptr + start_idx + pos)
         orig_prob = tl.load(target_probs_ptr + (start_idx + pos) * vocab_size +
                             draft_token_id)
@@ -631,7 +624,7 @@ def sample_recovered_tokens_kernel(
     recovered_id = tl.argmax(prob / q, axis=-1)
     tl.store(output_token_ids_ptr + start_idx + pos, recovered_id)
 
-    if IS_NGRAM:
+    if NO_DRAFT_PROBS:
         # Restore the original probability.
         tl.store(
             target_probs_ptr + (start_idx + pos) * vocab_size + draft_token_id,

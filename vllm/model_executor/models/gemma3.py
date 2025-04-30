@@ -34,7 +34,6 @@ from vllm.model_executor.layers.linear import (MergedColumnParallelLinear,
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
-from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import (
@@ -59,16 +58,23 @@ class Gemma3MLP(nn.Module):
         intermediate_size: int,
         hidden_activation: str,
         quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = "",
     ) -> None:
         super().__init__()
         self.gate_up_proj = MergedColumnParallelLinear(
-            hidden_size, [intermediate_size] * 2,
+            hidden_size,
+            [intermediate_size] * 2,
             bias=False,
-            quant_config=quant_config)
-        self.down_proj = RowParallelLinear(intermediate_size,
-                                           hidden_size,
-                                           bias=False,
-                                           quant_config=quant_config)
+            quant_config=quant_config,
+            prefix=f"{prefix}.gate_up_proj",
+        )
+        self.down_proj = RowParallelLinear(
+            intermediate_size,
+            hidden_size,
+            bias=False,
+            quant_config=quant_config,
+            prefix=f"{prefix}.down_proj",
+        )
         if hidden_activation != "gelu_pytorch_tanh":
             raise ValueError(
                 "Gemma3 uses `gelu_pytorch_tanh` as the hidden activation "
@@ -125,12 +131,14 @@ class Gemma3Attention(nn.Module):
             self.total_num_kv_heads,
             bias=config.attention_bias,
             quant_config=quant_config,
+            prefix=f"{prefix}.qkv_proj",
         )
         self.o_proj = RowParallelLinear(
             self.total_num_heads * self.head_dim,
             hidden_size,
             bias=config.attention_bias,
             quant_config=quant_config,
+            prefix=f"{prefix}.o_proj",
         )
 
         self.q_norm = GemmaRMSNorm(self.head_dim, eps=config.rms_norm_eps)
@@ -138,7 +146,9 @@ class Gemma3Attention(nn.Module):
 
         # TODO(woosuk): Add reference to the original HF implementation.
         layer_idx = extract_layer_index(prefix)
-        self.is_sliding = bool((layer_idx + 1) % config.sliding_window_pattern)
+        self.is_sliding = (getattr(
+            config, "interleaved_sliding_window", None) is not None and bool(
+                (layer_idx + 1) % config.sliding_window_pattern))
         # Initialize the rotary embedding.
         if self.is_sliding:
             # Local attention. Override the values in config.json.
@@ -293,6 +303,7 @@ class Gemma3DecoderLayer(nn.Module):
             intermediate_size=config.intermediate_size,
             hidden_activation=config.hidden_activation,
             quant_config=quant_config,
+            prefix=f"{prefix}.mlp",
         )
         self.input_layernorm = GemmaRMSNorm(config.hidden_size,
                                             eps=config.rms_norm_eps)
@@ -344,6 +355,7 @@ class Gemma3Model(nn.Module):
         self.embed_tokens = VocabParallelEmbedding(
             config.vocab_size,
             config.hidden_size,
+            prefix=f"{prefix}.embed_tokens",
         )
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
@@ -482,7 +494,6 @@ class Gemma3ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
                                  prefix=maybe_prefix(prefix, "model"))
         self.logits_processor = LogitsProcessor(
             config.vocab_size, soft_cap=config.final_logit_softcapping)
-        self.sampler = get_sampler()
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors)
 
@@ -509,14 +520,6 @@ class Gemma3ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         logits = self.logits_processor(self.model.embed_tokens, hidden_states,
                                        sampling_metadata)
         return logits
-
-    def sample(
-        self,
-        logits: torch.Tensor,
-        sampling_metadata: SamplingMetadata,
-    ) -> Optional[SamplerOutput]:
-        next_tokens = self.sampler(logits, sampling_metadata)
-        return next_tokens
 
     def load_weights(self, weights: Iterable[Tuple[str,
                                                    torch.Tensor]]) -> Set[str]:

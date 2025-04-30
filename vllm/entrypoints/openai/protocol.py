@@ -2,6 +2,7 @@
 
 # Adapted from
 # https://github.com/lm-sys/FastChat/blob/168ccc29d3f7edc50823016105c024fe2282732a/fastchat/protocol/openai_api_protocol.py
+import json
 import re
 import time
 from argparse import Namespace
@@ -61,7 +62,7 @@ class OpenAIBaseModel(BaseModel):
             field_names = set()
             for field_name, field in cls.model_fields.items():
                 field_names.add(field_name)
-                if alias := getattr(field, 'alias', None):
+                if alias := getattr(field, "alias", None):
                     field_names.add(alias)
             cls.field_names = field_names
 
@@ -70,7 +71,8 @@ class OpenAIBaseModel(BaseModel):
             logger.warning(
                 "The following fields were present in the request "
                 "but ignored: %s",
-                data.keys() - field_names)
+                data.keys() - field_names,
+            )
         return result
 
 
@@ -138,10 +140,28 @@ class JsonSchemaResponseFormat(OpenAIBaseModel):
     strict: Optional[bool] = None
 
 
+class StructuralTag(OpenAIBaseModel):
+    begin: str
+    # schema is the field, but that causes conflicts with pydantic so
+    # instead use structural_tag_schema with an alias
+    structural_tag_schema: Optional[dict[str, Any]] = Field(default=None,
+                                                            alias="schema")
+    end: str
+
+
+class StructuralTagResponseFormat(OpenAIBaseModel):
+    type: Literal["structural_tag"]
+    structures: list[StructuralTag]
+    triggers: list[str]
+
+
 class ResponseFormat(OpenAIBaseModel):
-    # type must be "json_schema", "json_object" or "text"
+    # type must be "json_schema", "json_object", or "text"
     type: Literal["text", "json_object", "json_schema"]
     json_schema: Optional[JsonSchemaResponseFormat] = None
+
+
+AnyResponseFormat = Union[ResponseFormat, StructuralTagResponseFormat]
 
 
 class StreamOptions(OpenAIBaseModel):
@@ -226,7 +246,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
     max_completion_tokens: Optional[int] = None
     n: Optional[int] = 1
     presence_penalty: Optional[float] = 0.0
-    response_format: Optional[ResponseFormat] = None
+    response_format: Optional[AnyResponseFormat] = None
     seed: Optional[int] = Field(None, ge=_LONG_INFO.min, le=_LONG_INFO.max)
     stop: Optional[Union[str, list[str]]] = Field(default_factory=list)
     stream: Optional[bool] = False
@@ -234,8 +254,12 @@ class ChatCompletionRequest(OpenAIBaseModel):
     temperature: Optional[float] = None
     top_p: Optional[float] = None
     tools: Optional[list[ChatCompletionToolsParam]] = None
-    tool_choice: Optional[Union[Literal["none"], Literal["auto"],
-                                ChatCompletionNamedToolChoiceParam]] = "none"
+    tool_choice: Optional[Union[
+        Literal["none"],
+        Literal["auto"],
+        Literal["required"],
+        ChatCompletionNamedToolChoiceParam,
+    ]] = "none"
 
     # NOTE this will be ignored by vLLM -- the model determines the behavior
     parallel_tool_calls: Optional[bool] = False
@@ -335,29 +359,38 @@ class ChatCompletionRequest(OpenAIBaseModel):
         description=(
             "If specified, the output will follow the context free grammar."),
     )
+    structural_tag: Optional[str] = Field(
+        default=None,
+        description=(
+            "If specified, the output will follow the structural tag schema."),
+    )
     guided_decoding_backend: Optional[str] = Field(
         default=None,
         description=(
             "If specified, will override the default guided decoding backend "
             "of the server for this specific request. If set, must be either "
-            "'outlines' / 'lm-format-enforcer'"))
+            "'outlines' / 'lm-format-enforcer'"),
+    )
     guided_whitespace_pattern: Optional[str] = Field(
         default=None,
         description=(
             "If specified, will override the default whitespace pattern "
-            "for guided json decoding."))
+            "for guided json decoding."),
+    )
     priority: int = Field(
         default=0,
         description=(
             "The priority of the request (lower means earlier handling; "
             "default: 0). Any priority other than 0 will raise an error "
-            "if the served model does not use priority scheduling."))
+            "if the served model does not use priority scheduling."),
+    )
     request_id: str = Field(
         default_factory=lambda: f"{random_uuid()}",
         description=(
             "The request_id related to this request. If the caller does "
             "not set it, a random_uuid will be generated. This id is used "
-            "through out the inference process and return in response."))
+            "through out the inference process and return in response."),
+    )
     logits_processors: Optional[LogitsProcessors] = Field(
         default=None,
         description=(
@@ -415,13 +448,15 @@ class ChatCompletionRequest(OpenAIBaseModel):
             ignore_eos=self.ignore_eos,
             temperature=temperature,
             length_penalty=self.length_penalty,
-            include_stop_str_in_output=self.include_stop_str_in_output)
+            include_stop_str_in_output=self.include_stop_str_in_output,
+        )
 
     def to_sampling_params(
-            self,
-            default_max_tokens: int,
-            logits_processor_pattern: Optional[str],
-            default_sampling_params: Optional[dict] = None) -> SamplingParams:
+        self,
+        default_max_tokens: int,
+        logits_processor_pattern: Optional[str],
+        default_sampling_params: Optional[dict] = None,
+    ) -> SamplingParams:
         # TODO(#9845): remove max_tokens when field is removed from OpenAI API
         max_tokens = self.max_completion_tokens or self.max_tokens
 
@@ -465,8 +500,12 @@ class ChatCompletionRequest(OpenAIBaseModel):
                 json_schema = self.response_format.json_schema
                 assert json_schema is not None
                 self.guided_json = json_schema.json_schema
-                if self.guided_decoding_backend is None:
-                    self.guided_decoding_backend = "xgrammar"
+            elif self.response_format.type == "structural_tag":
+                structural_tag = self.response_format
+                assert structural_tag is not None and isinstance(
+                    structural_tag, StructuralTagResponseFormat)
+                s_tag_obj = structural_tag.model_dump(by_alias=True)
+                self.structural_tag = json.dumps(s_tag_obj)
 
         guided_decoding = GuidedDecodingParams.from_optional(
             json=self._get_guided_json_from_tool() or self.guided_json,
@@ -475,7 +514,9 @@ class ChatCompletionRequest(OpenAIBaseModel):
             grammar=self.guided_grammar,
             json_object=guided_json_object,
             backend=self.guided_decoding_backend,
-            whitespace_pattern=self.guided_whitespace_pattern)
+            whitespace_pattern=self.guided_whitespace_pattern,
+            structural_tag=self.structural_tag,
+        )
 
         return SamplingParams.from_optional(
             n=self.n,
@@ -521,6 +562,41 @@ class ChatCompletionRequest(OpenAIBaseModel):
                     f"Tool '{tool_name}' has not been passed in `tools`.")
             tool = tools[tool_name]
             return tool.parameters
+
+        if self.tool_choice == "required":
+            # Pydantic schema generation cannot be used since the JSON schema
+            # has to be constructed for a specific instantiation of a tool list
+            # so that parameters of a function are correctly generated
+            # based on the chosen function name
+            def get_tool_schema(tool: ChatCompletionToolsParam) -> dict:
+                return {
+                    "properties": {
+                        "name": {
+                            "type": "string",
+                            "enum": [tool.function.name]
+                        },
+                        # parameters are always generated as '{}' in the final
+                        # output if they are missing from the request
+                        # (i.e. are None or '{}') so the schema is
+                        # updated to produce an empty object in that case
+                        "parameters": tool.function.parameters
+                        if tool.function.parameters else {
+                            "type": "object",
+                            "properties": {}
+                        }
+                    },
+                    "required": ["name", "parameters"]
+                }
+
+            json_schema = {
+                "type": "array",
+                "minItems": 1,
+                "items": {
+                    "type": "object",
+                    "anyOf": [get_tool_schema(tool) for tool in self.tools]
+                }
+            }
+            return json_schema
 
         return None
 
@@ -572,8 +648,11 @@ class ChatCompletionRequest(OpenAIBaseModel):
                 "You can only use one kind of guided decoding "
                 "('guided_json', 'guided_regex' or 'guided_choice').")
         # you can only either use guided decoding or tools, not both
-        if guide_count > 1 and data.get("tool_choice",
-                                        "none") not in ("none", "auto"):
+        if guide_count > 1 and data.get("tool_choice", "none") not in (
+                "none",
+                "auto",
+                "required",
+        ):
             raise ValueError(
                 "You can only either use guided decoding or tools, not both.")
         return data
@@ -602,12 +681,15 @@ class ChatCompletionRequest(OpenAIBaseModel):
                     "When using `tool_choice`, `tools` must be set.")
 
             # make sure that tool choice is either a named tool
-            # OR that it's set to "auto"
-            if data["tool_choice"] != "auto" and not isinstance(
-                    data["tool_choice"], dict):
-                raise ValueError(
-                    "`tool_choice` must either be a named tool, \"auto\", "
-                    "or \"none\".")
+            # OR that it's set to "auto" or "required"
+            if data["tool_choice"] not in [
+                    "auto", "required"
+            ] and not isinstance(data["tool_choice"], dict):
+                raise NotImplementedError(
+                    f'Invalid value for `tool_choice`: {data["tool_choice"]}! '\
+                    'Only named tools, "none", "auto" or "required" '\
+                    'are supported.'
+                )
 
             # ensure that if "tool_choice" is specified as an object,
             # it matches a valid tool
@@ -691,12 +773,13 @@ class CompletionRequest(OpenAIBaseModel):
             "If true (the default), special tokens (e.g. BOS) will be added to "
             "the prompt."),
     )
-    response_format: Optional[ResponseFormat] = Field(
+    response_format: Optional[AnyResponseFormat] = Field(
         default=None,
-        description=
-        ("Similar to chat completion, this parameter specifies the format of "
-         "output. Only {'type': 'json_object'}, {'type': 'json_schema'} or "
-         "{'type': 'text' } is supported."),
+        description=(
+            "Similar to chat completion, this parameter specifies the format "
+            "of output. Only {'type': 'json_object'}, {'type': 'json_schema'}"
+            ", {'type': 'structural_tag'}, or {'type': 'text' } is supported."
+        ),
     )
     guided_json: Optional[Union[str, dict, BaseModel]] = Field(
         default=None,
@@ -722,18 +805,21 @@ class CompletionRequest(OpenAIBaseModel):
         description=(
             "If specified, will override the default guided decoding backend "
             "of the server for this specific request. If set, must be one of "
-            "'outlines' / 'lm-format-enforcer'"))
+            "'outlines' / 'lm-format-enforcer'"),
+    )
     guided_whitespace_pattern: Optional[str] = Field(
         default=None,
         description=(
             "If specified, will override the default whitespace pattern "
-            "for guided json decoding."))
+            "for guided json decoding."),
+    )
     priority: int = Field(
         default=0,
         description=(
             "The priority of the request (lower means earlier handling; "
             "default: 0). Any priority other than 0 will raise an error "
-            "if the served model does not use priority scheduling."))
+            "if the served model does not use priority scheduling."),
+    )
     logits_processors: Optional[LogitsProcessors] = Field(
         default=None,
         description=(
@@ -745,6 +831,7 @@ class CompletionRequest(OpenAIBaseModel):
             "arguments. For example: {'qualname': "
             "'my_module.MyLogitsProcessor', 'args': [1, 2], 'kwargs': "
             "{'param': 'value'}}."))
+
     return_tokens_as_token_ids: Optional[bool] = Field(
         default=None,
         description=(
@@ -789,13 +876,15 @@ class CompletionRequest(OpenAIBaseModel):
             ignore_eos=self.ignore_eos,
             temperature=temperature,
             length_penalty=self.length_penalty,
-            include_stop_str_in_output=self.include_stop_str_in_output)
+            include_stop_str_in_output=self.include_stop_str_in_output,
+        )
 
     def to_sampling_params(
-            self,
-            default_max_tokens: int,
-            logits_processor_pattern: Optional[str],
-            default_sampling_params: Optional[dict] = None) -> SamplingParams:
+        self,
+        default_max_tokens: int,
+        logits_processor_pattern: Optional[str],
+        default_sampling_params: Optional[dict] = None,
+    ) -> SamplingParams:
         max_tokens = self.max_tokens
 
         if default_sampling_params is None:
@@ -844,7 +933,8 @@ class CompletionRequest(OpenAIBaseModel):
             grammar=self.guided_grammar,
             json_object=guided_json_object,
             backend=self.guided_decoding_backend,
-            whitespace_pattern=self.guided_whitespace_pattern)
+            whitespace_pattern=self.guided_whitespace_pattern,
+        )
 
         return SamplingParams.from_optional(
             n=self.n,
@@ -942,12 +1032,14 @@ class EmbeddingCompletionRequest(OpenAIBaseModel):
         description=(
             "The priority of the request (lower means earlier handling; "
             "default: 0). Any priority other than 0 will raise an error "
-            "if the served model does not use priority scheduling."))
+            "if the served model does not use priority scheduling."),
+    )
 
     # doc: end-embedding-extra-params
 
     def to_pooling_params(self):
-        return PoolingParams(additional_data=self.additional_data)
+        return PoolingParams(dimensions=self.dimensions,
+                             additional_data=self.additional_data)
 
 
 class EmbeddingChatRequest(OpenAIBaseModel):
@@ -995,7 +1087,8 @@ class EmbeddingChatRequest(OpenAIBaseModel):
         description=(
             "The priority of the request (lower means earlier handling; "
             "default: 0). Any priority other than 0 will raise an error "
-            "if the served model does not use priority scheduling."))
+            "if the served model does not use priority scheduling."),
+    )
     # doc: end-chat-embedding-extra-params
 
     @model_validator(mode="before")
@@ -1008,7 +1101,8 @@ class EmbeddingChatRequest(OpenAIBaseModel):
         return data
 
     def to_pooling_params(self):
-        return PoolingParams(additional_data=self.additional_data)
+        return PoolingParams(dimensions=self.dimensions,
+                             additional_data=self.additional_data)
 
 
 EmbeddingRequest = Union[EmbeddingCompletionRequest, EmbeddingChatRequest]
@@ -1034,7 +1128,8 @@ class ScoreRequest(OpenAIBaseModel):
         description=(
             "The priority of the request (lower means earlier handling; "
             "default: 0). Any priority other than 0 will raise an error "
-            "if the served model does not use priority scheduling."))
+            "if the served model does not use priority scheduling."),
+    )
 
     # doc: end-score-extra-params
 
@@ -1059,7 +1154,8 @@ class RerankRequest(OpenAIBaseModel):
         description=(
             "The priority of the request (lower means earlier handling; "
             "default: 0). Any priority other than 0 will raise an error "
-            "if the served model does not use priority scheduling."))
+            "if the served model does not use priority scheduling."),
+    )
 
     # doc: end-rerank-extra-params
 
@@ -1513,14 +1609,6 @@ class TranscriptionRequest(OpenAIBaseModel):
     """
 
     ## TODO (varun) : Support if set to 0, certain thresholds are met !!
-    temperature: float = Field(default=0.0)
-    """The sampling temperature, between 0 and 1.
-
-    Higher values like 0.8 will make the output more random, while lower values
-    like 0.2 will make it more focused / deterministic. If set to 0, the model
-    will use [log probability](https://en.wikipedia.org/wiki/Log_probability)
-    to automatically increase the temperature until certain thresholds are hit.
-    """
 
     timestamp_granularities: list[Literal["word", "segment"]] = Field(
         alias="timestamp_granularities[]", default=[])
@@ -1532,6 +1620,7 @@ class TranscriptionRequest(OpenAIBaseModel):
     timestamps incurs additional latency.
     """
 
+    # doc: begin-transcription-extra-params
     stream: Optional[bool] = False
     """Custom field not present in the original OpenAI definition. When set, 
     it will enable output to be streamed in a similar fashion as the Chat
@@ -1540,10 +1629,51 @@ class TranscriptionRequest(OpenAIBaseModel):
     # Flattened stream option to simplify form data.
     stream_include_usage: Optional[bool] = False
     stream_continuous_usage_stats: Optional[bool] = False
+    # doc: end-transcription-extra-params
+
+    # doc: begin-transcription-sampling-params
+    temperature: float = Field(default=0.0)
+    """The sampling temperature, between 0 and 1.
+
+    Higher values like 0.8 will make the output more random, while lower values
+    like 0.2 will make it more focused / deterministic. If set to 0, the model
+    will use [log probability](https://en.wikipedia.org/wiki/Log_probability)
+    to automatically increase the temperature until certain thresholds are hit.
+    """
+
+    top_p: Optional[float] = None
+    """Enables nucleus (top-p) sampling, where tokens are selected from the 
+    smallest possible set whose cumulative probability exceeds `p`.
+    """
+
+    top_k: Optional[int] = None
+    """Limits sampling to the `k` most probable tokens at each step."""
+
+    min_p: Optional[float] = None
+    """Filters out tokens with a probability lower than `min_p`, ensuring a 
+    minimum likelihood threshold during sampling.
+    """
+
+    seed: Optional[int] = Field(None, ge=_LONG_INFO.min, le=_LONG_INFO.max)
+    """The seed to use for sampling."""
+
+    frequency_penalty: Optional[float] = 0.0
+    """The frequency penalty to use for sampling."""
+
+    repetition_penalty: Optional[float] = None
+    """The repetition penalty to use for sampling."""
+
+    presence_penalty: Optional[float] = 0.0
+    """The presence penalty to use for sampling."""
+    # doc: end-transcription-sampling-params
 
     # Default sampling parameters for transcription requests.
     _DEFAULT_SAMPLING_PARAMS: dict = {
-        "temperature": 0,
+        "repetition_penalty": 1.0,
+        "temperature": 1.0,
+        "top_p": 1.0,
+        "top_k": -1,
+        "min_p": 0.0,
     }
 
     def to_sampling_params(
@@ -1555,13 +1685,35 @@ class TranscriptionRequest(OpenAIBaseModel):
 
         if default_sampling_params is None:
             default_sampling_params = {}
+
         # Default parameters
         if (temperature := self.temperature) is None:
             temperature = default_sampling_params.get(
                 "temperature", self._DEFAULT_SAMPLING_PARAMS["temperature"])
+        if (top_p := self.top_p) is None:
+            top_p = default_sampling_params.get(
+                "top_p", self._DEFAULT_SAMPLING_PARAMS["top_p"])
+        if (top_k := self.top_k) is None:
+            top_k = default_sampling_params.get(
+                "top_k", self._DEFAULT_SAMPLING_PARAMS["top_k"])
+        if (min_p := self.min_p) is None:
+            min_p = default_sampling_params.get(
+                "min_p", self._DEFAULT_SAMPLING_PARAMS["min_p"])
+
+        if (repetition_penalty := self.repetition_penalty) is None:
+            repetition_penalty = default_sampling_params.get(
+                "repetition_penalty",
+                self._DEFAULT_SAMPLING_PARAMS["repetition_penalty"])
 
         return SamplingParams.from_optional(temperature=temperature,
                                             max_tokens=max_tokens,
+                                            seed=self.seed,
+                                            top_p=top_p,
+                                            top_k=top_k,
+                                            min_p=min_p,
+                                            frequency_penalty=self.frequency_penalty,
+                                            repetition_penalty=repetition_penalty,
+                                            presence_penalty=self.presence_penalty,
                                             output_kind=RequestOutputKind.DELTA
                                             if self.stream \
                                             else RequestOutputKind.FINAL_ONLY)

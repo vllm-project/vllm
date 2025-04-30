@@ -1,4 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
+import random
+
 import pytest
 
 from vllm import LLM, envs
@@ -34,3 +36,28 @@ def test_sampler_different(model_name: str):
     sampling_params = SamplingParams(temperature=0.1, min_p=0.8, max_tokens=64)
     output2 = llm.generate(prompts, sampling_params)
     assert output[0].outputs[0].text != output2[0].outputs[0].text
+
+    with pytest.raises(ValueError):
+        # Unsupported `seed` param.
+        sampling_params = SamplingParams(temperature=0.3, seed=42)
+        output2 = llm.generate(prompts, sampling_params)
+
+    # Batch-case with TopK/P
+    for B in [4, 16]:
+        p = prompts * B
+        sampling_params = [
+            SamplingParams(
+                temperature=0.1,
+                min_p=0.8,
+                max_tokens=64,
+                # Vary number of ks
+                top_k=random.randint(4, 12),
+                top_p=random.random()) for _ in range(B)
+        ]
+        # Make sure first two reqs have the same K/P
+        sampling_params[0] = sampling_params[1]
+        output = llm.generate(p, sampling_params)
+        # There are natural numerical instabilities that make it difficult
+        # to have deterministic results over many tokens, tests the first ~20
+        # tokens match.
+        assert output[0].outputs[0].text[:20] == output[1].outputs[0].text[:20]

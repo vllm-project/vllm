@@ -43,7 +43,6 @@ from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.pooler import Pooler, PoolingType
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
-from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import (
@@ -263,7 +262,11 @@ class Qwen2DecoderLayer(nn.Module):
     })
 class Qwen2Model(nn.Module):
 
-    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
+    def __init__(self,
+                 *,
+                 vllm_config: VllmConfig,
+                 prefix: str = "",
+                 decoder_layer_type: type[nn.Module] = Qwen2DecoderLayer):
         super().__init__()
 
         config = vllm_config.model_config.hf_config
@@ -297,12 +300,14 @@ class Qwen2Model(nn.Module):
         else:
             self.embed_tokens = PPMissingLayer()
 
+        # Use the provided decoder layer type or default to Qwen2DecoderLayer
+        decoder_layer_type = decoder_layer_type or Qwen2DecoderLayer
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
-            lambda prefix: Qwen2DecoderLayer(config=config,
-                                             cache_config=cache_config,
-                                             quant_config=quant_config,
-                                             prefix=prefix),
+            lambda prefix: decoder_layer_type(config=config,
+                                              cache_config=cache_config,
+                                              quant_config=quant_config,
+                                              prefix=prefix),
             prefix=f"{prefix}.layers",
         )
 
@@ -444,7 +449,6 @@ class Qwen2ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
             self.lm_head = PPMissingLayer()
 
         self.logits_processor = LogitsProcessor(config.vocab_size)
-        self.sampler = get_sampler()
 
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors)
@@ -471,14 +475,6 @@ class Qwen2ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         logits = self.logits_processor(self.lm_head, hidden_states,
                                        sampling_metadata)
         return logits
-
-    def sample(
-        self,
-        logits: torch.Tensor,
-        sampling_metadata: SamplingMetadata,
-    ) -> Optional[SamplerOutput]:
-        next_tokens = self.sampler(logits, sampling_metadata)
-        return next_tokens
 
     def load_weights(self, weights: Iterable[Tuple[str,
                                                    torch.Tensor]]) -> Set[str]:
