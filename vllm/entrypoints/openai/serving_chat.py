@@ -450,8 +450,7 @@ class OpenAIServingChat(OpenAIServing):
             # because the should_stream_with_reasoning_parsing check
             # already ensures that the reasoning_parser is not None.
             # but the pre-commit hook requires it.
-            if should_stream_with_reasoning_parsing and \
-                self.reasoning_parser:
+            if should_stream_with_reasoning_parsing:
                 reasoning_parser = self.reasoning_parser(tokenizer)
         except RuntimeError as e:
             logger.exception("Error in reasoning parser creation.")
@@ -459,8 +458,6 @@ class OpenAIServingChat(OpenAIServing):
             yield f"data: {data}\n\n"
             yield "data: [DONE]\n\n"
             return
-        print("_+_"*20)
-        print(f"reasoning_parser: {reasoning_parser}")
         # Prepare the tool parser if it's needed
         try:
             if tool_choice_auto and self.tool_parser:
@@ -935,10 +932,6 @@ class OpenAIServingChat(OpenAIServing):
 
             should_stream_with_reasoning_parsing = (
                 self._should_stream_with_reasoning_parsing(request))
-            print("_+_"*20)
-            print(f"should_stream_with_reasoning_parsing: "
-                  f"{should_stream_with_reasoning_parsing}")
-            print(f"reasoning_parser: {self.reasoning_parser}")
             # In the OpenAI API the finish_reason is "tools_called"
             # if the tool choice is auto and the model produced a tool
             # call. The same is not true for named function calls
