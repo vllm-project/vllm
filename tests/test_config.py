@@ -4,9 +4,9 @@ from dataclasses import MISSING, Field, asdict, dataclass, field
 from typing import Literal, Union
 
 import pytest
-import json
 
-from vllm.config import ModelConfig, PoolerConfig, config, get_field, VllmConfig, LoadConfig
+from vllm.config import (LoadConfig, ModelConfig, PoolerConfig, VllmConfig,
+                         config, get_field)
 from vllm.model_executor.layers.pooler import PoolingType
 from vllm.platforms import current_platform
 
@@ -411,6 +411,7 @@ def test_generation_config_loading():
         override_generation_config=override_generation_config)
 
     assert model_config.get_diff_sampling_param() == override_generation_config
+
 
 @pytest.mark.parametrize("pt_load_map_location", [
     None,

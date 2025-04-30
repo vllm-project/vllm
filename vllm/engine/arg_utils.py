@@ -64,29 +64,20 @@ def optional_type(
     return _optional_type
 
 
-def optional_str(val: str) -> Optional[str]:
-    return optional_arg(val, str)
-
-
-def optional_int(val: str) -> Optional[int]:
-    return optional_arg(val, int)
-
-
-def optional_float(val: str) -> Optional[float]:
-    return optional_arg(val, float)
-
-def optional_union_dict_and_str(val: str) -> Optional[Union[str, dict[str, str]]]:
+def optional_union_dict_and_str(
+        val: str) -> Optional[Union[str, dict[str, str]]]:
     if not re.match("^{.*}$", val):
         return str(val)
     else:
         return optional_type(json.loads)(val)
 
 
-def nullable_kvs(val: str) -> Optional[dict[str, int]]:
-    """NOTE: This function is deprecated, args should be passed as JSON
-    strings instead.
-
-    Parses a string containing comma separate key [str] to value [int]
+@deprecated(
+    "Passing a JSON argument as a string containing comma separated key=value "
+    "pairs is deprecated. This will be removed in v0.10.0. Please use a JSON "
+    "string instead.")
+def nullable_kvs(val: str) -> dict[str, int]:
+    """Parses a string containing comma separate key [str] to value [int]
     pairs into a dictionary.
 
     Args:
@@ -204,8 +195,9 @@ def get_kwargs(cls: ConfigType) -> dict[str, Any]:
                 kwargs[name]["type"] = human_readable_int
         elif contains_type(type_hints, float):
             kwargs[name]["type"] = float
-        elif contains_type(type_hints, dict) and (contains_type(type_hints, str)
-              or any(is_not_builtin(th) for th in type_hints)):
+        elif contains_type(type_hints,
+                           dict) and (contains_type(type_hints, str) or any(
+                               is_not_builtin(th) for th in type_hints)):
             kwargs[name]["type"] = optional_union_dict_and_str
         elif contains_type(type_hints, dict):
             # Dict arguments will always be optional
