@@ -278,8 +278,7 @@ class CPUMLAImpl(MLACommonImpl[CPUMLAMetadata]):
         # remove padding
         output = output.view(-1, self.num_heads,
                              q.shape[-1])[..., :v.shape[-1]]
-        output = output.reshape(-1, self.num_heads * v.shape[-1])
-        return self.o_proj(output)[0]
+        return output.reshape(-1, self.num_heads * v.shape[-1])
 
     def _forward_decode(
             self,

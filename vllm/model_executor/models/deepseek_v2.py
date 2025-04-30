@@ -475,7 +475,12 @@ class DeepseekV2MLAAttention(nn.Module):
             [self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
         kv_c_normed = self.kv_a_layernorm(kv_c.contiguous())
 
-        attn_out = self.mla_attn(q, kv_c_normed, k_pe, output_shape=q.shape)
+        attn_out = self.mla_attn(
+            q,
+            kv_c_normed,
+            k_pe,
+            output_shape=(hidden_states.shape[0],
+                          self.num_heads * self.qk_rope_head_dim))
         return self.o_proj(attn_out)[0]
 
 
