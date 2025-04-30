@@ -338,7 +338,7 @@ class EmbedModelInfo(NamedTuple):
 
 def run_embedding_correctness_test(
     hf_model: HfRunner,
-    inputs: list[list[str]],
+    inputs: list[str],
     vllm_outputs: Sequence[list[float]],
     dimensions: Optional[int] = None,
 ):
