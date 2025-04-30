@@ -8,6 +8,7 @@ from collections.abc import Iterable
 from typing import Optional, Union
 
 from vllm.config import VllmConfig
+from vllm.distributed.kv_events import EventPublisherFactory, KVEventBatch
 from vllm.distributed.kv_transfer.kv_connector.factory import (
     KVConnectorFactory)
 from vllm.distributed.kv_transfer.kv_connector.v1 import KVConnectorRole
@@ -48,6 +49,7 @@ class Scheduler(SchedulerInterface):
         self.cache_config = vllm_config.cache_config
         self.lora_config = vllm_config.lora_config
         self.kv_cache_config = kv_cache_config
+        self.kv_events_config = vllm_config.kv_events_config
         self.log_stats = log_stats
         self.structured_output_manager = structured_output_manager
 
@@ -62,6 +64,9 @@ class Scheduler(SchedulerInterface):
         self.max_num_scheduled_tokens = \
             self.scheduler_config.max_num_batched_tokens
         self.max_model_len = self.scheduler_config.max_model_len
+        self.enable_kv_cache_events = (
+            self.kv_events_config is not None
+            and self.kv_events_config.enable_kv_cache_events)
 
         # Create KVConnector for the Scheduler. Note that each Worker
         # will have a corresponding KVConnector with Role=WORKER.
@@ -70,6 +75,9 @@ class Scheduler(SchedulerInterface):
         if self.vllm_config.kv_transfer_config is not None:
             self.connector = KVConnectorFactory.create_connector_v1(
                 config=self.vllm_config, role=KVConnectorRole.SCHEDULER)
+
+        self.kv_event_publisher = EventPublisherFactory.create(
+            self.kv_events_config)
 
         num_gpu_blocks = self.cache_config.num_gpu_blocks
         assert num_gpu_blocks is not None and num_gpu_blocks > 0
@@ -132,7 +140,9 @@ class Scheduler(SchedulerInterface):
             enable_caching=self.cache_config.enable_prefix_caching,
             caching_hash_algo=self.cache_config.prefix_caching_hash_algo,
             use_eagle=self.use_eagle,
-            log_stats=self.log_stats)
+            log_stats=self.log_stats,
+            enable_kv_cache_events=self.enable_kv_cache_events,
+        )
 
     def schedule(self) -> SchedulerOutput:
         # NOTE(woosuk) on the scheduling algorithm:
@@ -441,7 +451,7 @@ class Scheduler(SchedulerInterface):
         grammar_bitmask = self.structured_output_manager.grammar_bitmask(
             self.requests,
             structured_output_request_ids,
-            len(self.running),
+            scheduled_spec_decode_tokens,
         )
         # Construct the scheduler output.
         new_reqs_data = [
@@ -492,6 +502,11 @@ class Scheduler(SchedulerInterface):
         if self.connector is not None:
             meta = self.connector.build_connector_meta(scheduler_output)
             scheduler_output.kv_connector_metadata = meta
+
+        events = self.kv_cache_manager.take_events()
+        if events:
+            batch = KVEventBatch(ts=time.time(), events=events)
+            self.kv_event_publisher.publish(batch)
 
         # Advance the number of computed tokens for the request AFTER
         # the request is scheduled.
@@ -682,10 +697,6 @@ class Scheduler(SchedulerInterface):
                         self.encoder_cache_manager.free_encoder_input(
                             request, input_id)
 
-            # Add newly generated spec token ids to the request.
-            if spec_token_ids is not None:
-                request.spec_token_ids = spec_token_ids[req_index]
-
             stopped = False
             new_logprobs = None
             new_token_ids = generated_token_ids
@@ -716,6 +727,17 @@ class Scheduler(SchedulerInterface):
                 # check above, so safe to ignore type warning
                 request.structured_output_request.grammar.accept_tokens(  # type: ignore[union-attr]
                     req_id, new_token_ids)
+
+            # Add newly generated spec token ids to the request.
+            if spec_token_ids is not None:
+                if request.use_structured_output:
+                    metadata = request.structured_output_request
+                    assert metadata is not None and metadata.grammar is not None
+                    # Needs to happen after new_token_ids are accepted.
+                    request.spec_token_ids = metadata.grammar.validate_tokens(
+                        spec_token_ids[req_index])
+                else:
+                    request.spec_token_ids = spec_token_ids[req_index]
 
             # Get prompt logprobs for this request.
             prompt_logprobs_tensors = prompt_logprobs_dict.get(req_id)
@@ -836,3 +858,7 @@ class Scheduler(SchedulerInterface):
             num_draft_tokens=num_draft_tokens,
             num_accepted_tokens=num_accepted_tokens)
         return spec_decoding_stats
+
+    def shutdown(self) -> None:
+        if self.kv_event_publisher:
+            self.kv_event_publisher.shutdown()

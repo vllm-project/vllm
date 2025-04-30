@@ -738,7 +738,7 @@ class VllmRunner:
     - `block_size`: Set to `16` instead of `None` to reduce memory usage.
     - `enable_chunked_prefill`: Set to `False` instead of `None` for
       test reproducibility.
-    - `enforce_eager`: Set to `False` instead of `None` to test CUDA graph.
+    - `enforce_eager`: Set to `False` to test CUDA graph.
     """
 
     def __init__(
