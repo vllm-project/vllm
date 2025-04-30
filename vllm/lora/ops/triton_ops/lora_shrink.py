@@ -26,7 +26,8 @@ def _lora_shrink_kernel(input_ptr, lora_ptr, out_ptr, M, N, K,
                         output_d1_stride, output_d2_stride,
                         BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr,
                         BLOCK_K: tl.constexpr, EVEN_K: tl.constexpr,
-                        SPLIT_K: tl.constexpr, SLICE_NUM: tl.constexpr):
+                        SPLIT_K: tl.constexpr, SLICE_NUM: tl.constexpr,
+                        maxnreg: tl.constexpr):
 
     cta_n_num = tl.cdiv(N, BLOCK_N)
     cta_m_num = tl.cdiv(M, BLOCK_M)
