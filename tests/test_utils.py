@@ -694,6 +694,13 @@ def test_split_zmq_path_invalid(invalid_path):
 
 
 def test_make_zmq_socket_ipv6():
+    # Check if IPv6 is supported by trying to create an IPv6 socket
+    try:
+        sock = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
+        sock.close()
+    except socket.error:
+        pytest.skip("IPv6 is not supported on this system")
+
     ctx = zmq.Context()
     ipv6_path = "tcp://[::1]:5555"  # IPv6 loopback address
     socket_type = zmq.REP  # Example socket type
