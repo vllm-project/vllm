@@ -781,7 +781,10 @@ class TPUModelRunner(LoRAModelRunnerMixin):
         xm.mark_step()
         num_reqs = self.input_batch.num_reqs
         # Run the decoder
-        with set_forward_context(attn_metadata, self.vllm_config):
+        with set_forward_context(
+                attn_metadata,
+                self.vllm_config,
+                num_tokens=scheduler_output.total_num_scheduled_tokens):
             hidden_states = self.model(
                 input_ids=input_ids,
                 positions=self.position_ids,
