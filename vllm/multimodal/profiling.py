@@ -221,7 +221,7 @@ class MultiModalProfiler(Generic[_I]):
                 "To avoid this, you should increase `max_model_len`, reduce `max_num_seqs`, and/or reduce `mm_counts`.",  # noqa: E501
                 seq_len,
                 total_len,
-                self._get_mm_num_tokens(mm_inputs),
+                str(self._get_mm_num_tokens(mm_inputs)),
             )
 
         return DummyEncoderData(encoder_prompt_token_ids)
@@ -246,7 +246,7 @@ class MultiModalProfiler(Generic[_I]):
                 "To avoid this, you should increase `max_model_len`, reduce `max_num_seqs`, and/or reduce `mm_counts`.",  # noqa: E501
                 seq_len,
                 total_len,
-                self._get_mm_num_tokens(mm_inputs),
+                str(self._get_mm_num_tokens(mm_inputs)),
             )
 
         if total_len < seq_len:
