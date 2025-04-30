@@ -191,9 +191,9 @@ class GrammarConfig:
 
             if model_with_warn is not None and any_whitespace:
                 logger.info_once(
-                    f"{model_with_warn} model detected, consider setting "
-                    "`disable_any_whitespace` to prevent runaway generation "
-                    "of whitespaces.")
+                    "%s model detected, consider setting `disable_any_whitespace` to prevent runaway generation of whitespaces.",  # noqa: E501
+                    model_with_warn,
+                )
             # Validate the schema and raise ValueError here if it is invalid.
             # This is to avoid exceptions in model execution, which will crash
             # the engine worker process.
