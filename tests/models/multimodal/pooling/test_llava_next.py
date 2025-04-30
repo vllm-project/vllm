@@ -8,7 +8,7 @@ from vllm.platforms import current_platform
 
 from ....conftest import IMAGE_ASSETS, HfRunner, PromptImageInput, VllmRunner
 from ....utils import large_gpu_test
-from ..utils import check_embeddings_close
+from ...utils import check_embeddings_close
 
 # Llava Next embedding implementation is only supported by CUDA.
 # If run on ROCm, hf_model.model.resize_token_embeddings will

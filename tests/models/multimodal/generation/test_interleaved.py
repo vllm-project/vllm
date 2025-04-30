@@ -16,6 +16,7 @@ INTERLEAVED_PROMPT = base_prompt("<image><video><image>\n")
 NONINTERLEAVED_PROMPT = base_prompt("<image><image><video>\n")
 
 
+@pytest.mark.core_model
 @pytest.mark.parametrize("model", models)
 @pytest.mark.parametrize("dtype", ["float16"])
 @pytest.mark.parametrize("max_tokens", [128])

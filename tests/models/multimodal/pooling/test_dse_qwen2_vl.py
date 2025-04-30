@@ -10,7 +10,7 @@ from transformers import Qwen2VLForConditionalGeneration
 
 from ....conftest import IMAGE_ASSETS, HfRunner, PromptImageInput, VllmRunner
 from ....utils import large_gpu_test
-from ..utils import check_embeddings_close
+from ...utils import check_embeddings_close
 
 HF_TEXT_PROMPTS = [
     # T -> X

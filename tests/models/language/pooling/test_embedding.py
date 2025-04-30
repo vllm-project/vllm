@@ -8,7 +8,7 @@ import pytest
 from vllm.config import PoolerConfig
 from vllm.platforms import current_platform
 
-from ..utils import check_embeddings_close
+from ...utils import check_embeddings_close
 
 
 @pytest.mark.parametrize(

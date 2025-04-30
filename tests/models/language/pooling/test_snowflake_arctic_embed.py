@@ -5,9 +5,7 @@ Run `pytest tests/models/embedding/language/test_snowflake_arctic_embed.py`.
 """
 import pytest
 
-from tests.models.embedding.utils import EmbedModelInfo
-
-from ..utils import check_embeddings_close
+from ...utils import EmbedModelInfo, check_embeddings_close
 
 EMBEDDING_PROMPTS = [
     'what is snowflake?', 'Where can I get the best tacos?', 'The Data Cloud!',

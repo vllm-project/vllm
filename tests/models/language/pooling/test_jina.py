@@ -8,8 +8,9 @@ import math
 
 import pytest
 
-from tests.models.embedding.utils import check_embeddings_close, matryoshka_fy
 from vllm import PoolingParams
+
+from ...utils import check_embeddings_close, matryoshka_fy
 
 SCORING_MODELS = [
     "jinaai/jina-reranker-v2-base-multilingual",  # Roberta
