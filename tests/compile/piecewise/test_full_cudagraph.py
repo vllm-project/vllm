@@ -52,14 +52,21 @@ def piecewise_llm():
 
 
 def generate_text(llm: LLM, batch_size: int, max_tokens: int):
-    prompts = ["I pledge allegiance to"] * batch_size
-    sampling_params = SamplingParams(temperature=0.0, max_tokens=max_tokens)
+    prompts = ["Hi my name is"] * batch_size
+    sampling_params = SamplingParams(temperature=0.0,
+                                     max_tokens=max_tokens,
+                                     top_p=0.95)
 
     return llm.generate(prompts, sampling_params)
 
 
-@pytest.mark.parametrize("batch_size", [1, 7, 16, 25, 32, 45, 64])
-def test_full_cudagraph(batch_size, full_cudagraph_llm, piecewise_llm):
+@pytest.mark.parametrize(("batch_size", "max_tokens"), [(1, 10), (7, 10),
+                                                        (16, 10), (25, 10),
+                                                        (32, 10), (45, 10),
+                                                        (64, 10), (8, 5),
+                                                        (8, 20), (8, 200)])
+def test_full_cudagraph(batch_size, max_tokens, full_cudagraph_llm,
+                        piecewise_llm):
     """
     Load full cudagraph model and piecewise model once, and at the same time to
     reuse them across various test cases.
@@ -67,11 +74,6 @@ def test_full_cudagraph(batch_size, full_cudagraph_llm, piecewise_llm):
     Test various batch sizes and max_tokens to ensure that the full cudagraph
     compilation works for padded cases too.
     """
-
-    # For batch size > 1, PyTorch is not always deterministic so keep the
-    # output short and use a predictable prompt such as "I pledge allegiance to"
-    # See https://github.com/vllm-project/vllm/issues/5898
-    max_tokens = 5
     piecewise_responses = generate_text(piecewise_llm,
                                         batch_size=batch_size,
                                         max_tokens=max_tokens)
