@@ -21,12 +21,12 @@ body:
       It is suggested to download and execute the latest script, as vllm might frequently update the diagnosis information needed for accurately and quickly responding to issues.
     value: |
       <details>
-      <summary>The output of `python collect_env.py`</summary>
+      <summary>The output of <code>python collect_env.py</code></summary>
 
       ```text
       Your output of `python collect_env.py` here
       ```
-      
+
       </details>
   validations:
     required: true
