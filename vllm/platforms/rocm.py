@@ -13,9 +13,9 @@ from .interface import DeviceCapability, Platform, PlatformEnum, _Backend
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig, VllmConfig
-else:
-    ModelConfig = None
-    VllmConfig = None
+# else:
+#     ModelConfig = None
+#     VllmConfig = None
 
 logger = init_logger(__name__)
 
@@ -137,6 +137,17 @@ class RocmPlatform(Platform):
         "fbgemm_fp8", "gguf", "quark", "ptpc_fp8"
     ]
 
+    def __getstate__(self):
+        state = self.__dict__.copy()
+        # Remove non-serializable attributes
+        state.pop('logger', None)
+        return state
+
+    def __setstate__(self, state):
+        self.__dict__.update(state)
+        # Re-initialize non-serializable attributes
+        self.logger = init_logger(__name__)
+
     @classmethod
     def get_attn_backend_cls(cls, selected_backend, head_size, dtype,
                              kv_cache_dtype, block_size, use_v1,
@@ -243,7 +254,7 @@ class RocmPlatform(Platform):
         return True
 
     @classmethod
-    def check_and_update_config(cls, vllm_config: VllmConfig) -> None:
+    def check_and_update_config(cls, vllm_config: "VllmConfig") -> None:
         cache_config = vllm_config.cache_config
         if cache_config and cache_config.block_size is None:
             cache_config.block_size = 16
@@ -332,7 +343,7 @@ class RocmPlatform(Platform):
             return torch.float8_e4m3fn
 
     @classmethod
-    def supports_v1(cls, model_config: ModelConfig) -> bool:
+    def supports_v1(cls, model_config: "ModelConfig") -> bool:
         # V1 support on AMD gpus is experimental
         return True
 
