@@ -278,9 +278,9 @@ __launch_bounds__(NUM_THREADS, 5) void paged_attention_ll4mi_QKV_mfma16_kernel(
     const int q_stride,
     const int kv_block_stride,
     const int kv_head_stride,
-    float* __restrict__ exp_sums,           // [num_seqs, num_heads, max_num_partitions]
-    float* __restrict__ max_logits,         // [num_seqs, num_heads, max_num_partitions]
-    scalar_t* __restrict__ out,             // [num_seqs, num_heads, max_num_partitions, head_size]
+    float* __restrict__ exp_sums,           // [block_tables.size(0), num_heads, max_num_partitions]
+    float* __restrict__ max_logits,         // [block_tables.size(0), num_heads, max_num_partitions]
+    scalar_t* __restrict__ out,             // [block_tables.size(0), num_heads, max_num_partitions, head_size]
     OUTT* __restrict__ final_out,           // [num_seqs, num_heads, head_size]
     int max_ctx_blocks, const float* k_scale, const float* v_scale) {
   // clang-format on
@@ -792,9 +792,9 @@ __launch_bounds__(NUM_THREADS) void paged_attention_ll4mi_QKV_mfma4_kernel(
     const int q_stride,
     const int kv_block_stride,
     const int kv_head_stride,
-    float* __restrict__ exp_sums,           // [num_seqs, num_heads, max_num_partitions]
-    float* __restrict__ max_logits,         // [num_seqs, num_heads, max_num_partitions]
-    scalar_t* __restrict__ out,             // [num_seqs, num_heads, max_num_partitions, head_size]
+    float* __restrict__ exp_sums,           // [block_tables.size(0), num_heads, max_num_partitions]
+    float* __restrict__ max_logits,         // [block_tables.size(0), num_heads, max_num_partitions]
+    scalar_t* __restrict__ out,             // [block_tables.size(0), num_heads, max_num_partitions, head_size]
     OUTT* __restrict__ final_out,           // [num_seqs, num_heads, head_size]
     int max_ctx_blocks, const float* k_scale, const float* v_scale) {
   // clang-format on
@@ -1501,9 +1501,9 @@ __launch_bounds__(NUM_THREADS) void paged_attention_ll4mi_QKV_mfma16_kernel(
     const int q_stride,
     const int kv_block_stride,
     const int kv_head_stride,
-    float* __restrict__ exp_sums,             // [num_seqs, num_heads, max_num_partitions]
-    float* __restrict__ max_logits,           // [num_seqs, num_heads, max_num_partitions]
-    scalar_t* __restrict__ out,               // [num_seqs, num_heads, max_num_partitions, head_size]
+    float* __restrict__ exp_sums,             // [block_tables.size(0), num_heads, max_num_partitions]
+    float* __restrict__ max_logits,           // [block_tables.size(0), num_heads, max_num_partitions]
+    scalar_t* __restrict__ out,               // [block_tables.size(0), num_heads, max_num_partitions, head_size]
     OUTT* __restrict__ final_out,             // [num_seqs, num_heads, head_size]
     int max_ctx_blocks, const float* k_scale, const float* v_scale) {
   UNREACHABLE_CODE
@@ -1528,9 +1528,9 @@ __launch_bounds__(NUM_THREADS) void paged_attention_ll4mi_QKV_mfma4_kernel(
     const int q_stride,
     const int kv_block_stride,
     const int kv_head_stride,
-    float* __restrict__ exp_sums,            // [num_seqs, num_heads, max_num_partitions]
-    float* __restrict__ max_logits,          // [num_seqs, num_heads, max_num_partitions]
-    scalar_t* __restrict__ out,              // [num_seqs, num_heads, max_num_partitions, head_size]
+    float* __restrict__ exp_sums,            // [block_tables.size(0), num_heads, max_num_partitions]
+    float* __restrict__ max_logits,          // [block_tables.size(0), num_heads, max_num_partitions]
+    scalar_t* __restrict__ out,              // [block_tables.size(0), num_heads, max_num_partitions, head_size]
     OUTT* __restrict__ final_out,            // [num_seqs, num_heads, head_size]
     int max_ctx_blocks, const float* k_scale, const float* v_scale) {
   UNREACHABLE_CODE
@@ -1781,7 +1781,7 @@ void paged_attention_custom_launcher(
 void paged_attention(
     torch::Tensor& out,         // [num_seqs, num_heads, head_size]
     torch::Tensor& exp_sums,    // [block_tables.size(0), num_heads, max_num_partitions]
-    torch::Tensor& max_logits,  // [num_seqs, num_heads, max_num_partitions]
+    torch::Tensor& max_logits,  // [block_tables.size(0), num_heads, max_num_partitions]
     torch::Tensor& tmp_out,     // [block_tables.size(0), num_heads, max_num_partitions, head_size]
     torch::Tensor& query,       // [num_seqs, num_heads, head_size]
     torch::Tensor& key_cache,   // [num_blocks, num_heads, head_size/x, block_size, x]
