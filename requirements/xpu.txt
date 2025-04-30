@@ -3,7 +3,7 @@
 
 ray>=2.9
 cmake>=3.26
-packaging
+packaging>=24.2
 setuptools-scm>=8
 setuptools>=77.0.3,<80.0.0
 wheel

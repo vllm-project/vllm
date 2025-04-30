@@ -396,7 +396,7 @@ opencv-python-headless==4.11.0.86
     # via
     #   -r requirements/test.in
     #   mistral-common
-packaging==24.1
+packaging==24.2
     # via
     #   accelerate
     #   black
