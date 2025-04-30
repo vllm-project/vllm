@@ -26,7 +26,7 @@ from typing import Any, Dict, Iterable, Optional, Set, Tuple, Type, Union
 
 import torch
 from torch import nn
-from transformers import LlamaConfig
+from transformers import SwissAIConfig
 
 from vllm.attention import Attention
 from vllm.compilation.decorators import support_torch_compile
@@ -66,7 +66,7 @@ class SwissAIMLP(nn.Module):
         prefix: str = "",
     ) -> None:
         super().__init__()
-        self.up_proj = RowParallelLinear(
+        self.up_proj = ColumnParallelLinear(
             input_size=hidden_size,
             output_size=intermediate_size,
             bias=bias,
@@ -95,7 +95,7 @@ class SwissAIMLP(nn.Module):
 class SwissAIAttention(nn.Module):
 
     def __init__(self,
-                 config: LlamaConfig,
+                 config: SwissAIConfig,
                  hidden_size: int,
                  num_heads: int,
                  num_kv_heads: int,
@@ -216,7 +216,7 @@ class SwissAIDecoderLayer(nn.Module):
 
     def __init__(
         self,
-        config: LlamaConfig,
+        config: SwissAIConfig,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
