@@ -20,10 +20,8 @@ from vllm.entrypoints.openai.serving_engine import (EmbeddingServeContext,
                                                     OpenAIServing,
                                                     ServeContext)
 from vllm.entrypoints.openai.serving_models import OpenAIServingModels
-from vllm.entrypoints.utils import _validate_truncation_size
 from vllm.logger import init_logger
-from vllm.outputs import (EmbeddingOutput, 
-                          EmbeddingRequestOutput,
+from vllm.outputs import (EmbeddingOutput, EmbeddingRequestOutput,
                           PoolingRequestOutput)
 
 logger = init_logger(__name__)
