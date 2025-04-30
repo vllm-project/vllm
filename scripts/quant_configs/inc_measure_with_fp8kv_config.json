@@ -11,5 +11,5 @@
         "names": ["lm_head", "mlp\\.gate\\b"]
     },
     "quantize_weight": false,
-    "dump_stats_path": "./nc_workspace_measure_kvache/inc_measure_output"
+    "dump_stats_path": "./scripts/nc_workspace_measure_kvache/inc_measure_output"
 }

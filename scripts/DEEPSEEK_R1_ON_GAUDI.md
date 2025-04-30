@@ -105,7 +105,7 @@ or
 # calibration by your own. Takes about 1 hour
 export OFFICIAL_FP8_MODEL=deepseek-ai/DeepSeek-R1
 cd ./scripts
-VLLM_REQUANT_FP8_INC=1 QUANT_CONFIG=inc_measure_with_fp8kv_config.json VLLM_ENABLE_RUNTIME_DEQUANT=1 python run_example_tp.py --model ${OFFICIAL_FP8_MODEL} --tokenizer ${OFFICIAL_FP8_MODEL} --osl 32 --max_num_seqs 1 --nprompts 512 --dataset pile
+VLLM_REQUANT_FP8_INC=1 QUANT_CONFIG=./quant_configs/inc_measure_with_fp8kv_config.json VLLM_ENABLE_RUNTIME_DEQUANT=1 python run_example_tp.py --model ${OFFICIAL_FP8_MODEL} --tokenizer ${OFFICIAL_FP8_MODEL} --osl 32 --max_num_seqs 1 --nprompts 512 --dataset pile
 ```
 
 ## step 3. Benchmark

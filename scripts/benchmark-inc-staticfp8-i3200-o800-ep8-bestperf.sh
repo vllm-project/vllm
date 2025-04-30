@@ -31,7 +31,7 @@ tokenizer="/data/models/DeepSeek-R1/"
 model_name="DeepSeek-R1"
 
 
-QUANT_CONFIG="scripts/inc_quant_with_fp8kv_config.json" \
+QUANT_CONFIG="scripts/quant_configs/inc_quant_with_fp8kv_config.json" \
 VLLM_REQUANT_FP8_INC=1 \
 VLLM_USE_FP8_MATMUL=true \
 VLLM_ENABLE_RUNTIME_DEQUANT=1 \

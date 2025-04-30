@@ -396,6 +396,9 @@ measurements for a given model. The quantization configuration is used during in
 However, disabling this feature in production environments is not recommended, as it can lead to a significant performance decrease.
 
 > [!TIP]
+> If you are benchmarking an FP8 model with `scale_format=const`, setting `VLLM_HPU_MARK_SCALES_AS_CONST=false` can help speed up the warmup stage.
+
+> [!TIP]
 > When using FP8 models, you may experience timeouts caused by the long compilation time of FP8 operations. To mitigate this, set the following environment variables:
 > - `VLLM_ENGINE_ITERATION_TIMEOUT_S` - to adjust the vLLM server timeout. You can set the value in seconds, e.g., 600 equals 10 minutes.
 > - `VLLM_RPC_TIMEOUT` - to adjust the RPC protocol timeout used by the OpenAI-compatible API. This value is in microseconds, e.g., 600000 equals 10 minutes.

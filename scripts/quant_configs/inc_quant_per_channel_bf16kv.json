@@ -1,8 +1,8 @@
 {
     "mode": "QUANTIZE",
     "observer": "maxabs",
-    "scale_method": "maxabs_hw",
-    "scale_format": "scalar",
+    "scale_method": "ACT_MAXABS_HW_WEIGHTS_PCS_MAXABS_POW2",
+    "scale_format": "const",
     "allowlist": {
         "types": [],
         "names": []
@@ -14,10 +14,14 @@
             "mlp\\.gate\\b",
             "latent_cache_k_nodeq",
             "latent_cache_v_nodeq",
+            "latent_cache_v",
+            "latent_cache_k",
+            "kv_b_proj",
             "matmul_qk",
             "matmul_av",
+            "batch2block_matmul",
             "block2batch_matmul"
         ]
     },
-    "dump_stats_path": "./nc_workspace_measure_kvache/inc_measure_output"
+    "dump_stats_path": "./scripts/nc_workspace_measure_kvache/inc_measure_output"
 }

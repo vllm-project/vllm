@@ -1,0 +1,21 @@
+{
+    "mode": "QUANTIZE",
+    "observer": "maxabs",
+    "scale_method": "maxabs_hw",
+    "scale_format": "scalar",
+    "allowlist": {
+        "types": [],
+        "names": []
+    },
+    "blocklist": {
+        "types": [],
+        "names": [
+            "lm_head",
+            "mlp\\.gate\\b",
+            "latent_cache_k_nodeq",
+            "latent_cache_v_nodeq",
+            "latent_cache_v"
+        ]
+    },
+    "dump_stats_path": "./scripts/nc_workspace_measure_fp8_mla/inc_measure_output"
+}

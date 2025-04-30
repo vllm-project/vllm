@@ -26,8 +26,10 @@ parser.add_argument("--isl", type=int, default=1024, help="input sequence length
 parser.add_argument("--osl", type=int, default=1024, help="output sequence length.")
 parser.add_argument("--nprompts", type=int, default=4, help="The number of prompts.")
 parser.add_argument("--max_num_seqs", type=int, default=None, help="The max number of sequences.")
+parser.add_argument("--max_model_len", type=int, default=16384, help="The max model length.")
 parser.add_argument("--random", action="store_true", help="Randomly sample prompts.")
 parser.add_argument("--fp8_kv_cache", action="store_true", help="Use fp8 for kv cache.")
+parser.add_argument("--enforce_eager", action="store_true", help="Enforce eager")
 args = parser.parse_args()
 
 os.environ["VLLM_SKIP_WARMUP"] = "true"
@@ -245,6 +247,8 @@ if __name__ == "__main__":
         param["kv_cache_dtype"] = "fp8_inc"
     if args.max_num_seqs is not None:
         param["max_num_seqs"] = args.max_num_seqs
+    if args.enforce_eager:
+        param["enforce_eager"] = True
     if args.tp_size == 1:
         llm = LLM(
             model=model, 
@@ -262,7 +266,7 @@ if __name__ == "__main__":
             tensor_parallel_size=args.tp_size,
             distributed_executor_backend='mp',
             trust_remote_code=True,
-            max_model_len=16384,
+            max_model_len=args.max_model_len,
             dtype="bfloat16",
             gpu_memory_utilization=0.8,
             **param
@@ -285,9 +289,11 @@ if __name__ == "__main__":
         gt_i = None if gt is None else gt[output_i]
         prompt = output.prompt
         generated_text = output.outputs[0].text
+        gen_token_id = output.outputs[0].token_ids
         print("====================================")
         print(f"Prompt: {prompt!r}")
         print(f"Generated text: {generated_text!r}")
+        print(f"Generated token: {gen_token_id!r}")
         print(f"Ground truth: {gt_i!r}")
         print("====================================")
     if os.getenv("VLLM_REQUANT_FP8_INC", None) is not None:

@@ -894,6 +894,10 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
                 with HabanaMemoryProfiler() as m_inc:
                     from neural_compressor.torch.quantization import (
                         FP8Config, convert, prepare)
+
+                    mark_scales_as_const = os.getenv(
+                        "VLLM_HPU_MARK_SCALES_AS_CONST", "true"
+                    ) in ("1", "true")
                     config = FP8Config.from_json_file(
                         os.getenv("QUANT_CONFIG", ""))
 
@@ -903,12 +907,11 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
                         
                     elif config.quantize:
                         self.model = convert(self.model, config)
-                    htcore.hpu_initialize(self.model,
-                                          mark_only_scales_as_const=True)
-                    torch.distributed.barrier()
-                    if torch.distributed.get_rank() == 0:
-                        logger.debug(f"INC model \n {self.model}")
-                                    
+                    if mark_scales_as_const:
+                        htcore.hpu_initialize(self.model,
+                                              mark_only_scales_as_const=True)
+                    if torch.distributed.is_initialized():
+                        torch.distributed.barrier()
                 self.inc_initialized_successfully = True
                 logger.info("Preparing model with INC took %s",
                             m_inc.get_summary_string())
