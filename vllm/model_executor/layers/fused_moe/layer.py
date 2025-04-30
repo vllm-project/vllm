@@ -649,8 +649,7 @@ class FusedMoE(torch.nn.Module):
         assert quant_method is not None
         self.quant_method = quant_method
 
-        dispatch_combine = self._construct_dispatch_combine(
-            moe, quant_config)
+        dispatch_combine = self._construct_dispatch_combine(moe, quant_config)
 
         success = self.quant_method.set_dispatch_combine(dispatch_combine)
 
@@ -1072,13 +1071,12 @@ class FusedMoE(torch.nn.Module):
             return torch.ops.vllm.moe_forward(hidden_states, router_logits,
                                               self.layer_name)
 
-
     def forward_impl_chunked(self, full_hidden_states: torch.Tensor,
                              full_router_logits: torch.Tensor):
 
         full_final_hidden_states = torch.empty_like(full_hidden_states)
 
-        def process_chunk(chunk_start, chunk_end, skip_result_store = False):
+        def process_chunk(chunk_start, chunk_end, skip_result_store=False):
             hidden_states = full_hidden_states[chunk_start:chunk_end, :]
             router_logits = full_router_logits[chunk_start:chunk_end, :]
 
@@ -1131,18 +1129,23 @@ class FusedMoE(torch.nn.Module):
                 full_final_hidden_states[chunk_start:chunk_end, :].copy_(
                     final_hidden_states)
 
-        max_tokens_across_dp = get_forward_context().dp_metadata.max_tokens_across_dp
+        max_tokens_across_dp = get_forward_context(
+        ).dp_metadata.max_tokens_across_dp
         moe_dp_chunk_size_per_rank = MOE_DP_CHUNK_SIZE // self.dp_size
 
         num_tokens = full_hidden_states.size(0)
-        for chunk_start_ in range(0, max_tokens_across_dp, moe_dp_chunk_size_per_rank):
-            chunk_start = chunk_start_ 
-            chunk_end =  min(chunk_start + moe_dp_chunk_size_per_rank, max_tokens_across_dp)
+        for chunk_start_ in range(0, max_tokens_across_dp,
+                                  moe_dp_chunk_size_per_rank):
+            chunk_start = chunk_start_
+            chunk_end = min(chunk_start + moe_dp_chunk_size_per_rank,
+                            max_tokens_across_dp)
             # clamp start and end
             chunk_start = min(chunk_start, num_tokens - 1)
             chunk_end = min(chunk_end, num_tokens)
 
-            process_chunk(chunk_start, chunk_end, skip_result_store = chunk_start_ >= num_tokens)
+            process_chunk(chunk_start,
+                          chunk_end,
+                          skip_result_store=chunk_start_ >= num_tokens)
 
         return full_final_hidden_states
 
