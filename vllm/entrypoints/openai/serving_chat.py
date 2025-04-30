@@ -83,6 +83,7 @@ class OpenAIServingChat(OpenAIServing):
 
         self.reasoning_parser: Optional[Callable[[AnyTokenizer],
                                                  ReasoningParser]] = None
+        self.enable_reasoning: bool = False
         if reasoning_parser:
             try:
                 self.reasoning_parser = (
@@ -1184,7 +1185,7 @@ class OpenAIServingChat(OpenAIServing):
             We only want to do this IF reasoning is enabled and a reasoning 
             parser is configured.
             """
-        return self.enable_reasoning and self.reasoning_parser is not None
+        return self.enable_reasoning and not self.reasoning_parser
 
     def _should_check_for_unstreamed_tool_arg_tokens(
         self,
