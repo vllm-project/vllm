@@ -702,7 +702,7 @@ def test_make_zmq_socket_ipv6():
         pytest.skip("IPv6 is not supported on this system")
 
     ctx = zmq.Context()
-    ipv6_path = "tcp://[::1]:5555"  # IPv6 loopback address
+    ipv6_path = "tcp://[::]:5555"  # IPv6 loopback address
     socket_type = zmq.REP  # Example socket type
 
     # Create the socket
