@@ -644,7 +644,7 @@ async def benchmark(
     result = print_metrics_to_console(metrics, benchmark_duration,
                                       selected_percentile_metrics,
                                       goodput_config_dict)
-    result.merge({
+    result.update({
         "ttft_description":
         pd.Series([output.ttft for output in outputs]).describe().to_dict(),
         "tpot_description":

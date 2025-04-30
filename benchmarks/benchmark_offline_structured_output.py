@@ -3,13 +3,21 @@ r"""Benchmark offline throughput with structured outputs.
 
 Usage:
     python benchmarks/benchmark_offline_structured_output.py \
-        --model <your_model> \
-        --dataset json \
-        --structured-output-ratio 1.0 \
-        --structured-output-backend auto \
-        --request-rate 10 \
-        --num-prompts 1000
+        --model <your_model>
 
+Run benchmark in async mode:
+    python benchmarks/benchmark_offline_structured_output.py \
+        --model <your_model> \
+        --num-prompts 100 \
+        --async
+
+Benchmark EBNF decoding on xgrammar backend in async mode:
+    python benchmarks/benchmark_offline_structured_output.py \
+        --model <your_model> \
+        --structured-output-backend xgrammar \
+        --dataset grammar \
+        --num-prompts 1000 \
+        --async
 """
 import argparse
 import random
@@ -23,7 +31,8 @@ from benchmark_serving_structured_output import (
     print_metrics_to_console, sample_requests)
 from transformers import PreTrainedTokenizerBase
 
-from vllm import LLM
+import vllm
+from vllm import LLM, AsyncEngineArgs
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import GuidedDecodingParams, SamplingParams
 
@@ -43,6 +52,16 @@ def _to_request_output(
     ]
 
 
+def _to_vllm_guided_decoding_params(
+        args: argparse.Namespace,
+        request: SampleRequest) -> GuidedDecodingParams:
+    kwargs = {
+        "backend": args.structured_output_backend,
+        args.dataset: request.schema
+    }
+    return GuidedDecodingParams(**kwargs)
+
+
 def benchmark_sync(
     args: argparse.Namespace, tokenizer: PreTrainedTokenizerBase,
     input_requests: list[SampleRequest]
@@ -55,19 +74,10 @@ def benchmark_sync(
     """
     llm = LLM(
         model=args.model,
-        tokenizer=args.tokenizer if args.tokenizer is not None else args.model,
+        tokenizer=args.tokenizer if args.tokenizer else args.model,
         tokenizer_mode=args.tokenizer_mode,
         trust_remote_code=args.trust_remote_code,
     )
-
-    def _to_vllm_guided_decoding_params(
-            args: argparse.Namespace,
-            request: SampleRequest) -> GuidedDecodingParams:
-        kwargs = {
-            "backend": args.structured_output_backend,
-            args.dataset: request.schema
-        }
-        return GuidedDecodingParams(**kwargs)
 
     start = perf_counter()
     outputs = llm.generate(
@@ -83,8 +93,43 @@ def benchmark_sync(
     return outputs, end - start
 
 
-def benchmark_async(backend: str, api_url: str, base_url: str, model_id: str):
-    pass
+def benchmark_async(
+    args: argparse.Namespace, tokenizer: PreTrainedTokenizerBase,
+    input_requests: list[SampleRequest]
+) -> tuple[list[RequestFuncOutput], float]:
+    """
+    Benchmark asynchronous offline vLLM with structured outputs.
+
+    Returns:
+        A tuple of (output texts, benchmark duration in seconds).
+    """
+    engine = vllm.AsyncLLMEngine.from_engine_args(
+        AsyncEngineArgs(
+            model=args.model,
+            tokenizer=args.tokenizer if args.tokenizer else args.model,
+            tokenizer_mode=args.tokenizer_mode,
+            trust_remote_code=args.trust_remote_code,
+        ))
+
+    import asyncio
+    import uuid
+    start = perf_counter()
+    tasks = []
+    for req in input_requests:
+        tasks.append(
+            asyncio.create_task(
+                engine.generate(
+                    request_id=str(uuid.uuid4()),
+                    prompt=input_requests[0].prompt,
+                    sampling_params=SamplingParams(
+                        ignore_eos=args.ignore_eos,
+                        guided_decoding=_to_vllm_guided_decoding_params(
+                            args, req),
+                    ))))
+    outputs = asyncio.run(asyncio.gather(*tasks))
+    end = perf_counter()
+
+    return outputs, end - start
 
 
 def main(args: argparse.Namespace):
