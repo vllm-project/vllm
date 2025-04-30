@@ -2,7 +2,6 @@
 
 import torch
 import torch._inductor.pattern_matcher as pm
-from torch import fx
 from torch._higher_order_ops.auto_functionalize import auto_functionalized
 from torch._inductor.pattern_matcher import PatternMatcherPass
 from torch._subclasses.fake_tensor import (FakeTensorMode,
@@ -15,7 +14,6 @@ from vllm.platforms import current_platform
 
 # TODO(luka) move this around
 from .fusion import QUANT_OPS, QuantKey, empty_bf16, empty_fp32
-from .fx_utils import find_getitem, get_only_user, is_auto_func, is_func
 from .vllm_inductor_pass import VllmInductorPass
 
 logger = init_logger(__name__)
@@ -28,11 +26,13 @@ class AttentionStaticQuantPattern:
 
     def __init__(
         self,
+        layer_name: str,
         num_heads: int,
         head_size: int,
         quant_dtype: torch.dtype,
         symmetric=True,
     ):
+        self.layer_name = layer_name
         self.num_heads = num_heads
         self.head_size = head_size
         self.quant_dtype = quant_dtype
@@ -48,7 +48,14 @@ class AttentionStaticQuantPattern:
         kwargs = {'dtype': self.quant_dtype, 'device': "cuda", **kwargs}
         return torch.empty(*args, **kwargs)
 
-    def register(self, pm_pass: PatternMatcherPass):
+    def register_if_supported(self, pm_pass: PatternMatcherPass,
+                              layer: Attention):
+        if layer.impl.fused_output_quant_supported(
+                self.quant_dtype, self.quant_key.static,
+                not self.quant_key.per_tensor):
+            self._register(pm_pass)
+
+    def _register(self, pm_pass: PatternMatcherPass):
 
         def pattern(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor,
                     output_attn: torch.Tensor, output_quant: torch.Tensor,
@@ -56,14 +63,13 @@ class AttentionStaticQuantPattern:
             view_7 = RESHAPE_OP(output_attn,
                                 [-1, self.num_heads, self.head_size])
 
-            at1 = auto_functionalized(
-                ATTN_OP,
-                query=q,
-                key=k,
-                value=v,
-                output=view_7,
-                layer_name='model.layers.0.self_attn.attn',
-                output_scale=None)
+            at1 = auto_functionalized(ATTN_OP,
+                                      query=q,
+                                      key=k,
+                                      value=v,
+                                      output=view_7,
+                                      layer_name=self.layer_name,
+                                      output_scale=None)
             attn_out_view = RESHAPE_OP(at1[1],
                                        [-1, self.num_heads * self.head_size])
 
@@ -79,14 +85,13 @@ class AttentionStaticQuantPattern:
             view_7 = RESHAPE_OP(output_quant,
                                 [-1, self.num_heads, self.head_size])
 
-            at1 = auto_functionalized(
-                ATTN_OP,
-                query=q,
-                key=k,
-                value=v,
-                output=view_7,
-                layer_name='model.layers.0.self_attn.attn',
-                output_scale=scale)
+            at1 = auto_functionalized(ATTN_OP,
+                                      query=q,
+                                      key=k,
+                                      value=v,
+                                      output=view_7,
+                                      layer_name=self.layer_name,
+                                      output_scale=scale)
 
             return RESHAPE_OP(at1[1], [-1, self.num_heads * self.head_size])
 
@@ -102,11 +107,6 @@ class AttentionStaticQuantPattern:
                 empty_fp32(1, 1)  # scale
             ]
 
-            def extra_check(match):
-                print(match)
-                # TODO copy custom check from current code
-                return False
-
             def wrap_trace_fn(process_fx, trace_fn):
 
                 def wrapped(*args, **kwargs):
@@ -114,18 +114,14 @@ class AttentionStaticQuantPattern:
 
                 return wrapped
 
-            def process(gm: torch.fx.GraphModule):
+            def fx_view_to_reshape(gm: torch.fx.GraphModule):
                 from torch._inductor.fx_passes.post_grad import view_to_reshape
                 view_to_reshape(gm)
                 return gm
 
-            pm.register_replacement(pattern,
-                                    replacement,
-                                    inputs,
-                                    wrap_trace_fn(process, pm.fwd_only),
-                                    pm_pass,
-                                    extra_check=extra_check)
-            # extra_check=lambda m: record_match())
+            pm.register_replacement(
+                pattern, replacement, inputs,
+                wrap_trace_fn(fx_view_to_reshape, pm.fwd_only), pm_pass)
 
 
 class AttnFusionPass(VllmInductorPass):
@@ -147,124 +143,17 @@ class AttnFusionPass(VllmInductorPass):
 
         self.patterns = PatternMatcherPass(pass_name="attn_fusion_pass")
 
-        key, layer = list(self.static_fwd_ctx.items())[0]
-        AttentionStaticQuantPattern(layer.num_heads, layer.head_size,
-                                    current_platform.fp8_dtype()).register(
-                                        self.patterns)
+        for key, layer in self.static_fwd_ctx.items():
+            pattern = AttentionStaticQuantPattern(key, layer.num_heads,
+                                                  layer.head_size,
+                                                  current_platform.fp8_dtype())
+            pattern.register_if_supported(self.patterns, layer)
 
     def __call__(self, graph: torch.fx.graph.Graph) -> None:
-        RESHAPE_OP = torch.ops.aten.reshape.default
-        ATTN_OP = torch.ops.vllm.unified_attention_with_output.default
-        QUANT_OP = torch.ops._C.static_scaled_fp8_quant.default
-        EMPTY_OP = torch.ops.aten.empty.memory_format
-
-        # TODO(luka): move this to pass manager and be smarter with it
-        from torch._inductor.fx_utils import FakeTensorUpdater
-        fake_tensor_updater = FakeTensorUpdater(graph)
-        nodes_to_process = []
-
         self.begin()
         self.dump_graph(graph, "before_attn_fusion")
 
-        count2 = self.patterns.apply(graph)
-        logger.debug("Matched %s patterns", count2)
-        self.dump_graph(graph, "after_pattern_match")
-
-        count = 0
-        for node in graph.nodes:
-            # Find the unified attention nodes
-            if not is_auto_func(node, ATTN_OP):
-                continue
-
-            attn_getitem = find_getitem(node, 1)
-
-            # Output view might be reshaped, skip reshapes until the real use
-            output_view = attn_getitem
-
-            while is_func(get_only_user(output_view), RESHAPE_OP):
-                output_view = get_only_user(output_view)
-
-            # If this is not a quant node, exit
-            if not is_auto_func(get_only_user(output_view), QUANT_OP):
-                continue
-
-            quant_node: fx.Node = get_only_user(output_view)
-            quant_output: fx.Node = quant_node.kwargs["result"]
-            assert is_func(quant_output, EMPTY_OP)
-            quant_output_shape = quant_output.args[0]
-
-            # Extract pertinent attention information,
-            # assuming the output is allocated 2d and reshaped
-            layer_name = node.kwargs["layer_name"]
-            attn_output_view = node.kwargs["output"]
-            assert is_func(attn_output_view, RESHAPE_OP)
-            attn_output_buf = attn_output_view.args[0]
-            assert is_func(attn_output_buf, EMPTY_OP)
-
-            # Check that the attention layer impl supports quant fusion
-            attn_layer: Attention = self.static_fwd_ctx[layer_name]
-            quant_dtype = quant_output.kwargs['dtype']
-            # hardcoded because we only match the op for static/per-tensor
-            # (static_scaled_fp8_quant) for now
-            static, per_token = True, False
-            if not attn_layer.impl.fused_output_quant_supported(
-                    quant_dtype, static=static, per_token=per_token):
-                continue
-
-            # The output shapes and dtypes are:
-            # - attn_view: bf16[s0, n_heads, head_size]
-            # - attn_buf: bf16[s0, n_heads * head_size]
-            # - quant: fp8[s0, n_heads * head_size]
-
-            # START REWRITE
-            # After this point, all operations must succeed for the graph to
-            # remain valid. That includes modifications to attention layers.
-
-            # 1. Set scale on unified_attn
-            node.update_kwarg('output_scale', quant_node.kwargs['scale'])
-
-            # 2. Rewrite the initial buf alloc dtype
-            attn_output_buf.update_kwarg('dtype', quant_output.kwargs['dtype'])
-            assert attn_output_buf.args == quant_output.args
-            assert attn_output_buf.kwargs == quant_output.kwargs
-            # meta value fixed by FakeTensorUpdater
-
-            # 3. Update the autofunc node meta, as the FakeTensorUpdater does
-            # not touch them. To get both the shape and type correct, we have
-            # to create the type manually, which is a bit ugly.
-            old_fake = node.meta['val'][1]
-            new_fake_tensor = torch.empty_like(old_fake, dtype=quant_dtype)
-            node.meta['val'] = (None, new_fake_tensor)
-
-            # 4. Autofunc nodes don't get updated, so add the next node to the
-            # update list. Also remove the meta value as the FakeTensorUpdater
-            # has a bug where the type is not considered in FakeTensor equality.
-            # No existing meta val forces a new one.
-            nodes_to_process.append(attn_getitem)
-            del attn_getitem.meta['val']
-
-            # 5. Reshape output buffer back to 2d for scaled mm input
-            with graph.inserting_after(attn_getitem):
-                reshape_args = (attn_getitem, quant_output_shape)
-                attn_new_output = graph.call_function(RESHAPE_OP, reshape_args)
-
-            # 6. Rebind users of quant to use output of attention directly:
-            find_getitem(quant_node, 1).replace_all_uses_with(attn_new_output)
-
-            # Done, add to the count
-            count += 1
-
-        # remove the quant nodes
-        graph.eliminate_dead_code()
-
-        # Manually force processing of nodes
-        for node in nodes_to_process:
-            node_hash = fake_tensor_updater.hash_node(node)
-            fake_tensor_updater.processed_hashes.remove(node_hash)
-
-        # Update the fake tensor data
-        fake_tensor_updater.incremental_update()
-
+        count = self.patterns.apply(graph)
         logger.debug("fused quantization onto %s attention nodes", count)
         self.dump_graph(graph, "after_attn_fusion")
         self.end_and_log()
