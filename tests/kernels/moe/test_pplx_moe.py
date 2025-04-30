@@ -17,7 +17,7 @@ try:
                                       nvshmem_finalize, nvshmem_get_unique_id,
                                       nvshmem_init)
     has_pplx = False
-except ImportError as ex:
+except ImportError:
     has_pplx = False
 
 from torch.multiprocessing import (

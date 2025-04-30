@@ -946,16 +946,15 @@ def pplx_init(rank, world_size):
 
     if has_pplx and world_size > 1:
         from pplx_kernels.nvshmem import (nvshmem_alloc_empty_unique_id,
-                                          nvshmem_get_unique_id,
-                                          nvshmem_init)
+                                          nvshmem_get_unique_id, nvshmem_init)
         try:
             global PPLX_DID_INIT
-            logger.debug(f"PPLX_INIT {rank} {world_size}")
+            logger.debug("PPLX_INIT %s %d", rank, world_size)
             uid = nvshmem_get_unique_id(
             ) if rank == 0 else nvshmem_alloc_empty_unique_id()
             uid_gpu = uid.cuda()
             get_world_group().broadcast(uid_gpu, src=0)
-            logger.debug(f"PPLX_INIT UID={uid_gpu}")
+            logger.debug("PPLX_INIT UID = %s", uid_gpu)
             uid = uid_gpu.to(device='cpu')
             nvshmem_init(uid, rank, world_size)
             PPLX_DID_INIT = True
@@ -968,6 +967,7 @@ def pplx_finalize():
     global PPLX_DID_INIT
     if PPLX_DID_INIT:
         from pplx_kernels.nvshmem import nvshmem_finalize
+        logger.debug("PPLX finalize")
         nvshmem_finalize()
 
 
