@@ -288,6 +288,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
     "csrc/quantization/cutlass_w8a8/scaled_mm_entry.cu"
     "csrc/quantization/fp4/nvfp4_quant_entry.cu"
     "csrc/quantization/fp4/nvfp4_scaled_mm_entry.cu"
+    "csrc/quantization/fp4/nvfp4_blockwise_moe_kernel.cu"
     "csrc/sparse/cutlass/sparse_scaled_mm_entry.cu"
     "csrc/cutlass_extensions/common.cpp"
     "csrc/attention/mla/cutlass_mla_entry.cu")

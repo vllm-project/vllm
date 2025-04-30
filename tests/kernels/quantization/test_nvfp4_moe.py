@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
-import torch
 import pytest
+import torch
+
 from tests.kernels.utils import torch_moe
 from vllm import _custom_ops as ops
 from vllm.config import ParallelConfig, VllmConfig, set_current_vllm_config
@@ -42,19 +43,14 @@ kE2M1ToFloat = torch.tensor([0., 0.5, 1., 1.5, 2., 3., 4., 6.],
 def break_fp4_bytes(a, dtype):
     assert a.dtype == torch.uint8
     m, n = a.shape
-    # Vectorized nibble processing
     a_flat = a.flatten()
-    high = (a_flat & 0xF0) >> 4  # Upper nibbles
-    low = a_flat & 0x0F  # Lower nibbles
-    # Combine nibbles for batch processing
+    high = (a_flat & 0xF0) >> 4 
+    low = a_flat & 0x0F  
     combined = torch.stack((low, high), dim=1).flatten()
-    # Vectorized sign and magnitude extraction
     signs = (combined & 0x08).to(torch.bool)  # Sign bits
     abs_vals = (combined & 0x07).to(torch.long)
-    # Device-aware lookup and sign application
     kE2M1 = kE2M1ToFloat.to(device=a.device)
     values = kE2M1[abs_vals] * torch.where(signs, -1.0, 1.0)
-    # Reshape to final form
     return values.reshape(m, n * 2).to(dtype=dtype)
 
 

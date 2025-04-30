@@ -698,12 +698,12 @@ class FusedMoE(torch.nn.Module):
             loaded_weight = loaded_weight.to(param.data.device)
 
             if ("compressed" in quant_method_name.lower()
-                and param.data[expert_id] != 1 and (param.data[expert_id] -
-                                              loaded_weight).abs() > 1e-5):
-               raise ValueError(
-                   "input_scales of w1 and w3 of a layer "
-                   f"must be equal. But got {param.data[expert_id]} "
-                   f"vs. {loaded_weight}")
+                    and param.data[expert_id] != 1
+                    and (param.data[expert_id] - loaded_weight).abs() > 1e-5):
+                raise ValueError(
+                    "input_scales of w1 and w3 of a layer "
+                    f"must be equal. But got {param.data[expert_id]} "
+                    f"vs. {loaded_weight}")
 
             self._load_single_value(param=param,
                                     loaded_weight=loaded_weight,
@@ -720,22 +720,22 @@ class FusedMoE(torch.nn.Module):
             return
 
         if "ModelOpt" in quant_method_name:
-            if ('weight_scale_2' in weight_name or 
-                'input_scale' in weight_name):
+            if ('weight_scale_2' in weight_name
+                    or 'input_scale' in weight_name):
                 self._load_per_tensor_weight_scale(shard_id=shard_id,
                                                    param=param,
                                                    loaded_weight=loaded_weight,
                                                    expert_id=expert_id)
             elif "weight" in weight_name:
                 self._load_model_weight_or_group_weight_scale(
-                shard_id=shard_id,
-                shard_dim=shard_dim,
-                loaded_weight=loaded_weight,
-                expert_data=expert_data,
-                tp_rank=self.tp_rank)
+                    shard_id=shard_id,
+                    shard_dim=shard_dim,
+                    loaded_weight=loaded_weight,
+                    expert_data=expert_data,
+                    tp_rank=self.tp_rank)
             return
-        
-	# Case weight scales, zero_points and offset
+
+# Case weight scales, zero_points and offset
         if ("scale" in weight_name or "zero" in weight_name
                 or "offset" in weight_name):
             # load the weight scales and zp based on the quantization scheme

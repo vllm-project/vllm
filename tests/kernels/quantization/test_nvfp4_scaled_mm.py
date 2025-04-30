@@ -22,33 +22,33 @@ CUDA_DEVICES = ['cuda:0']
 FLOAT4_E2M1_MAX = scalar_types.float4_e2m1fn.max()
 FLOAT8_E4M3_MAX = torch.finfo(torch.float8_e4m3fn).max
 
-kE2M1ToFloat = torch.tensor([
-    0., 0.5, 1., 1.5, 
-    2., 3., 4., 6.
-], dtype=torch.float32)
+kE2M1ToFloat = torch.tensor([0., 0.5, 1., 1.5, 2., 3., 4., 6.],
+                            dtype=torch.float32)
+
 
 def break_fp4_bytes(a, dtype):
     assert a.dtype == torch.uint8
     m, n = a.shape
-    
+
     # Vectorized nibble processing
     a_flat = a.flatten()
     high = (a_flat & 0xF0) >> 4  # Upper nibbles
-    low = a_flat & 0x0F          # Lower nibbles
-    
+    low = a_flat & 0x0F  # Lower nibbles
+
     # Combine nibbles for batch processing
     combined = torch.stack((low, high), dim=1).flatten()
-    
+
     # Vectorized sign and magnitude extraction
-    signs = (combined & 0x08).to(torch.bool) # Sign bits
-    abs_vals = (combined & 0x07).to(torch.long) # Magnitude indices
-    
+    signs = (combined & 0x08).to(torch.bool)  # Sign bits
+    abs_vals = (combined & 0x07).to(torch.long)  # Magnitude indices
+
     # Device-aware lookup and sign application
     kE2M1 = kE2M1ToFloat.to(device=a.device)
     values = kE2M1[abs_vals] * torch.where(signs, -1.0, 1.0)
-    
+
     # Reshape to final form
     return values.reshape(m, n * 2).to(dtype=dtype)
+
 
 def convert_swizzled_to_linear(a_sf_swizzled: torch.Tensor, m, k, block_size):
     m_tiles = (m + 128 - 1) // 128
