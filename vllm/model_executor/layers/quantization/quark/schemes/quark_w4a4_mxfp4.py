@@ -28,8 +28,7 @@ class QuarkW4A4MXFP4(QuarkScheme):
 
     @classmethod
     def get_min_capability(cls) -> int:
-        # lovelace and up
-        return 89
+        return 70
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         layer.weight = torch.nn.Parameter(layer.weight.data,
