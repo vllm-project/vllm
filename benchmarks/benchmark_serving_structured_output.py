@@ -106,6 +106,16 @@ class SampleRequest:
     completion: str = None
 
 
+def get_tokenizer_from_args(
+        args: argparse.Namespace) -> PreTrainedTokenizerBase:
+    tokenizer_id = args.tokenizer if args.tokenizer else args.model
+    return get_tokenizer(
+        tokenizer_id,
+        trust_remote_code=args.trust_remote_code,
+        tokenizer_mode=args.tokenizer_mode,
+    )
+
+
 def sample_requests(tokenizer: PreTrainedTokenizerBase,
                     args: argparse.Namespace) -> list[SampleRequest]:
     if args.dataset == 'json' or args.dataset == 'json-unique':
@@ -416,7 +426,7 @@ async def benchmark(
     structured_output_ratio: float,
     structured_output_backend: str,
     goodput_config_dict: Optional[dict[str, float]] = None,
-):
+) -> tuple[dict, list[dict]]:
     if backend in ASYNC_REQUEST_FUNCS:
         request_func = ASYNC_REQUEST_FUNCS[backend]
     else:
@@ -640,7 +650,7 @@ async def benchmark(
     return result, ret
 
 
-def evaluate(ret, args):
+def evaluate(ret: list[dict], args: argparse.Namespace) -> Optional[float]:
 
     def _eval_correctness_json(expected, actual):
         # extract json string from string using regex
@@ -717,28 +727,7 @@ def check_goodput_args(args):
     return goodput_config_dict
 
 
-def main(args: argparse.Namespace):
-    print(args)
-    random.seed(args.seed)
-    np.random.seed(args.seed)
-
-    backend = args.backend
-    model_id = args.model
-    tokenizer_id = args.tokenizer if args.tokenizer is not None else args.model
-
-    if args.base_url is not None:
-        api_url = f"{args.base_url}{args.endpoint}"
-        base_url = f"{args.base_url}"
-    else:
-        api_url = f"http://{args.host}:{args.port}{args.endpoint}"
-        base_url = f"http://{args.host}:{args.port}"
-
-    tokenizer = get_tokenizer(
-        tokenizer_id,
-        trust_remote_code=args.trust_remote_code,
-        tokenizer_mode=args.tokenizer_mode,
-    )
-
+def fill_structure_type(args: argparse.Namespace):
     if args.dataset == 'grammar':
         args.structure_type = 'guided_grammar'
     elif args.dataset == 'regex':
@@ -747,6 +736,25 @@ def main(args: argparse.Namespace):
         args.structure_type = 'guided_choice'
     else:
         args.structure_type = 'guided_json'
+
+
+def main(args: argparse.Namespace):
+    print(args)
+    random.seed(args.seed)
+    np.random.seed(args.seed)
+
+    backend = args.backend
+    model_id = args.model
+
+    if args.base_url is not None:
+        api_url = f"{args.base_url}{args.endpoint}"
+        base_url = f"{args.base_url}"
+    else:
+        api_url = f"http://{args.host}:{args.port}{args.endpoint}"
+        base_url = f"http://{args.host}:{args.port}"
+
+    tokenizer = get_tokenizer_from_args(args)
+    fill_structure_type(args)
 
     if args.no_structured_output:
         args.structured_output_ratio = 0
@@ -799,7 +807,7 @@ def main(args: argparse.Namespace):
             "model_id":
             model_id,
             "tokenizer_id":
-            tokenizer_id,
+            args.tokenizer if args.tokenizer else args.model,
             "num_prompts":
             args.num_prompts,
             "request_rate":
@@ -822,9 +830,84 @@ def main(args: argparse.Namespace):
             json.dump(results, outfile, indent=4)
 
 
-if __name__ == "__main__":
+def get_structured_output_argparser():
     parser = FlexibleArgumentParser(
-        description="Benchmark the online serving throughput.")
+        description="Benchmark the structured output throughput.")
+    parser.add_argument(
+        "--model",
+        type=str,
+        required=True,
+        help="Name of the model.",
+    )
+    parser.add_argument("--dataset",
+                        default='json',
+                        choices=[
+                            'json', 'json-unique', 'grammar', 'regex',
+                            'choice', 'xgrammar_bench'
+                        ])
+    parser.add_argument("--json-schema-path",
+                        type=str,
+                        default=None,
+                        help="Path to json schema.")
+    parser.add_argument(
+        "--num-prompts",
+        type=int,
+        default=1000,
+        help="Number of prompts to process.",
+    )
+    parser.add_argument(
+        "--output-len",
+        type=int,
+        default=128,
+        help="Number of output tokens.",
+    )
+    parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument(
+        "--trust-remote-code",
+        action="store_true",
+        help="Trust remote code from huggingface",
+    )
+    parser.add_argument(
+        "--disable-tqdm",
+        action="store_true",
+        help="Specify to disable tqdm progress bar.",
+    )
+    parser.add_argument(
+        "--profile",
+        action="store_true",
+        help="Use Torch Profiler. The endpoint must be launched with "
+        "VLLM_TORCH_PROFILER_DIR to enable profiler.",
+    )
+    parser.add_argument("--structured-output-ratio",
+                        type=float,
+                        default=1.0,
+                        help="Ratio of Structured Outputs requests")
+    parser.add_argument("--structured-output-backend",
+                        type=str,
+                        choices=[
+                            "outlines", "lm-format-enforcer", "xgrammar",
+                            "guidance", "auto"
+                        ],
+                        default="auto",
+                        help="Backend to use for structured outputs")
+    parser.add_argument(
+        "--tokenizer",
+        type=str,
+        help=
+        "Name or path of the tokenizer, if not using the default tokenizer.",  # noqa: E501
+    )
+    parser.add_argument(
+        "--tokenizer-mode",
+        type=str,
+        default="auto",
+        help=
+        "Name or path of the tokenizer, if not using the default tokenizer.",  # noqa: E501
+    )
+    return parser
+
+
+if __name__ == "__main__":
+    parser = get_structured_output_argparser()
     parser.add_argument(
         "--backend",
         type=str,
@@ -846,16 +929,6 @@ if __name__ == "__main__":
         default="/v1/completions",
         help="API endpoint.",
     )
-    parser.add_argument("--dataset",
-                        default='json',
-                        choices=[
-                            'json', 'json-unique', 'grammar', 'regex',
-                            'choice', 'xgrammar_bench'
-                        ])
-    parser.add_argument("--json-schema-path",
-                        type=str,
-                        default=None,
-                        help="Path to json schema.")
     parser.add_argument(
         "--max-concurrency",
         type=int,
@@ -868,37 +941,6 @@ if __name__ == "__main__":
         "to execute at a time. This means that when used in combination, the "
         "actual request rate may be lower than specified with --request-rate, "
         "if the server is not processing requests fast enough to keep up.")
-    parser.add_argument(
-        "--model",
-        type=str,
-        required=True,
-        help="Name of the model.",
-    )
-    parser.add_argument(
-        "--tokenizer",
-        type=str,
-        help=
-        "Name or path of the tokenizer, if not using the default tokenizer.",  # noqa: E501
-    )
-    parser.add_argument(
-        "--tokenizer-mode",
-        type=str,
-        default="auto",
-        help=
-        "Name or path of the tokenizer, if not using the default tokenizer.",  # noqa: E501
-    )
-    parser.add_argument(
-        "--num-prompts",
-        type=int,
-        default=1000,
-        help="Number of prompts to process.",
-    )
-    parser.add_argument(
-        "--output-len",
-        type=int,
-        default=128,
-        help="Number of output tokens.",
-    )
     parser.add_argument(
         "--request-rate",
         type=float,
@@ -920,27 +962,10 @@ if __name__ == "__main__":
         "bursty requests. A higher burstiness value (burstiness > 1) "
         "results in a more uniform arrival of requests.",
     )
-    parser.add_argument("--seed", type=int, default=0)
-    parser.add_argument(
-        "--trust-remote-code",
-        action="store_true",
-        help="Trust remote code from huggingface",
-    )
-    parser.add_argument(
-        "--disable-tqdm",
-        action="store_true",
-        help="Specify to disable tqdm progress bar.",
-    )
     parser.add_argument(
         "--save-results",
         action="store_true",
         help="Specify to save benchmark results to a json file",
-    )
-    parser.add_argument(
-        "--profile",
-        action="store_true",
-        help="Use Torch Profiler. The endpoint must be launched with "
-        "VLLM_TORCH_PROFILER_DIR to enable profiler.",
     )
     parser.add_argument(
         "--result-dir",
@@ -996,18 +1021,6 @@ if __name__ == "__main__":
                         action='store_true',
                         default=False,
                         help="Whether to disable JSON decoding or not.")
-    parser.add_argument("--structured-output-ratio",
-                        type=float,
-                        default=1.0,
-                        help="Ratio of Structured Outputs requests")
-    parser.add_argument("--structured-output-backend",
-                        type=str,
-                        choices=[
-                            "outlines", "lm-format-enforcer", "xgrammar",
-                            "guidance", "auto"
-                        ],
-                        default="auto",
-                        help="Backend to use for structured outputs")
 
     args = parser.parse_args()
     main(args)

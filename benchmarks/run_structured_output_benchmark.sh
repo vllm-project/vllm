@@ -17,11 +17,12 @@ OUTPUT_DIR=${5:-"$SCRIPT_DIR/structured_output_benchmark_results"}
 
 GUIDED_RATIO=${6:-0.5}
 
+# Define QPS values to test
+QPS_VALUES=${7:-"70,60,50,25,20,15,10"}
+QPS_VALUES=(${QPS_VALUES//,/ })
+
 # Create output directory if it doesn't exist
 mkdir -p "$OUTPUT_DIR"
-
-# Define QPS values to test
-QPS_VALUES=(70 60 50 25 20 15 10)
 
 # Common parameters
 COMMON_PARAMS="--backend $BACKEND \
