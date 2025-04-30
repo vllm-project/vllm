@@ -743,12 +743,6 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
             ModelInputForHPUWithSamplingMetadata] = []
         self.spec_decode_enabled = \
             self.vllm_config.speculative_config is not None
-
-        # For multi-step scheduling
-        self.cached_step_outputs: List[torch.Tensor] = []
-        # For delayed sampling
-        self.cached_step_inputs: List[
-            ModelInputForHPUWithSamplingMetadata] = []
         self.sampler = get_sampler()
 
     def _set_gc_threshold(self) -> None:
@@ -2571,21 +2565,6 @@ class HPUModelRunner(HPUModelRunnerBase[ModelInputForHPUWithSamplingMetadata]):
                                    sampling_metadata=sampling_metadata,
                                    is_prompt=is_prompt,
                                    virtual_engine=virtual_engine)
-
-    def _get_seq_ids(self, model_input):
-        return ([
-            sg.seq_ids[0] for sg in model_input.sampling_metadata.seq_groups
-        ])
-
-    def _pad_to_max_num_seqs(self, tensor, value):
-        padding_needed = self.max_num_seqs - tensor.size(0)
-        if padding_needed:
-            padding = torch.full((padding_needed, *tensor.shape[1:]),
-                                 value,
-                                 device=tensor.device,
-                                 dtype=tensor.dtype)
-            tensor = torch.cat([tensor, padding])
-        return tensor
 
     def _get_seq_ids(self, model_input):
         return ([
