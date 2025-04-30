@@ -310,7 +310,7 @@ class HpuModelAdapter:
         self.block_size = vllm_config.cache_config.block_size
         self.dtype = vllm_config.model_config.dtype
         self.layer_names = layer_names
-        
+
         enforce_eager = vllm_config.model_config.enforce_eager
         if not is_fake_hpu() and not htorch.utils.internal.is_lazy(
         ) and not enforce_eager:
@@ -1671,8 +1671,8 @@ class HPUModelRunner:
                 htorch.core.mark_step()
                 sampling_metadata = self._prepare_sampling(
                     batch_changed, req_id, pad_to=logits_device.shape[0])
-                sampler_output = self.sampler(logits=logits_device,
-                                              sampling_metadata=sampling_metadata)
+                sampler_output = self.sampler(
+                    logits=logits_device, sampling_metadata=sampling_metadata)
                 htorch.core.mark_step()
                 prefill_sampler_outputs.append(sampler_output)
                 if self.input_batch.num_prompt_logprobs:
@@ -1702,8 +1702,8 @@ class HPUModelRunner:
                 batch_changed,
                 pd_info.decode_req_ids,
                 pad_to=logits_device.shape[0])
-            sampler_output = self.sampler(
-                logits=logits_device, sampling_metadata=sampling_metadata)
+            sampler_output = self.sampler(logits=logits_device,
+                                          sampling_metadata=sampling_metadata)
             decode_sampler_outputs.append(sampler_output)
             decode_output_tokens_device = sampler_output.sampled_token_ids
             htorch.core.mark_step()

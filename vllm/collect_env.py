@@ -269,11 +269,7 @@ def get_hpu_info():
         command = ["hl-smi", "-q", "-d", "PRODUCT"]
         lines = subprocess.Popen(command,
                                  stdout=subprocess.PIPE,
-                                 universal_newlines=True).stdout
-        if lines:
-            lines = lines.readlines()
-        else:
-            lines = []
+                                 universal_newlines=True).stdout.readlines() # type: ignore
         lines = [l.strip('\t') for l in lines]
         hpu_count = None
         hpu_model = None
