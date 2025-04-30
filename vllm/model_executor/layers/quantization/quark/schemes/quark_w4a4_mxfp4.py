@@ -7,11 +7,11 @@ import torch.nn.functional as F
 
 import vllm.envs as envs
 from vllm.model_executor.layers.quantization.quark.schemes import QuarkScheme
+from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
+    OCP_MX_BLOCK_SIZE, per_token_group_quant_mxfp4)
 from vllm.model_executor.parameter import (GroupQuantScaleParameter,
                                            PackedvLLMParameter)
 from vllm.platforms import current_platform
-
-from vllm.model_executor.layers.quantization.utils.mxfp4_utils import OCP_MX_BLOCK_SIZE, per_token_group_quant_mxfp4
 
 __all__ = ["QuarkW4A4MXFP4"]
 
@@ -25,17 +25,6 @@ class QuarkW4A4MXFP4(QuarkScheme):
         self.weight_quant_spec = weight_quant_spec
         self.input_quant_spec = input_quant_spec
         self.emulate = not current_platform.supports_mx()
-
-        if self.emulate:
-            try:
-                from quark.torch.export.nn.modules import realquantizer
-                from quark.torch.quantization.config.config import (
-                    QuantizationSpec)
-            except ImportError as err:
-                raise ImportError(
-                    "The package `amd-quark` is required to use AMD Quark "
-                    "MX-FP4 models. Please install it with `pip install "
-                    "amd-quark`.") from err
 
     @classmethod
     def get_min_capability(cls) -> int:
@@ -75,12 +64,13 @@ class QuarkW4A4MXFP4(QuarkScheme):
 
             if not envs.VLLM_QUARK_EMU_MEM_OPT:
                 layer.weight = torch.nn.Parameter(
-                    weight_quantizer(layer.weight.data).to(
-                        self.out_dtype),
+                    weight_quantizer(layer.weight.data).to(self.out_dtype),
                     requires_grad=False,
                 )
+            else:
+                self.weight_quantizer = weight_quantizer
             layer.weight_scale = None
-            
+
             # This call is necessary to release the scales memory.
             torch.cuda.empty_cache()
 
