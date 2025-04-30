@@ -42,6 +42,7 @@ extensions = [
     "sphinx_copybutton",
     "sphinx.ext.autodoc",
     "sphinx.ext.autosummary",
+    "autodoc2",
     "myst_parser",
     "sphinxarg.ext",
     "sphinx_design",
@@ -50,6 +51,16 @@ extensions = [
 myst_enable_extensions = [
     "colon_fence",
 ]
+autodoc2_render_plugin = "myst"
+autodoc2_hidden_objects = ["undoc", "dunder", "private", "inherited"]
+autodoc2_packages = [
+    {
+        "path": "../../vllm",
+        "auto_mode": False,
+        "exclude_dirs": ["__pycache__", "third_party"],
+    },
+]
+suppress_warnings = ["autodoc2.dup_item"]
 
 # Add any paths that contain templates here, relative to this directory.
 templates_path = ['_templates']
