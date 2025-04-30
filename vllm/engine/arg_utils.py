@@ -19,14 +19,14 @@ from vllm.config import (BlockSize, CacheConfig, CacheDType, CompilationConfig,
                          ConfigFormat, ConfigType, DecodingConfig, Device,
                          DeviceConfig, DistributedExecutorBackend,
                          GuidedDecodingBackend, GuidedDecodingBackendV1,
-                         HfOverrides, KVTransferConfig, LoadConfig, LoadFormat,
-                         LoRAConfig, ModelConfig, ModelDType, ModelImpl,
-                         MultiModalConfig, ObservabilityConfig, ParallelConfig,
-                         PoolerConfig, PrefixCachingHashAlgo,
-                         PromptAdapterConfig, SchedulerConfig, SchedulerPolicy,
-                         SpeculativeConfig, TaskOption, TokenizerMode,
-                         TokenizerPoolConfig, VllmConfig, get_attr_docs,
-                         get_field)
+                         HfOverrides, KVEventsConfig, KVTransferConfig,
+                         LoadConfig, LoadFormat, LoRAConfig, ModelConfig,
+                         ModelDType, ModelImpl, MultiModalConfig,
+                         ObservabilityConfig, ParallelConfig, PoolerConfig,
+                         PrefixCachingHashAlgo, PromptAdapterConfig,
+                         SchedulerConfig, SchedulerPolicy, SpeculativeConfig,
+                         TaskOption, TokenizerMode, TokenizerPoolConfig,
+                         VllmConfig, get_attr_docs, get_field)
 from vllm.executor.executor_base import ExecutorBase
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import QuantizationMethods
@@ -353,6 +353,7 @@ class EngineArgs:
     worker_extension_cls: str = ParallelConfig.worker_extension_cls
 
     kv_transfer_config: Optional[KVTransferConfig] = None
+    kv_events_config: Optional[KVEventsConfig] = None
 
     generation_config: str = ModelConfig.generation_config
     enable_sleep_mode: bool = ModelConfig.enable_sleep_mode
@@ -769,6 +770,10 @@ class EngineArgs:
                             default=None,
                             help='The configurations for distributed KV cache '
                             'transfer. Should be a JSON string.')
+        parser.add_argument('--kv-events-config',
+                            type=KVEventsConfig.from_cli,
+                            default=None,
+                            help='The configurations for event publishing.')
 
         parser.add_argument(
             '--worker-cls',
@@ -1125,6 +1130,7 @@ class EngineArgs:
             prompt_adapter_config=prompt_adapter_config,
             compilation_config=self.compilation_config,
             kv_transfer_config=self.kv_transfer_config,
+            kv_events_config=self.kv_events_config,
             additional_config=self.additional_config,
         )
 
