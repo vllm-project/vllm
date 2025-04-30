@@ -35,13 +35,6 @@ pip install -v -r requirements/xpu.txt
 VLLM_TARGET_DEVICE=xpu python setup.py install
 ```
 
-- Finally, due to a known issue of conflict dependency(oneapi related) in torch-xpu 2.6 and ipex-xpu 2.6, we install ipex here. This will be fixed in the ipex-xpu 2.7.
-
-```console
-pip install intel-extension-for-pytorch==2.6.10+xpu \
-    --extra-index-url=https://pytorch-extension.intel.com/release-whl/stable/xpu/us/
-```
-
 :::{note}
 - FP16 is the default data type in the current XPU backend. The BF16 data
   type is supported on Intel Data Center GPU, not supported on Intel Arc GPU yet.
@@ -81,5 +74,3 @@ python -m vllm.entrypoints.openai.api_server \
 ```
 
 By default, a ray instance will be launched automatically if no existing one is detected in the system, with `num-gpus` equals to `parallel_config.world_size`. We recommend properly starting a ray cluster before execution, referring to the <gh-file:examples/online_serving/run_cluster.sh> helper script.
-
-There are some new features coming with ipex-xpu 2.6, e.g. **chunked prefill**, **V1 engine support**, **lora**, **MoE**, etc.
