@@ -120,7 +120,8 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
                                          trust_remote_code=True),
     "BaichuanForCausalLM": _HfExamplesInfo("baichuan-inc/Baichuan2-7B-chat",
                                          trust_remote_code=True),
-    "BambaForCausalLM": _HfExamplesInfo("ibm-ai-platform/Bamba-9B"),
+    "BambaForCausalLM": _HfExamplesInfo("ibm-ai-platform/Bamba-9B",
+                                        extras={"tiny": "hmellor/bamba-tiny-random"}),  # noqa: E501
     "BloomForCausalLM": _HfExamplesInfo("bigscience/bloom-560m",
                                         {"1b": "bigscience/bloomz-1b1"}),
     "ChatGLMModel": _HfExamplesInfo("THUDM/chatglm3-6b",
@@ -191,7 +192,7 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
                                                 trust_remote_code=True),
     "MistralForCausalLM": _HfExamplesInfo("mistralai/Mistral-7B-Instruct-v0.1"),
     "MixtralForCausalLM": _HfExamplesInfo("mistralai/Mixtral-8x7B-Instruct-v0.1",  # noqa: E501
-                                          {"falcon3": "ehristoforu/Falcon3-MoE-2x7B-Insruct"}),  # noqa: E501
+                                          {"tiny": "TitanML/tiny-mixtral"}),  # noqa: E501
     "QuantMixtralForCausalLM": _HfExamplesInfo("mistral-community/Mixtral-8x22B-v0.1-AWQ"),  # noqa: E501
     "MptForCausalLM": _HfExamplesInfo("mpt", is_available_online=False),
     "MPTForCausalLM": _HfExamplesInfo("mosaicml/mpt-7b"),
@@ -217,16 +218,8 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "Qwen2ForCausalLM": _HfExamplesInfo("Qwen/Qwen2-0.5B-Instruct",
                                         extras={"2.5": "Qwen/Qwen2.5-0.5B-Instruct"}), # noqa: E501
     "Qwen2MoeForCausalLM": _HfExamplesInfo("Qwen/Qwen1.5-MoE-A2.7B-Chat"),
-    "Qwen3ForCausalLM": _HfExamplesInfo(
-        "Qwen/Qwen3-8B",
-        is_available_online=False,
-        min_transformers_version="4.51"
-    ),
-    "Qwen3MoeForCausalLM": _HfExamplesInfo(
-        "Qwen/Qwen3-MoE-15B-A2B",
-        is_available_online=False,
-        min_transformers_version="4.51"
-    ),
+    "Qwen3ForCausalLM": _HfExamplesInfo("Qwen/Qwen3-8B"),
+    "Qwen3MoeForCausalLM": _HfExamplesInfo("Qwen/Qwen3-30B-A3B"),
     "RWForCausalLM": _HfExamplesInfo("tiiuae/falcon-40b",
                                      is_available_online=False),
     "StableLMEpochForCausalLM": _HfExamplesInfo("stabilityai/stablelm-zephyr-3b",  # noqa: E501
@@ -337,6 +330,8 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     "MiniCPMV": _HfExamplesInfo("openbmb/MiniCPM-Llama3-V-2_5",
                                 extras={"2.6": "openbmb/MiniCPM-V-2_6"},  # noqa: E501
                                 trust_remote_code=True),
+    "MiniMaxVL01ForConditionalGeneration": _HfExamplesInfo("MiniMaxAI/MiniMax-VL-01", # noqa: E501
+                                              trust_remote_code=True),
     "Mistral3ForConditionalGeneration": _HfExamplesInfo("mistralai/Mistral-Small-3.1-24B-Instruct-2503",  # noqa: E501
                                                         extras={"fp8": "nm-testing/Mistral-Small-3.1-24B-Instruct-2503-FP8-dynamic"}),  # noqa: E501
     "MolmoForCausalLM": _HfExamplesInfo("allenai/Molmo-7B-D-0924",

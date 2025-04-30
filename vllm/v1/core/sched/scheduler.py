@@ -441,7 +441,7 @@ class Scheduler(SchedulerInterface):
         grammar_bitmask = self.structured_output_manager.grammar_bitmask(
             self.requests,
             structured_output_request_ids,
-            len(self.running),
+            scheduled_spec_decode_tokens,
         )
         # Construct the scheduler output.
         new_reqs_data = [
@@ -682,10 +682,6 @@ class Scheduler(SchedulerInterface):
                         self.encoder_cache_manager.free_encoder_input(
                             request, input_id)
 
-            # Add newly generated spec token ids to the request.
-            if spec_token_ids is not None:
-                request.spec_token_ids = spec_token_ids[req_index]
-
             stopped = False
             new_logprobs = None
             new_token_ids = generated_token_ids
@@ -716,6 +712,17 @@ class Scheduler(SchedulerInterface):
                 # check above, so safe to ignore type warning
                 request.structured_output_request.grammar.accept_tokens(  # type: ignore[union-attr]
                     req_id, new_token_ids)
+
+            # Add newly generated spec token ids to the request.
+            if spec_token_ids is not None:
+                if request.use_structured_output:
+                    metadata = request.structured_output_request
+                    assert metadata is not None and metadata.grammar is not None
+                    # Needs to happen after new_token_ids are accepted.
+                    request.spec_token_ids = metadata.grammar.validate_tokens(
+                        spec_token_ids[req_index])
+                else:
+                    request.spec_token_ids = spec_token_ids[req_index]
 
             # Get prompt logprobs for this request.
             prompt_logprobs_tensors = prompt_logprobs_dict.get(req_id)
