@@ -227,6 +227,7 @@ class MistralTokenizer(TokenizerBase):
         else:
             assert Path(
                 path_or_repo_id).is_file(), f"Invalid path: {path_or_repo_id}"
+            tokenizer_file = str(Path(path_or_repo_id))
 
         from mistral_common.tokens.tokenizers.mistral import (
             MistralTokenizer as PublicMistralTokenizer)
