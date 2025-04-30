@@ -46,7 +46,8 @@ def _lora_expand_kernel(
         ADD_INPUTS: tl.constexpr,
         CAST_TYPE: tl.constexpr,
         SLICE_NUM: tl.constexpr,
-        SAME_STRIDE: tl.constexpr):
+        SAME_STRIDE: tl.constexpr,
+        maxnreg: tl.constexpr):
 
     cta_n_num = tl.cdiv(N, BLOCK_N)
     cta_m_num = tl.cdiv(M, BLOCK_M)
