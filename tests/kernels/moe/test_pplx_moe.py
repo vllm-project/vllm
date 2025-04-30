@@ -504,8 +504,7 @@ def torch_pplx_moe(pgi, dp_size, a, w1, w2, scores, topk):
         chunk_by_rank(w2, rank, world_size),
         chunk_topk_weight,
         chunk_topk_ids,
-        global_num_experts=num_experts
-    )
+        global_num_experts=num_experts)
 
     torch.cuda.synchronize()
 
