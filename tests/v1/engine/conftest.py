@@ -13,6 +13,8 @@ from tests.v1.engine.utils import (NUM_PROMPT_LOGPROBS_UNDER_TEST,
 from vllm.engine.arg_utils import EngineArgs
 from vllm.transformers_utils.tokenizer_group import init_tokenizer_from_configs
 
+from ...distributed.conftest import publisher_config, random_port  # noqa: F401
+
 from tests.v1.engine.utils import FULL_STRINGS  # isort: skip
 
 EngineCoreSampleLogprobsType = list[tuple[torch.Tensor, torch.Tensor]]
