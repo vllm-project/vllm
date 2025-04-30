@@ -375,21 +375,8 @@ class InputPreprocessor:
         """Async version of :meth:`_extract_prompt_components`."""
         parsed = parse_singleton_prompt(prompt)
 
-        if parsed["type"] == "str":
-            prompt_text = parsed["content"]
-            prompt_token_ids = await self._tokenize_prompt_async(
-                prompt=prompt_text,
-                lora_request=lora_request,
-                tokenization_kwargs=tokenization_kwargs,
-            )
-
-            return token_inputs(
-                prompt=prompt_text,
-                prompt_token_ids=prompt_token_ids,
-            )
-
-        prompt_text, prompt_token_ids, token_type_ids = self._get_prompt_data(
-            parsed)
+        prompt_text, prompt_token_ids, token_type_ids, cache_salt = \
+            self._get_prompt_data(parsed)
 
         if parsed["type"] != "str" and parsed["content"].get(
                 "multi_modal_data") is not None:
@@ -406,6 +393,7 @@ class InputPreprocessor:
             prompt_token_ids = await self._tokenize_prompt_async(
                 prompt_text,
                 lora_request=lora_request,
+                tokenization_kwargs=tokenization_kwargs,
             )
 
         return token_inputs(
