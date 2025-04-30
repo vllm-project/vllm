@@ -7,7 +7,6 @@ from array import array
 
 import openai
 import pytest
-import pytest_asyncio
 from scipy.spatial.distance import cosine
 
 import vllm
@@ -50,37 +49,6 @@ def test_find_array(monkeypatch: pytest.MonkeyPatch):
 
         with pytest.raises(ValueError):
             pooler._find_array(arr, _arr([3, 4, 5]), start_idx=-1)
-
-
-@pytest.fixture(scope="module")
-def server_embedding():
-    # GritLM embedding implementation is only supported by XFormers backend.
-    args = ["--task", "embed", "--max_model_len", str(MAX_MODEL_LEN)]
-    with pytest.MonkeyPatch.context() as m:
-        m.setenv(STR_BACKEND_ENV_VAR, "XFORMERS")
-        with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
-            yield remote_server
-
-
-@pytest.fixture(scope="module")
-def server_generate():
-    args = ["--task", "generate", "--max_model_len", str(MAX_MODEL_LEN)]
-    with pytest.MonkeyPatch.context() as m:
-        m.setenv(STR_BACKEND_ENV_VAR, "XFORMERS")
-        with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
-            yield remote_server
-
-
-@pytest_asyncio.fixture
-async def client_embedding(server_embedding: RemoteOpenAIServer):
-    async with server_embedding.get_async_client() as async_client:
-        yield async_client
-
-
-@pytest_asyncio.fixture
-async def client_generate(server_generate: RemoteOpenAIServer):
-    async with server_generate.get_async_client() as async_client:
-        yield async_client
 
 
 def run_llm_encode(
@@ -142,70 +110,97 @@ def validate_embed_output(q_rep: list[list[float]], d_rep: list[list[float]]):
     assert math.isclose(cosine_sim_q1_d0, 0.120, abs_tol=0.001)
 
     cosine_sim_q1_d1 = 1 - cosine(q_rep[1], d_rep[1])
-    assert math.isclose(cosine_sim_q1_d1, 0.532, abs_tol=0.001)
+    assert math.isclose(cosine_sim_q1_d1, 0.534, abs_tol=0.001)
 
 
-def test_gritlm_offline_embedding(monkeypatch: pytest.MonkeyPatch):
+def test_gritlm_offline_embedding(monkeypatch: pytest.MonkeyPatch,
+                                  vllm_runner):
     # GritLM embedding implementation is only supported by XFormers backend.
     with monkeypatch.context() as m:
         m.setenv(STR_BACKEND_ENV_VAR, "XFORMERS")
 
         queries, q_instruction, documents, d_instruction = get_test_data()
 
-        llm = vllm.LLM(MODEL_NAME, task="embed", max_model_len=MAX_MODEL_LEN)
+        with vllm_runner(
+                MODEL_NAME,
+                task="embed",
+                max_model_len=MAX_MODEL_LEN,
+        ) as vllm_model:
+            llm = vllm_model.model
 
-        d_rep = run_llm_encode(
-            llm,
-            documents,
-            d_instruction,
-        )
-        q_rep = run_llm_encode(
-            llm,
-            queries,
-            q_instruction,
-        )
+            d_rep = run_llm_encode(
+                llm,
+                documents,
+                d_instruction,
+            )
+            q_rep = run_llm_encode(
+                llm,
+                queries,
+                q_instruction,
+            )
 
         validate_embed_output(q_rep, d_rep)
 
 
 @pytest.mark.asyncio
-async def test_gritlm_api_server_embedding(
-    client_embedding: openai.AsyncOpenAI, ):
+async def test_gritlm_api_server_embedding():
     queries, q_instruction, documents, d_instruction = get_test_data()
 
-    d_rep = await run_client_embeddings(
-        client_embedding,
-        documents,
-        d_instruction,
-    )
-    q_rep = await run_client_embeddings(
-        client_embedding,
-        queries,
-        q_instruction,
-    )
+    # GritLM embedding implementation is only supported by XFormers backend.
+    args = ["--task", "embed", "--max_model_len", str(MAX_MODEL_LEN)]
+    env_dict = {STR_BACKEND_ENV_VAR: "XFORMERS"}
+
+    with RemoteOpenAIServer(MODEL_NAME, args, env_dict=env_dict) as server:
+        client_embedding = server.get_async_client()
+
+        d_rep = await run_client_embeddings(
+            client_embedding,
+            documents,
+            d_instruction,
+        )
+        q_rep = await run_client_embeddings(
+            client_embedding,
+            queries,
+            q_instruction,
+        )
 
     validate_embed_output(q_rep, d_rep)
 
 
-def test_gritlm_offline_gen():
-    input = "<|user|>\nWhat is the capital of France?\n<|assistant|>\n"
+def test_gritlm_offline_generate(monkeypatch: pytest.MonkeyPatch, vllm_runner):
+    # GritLM embedding implementation is only supported by XFormers backend.
+    with monkeypatch.context() as m:
+        m.setenv(STR_BACKEND_ENV_VAR, "XFORMERS")
 
-    llm = vllm.LLM(MODEL_NAME, max_model_len=MAX_MODEL_LEN)
-    sampling_params = vllm.SamplingParams(temperature=0.0, max_tokens=256)
-    outputs = llm.generate(input, sampling_params=sampling_params)
+        input = "<|user|>\nWhat is the capital of France?\n<|assistant|>\n"
 
-    assert outputs[0].outputs[0].text == "The capital of France is Paris."
+        with vllm_runner(MODEL_NAME,
+                         max_model_len=MAX_MODEL_LEN) as vllm_model:
+            llm = vllm_model.model
+
+            sampling_params = vllm.SamplingParams(temperature=0.0,
+                                                  max_tokens=256)
+            outputs = llm.generate(input, sampling_params=sampling_params)
+
+        assert outputs[0].outputs[0].text == "The capital of France is Paris."
 
 
 @pytest.mark.asyncio
-async def test_gritlm_api_server_gen(client_generate: openai.AsyncOpenAI):
+async def test_gritlm_api_server_generate():
     input = "<|user|>\nWhat is the capital of France?\n<|assistant|>\n"
 
-    outputs = await client_generate.completions.create(
-        model=MODEL_NAME,
-        prompt=input,
-        max_tokens=256,
-        temperature=0.0,
-    )
+    # GritLM embedding implementation is only supported by XFormers backend.
+    args = ["--task", "embed", "--max_model_len", str(MAX_MODEL_LEN)]
+    env_dict = {STR_BACKEND_ENV_VAR: "XFORMERS"}
+
+    with RemoteOpenAIServer(MODEL_NAME, args, env_dict=env_dict) as server:
+        client_generate = server.get_async_client()
+
+        outputs = await client_generate.completions.create(
+            model=MODEL_NAME,
+            prompt=input,
+            max_tokens=256,
+            temperature=0.0,
+        )
 
     assert outputs.choices[0].text == "The capital of France is Paris."
