@@ -9,7 +9,7 @@ awscli
 boto3
 botocore
 datasets
-ray >= 2.10.0
+ray>=2.10.0,<2.45.0
 peft
 pytest-asyncio
 tensorizer>=2.9.0
