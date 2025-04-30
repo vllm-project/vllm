@@ -67,7 +67,7 @@ def run_test(
         "disable_mm_preprocessor_cache": True,
     }
     if model_info.tokenizer:
-        vllm_runner_kwargs_["tokenizer"] = model_info.tokenizer
+        vllm_runner_kwargs_["tokenizer_name"] = model_info.tokenizer
     if model_info.tokenizer_mode:
         vllm_runner_kwargs_["tokenizer_mode"] = model_info.tokenizer_mode
     if model_info.hf_overrides:
