@@ -1,12 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import pytest
+
 from ...utils import check_logprobs_close
 
 # Path of the checkpoints
 MODELS = [
     "ibm-research/granite-4.0-tiny-test",
 ]
+
 
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("dtype", ["float16", "bfloat16"])

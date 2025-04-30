@@ -15,10 +15,10 @@ from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
-from vllm.model_executor.layers.mamba.mamba_mixer2 import (
-    MambaMixer2, extra_groups_for_head_shards)
 from vllm.model_executor.layers.mamba.mamba2_metadata import (
     Mamba2Metadata, prepare_mamba2_metadata)
+from vllm.model_executor.layers.mamba.mamba_mixer2 import (
+    MambaMixer2, extra_groups_for_head_shards)
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import (
@@ -30,14 +30,12 @@ from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
 from vllm.utils import LayerBlockType
 
-from .interfaces import (HasInnerState, IsHybrid, SupportsLoRA, SupportsPP,
-                         SupportsQuant, SupportsV0Only)
-from .utils import (AutoWeightsLoader,
-                    make_empty_intermediate_tensors_factory, make_layers,
-                    maybe_prefix)
-
 from .granitemoe import GraniteMoeMoE
 from .granitemoeshared import GraniteMoeSharedMLP
+from .interfaces import (HasInnerState, IsHybrid, SupportsLoRA, SupportsPP,
+                         SupportsQuant, SupportsV0Only)
+from .utils import (AutoWeightsLoader, make_empty_intermediate_tensors_factory,
+                    make_layers, maybe_prefix)
 
 
 class GraniteMoeHybridMambaDecoderLayer(nn.Module):
@@ -208,29 +206,31 @@ class GraniteMoeHybridAttention(nn.Module):
         self.head_dim = self.hidden_size // self.num_heads
         self.num_key_value_heads = config.num_key_value_heads
 
-        self.q_proj = ReplicatedLinear(   self.hidden_size,
-                                          self.num_heads * self.head_dim,
-                                          bias=self.attention_bias,
-                                          quant_config=quant_config,
-                                          prefix=f"{prefix}.q_proj")
+        self.q_proj = ReplicatedLinear(self.hidden_size,
+                                       self.num_heads * self.head_dim,
+                                       bias=self.attention_bias,
+                                       quant_config=quant_config,
+                                       prefix=f"{prefix}.q_proj")
 
-        self.k_proj = ReplicatedLinear(   self.hidden_size,
-                                          self.num_key_value_heads * self.head_dim,
-                                          bias=self.attention_bias,
-                                          quant_config=quant_config,
-                                          prefix=f"{prefix}.k_proj")
+        self.k_proj = ReplicatedLinear(self.hidden_size,
+                                       self.num_key_value_heads *
+                                       self.head_dim,
+                                       bias=self.attention_bias,
+                                       quant_config=quant_config,
+                                       prefix=f"{prefix}.k_proj")
 
-        self.v_proj = ReplicatedLinear(   self.hidden_size,
-                                          self.num_key_value_heads * self.head_dim,
-                                          bias=self.attention_bias,
-                                          quant_config=quant_config,
-                                          prefix=f"{prefix}.v_proj")
+        self.v_proj = ReplicatedLinear(self.hidden_size,
+                                       self.num_key_value_heads *
+                                       self.head_dim,
+                                       bias=self.attention_bias,
+                                       quant_config=quant_config,
+                                       prefix=f"{prefix}.v_proj")
 
-        self.o_proj = ReplicatedLinear(   self.hidden_size,
-                                          self.hidden_size,
-                                          bias=self.attention_bias,
-                                          quant_config=quant_config,
-                                          prefix=f"{prefix}.o_proj")
+        self.o_proj = ReplicatedLinear(self.hidden_size,
+                                       self.hidden_size,
+                                       bias=self.attention_bias,
+                                       quant_config=quant_config,
+                                       prefix=f"{prefix}.o_proj")
 
         self.position_embedding_type = config.position_embedding_type
         if self.position_embedding_type == "rope":
@@ -273,11 +273,11 @@ class GraniteMoeHybridAttention(nn.Module):
         return hidden_states
 
 
-
 ALL_DECODER_LAYER_TYPES = {
     "attention": GraniteMoeHybridAttentionDecoderLayer,
     "mamba": GraniteMoeHybridMambaDecoderLayer,
 }
+
 
 class GraniteMoeHybridModel(nn.Module):
 
@@ -370,8 +370,7 @@ class GraniteMoeHybridModel(nn.Module):
                 hidden_states=hidden_states,
                 residual=residual,
                 mamba_cache_params=layer_mamba_cache_params,
-                mamba2_metadata=mamba2_metadata
-            )
+                mamba2_metadata=mamba2_metadata)
 
         if not get_pp_group().is_last_rank:
             return IntermediateTensors({
@@ -382,22 +381,27 @@ class GraniteMoeHybridModel(nn.Module):
         hidden_states = self.norm(hidden_states)
         return hidden_states
 
-    def load_weights(self,
-                     weights: Iterable[Tuple[str, torch.Tensor]]
-                     ) -> Set[str]:
+    def load_weights(self, weights: Iterable[Tuple[str,
+                                                   torch.Tensor]]) -> Set[str]:
         params_dict = dict(self.named_parameters())
         loaded_params: Set[str] = set()
-        
+
         def _load(n, p):
             param = params_dict[n]
-            weight_loader = getattr(param, "weight_loader", default_weight_loader)
+            weight_loader = getattr(param, "weight_loader",
+                                    default_weight_loader)
             weight_loader(param, p)
             loaded_params.add(n)
-        
+
         def _load_expert(n, p, name, shard_id, expert_id):
             param = params_dict[n]
-            weight_loader = getattr(param, "weight_loader", default_weight_loader)
-            weight_loader(param, p, name, shard_id=shard_id, expert_id=expert_id)
+            weight_loader = getattr(param, "weight_loader",
+                                    default_weight_loader)
+            weight_loader(param,
+                          p,
+                          name,
+                          shard_id=shard_id,
+                          expert_id=expert_id)
             loaded_params.add(n)
 
         for n, p in weights:
@@ -405,8 +409,9 @@ class GraniteMoeHybridModel(nn.Module):
                 n = n.replace("A_log", "A")
 
             # Logic analogous to: https://github.com/vllm-project/vllm/blob/f49e5aff11c986ed4d45202b1716c5d74786efa9/vllm/model_executor/models/granitemoeshared.py#L215
-            # Mapping different experts' layout: from HF (input_linear, output_linear, router)
-            # to vLLM (experts_w13({e}.w1, {e}.w2), experts_w3({e}.w3), gate)
+            # Mapping different experts' layout:
+            #  from HF (input_linear, output_linear, router)
+            #  to vLLM (experts_w13({e}.w1, {e}.w2), experts_w3({e}.w3), gate)
             if n.endswith('.block_sparse_moe.input_linear.weight'):
                 for e in range(p.size(0)):
                     w1_name = n.replace(
@@ -416,10 +421,16 @@ class GraniteMoeHybridModel(nn.Module):
                         '.block_sparse_moe.input_linear.weight',
                         f".block_sparse_moe.experts.{e}.w3.weight")
                     w1_param, w3_param = p[e].chunk(2, dim=0)
-                    _load_expert(n.replace('.input_linear.','.experts.w13_'),
-                                 w1_param, w1_name, shard_id='w1', expert_id=e)
-                    _load_expert(n.replace('.input_linear.','.experts.w13_'),
-                                 w3_param, w3_name, shard_id='w3', expert_id=e)
+                    _load_expert(n.replace('.input_linear.', '.experts.w13_'),
+                                 w1_param,
+                                 w1_name,
+                                 shard_id='w1',
+                                 expert_id=e)
+                    _load_expert(n.replace('.input_linear.', '.experts.w13_'),
+                                 w3_param,
+                                 w3_name,
+                                 shard_id='w3',
+                                 expert_id=e)
             elif n.endswith('.block_sparse_moe.output_linear.weight'):
                 for e in range(p.size(0)):
                     w2_name = n.replace(
@@ -427,19 +438,23 @@ class GraniteMoeHybridModel(nn.Module):
                         f".block_sparse_moe.experts.{e}.w2.weight")
                     w2_param = p[e]
                     _load_expert(n.replace('.output_linear.', '.experts.w2_'),
-                                 w2_param, w2_name, shard_id='w2', expert_id=e)
+                                 w2_param,
+                                 w2_name,
+                                 shard_id='w2',
+                                 expert_id=e)
             elif n.endswith('.block_sparse_moe.router.layer.weight'):
                 gate_name = n.replace('.block_sparse_moe.router.layer.weight',
                                       ".block_sparse_moe.gate.weight")
                 _load(gate_name, p)
             else:
-                _load(n,p)
+                _load(n, p)
 
         return loaded_params
 
 
-class GraniteMoeHybridForCausalLM(nn.Module, HasInnerState, SupportsLoRA, 
-        SupportsPP, IsHybrid, SupportsV0Only, SupportsQuant):
+class GraniteMoeHybridForCausalLM(nn.Module, HasInnerState, SupportsLoRA,
+                                  SupportsPP, IsHybrid, SupportsV0Only,
+                                  SupportsQuant):
     packed_modules_mapping = {}
     embedding_modules = {
         "embed_tokens": "input_embeddings",
@@ -463,7 +478,8 @@ class GraniteMoeHybridForCausalLM(nn.Module, HasInnerState, SupportsLoRA,
         self.config = config
         self.scheduler_config = scheduler_config
         self.model = GraniteMoeHybridModel(vllm_config=vllm_config,
-                                prefix=maybe_prefix(prefix, "model"))
+                                           prefix=maybe_prefix(
+                                               prefix, "model"))
         self.unpadded_vocab_size = config.vocab_size
         if lora_config:
             self.unpadded_vocab_size += lora_config.lora_extra_vocab_size
@@ -502,11 +518,11 @@ class GraniteMoeHybridForCausalLM(nn.Module, HasInnerState, SupportsLoRA,
                 **kwargs):
         if self.mamba_cache is None:
             num_mamba_layers = self.model_config.get_num_layers_by_block_type(
-                       self.vllm_config.parallel_config, LayerBlockType.mamba)
+                self.vllm_config.parallel_config, LayerBlockType.mamba)
             self.mamba_cache = MambaCacheManager(
                 self.vllm_config, self.model_config.dtype, num_mamba_layers,
                 *self._get_mamba_cache_shape())
-        
+
         mamba_cache_params = self.mamba_cache.current_run_tensors(**kwargs)
         hidden_states = self.model(input_ids, positions, mamba_cache_params,
                                    intermediate_tensors, inputs_embeds)
