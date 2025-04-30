@@ -379,7 +379,7 @@ class EngineArgs:
 
     # Deprecated, use reasoning_parser instead
     enable_reasoning: Optional[bool] = None
-    reasoning_parser: Optional[str] = DecodingConfig.reasoning_backend
+    reasoning_parser: str = DecodingConfig.reasoning_backend
 
     use_tqdm_on_load: bool = LoadConfig.use_tqdm_on_load
 

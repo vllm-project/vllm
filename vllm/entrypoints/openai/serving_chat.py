@@ -92,8 +92,7 @@ class OpenAIServingChat(OpenAIServing):
                 self.enable_reasoning = True
             except Exception as e:
                 raise TypeError(
-                    f"Error: reasoning_parser:'{reasoning_parser}' "
-                    "which has not been registered") from e
+                    f"{reasoning_parser=} has not been registered") from e
         self.tool_parser: Optional[Callable[[AnyTokenizer], ToolParser]] = None
         if self.enable_auto_tools:
             try:

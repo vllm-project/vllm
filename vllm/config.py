@@ -3223,7 +3223,7 @@ class DecodingConfig:
     in the JSON schema. This is only supported for the `guidance` backend and
     is used to better align its behaviour with `outlines` and `xgrammar`."""
 
-    reasoning_backend: Optional[str] = None
+    reasoning_backend: str = ""
     """Select the reasoning parser depending on the model that you're using.
     This is used to parse the reasoning content into OpenAI API format."""
 
