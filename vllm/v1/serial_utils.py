@@ -185,7 +185,7 @@ class MsgpackDecoder:
     not thread-safe when encoding tensors / numpy arrays.
     """
 
-    def __init__(self, t: Optional[Any] = None, allow_pickle=True):
+    def __init__(self, t: Optional[Any] = None, allow_pickle: bool = True):
         args = () if t is None else (t, )
         self.decoder = msgpack.Decoder(*args,
                                        ext_hook=self.ext_hook,
