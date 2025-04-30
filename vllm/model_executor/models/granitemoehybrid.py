@@ -13,7 +13,7 @@ from vllm.distributed import divide, get_tensor_model_parallel_world_size
 from vllm.distributed.parallel_state import get_pp_group
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.layernorm import RMSNorm
-from vllm.model_executor.layers.linear import ReplicatedLinear, RowParallelLinear
+from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.mamba.mamba_mixer2 import (
     MambaMixer2, extra_groups_for_head_shards)
@@ -52,7 +52,7 @@ class GraniteMoeHybridMambaDecoderLayer(nn.Module):
         super().__init__()
         self.config = config
         self.hidden_size = config.hidden_size
-        self.residual_multiplier = config.residual_multiplier        
+        self.residual_multiplier = config.residual_multiplier
 
         self.mamba = MambaMixer2(hidden_size= config.hidden_size,
                                 ssm_state_size = config.mamba_d_state,
@@ -87,7 +87,7 @@ class GraniteMoeHybridMambaDecoderLayer(nn.Module):
         self.input_layernorm = RMSNorm(config.hidden_size,
                                        eps=config.rms_norm_eps)
         self.post_attention_layernorm = RMSNorm(config.hidden_size,
-                                                eps=config.rms_norm_eps)      
+                                                eps=config.rms_norm_eps)
 
     def forward(
         self,
@@ -102,7 +102,7 @@ class GraniteMoeHybridMambaDecoderLayer(nn.Module):
         hidden_states = self.mamba(hidden_states, mamba_cache_params,
                                    mamba2_metadata)
         hidden_states = residual + hidden_states * self.residual_multiplier
-        
+
         residual = hidden_states
         hidden_states = self.post_attention_layernorm(hidden_states)
         if self.shared_mlp is None:
@@ -207,32 +207,32 @@ class GraniteMoeHybridAttention(nn.Module):
         self.attention_multiplier = config.attention_multiplier
         self.num_heads = config.num_attention_heads
         self.head_dim = self.hidden_size // self.num_heads
-        self.num_key_value_heads = config.num_key_value_heads    
-        
+        self.num_key_value_heads = config.num_key_value_heads
+
         self.q_proj = ReplicatedLinear(   self.hidden_size,
                                           self.num_heads * self.head_dim,
                                           bias=self.attention_bias,
                                           quant_config=quant_config,
                                           prefix=f"{prefix}.q_proj")
-        
+
         self.k_proj = ReplicatedLinear(   self.hidden_size,
                                           self.num_key_value_heads * self.head_dim,
                                           bias=self.attention_bias,
                                           quant_config=quant_config,
                                           prefix=f"{prefix}.k_proj")
-        
+
         self.v_proj = ReplicatedLinear(   self.hidden_size,
                                           self.num_key_value_heads * self.head_dim,
                                           bias=self.attention_bias,
                                           quant_config=quant_config,
                                           prefix=f"{prefix}.v_proj")
-        
+
         self.o_proj = ReplicatedLinear(   self.hidden_size,
                                           self.hidden_size,
                                           bias=self.attention_bias,
                                           quant_config=quant_config,
                                           prefix=f"{prefix}.o_proj")
-      
+
         self.position_embedding_type = config.position_embedding_type
         if self.position_embedding_type == "rope":
             self.rotary_emb = get_rope(
@@ -240,10 +240,11 @@ class GraniteMoeHybridAttention(nn.Module):
                 rotary_dim=self.head_dim,
                 max_position=config.max_position_embeddings,
                 base=int(config.rope_theta),
-                rope_scaling=config.rope_scaling if hasattr(config, "rope_scaling") and config.rope_scaling is not None else None,
+                rope_scaling=config.rope_scaling if hasattr(config, "rope_scaling") \
+                    and config.rope_scaling is not None else None,
                 is_neox_style=True,
             )
-      
+
         self.attn = Attention(self.num_heads,
                               self.head_dim,
                               self.attention_multiplier,
@@ -261,10 +262,10 @@ class GraniteMoeHybridAttention(nn.Module):
         query = self.q_proj(hidden_states)[0]
         key = self.k_proj(hidden_states)[0]
         value = self.v_proj(hidden_states)[0]
-        
+
         if self.position_embedding_type == "rope":
             query, key = self.rotary_emb(positions, query, key)
-        
+
         hidden_states = self.attn(query, key, value)
         del query, key, value
 
@@ -319,8 +320,7 @@ class GraniteMoeHybridModel(nn.Module):
             make_empty_intermediate_tensors_factory(
                 ["hidden_states", "residual"], config.hidden_size))
 
-        self.norm = RMSNorm(config.hidden_size,
-                                       eps=config.rms_norm_eps)
+        self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
@@ -382,7 +382,7 @@ class GraniteMoeHybridModel(nn.Module):
         hidden_states = self.norm(hidden_states)
         return hidden_states
 
-    def load_weights(self, 
+    def load_weights(self,
                      weights: Iterable[Tuple[str, torch.Tensor]]
                      ) -> Set[str]:
         params_dict = dict(self.named_parameters())
@@ -405,7 +405,8 @@ class GraniteMoeHybridModel(nn.Module):
                 n = n.replace("A_log", "A")
 
             # Logic analogous to: https://github.com/vllm-project/vllm/blob/f49e5aff11c986ed4d45202b1716c5d74786efa9/vllm/model_executor/models/granitemoeshared.py#L215
-            # Mapping different experts' layout: from HF (input_linear, output_linear, router) to vLLM (experts_w13({e}.w1, {e}.w2), experts_w3({e}.w3), gate)
+            # Mapping different experts' layout: from HF (input_linear, output_linear, router) 
+            # to vLLM (experts_w13({e}.w1, {e}.w2), experts_w3({e}.w3), gate)
             if n.endswith('.block_sparse_moe.input_linear.weight'):
                 for e in range(p.size(0)):
                     w1_name = n.replace(
@@ -415,15 +416,18 @@ class GraniteMoeHybridModel(nn.Module):
                         '.block_sparse_moe.input_linear.weight',
                         f".block_sparse_moe.experts.{e}.w3.weight")
                     w1_param, w3_param = p[e].chunk(2, dim=0)
-                    _load_expert(n.replace('.input_linear.','.experts.w13_'), w1_param, w1_name, shard_id='w1', expert_id=e)
-                    _load_expert(n.replace('.input_linear.','.experts.w13_'), w3_param, w3_name, shard_id='w3', expert_id=e)
+                    _load_expert(n.replace('.input_linear.','.experts.w13_'),
+                                 w1_param, w1_name, shard_id='w1', expert_id=e)
+                    _load_expert(n.replace('.input_linear.','.experts.w13_'),
+                                 w3_param, w3_name, shard_id='w3', expert_id=e)
             elif n.endswith('.block_sparse_moe.output_linear.weight'):
                 for e in range(p.size(0)):
                     w2_name = n.replace(
                         '.block_sparse_moe.output_linear.weight',
                         f".block_sparse_moe.experts.{e}.w2.weight")
-                    w2_param = p[e] 
-                    _load_expert(n.replace('.output_linear.', '.experts.w2_'), w2_param, w2_name, shard_id='w2', expert_id=e)            
+                    w2_param = p[e]
+                    _load_expert(n.replace('.output_linear.', '.experts.w2_'), 
+                                 w2_param, w2_name, shard_id='w2', expert_id=e)
             elif n.endswith('.block_sparse_moe.router.layer.weight'):
                 gate_name = n.replace('.block_sparse_moe.router.layer.weight',
                                       ".block_sparse_moe.gate.weight")

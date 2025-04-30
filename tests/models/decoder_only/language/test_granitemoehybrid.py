@@ -2,7 +2,7 @@
 
 import pytest
 from ...utils import check_logprobs_close
-    
+
 # Path of the checkpoints
 MODELS = [
     "/code/granite/granite-4_0-tiny-base-pipecleaner-hf",
@@ -26,17 +26,14 @@ def test_model_equivalence_to_hf_greedy(
     with vllm_runner(model, dtype=dtype) as vllm_model:
         vllm_outputs = vllm_model.generate_greedy_logprobs(
             example_prompts, max_tokens, num_logprobs)
-    
+
     with hf_runner(model, dtype=dtype) as hf_model:
         hf_outputs = hf_model.generate_greedy_logprobs_limit(
             example_prompts, max_tokens, num_logprobs)
-        
+
     check_logprobs_close(
         outputs_0_lst=hf_outputs,
         outputs_1_lst=vllm_outputs,
         name_0="hf",
         name_1="vllm",
     )
-
-if __name__ == "__main__":
-    pytest.main(["tests/models/decoder_only/language/test_granitemoehybrid.py"])
