@@ -9,7 +9,7 @@ Run benchmark in async mode:
     python benchmarks/benchmark_offline_structured_output.py \
         --model <your_model> \
         --num-prompts 100 \
-        --async
+        --async-mode
 
 Benchmark EBNF decoding on xgrammar backend in async mode:
     python benchmarks/benchmark_offline_structured_output.py \
@@ -17,9 +17,10 @@ Benchmark EBNF decoding on xgrammar backend in async mode:
         --structured-output-backend xgrammar \
         --dataset grammar \
         --num-prompts 1000 \
-        --async
+        --async-mode
 """
 import argparse
+import asyncio
 import random
 from time import perf_counter
 
@@ -87,6 +88,8 @@ def benchmark_sync(
         trust_remote_code=args.trust_remote_code,
         guided_decoding_backend=args.structured_output_backend,
     )
+    if args.profile:
+        llm.start_profile()
 
     start = perf_counter()
     outputs = llm.generate(
@@ -99,10 +102,13 @@ def benchmark_sync(
         ],
         use_tqdm=not args.disable_tqdm)
     end = perf_counter()
+
+    if args.profile:
+        llm.stop_profile()
     return outputs, end - start
 
 
-def benchmark_async(
+async def benchmark_async(
     args: argparse.Namespace, tokenizer: PreTrainedTokenizerBase,
     input_requests: list[SampleRequest]
 ) -> tuple[list[RequestFuncOutput], float]:
@@ -118,15 +124,18 @@ def benchmark_async(
             tokenizer=args.tokenizer if args.tokenizer else args.model,
             tokenizer_mode=args.tokenizer_mode,
             trust_remote_code=args.trust_remote_code,
+            guided_decoding_backend=args.structured_output_backend,
         ))
+    if args.profile:
+        await engine.start_profile()
 
-    import asyncio
     import uuid
     start = perf_counter()
-    tasks = []
-    for req in input_requests:
-        tasks.append(
-            asyncio.create_task(
+    outputs = []
+    streams = []
+    if vllm.envs.VLLM_USE_V1:
+        for req in input_requests:
+            streams.append(
                 engine.generate(
                     request_id=str(uuid.uuid4()),
                     prompt=input_requests[0].prompt,
@@ -134,9 +143,24 @@ def benchmark_async(
                         ignore_eos=args.ignore_eos,
                         guided_decoding=_to_vllm_guided_decoding_params(
                             args, req),
-                    ))))
-    outputs = asyncio.run(asyncio.gather(*tasks))
+                    )))
+    else:
+        for req in input_requests:
+            streams.append(await engine.add_request(
+                request_id=str(uuid.uuid4()),
+                prompt=input_requests[0].prompt,
+                params=SamplingParams(
+                    ignore_eos=args.ignore_eos,
+                    guided_decoding=_to_vllm_guided_decoding_params(args, req),
+                )))
+    for stream in streams:
+        async for output in stream:
+            if output.finished:
+                outputs.append(output)
     end = perf_counter()
+
+    if args.profile:
+        await engine.stop_profile()
 
     return outputs, end - start
 
@@ -152,9 +176,14 @@ def main(args: argparse.Namespace):
     input_requests = sample_requests(tokenizer, args)
     selected_percentile_metrics = []
 
-    outputs, benchmark_duration = benchmark_sync(args=args,
-                                                 tokenizer=tokenizer,
-                                                 input_requests=input_requests)
+    if args.async_mode:
+        outputs, benchmark_duration = asyncio.run(
+            benchmark_async(args=args,
+                            tokenizer=tokenizer,
+                            input_requests=input_requests))
+    else:
+        outputs, benchmark_duration = benchmark_sync(
+            args=args, tokenizer=tokenizer, input_requests=input_requests)
 
     metrics, actual_output_lens = calculate_metrics(
         input_requests=input_requests,
@@ -178,7 +207,7 @@ def main(args: argparse.Namespace):
 
 if __name__ == "__main__":
     parser = get_structured_output_argparser()
-    parser.add_argument("--async",
+    parser.add_argument("--async-mode",
                         action="store_true",
                         help="Run the benchmark in async mode.")
     args = parser.parse_args()
