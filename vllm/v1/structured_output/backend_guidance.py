@@ -136,11 +136,31 @@ class GuidanceGrammar(StructuredOutputGrammar):
 
         return r
 
-    def fill_bitmask(self, bitmask: torch.Tensor, batch_index: int) -> None:
+    def validate_tokens(self, tokens: list[int]) -> list[int]:
+        """Checks if the list of tokens are accepted by the parser in sequence.
+        Will not advance the parser.
+
+        Returns the prefix list of tokens that are accepted by the parser.
+        """
+        if len(tokens) == 0:
+            return []
+        if self.ll_matcher.is_stopped():
+            return []
+
+        num_tokens = self.ll_matcher.validate_tokens(tokens)
+
+        self.check_error()
+
+        return tokens[:num_tokens]
+
+    def rollback(self, num_tokens: int) -> None:
+        self.ll_matcher.rollback(num_tokens)
+        self.check_error()
+
+    def fill_bitmask(self, bitmask: torch.Tensor, idx: int) -> None:
         # this will automatically return [EOS] mask if the matcher is stopped
         # or otherwise in an error state
-        llguidance_torch.fill_next_token_bitmask(self.ll_matcher, bitmask,
-                                                 batch_index)
+        llguidance_torch.fill_next_token_bitmask(self.ll_matcher, bitmask, idx)
         self.check_error()
 
     def is_terminated(self) -> bool:

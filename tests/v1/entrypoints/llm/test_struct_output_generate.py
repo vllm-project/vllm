@@ -16,38 +16,34 @@ from vllm.outputs import RequestOutput
 from vllm.platforms import current_platform
 from vllm.sampling_params import GuidedDecodingParams, SamplingParams
 
-PARAMS_MODELS_BACKENDS_TOKENIZER_MODE_REASONING_PARSER = [
-    (
-        "mistralai/Ministral-8B-Instruct-2410",
-        "xgrammar",
-        "auto",
-        None,
-    ),
-    (
-        "mistralai/Ministral-8B-Instruct-2410",
-        "guidance",
-        "auto",
-        None,
-    ),
-    (
-        "mistralai/Ministral-8B-Instruct-2410",
-        "xgrammar",
-        "mistral",
-        None,
-    ),
+NGRAM_SPEC_CONFIG = {
+    "model": "[ngram]",
+    "num_speculative_tokens": 5,
+    "prompt_lookup_max": 5,
+    "prompt_lookup_min": 1,
+}
+
+EAGLE_SPEC_CONFIG = {
+    "method": "eagle",
+    "model": "yuhuili/EAGLE-LLaMA3.1-Instruct-8B",
+    "num_speculative_tokens": 5,
+}
+
+PARAMS_MODELS_BACKENDS_TOKENIZER_MODE_REASONING_PARSER_SPEC_CONFIG = [
+    ("mistralai/Ministral-8B-Instruct-2410", "xgrammar", "auto", None, None),
+    ("mistralai/Ministral-8B-Instruct-2410", "guidance", "auto", None, None),
+    ("mistralai/Ministral-8B-Instruct-2410", "xgrammar", "mistral", None,
+     None),
+    ("Qwen/Qwen2.5-1.5B-Instruct", "xgrammar", "auto", None, None),
+    ("deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B", "xgrammar", "auto",
+     "deepseek_r1", None),
+    ("mistralai/Ministral-8B-Instruct-2410", "guidance", "auto", None,
+     NGRAM_SPEC_CONFIG),
     #FIXME: This test is flaky on CI thus disabled
-    # (
-    #     "Qwen/Qwen2.5-1.5B-Instruct",
-    #     "xgrammar",
-    #     "auto",
-    #     None,
-    # ),
-    (
-        "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B",
-        "xgrammar",
-        "auto",
-        "deepseek_r1",
-    ),
+    ("Qwen/Qwen2.5-1.5B-Instruct", "xgrammar", "auto", None, NGRAM_SPEC_CONFIG
+     ),
+    ("meta-llama/Meta-Llama-3.1-8B-Instruct", "xgrammar", "auto", None,
+     EAGLE_SPEC_CONFIG)
 ]
 
 PARAMS_MODELS_TOKENIZER_MODE = [
@@ -71,8 +67,8 @@ class CarDescription(BaseModel):
 
 @pytest.mark.skip_global_cleanup
 @pytest.mark.parametrize(
-    "model_name, guided_decoding_backend, tokenizer_mode, reasoning_parser",
-    PARAMS_MODELS_BACKENDS_TOKENIZER_MODE_REASONING_PARSER,
+    "model_name, guided_decoding_backend, tokenizer_mode, reasoning_parser, speculative_config",  # noqa: E501
+    PARAMS_MODELS_BACKENDS_TOKENIZER_MODE_REASONING_PARSER_SPEC_CONFIG,
 )
 def test_structured_output(
     monkeypatch: pytest.MonkeyPatch,
@@ -86,6 +82,7 @@ def test_structured_output(
     tokenizer_mode: str,
     reasoning_parser: str | None,
     model_name: str,
+    speculative_config: dict[str, Any],
 ):
     monkeypatch.setenv("VLLM_USE_V1", "1")
 
@@ -94,15 +91,14 @@ def test_structured_output(
     enforce_eager = bool(not current_platform.is_tpu())
     # Use a single LLM instance for several scenarios to
     # speed up the test suite.
-    llm = LLM(
-        model=model_name,
-        enforce_eager=enforce_eager,
-        max_model_len=1024,
-        guided_decoding_backend=guided_decoding_backend,
-        guided_decoding_disable_any_whitespace=True,
-        tokenizer_mode=tokenizer_mode,
-        reasoning_parser=reasoning_parser,
-    )
+    llm = LLM(model=model_name,
+              enforce_eager=enforce_eager,
+              max_model_len=1024,
+              guided_decoding_backend=guided_decoding_backend,
+              guided_decoding_disable_any_whitespace=True,
+              tokenizer_mode=tokenizer_mode,
+              reasoning_parser=reasoning_parser,
+              speculative_config=speculative_config)
 
     #
     # Test 1: Generate JSON output based on a provided schema
