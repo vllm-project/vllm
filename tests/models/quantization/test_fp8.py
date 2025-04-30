@@ -4,17 +4,13 @@
 """Tests fp8 models against ground truth generation
 Note: these tests will only pass on L4 GPU.
 """
-import os
-from typing import Optional
-
 import pytest
 
-from tests.kernels.utils import override_backend_env_variable
 from tests.quantization.utils import is_quant_method_supported
 from vllm.platforms import current_platform
 from vllm.utils import STR_BACKEND_ENV_VAR
 
-from ...utils import check_logprobs_close
+from ..utils import check_logprobs_close
 
 
 @pytest.mark.skipif(not is_quant_method_supported("fp8"),

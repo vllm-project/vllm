@@ -15,7 +15,7 @@ from dataclasses import dataclass
 
 import pytest
 
-from .utils import check_logprobs_close
+from ..utils import check_logprobs_close
 
 
 @dataclass

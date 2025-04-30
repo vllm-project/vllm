@@ -7,8 +7,8 @@ import torch
 
 from vllm.multimodal.image import rescale_image_size
 
-from ....conftest import IMAGE_ASSETS, VllmRunner, _ImageAssets
-from ...utils import check_logprobs_close
+from ...conftest import IMAGE_ASSETS, VllmRunner, _ImageAssets
+from ..utils import check_logprobs_close
 
 HF_IMAGE_PROMPTS = IMAGE_ASSETS.prompts({
     "stop_sign":
