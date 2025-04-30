@@ -176,13 +176,13 @@ class StructuredOutputManager:
         return bitmask_tensor.numpy()
 
     def should_advance(self, request: Request) -> bool:
-        """To determine whether we can advance the FSM.
-        Supports thinking usage where we skip the reasoning components.
-        """
+        # To determine whether we can advance the FSM.
+        # Supports thinking usage where we skip the reasoning components.
         if TYPE_CHECKING:
             assert request.structured_output_request is not None
             assert request.structured_output_request.grammar is not None
         # by default, we should always advance
+        # for cases that doesn't uses thinking mode.
         should_advance = self.reasoner is None
 
         # if there is a reasoning parser, then will
