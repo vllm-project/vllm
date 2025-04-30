@@ -676,3 +676,33 @@ def molmo_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
     hf_model.model.generate = types.MethodType(_generate, hf_model.model)
 
     return hf_model
+
+
+def ovis2_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
+    """Patches and returns an instance of the HfRunner to use for Ovis2."""
+    hf_model.model.visual_tokenizer.to(hf_model.dtype)
+    hf_model.model.vte.to(hf_model.dtype)
+    hf_model.model.llm.to(hf_model.dtype)
+
+    hf_model.model.get_output_embeddings = lambda: \
+        hf_model.model.llm.get_output_embeddings()
+
+    def processor(*args, text="", images=None, **kwargs):
+        text_tokenizer = hf_model.model.get_text_tokenizer()
+        images = [images] if isinstance(images, Image) else images
+
+        text = text.split("<|im_start|>user\n")[1].split("<|im_end|>\n")[0]
+
+        prompt, input_ids, pixel_values = hf_model.model.preprocess_inputs(
+            text_or_conversations=text, images=images)
+        attention_mask = torch.ne(input_ids, text_tokenizer.pad_token_id)
+
+        inputs = {
+            "inputs": input_ids.unsqueeze(0),
+            "pixel_values": pixel_values.unsqueeze(0),
+            "attention_mask": attention_mask.unsqueeze(0),
+        }
+        return BatchFeature(data=inputs, tensor_type="pt")
+
+    hf_model.processor = processor
+    return hf_model
