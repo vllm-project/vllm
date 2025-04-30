@@ -46,6 +46,11 @@ class StructuredOutputManager:
             scheduler_config=self.vllm_config.scheduler_config,
             lora_config=self.vllm_config.lora_config,
         ).get_lora_tokenizer(None)
+        # yapf: disable
+        reasoning_backend = vllm_config.decoding_config.reasoning_backend
+        if reasoning_backend is not None:
+            self.reasoner = ReasoningParserManager.get_reasoning_parser(reasoning_backend)(tokenizer=self.tokenizer)  # noqa: E501
+        # yapf: enable
 
     def grammar_init(self, request: Request) -> None:
         if request.structured_output_request is None:
@@ -76,12 +81,6 @@ class StructuredOutputManager:
             else:
                 raise ValueError(
                     f"Unsupported structured output backend: {backend}")
-
-            if ((reasoning_backend :=
-                 self.vllm_config.decoding_config.reasoning_backend)
-                    is not None and self.reasoner is None):
-                self.reasoner = ReasoningParserManager.get_reasoning_parser(
-                    reasoning_backend)(tokenizer=self.tokenizer)
 
         grammar = self.executor.submit(self._async_create_grammar, request)
         request.structured_output_request.grammar = grammar  # type: ignore[assignment]
@@ -115,11 +114,10 @@ class StructuredOutputManager:
         if self._grammar_bitmask is None:
             assert self.backend is not None
             max_batch_size = self.vllm_config.scheduler_config.max_num_seqs
+            max_num_spec_tokens = 0
             if self.vllm_config.speculative_config is not None:
-                max_num_spec_tokens = self.vllm_config.\
-                    speculative_config.num_speculative_tokens
-            else:
-                max_num_spec_tokens = 0
+                max_num_spec_tokens = \
+                    self.vllm_config.speculative_config.num_speculative_tokens
 
             # Allocate a bitmask for each token needing to be checked:
             # one for each speculative position, and one more for the
@@ -128,15 +126,7 @@ class StructuredOutputManager:
                 self.backend.allocate_token_bitmask(
                     max_batch_size * (1 + max_num_spec_tokens))
 
-        # Fill the bitmask using the index of each request equal to its
-        # position in the batch. Resize the bitmask down to the size of
-        # the batch.
         bitmask_tensor = self._grammar_bitmask
-        batch_len = len(scheduled_spec_decode_tokens)
-        # Reset the relevant part of the bitmask before filling
-        if batch_len > 0:
-            bitmask_tensor[:batch_len].fill_(-1)
-
         # Generate a batched bitmask for all structured output requests.
         # When speculative decoding is enabled, we need to include multiple
         # masks for each request, one for each possible bonus token position.
@@ -144,13 +134,17 @@ class StructuredOutputManager:
         cumulative_index = 0
         ordered_seq = sorted(structured_output_request_ids.items(),
                              key=lambda x: x[1])
+
+        # Reset the relevant part of the bitmask before filling
+        if self.reasoner is not None:
+            bitmask_tensor[:len(ordered_seq)].fill_(-1)
         # NOTE: This outer loop can likely be parallelized to improve
         # performance of bitmask generation for large batches.
         for req_id, _ in ordered_seq:
-            full_request = requests[req_id]
-            request = full_request.structured_output_request
+            request = requests[req_id].structured_output_request
             if TYPE_CHECKING:
-                assert request is not None and request.grammar is not None
+                assert request is not None
+                assert request.grammar is not None
 
             apply_bitmask = (
                 request.reasoning_ended if self.reasoner is not None else True
@@ -160,7 +154,7 @@ class StructuredOutputManager:
             req_tokens = scheduled_spec_decode_tokens.get(req_id, []) + [None]
             for token in req_tokens:
                 if apply_bitmask and not request.grammar.is_terminated():
-                    request.grammar.fill_bitmask(self._grammar_bitmask,
+                    request.grammar.fill_bitmask(bitmask_tensor,
                                                  cumulative_index)
                     if token is not None:
                         # In order to generate the correct bitmask for each
@@ -173,14 +167,36 @@ class StructuredOutputManager:
             if state_advancements > 0:
                 request.grammar.rollback(state_advancements)
 
-        bitmask_tensor = self._grammar_bitmask
-        if cumulative_index < self._grammar_bitmask.shape[0]:
-            bitmask_tensor = self._grammar_bitmask[:cumulative_index]
+        if cumulative_index < bitmask_tensor.shape[0]:
+            bitmask_tensor = bitmask_tensor[:cumulative_index]
 
         # After finishing with the xgrammar operations, we convert to
         # np.ndarray, because that is much more efficient for serialization
         # and deserialization when sending this to the GPU workers.
         return bitmask_tensor.numpy()
+
+    def should_advance(self, request: Request) -> bool:
+        """To determine whether we can advance the FSM.
+        Supports thinking usage where we skip the reasoning components.
+        """
+        if TYPE_CHECKING:
+            assert request.structured_output_request is not None
+            assert request.structured_output_request.grammar is not None
+        # by default, we should always advance
+        should_advance = self.reasoner is None
+
+        # if there is a reasoning parser, then will
+        # we will need to determine when to start advancing
+        # the state machine.
+        if self.reasoner is not None:
+            if request.structured_output_request.reasoning_ended:
+                should_advance = True
+            elif self.reasoner.is_reasoning_end(request.all_token_ids):
+                request.structured_output_request.reasoning_ended = True
+                should_advance = False
+            else:
+                should_advance = False
+        return should_advance
 
     def clear_backend(self) -> None:
         if self.backend is not None:

@@ -706,39 +706,25 @@ class Scheduler(SchedulerInterface):
                 # the outer lists can be of length > 1.
                 new_logprobs = logprobs.slice(req_index, req_index + 1)
 
-            if new_token_ids and request.use_structured_output:
-                reasoner = self.structured_output_manager.reasoner
-                advance_fsm = reasoner is None
-
-                # NOTE: use_structured_output implies
-                # structured_output_request is not None,
-                # but type checker isn't smart enough to know this.
-                # This only affect type runtime, not actual runtime.
-                # assert is also not recommended on perf-sensitive runtime path.
+            if new_token_ids and request.use_structured_output and self.structured_output_manager.should_advance(  # noqa: E501
+                    request):
                 if TYPE_CHECKING:
                     assert request.structured_output_request is not None
                     assert request.structured_output_request.grammar is not None
-
-                if reasoner is not None:
-                    if request.structured_output_request.reasoning_ended:  # noqa: E501
-                        advance_fsm = True
-                    elif reasoner.is_reasoning_end(request.all_token_ids):
-                        request.structured_output_request.reasoning_ended = True
-                        advance_fsm = False
-                    else:
-                        advance_fsm = False
-
-                if advance_fsm:
-                    request.structured_output_request.grammar.accept_tokens(
-                        req_id, new_token_ids)
+                request.structured_output_request.grammar.accept_tokens(
+                    req_id,
+                    new_token_ids,
+                )
 
             # Add newly generated spec token ids to the request.
             if spec_token_ids is not None:
-                if request.use_structured_output:
-                    metadata = request.structured_output_request
-                    assert metadata is not None and metadata.grammar is not None
+                if request.use_structured_output and self.structured_output_manager.should_advance(  # noqa: E501
+                        request):
+                    if TYPE_CHECKING:
+                        assert request.structured_output_request is not None
+                        assert request.structured_output_request.grammar is not None  # noqa: E501
                     # Needs to happen after new_token_ids are accepted.
-                    request.spec_token_ids = metadata.grammar.validate_tokens(
+                    request.spec_token_ids = request.structured_output_request.grammar.validate_tokens(  # noqa: E501
                         spec_token_ids[req_index])
                 else:
                     request.spec_token_ids = spec_token_ids[req_index]
