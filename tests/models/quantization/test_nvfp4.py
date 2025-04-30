@@ -1,10 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
-
 # flake8: noqa
-"""Tests Model Optimizer fp8 models against ground truth generation
-Note: these tests will only pass on H100
+"""Tests Model Optimizer nvfp4 models against ground truth generation
+Note: these tests will only pass on B200
 """
 import os
+from typing import List
 
 import pytest
 from transformers import AutoTokenizer
@@ -16,33 +16,33 @@ os.environ["TOKENIZERS_PARALLELISM"] = "true"
 
 MAX_MODEL_LEN = 1024
 
-MODELS = ["nvidia/Llama-3.1-8B-Instruct-FP8"]
+MODELS = ["nvidia/Llama-3.3-70B-Instruct-FP4"]
 
 EXPECTED_STRS_MAP = {
-    "nvidia/Llama-3.1-8B-Instruct-FP8": [
-        "You're referring to VLLM, a high-performance Large Language Model (LLM) inference and",
+    "nvidia/Llama-3.3-70B-Instruct-FP4": [
+        'vLLM (Vectorized Large Language Model) is indeed a high-throughput and memory-efficient inference',
         'Here are the major milestones in the development of artificial intelligence (AI) from 1950 to ',
-        'The comparison between artificial intelligence (AI) and human intelligence in terms of processing information is a complex and',
-        'A neural network is a complex system modeled after the human brain, consisting of interconnected nodes or "ne',
-        '**The Spark of Imagination**\n\nZeta-5, a sleek and efficient robot, whir',
-        'The COVID-19 pandemic has had a profound impact on global economic structures and business models, leading to',
+        'Artificial intelligence (AI) and human intelligence (HI) are two distinct forms of intelligence that process',
+        'A neural network is a type of machine learning model inspired by the structure and function of the human brain',
+        'In the heart of a cutting-edge robotics lab, a team of engineers had been working tirelessly to push',
+        'The COVID-19 pandemic has had a profound impact on global economic structures and future business models, leading',
         'The Mona Lisa, painted by Leonardo da Vinci in the early 16th century, is one of',
-        'Here are the translations:\n\n**Japanese:** 「早起きは早く獲物をとる'
+        'Here are the translations:\n\n* Japanese: (Sasuga no tori ga miwa o ts'
     ]
 }
 
 
 # This test compares against golden strings for exact match since
 # there is no baseline implementation to compare against
-# and is unstable w.r.t specifics of the fp8 implementation or
+# and is unstable w.r.t specifics of the fp4 implementation or
 # the hardware being run on.
 # Disabled to prevent it from breaking the build
 @pytest.mark.skip(
     reason=
-    "Prevent unstable test based on golden strings from breaking the build.")
-@pytest.mark.quant_model
-@pytest.mark.skipif(not is_quant_method_supported("fp8"),
-                    reason="fp8 is not supported on this GPU type.")
+    "Prevent unstable test based on golden strings from breaking the build "
+    " and test input model being too large and hanging the system.")
+@pytest.mark.skipif(not is_quant_method_supported("nvfp4"),
+                    reason="nvfp4 is not supported on this GPU type.")
 @pytest.mark.parametrize("model_name", MODELS)
 def test_models(example_prompts, model_name) -> None:
     model = LLM(
@@ -50,7 +50,7 @@ def test_models(example_prompts, model_name) -> None:
         max_model_len=MAX_MODEL_LEN,
         trust_remote_code=True,
         enforce_eager=True,
-        quantization="modelopt",
+        quantization="nvfp4",
     )
 
     tokenizer = AutoTokenizer.from_pretrained(model_name)
@@ -64,7 +64,7 @@ def test_models(example_prompts, model_name) -> None:
         for prompt in example_prompts
     ]
     params = SamplingParams(max_tokens=20, temperature=0)
-    generations: list[str] = []
+    generations: List[str] = []
     # Note: these need to be run 1 at a time due to numerical precision,
     # since the expected strs were generated this way.
     for prompt in formatted_prompts:

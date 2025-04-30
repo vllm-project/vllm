@@ -85,7 +85,6 @@ def run_awq_test(
         )
 
 
-@pytest.mark.quant_model
 @pytest.mark.parametrize(
     ("source_model", "quant_model"),
     [("OpenGVLab/InternVL2-2B", "OpenGVLab/InternVL2-2B-AWQ")],

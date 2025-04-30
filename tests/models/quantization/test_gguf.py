@@ -38,7 +38,6 @@ LLAMA_CONFIG = GGUFTestConfig(
     original_model="meta-llama/Llama-3.2-1B-Instruct",
     gguf_repo="bartowski/Llama-3.2-1B-Instruct-GGUF",
     gguf_filename="Llama-3.2-1B-Instruct-IQ4_XS.gguf",
-    marks=[pytest.mark.quant_model],
 )
 
 QWEN2_CONFIG = GGUFTestConfig(

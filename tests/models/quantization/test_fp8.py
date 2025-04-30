@@ -17,7 +17,6 @@ from vllm.utils import STR_BACKEND_ENV_VAR
 from ...utils import check_logprobs_close
 
 
-@pytest.mark.quant_model
 @pytest.mark.skipif(not is_quant_method_supported("fp8"),
                     reason="fp8 is not supported on this GPU type.")
 @pytest.mark.parametrize(
