@@ -803,11 +803,14 @@ class EngineArgs:
             action="store_true",
             default=False,
             help=
-            "[DEPRECATED] Use --reasoning-parser instead. " \
+            "[DEPRECATED] " \
+            "The --enable-reasoning flag is deprecated as of v0.8.6. "
+            "Use --reasoning-parser to specify " \
+            "the reasoning parser backend instead. "
+            "This flag (--enable-reasoning) will be " \
+            "removed in a future version. "
             "When --reasoning-parser is specified, " \
-            "it is automatically set to True. "
-            "Whether to enable reasoning_content for the model. "
-            "If enabled, the model will be able to generate reasoning content."
+            "reasoning mode is automatically enabled."
         )
 
         return parser
