@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+import json
 import os
 import queue
 import signal
@@ -116,6 +117,7 @@ class EngineCore:
             logger.info("Batch queue is enabled with size %d",
                         self.batch_queue_size)
             self.batch_queue = queue.Queue(self.batch_queue_size)
+        self.vllm_config = vllm_config
 
     def _initialize_kv_caches(
             self, vllm_config: VllmConfig) -> tuple[int, int, KVCacheConfig]:
@@ -507,7 +509,12 @@ class EngineCoreProc(EngineCore):
                             bind=False) as socket:
 
             # Send ready message to front-end once input socket is connected.
-            socket.send(b'READY')
+            message_dict = {
+                'type': 'READY',
+                'num_gpu_blocks': self.vllm_config.cache_config.num_gpu_blocks,
+            }
+            message = json.dumps(message_dict).encode('utf-8')
+            socket.send(message)
 
             while True:
                 # (RequestType, RequestData)
