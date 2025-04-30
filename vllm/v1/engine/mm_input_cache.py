@@ -37,7 +37,10 @@ if TYPE_CHECKING:
 class MirroredProcessingCache:
 
     def __init__(self, model_config: "ModelConfig") -> None:
-        self.use_cache = not model_config.disable_mm_preprocessor_cache
+        mm_config = model_config.multimodal_config
+        disable_mm_preprocessor_cache = mm_config is not None and \
+            not mm_config.disable_mm_preprocessor_cache
+        self.use_cache = not disable_mm_preprocessor_cache
         self.mm_cache = ProcessingCache.get_lru_cache(VLLM_MM_INPUT_CACHE_GIB,
                                                       MultiModalKwargs)
 

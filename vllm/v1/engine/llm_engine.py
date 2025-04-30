@@ -175,22 +175,22 @@ class LLMEngine:
         params: Union[SamplingParams, PoolingParams],
         arrival_time: Optional[float] = None,
         lora_request: Optional[LoRARequest] = None,
+        tokenization_kwargs: Optional[dict[str, Any]] = None,
         trace_headers: Optional[Mapping[str, str]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
         priority: int = 0,
     ) -> None:
         # Process raw inputs into the request.
-        request = self.processor.process_inputs(request_id, prompt, params,
-                                                arrival_time, lora_request,
-                                                trace_headers,
-                                                prompt_adapter_request,
-                                                priority)
+        prompt_str, request = self.processor.process_inputs(
+            request_id, prompt, params, arrival_time, lora_request,
+            tokenization_kwargs, trace_headers, prompt_adapter_request,
+            priority)
 
         n = params.n if isinstance(params, SamplingParams) else 1
 
         if n == 1:
             # Make a new RequestState and queue.
-            self.output_processor.add_request(request, None, 0)
+            self.output_processor.add_request(request, prompt_str, None, 0)
             # Add the request to EngineCore.
             self.engine_core.add_request(request)
             return
@@ -204,7 +204,8 @@ class LLMEngine:
             child_request.sampling_params = params
 
             # Make a new RequestState and queue.
-            self.output_processor.add_request(child_request, parent_req, idx)
+            self.output_processor.add_request(child_request, prompt_str,
+                                              parent_req, idx)
             # Add the request to EngineCore.
             self.engine_core.add_request(child_request)
 

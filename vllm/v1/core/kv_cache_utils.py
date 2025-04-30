@@ -41,7 +41,7 @@ class BlockHashType(NamedTuple):
 # This aligns with the behavior of Python's hash() function, which also uses
 # a random seed if PYTHONHASHSEED is not set.
 NONE_HASH = int.from_bytes(os.urandom(32), byteorder="big") if os.getenv(
-    'PYTHONHASHSEED') is not None else sha256(os.getenv('PYTHONHASHSEED'))
+    'PYTHONHASHSEED') is None else sha256(os.getenv('PYTHONHASHSEED'))
 
 
 @dataclass
