@@ -46,7 +46,7 @@ repos:
   rev: 0.6.17
   hooks:
     - id: pip-compile
-      args: [requirements/test.in, -o, requirements/test.txt]
+      args: [requirements/test.in, -o, requirements/test.txt, --index-strategy, unsafe-best-match]
       files: ^requirements/test\.(in|txt)$
 - repo: local
   hooks:

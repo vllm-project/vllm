@@ -455,7 +455,7 @@ steps:
   - tests/models/encoder_decoder/language
   commands:
     # Install causal-conv1d for plamo2 models here, as it is not compatible with pip-compile.
-    - pip install causal-conv1d
+    - pip install 'git+https://github.com/Dao-AILab/causal-conv1d@v1.5.0.post8'
     - pytest -v -s models/decoder_only/language -m 'core_model or quant_model'
     - pytest -v -s models/embedding/language -m core_model
 
