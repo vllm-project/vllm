@@ -47,7 +47,9 @@ class MsgpackEncoder:
     via dedicated messages. Note that this is a per-tensor limit.
     """
 
-    def __init__(self, size_threshold: Optional[int] = None):
+    def __init__(self,
+                 size_threshold: Optional[int] = None,
+                 allow_pickle: bool = True):
         if size_threshold is None:
             size_threshold = envs.VLLM_MSGPACK_ZERO_COPY_THRESHOLD
         self.encoder = msgpack.Encoder(enc_hook=self.enc_hook)
@@ -56,6 +58,7 @@ class MsgpackEncoder:
         # pass custom data to the hook otherwise.
         self.aux_buffers: Optional[list[bytestr]] = None
         self.size_threshold = size_threshold
+        self.allow_pickle = allow_pickle
 
     def encode(self, obj: Any) -> Sequence[bytestr]:
         try:
@@ -104,6 +107,9 @@ class MsgpackEncoder:
             } for elem in item.values()]
                     for itemlist in mm._items_by_modality.values()
                     for item in itemlist]
+
+        if not self.allow_pickle:
+            raise TypeError(f"Object of type {type(obj)} is not serializable")
 
         if isinstance(obj, FunctionType):
             # `pickle` is generally faster than cloudpickle, but can have
@@ -179,12 +185,13 @@ class MsgpackDecoder:
     not thread-safe when encoding tensors / numpy arrays.
     """
 
-    def __init__(self, t: Optional[Any] = None):
+    def __init__(self, t: Optional[Any] = None, allow_pickle: bool = True):
         args = () if t is None else (t, )
         self.decoder = msgpack.Decoder(*args,
                                        ext_hook=self.ext_hook,
                                        dec_hook=self.dec_hook)
         self.aux_buffers: Sequence[bytestr] = ()
+        self.allow_pickle = allow_pickle
 
     def decode(self, bufs: Union[bytestr, Sequence[bytestr]]) -> Any:
         if isinstance(bufs, (bytes, bytearray, memoryview, zmq.Frame)):
@@ -265,10 +272,12 @@ class MsgpackDecoder:
     def ext_hook(self, code: int, data: memoryview) -> Any:
         if code == CUSTOM_TYPE_RAW_VIEW:
             return data
-        if code == CUSTOM_TYPE_PICKLE:
-            return pickle.loads(data)
-        if code == CUSTOM_TYPE_CLOUDPICKLE:
-            return cloudpickle.loads(data)
+
+        if self.allow_pickle:
+            if code == CUSTOM_TYPE_PICKLE:
+                return pickle.loads(data)
+            if code == CUSTOM_TYPE_CLOUDPICKLE:
+                return cloudpickle.loads(data)
 
         raise NotImplementedError(
             f"Extension type code {code} is not supported")
