@@ -706,11 +706,11 @@ def test_make_zmq_socket_ipv6():
     socket_type = zmq.REP  # Example socket type
 
     # Create the socket
-    sock = make_zmq_socket(ctx, ipv6_path, socket_type)
+    zsock: zmq.Socket = make_zmq_socket(ctx, ipv6_path, socket_type)
 
     # Verify that the IPV6 option is set
-    assert sock.getsockopt(zmq.IPV6) == 1, "IPV6 option should be enabled for IPv6 addresses"
+    assert zsock.getsockopt(zmq.IPV6) == 1, "IPV6 option should be enabled for IPv6 addresses"
 
     # Clean up
-    sock.close()
+    zsock.close()
     ctx.term()
