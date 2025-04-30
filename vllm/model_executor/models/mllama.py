@@ -48,21 +48,21 @@ from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     DEFAULT_VOCAB_PADDING_SIZE, ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader, maybe_remap_kv_scale_name)
+from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.inputs import (MultiModalEncDecInputs,
+from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalEncDecInputs,
                                     MultiModalFieldConfig, MultiModalKwargs)
 from vllm.multimodal.parse import (ImageProcessorItems, ImageSize,
-                                   MultiModalDataDict, MultiModalDataItems)
+                                   MultiModalDataItems)
 from vllm.multimodal.processing import (BaseProcessingInfo,
                                         EncDecMultiModalProcessor,
                                         PromptReplacement, PromptUpdate)
-from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
+from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.platforms import current_platform
 
 from .clip import CLIPMLP
@@ -110,16 +110,6 @@ class MllamaProcessingInfo(BaseProcessingInfo):
         image_size = self.get_hf_config().vision_config.image_size
         return calc_token_per_chunk(image_size)
 
-    def get_mm_max_tokens_per_item(
-        self,
-        seq_len: int,
-        mm_counts: Mapping[str, int],
-    ) -> Mapping[str, int]:
-        vision_config = self.get_hf_config().vision_config
-        token_per_chunk = self.get_token_per_chunk_from_config()
-        mm_max_tokens = vision_config.max_num_tiles * token_per_chunk
-        return {"image": mm_max_tokens}
-
     def get_num_tiles_per_image(self, image_height: int,
                                 image_width: int) -> int:
         vision_config = self.get_hf_config().vision_config
@@ -145,30 +135,30 @@ class MllamaProcessingInfo(BaseProcessingInfo):
 
 class MllamaDummyInputsBuilder(BaseDummyInputsBuilder[MllamaProcessingInfo]):
 
-    def get_dummy_processor_inputs(
+    def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
+        num_images = mm_counts.get("image", 0)
+
+        processor = self.info.get_hf_processor()
+        image_token = processor.image_token
+
+        return image_token * num_images
+
+    def get_dummy_mm_data(
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-    ) -> ProcessorInputs:
+    ) -> MultiModalDataDict:
         num_images = mm_counts.get("image", 0)
 
         target_width, target_height = \
             self.info.get_image_size_with_most_features()
 
-        mm_data = {
+        return {
             "image":
             self._get_dummy_images(width=target_width,
                                    height=target_height,
                                    num_images=num_images)
         }
-
-        hf_processor = self.info.get_hf_processor()
-        image_token: str = hf_processor.image_token
-
-        return ProcessorInputs(
-            prompt_text=image_token * num_images,
-            mm_data=mm_data,
-        )
 
 
 class MllamaMultiModalProcessor(EncDecMultiModalProcessor[MllamaProcessingInfo]
@@ -215,6 +205,9 @@ class MllamaMultiModalProcessor(EncDecMultiModalProcessor[MllamaProcessingInfo]
         # }
 
         if mm_data:
+            hf_processor = self.info.get_hf_processor()
+            image_token: str = hf_processor.image_token
+
             # Since only the last group of consecutive images
             # are attended by the decoded tokens, we only need to
             # get the number of tokens for those images.
@@ -231,7 +224,7 @@ class MllamaMultiModalProcessor(EncDecMultiModalProcessor[MllamaProcessingInfo]
             num_tokens = decode_tiles * token_per_chunk
             mm_inputs["encoder_prompt_token_ids"] = [image_token_id
                                                      ] * num_tokens
-            mm_inputs["encoder_prompt"] = "<|image|>" * num_tokens
+            mm_inputs["encoder_prompt"] = image_token * num_tokens
 
         return mm_inputs
 
@@ -1391,6 +1384,7 @@ class MllamaForConditionalGeneration(CustomOp, SupportsMultiModal,
         super().__init__()
         config: MllamaConfig = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
+        self.config = config
         self.quant_config = quant_config
         self.vocab_size = config.text_config.vocab_size
         self.hidden_size = config.text_config.hidden_size
@@ -1419,7 +1413,6 @@ class MllamaForConditionalGeneration(CustomOp, SupportsMultiModal,
         )
         self.logits_processor = LogitsProcessor(config.output_hidden_states,
                                                 config.text_config.vocab_size)
-        self.sampler = get_sampler()
 
     def compute_logits(
         self,
@@ -1429,14 +1422,6 @@ class MllamaForConditionalGeneration(CustomOp, SupportsMultiModal,
         logits = self.logits_processor(self.language_model.lm_head,
                                        hidden_states, sampling_metadata)
         return logits
-
-    def sample(
-        self,
-        logits: torch.Tensor,
-        sampling_metadata: SamplingMetadata,
-    ) -> Optional[SamplerOutput]:
-        next_tokens = self.sampler(logits, sampling_metadata)
-        return next_tokens
 
     def unpack_data(self,
                     image_data: Union[List[torch.Tensor], torch.Tensor],
@@ -1509,6 +1494,31 @@ class MllamaForConditionalGeneration(CustomOp, SupportsMultiModal,
 
         raise AssertionError("This line should be unreachable.")
 
+    def _get_and_validate_encoder_lens(
+        self,
+        encoder_seq_lens: List[int],
+        num_tiles: List[List[int]],
+        num_tokens_per_tile: int,
+    ) -> List[int]:
+        # Get the actual number of encoder tokens for each sample.
+        # Because attn_metadata.encoder_seq_lens only counts the last
+        # group of images for each sample, which is used to cheat the
+        # block manager to allocate blocks for those images only.
+        # See MllamaMultiModalProcessor for more details.
+        actual_encoder_seq_lens = [
+            sum(num_tile) * num_tokens_per_tile for num_tile in num_tiles
+        ]
+
+        # remove 0 encoder len entries for text-only requests for these
+        # assertions
+        attn_metadata_lens = [x for x in encoder_seq_lens if x > 0]
+        assert len(actual_encoder_seq_lens) == len(attn_metadata_lens)
+        for actual_len, last_group_len in zip(actual_encoder_seq_lens,
+                                              attn_metadata_lens):
+            assert actual_len >= last_group_len
+
+        return actual_encoder_seq_lens
+
     def flat_encoder_result(self, cross_attention_states: torch.Tensor,
                             attn_metadata: AttentionMetadata,
                             actual_encoder_seq_lens: List[int]):
@@ -1527,6 +1537,9 @@ class MllamaForConditionalGeneration(CustomOp, SupportsMultiModal,
             start_pos = end_pos
         cross_attention_states = cross_attention_states_flat
         return cross_attention_states
+
+    def get_language_model(self) -> torch.nn.Module:
+        return self.language_model
 
     def get_cross_attention_states(
         self,
@@ -1710,20 +1723,14 @@ class MllamaForConditionalGeneration(CustomOp, SupportsMultiModal,
         else:
             skip_cross_attention = False
 
-            # Get the actual number of encoder tokens for each sample.
-            # Because attn_metadata.encoder_seq_lens only counts the last
-            # group of images for each sample, which is used to cheat the
-            # block manager to allocate blocks for those images only.
-            # See MllamaMultiModalProcessor for more details.
-            num_tiles_tensor = kwargs.pop("num_tiles")
-            num_tiles = [t.tolist() for t in num_tiles_tensor]
+            num_tiles = [t.tolist() for t in kwargs.pop("num_tiles")]
             num_tokens_per_tile = calc_token_per_chunk(self.image_size)
-            actual_encoder_seq_lens = [
-                sum(num_tile) * num_tokens_per_tile for num_tile in num_tiles
-            ]
-            for actual_len, last_group_len in zip(
-                    actual_encoder_seq_lens, attn_metadata.encoder_seq_lens):
-                assert actual_len >= last_group_len
+
+            actual_encoder_seq_lens = self._get_and_validate_encoder_lens(
+                attn_metadata.encoder_seq_lens,
+                num_tiles,
+                num_tokens_per_tile,
+            )
 
             cross_attention_states = self.get_cross_attention_states(
                 image_inputs, attn_metadata, actual_encoder_seq_lens)
@@ -1800,6 +1807,15 @@ class MllamaForConditionalGeneration(CustomOp, SupportsMultiModal,
                 weight_loader(param, loaded_weight)
                 updated_params.add(name)
         return updated_params
+
+    def get_mm_mapping(self) -> MultiModelKeys:
+        """
+        Get the module prefix in multimodal models
+        """
+        return MultiModelKeys.from_string_field(
+            language_model="language_model",
+            connector="multi_modal_projector",
+            tower_model="vision_model")
 
 
 def skip_attention_mask(sparse_mask: List[List[int]]) -> bool:

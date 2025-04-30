@@ -1,27 +1,29 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import time
-from collections.abc import Mapping
-from typing import Optional, Union
+from collections.abc import Mapping, Sequence
+from typing import Literal, Optional, Union
 
 from vllm.config import VllmConfig
-from vllm.inputs import ProcessorInputs, PromptType
+from vllm.inputs import ProcessorInputs, PromptType, SingletonInputs
 from vllm.inputs.parse import split_enc_dec_inputs
 from vllm.inputs.preprocess import InputPreprocessor
 from vllm.lora.request import LoRARequest
 from vllm.multimodal import (MULTIMODAL_REGISTRY, MultiModalKwargs,
                              MultiModalRegistry)
 from vllm.multimodal.inputs import PlaceholderRange
+from vllm.multimodal.processing import EncDecMultiModalProcessor
 from vllm.multimodal.utils import merge_and_sort_multimodal_metadata
 from vllm.pooling_params import PoolingParams
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import SamplingParams
-from vllm.transformers_utils.tokenizer_group import BaseTokenizerGroup
+from vllm.transformers_utils.tokenizer_group import TokenizerGroup
 from vllm.v1.engine import EngineCoreRequest
+from vllm.v1.engine.mm_input_cache import MirroredProcessingCache
 from vllm.v1.structured_output.backend_guidance import (
     validate_guidance_grammar)
-from vllm.v1.structured_output.utils import (
-    validate_structured_output_request_xgrammar)
+from vllm.v1.structured_output.backend_xgrammar import (
+    validate_xgrammar_grammar)
 
 
 class Processor:
@@ -29,7 +31,7 @@ class Processor:
     def __init__(
         self,
         vllm_config: VllmConfig,
-        tokenizer: BaseTokenizerGroup,
+        tokenizer: TokenizerGroup,
         mm_registry: MultiModalRegistry = MULTIMODAL_REGISTRY,
     ):
 
@@ -45,6 +47,8 @@ class Processor:
         self.input_preprocessor = InputPreprocessor(self.model_config,
                                                     self.tokenizer,
                                                     mm_registry)
+
+        self.mm_input_cache_client = MirroredProcessingCache(self.model_config)
 
         # Multi-modal hasher (for images)
         self.use_hash = (
@@ -73,6 +77,7 @@ class Processor:
         params: SamplingParams,
     ) -> None:
         self._validate_structured_output(params)
+        self._validate_logit_bias(params)
 
         if params.allowed_token_ids is None:
             return
@@ -82,6 +87,26 @@ class Processor:
         if not all(0 <= tid < vocab_size for tid in params.allowed_token_ids):
             raise ValueError(
                 "allowed_token_ids contains out-of-vocab token id!")
+
+    def _validate_logit_bias(
+        self,
+        params: SamplingParams,
+    ) -> None:
+        """Validate logit_bias token IDs are within vocabulary range."""
+        if not params.logit_bias:
+            return
+
+        vocab_size = self.model_config.get_vocab_size()
+        invalid_token_ids = []
+
+        for token_id in params.logit_bias:
+            if token_id < 0 or token_id >= vocab_size:
+                invalid_token_ids.append(token_id)
+
+        if invalid_token_ids:
+            raise ValueError(
+                f"token_id(s) {invalid_token_ids} in logit_bias contain "
+                f"out-of-vocab token ids. Vocabulary size: {vocab_size}")
 
     def _validate_supported_sampling_params(
         self,
@@ -120,53 +145,52 @@ class Processor:
         if not params.guided_decoding or not self.decoding_config:
             return
 
-        supported_backends = [
-            "xgrammar", "xgrammar:disable-any-whitespace", "guidance",
-            "guidance:disable-any-whitespace", "auto"
-        ]
         engine_level_backend = self.decoding_config.guided_decoding_backend
-        if engine_level_backend not in supported_backends:
-            raise ValueError(f"Only {supported_backends} structured output is "
-                             "supported in V1.")
         if params.guided_decoding.backend:
-            if params.guided_decoding.backend != engine_level_backend:
-                raise ValueError("Request-level structured output backend "
-                                 "must match engine-level backend. "
-                                 f"{params.guided_decoding.backend}"
-                                 f" != {engine_level_backend}")
+            # Request-level backend selection is not supported in V1.
+            # The values may differ if `params` is reused and was set
+            # to a specific backend based on `auto` behavior in a previous
+            # request. We remember that it was set as a result of `auto`
+            # using the `_auto` option set on the backend in the params.
+            if (params.guided_decoding.backend != engine_level_backend
+                    and not (engine_level_backend == "auto" and "_auto"
+                             in params.guided_decoding.backend_options())):
+                raise ValueError(
+                    "Request-level structured output backend selection is no "
+                    "longer supported. The request specified "
+                    f"'{params.guided_decoding.backend}', but vLLM was "
+                    f"initialised with '{engine_level_backend}'. This error "
+                    "can be resolved by removing backend selection from the "
+                    "request.")
         else:
             params.guided_decoding.backend = engine_level_backend
-
-        from vllm.platforms import current_platform
-        if not current_platform.supports_structured_output():
-            raise ValueError("Structured output is not supported on "
-                             f"{current_platform.device_name}.")
 
         # Request content validation
         if engine_level_backend.startswith("xgrammar"):
             # xgrammar with no fallback
-            validate_structured_output_request_xgrammar(params)
-            params.guided_decoding.backend = engine_level_backend
-        elif engine_level_backend == "auto":
+            validate_xgrammar_grammar(params)
+        elif engine_level_backend.startswith("guidance"):
+            # TODO: ideally we would have the LLTokenizer here as Lark syntax
+            # allows <|special_token|> and similar, see
+            # https://github.com/guidance-ai/llguidance/blob/main/docs/syntax.md#special-tokens
+            # Without tokenizer these are disallowed in grammars.
+            validate_guidance_grammar(params, tokenizer=None)
+        else:
+            # NOTE: engine_level_backend must be "auto" here, because we have
+            # checked supported_backends above.
             # "auto" is an opt-in to opinionated behavior where we try to
             # choose a backend based on request contents. This is not the
             # default as it is less predictable and subject to change
             # between releases as feature support changes.
             try:
-                validate_structured_output_request_xgrammar(params)
+                validate_xgrammar_grammar(params)
                 params.guided_decoding.backend = "xgrammar"
             except ValueError:
                 # The request includes some jsonschema feature(s) that
                 # are not supported in xgrammar. Fall back to guidance.
                 params.guided_decoding.backend = "guidance"
-
-        if engine_level_backend.startswith("guidance"):
-            # TODO ideally we would have the LLTokenizer here as Lark syntax
-            # allows <|special_token|> and similar, see
-            # https://github.com/guidance-ai/llguidance/blob/main/docs/syntax.md#special-tokens
-            # Without tokenizer these are disallowed in grammars.
-            validate_guidance_grammar(params, tokenizer=None)
-            params.guided_decoding.backend = engine_level_backend
+            # Remember that this backend was set automatically
+            params.guided_decoding.add_option("_auto")
 
     def process_inputs(
         self,
@@ -182,7 +206,6 @@ class Processor:
 
         # TODO(woosuk): Support pooling models.
         # TODO(woosuk): Support encoder-decoder models.
-
         self._validate_lora(lora_request)
         self._validate_params(params)
         if priority != 0:
@@ -205,6 +228,12 @@ class Processor:
             lora_request=lora_request,
             prompt_adapter_request=prompt_adapter_request,
             return_mm_hashes=self.use_hash,
+        )
+        from vllm.platforms import current_platform
+        current_platform.validate_request(
+            prompt=prompt,
+            params=params,
+            processed_inputs=processed_inputs,
         )
         eos_token_id = self.input_preprocessor.get_eos_token_id(lora_request)
 
@@ -230,7 +259,7 @@ class Processor:
             self.tokenizer.get_lora_tokenizer(lora_request))
 
         # Multimodal related.
-        sorted_mm_inputs: Optional[list[MultiModalKwargs]] = None
+        sorted_mm_inputs: Optional[Sequence[Optional[MultiModalKwargs]]] = None
         sorted_mm_positions: Optional[list[PlaceholderRange]] = None
         sorted_mm_hashes: Optional[list[str]] = None
         if decoder_inputs["type"] == "multimodal":
@@ -255,19 +284,27 @@ class Processor:
             # are multiple modalities.
             unique_modalities = set(sorted_item_modalities)
             if len(unique_modalities) > 1:
-                sorted_mm_inputs = []
+                orig_sorted_mm_inputs = []
                 used_indices = {modality: 0 for modality in unique_modalities}
+
                 for modality in sorted_item_modalities:
                     items = decoder_mm_inputs.get_items(modality)
                     item = items[used_indices[modality]]
-                    sorted_mm_inputs.append(MultiModalKwargs.from_items([item
-                                                                         ]))
+
+                    orig_sorted_mm_inputs.append(
+                        MultiModalKwargs.from_items([item]))
                     used_indices[modality] += 1
             else:
-                sorted_mm_inputs = [
+                orig_sorted_mm_inputs = [
                     MultiModalKwargs.from_items([item]) for item in
                     decoder_mm_inputs.get_items(sorted_item_modalities[0])
                 ]
+
+            if sorted_mm_hashes is not None:
+                sorted_mm_inputs = self.mm_input_cache_client.get_and_update_p0(
+                    orig_sorted_mm_inputs, sorted_mm_hashes)
+            else:
+                sorted_mm_inputs = orig_sorted_mm_inputs
 
         return EngineCoreRequest(
             request_id=request_id,
@@ -287,41 +324,64 @@ class Processor:
                                lora_request: Optional[LoRARequest] = None):
         encoder_inputs, decoder_inputs = split_enc_dec_inputs(inputs)
 
-        # For encoder-decoder multimodal models, the max_prompt_len
-        # restricts the decoder prompt length
-        if self.model_config.is_multimodal_model:
-            prompt_inputs = decoder_inputs
-        else:
-            prompt_inputs = encoder_inputs or decoder_inputs
+        if encoder_inputs is not None:
+            self._validate_model_input(encoder_inputs,
+                                       lora_request,
+                                       prompt_type="encoder")
+
+        self._validate_model_input(decoder_inputs,
+                                   lora_request,
+                                   prompt_type="decoder")
+
+    def _validate_model_input(
+        self,
+        prompt_inputs: SingletonInputs,
+        lora_request: Optional[LoRARequest],
+        *,
+        prompt_type: Literal["encoder", "decoder"],
+    ):
+        model_config = self.model_config
+        tokenizer = self.tokenizer.get_lora_tokenizer(lora_request)
 
         prompt_ids = prompt_inputs["prompt_token_ids"]
+        if not prompt_ids:
+            if prompt_type == "encoder" and model_config.is_multimodal_model:
+                pass  # Mllama may have empty encoder inputs for text-only data
+            else:
+                raise ValueError(f"The {prompt_type} prompt cannot be empty")
 
-        if prompt_ids is None or len(prompt_ids) == 0:
-            raise ValueError("Prompt cannot be empty")
+        max_input_id = max(prompt_ids, default=0)
+        if max_input_id > tokenizer.max_token_id:
+            raise ValueError(f"Token id {max_input_id} is out of vocabulary")
 
-        max_input_id = max(prompt_ids)
-        max_allowed = self.tokenizer.get_lora_tokenizer(
-            lora_request).max_token_id
-        if max_input_id > max_allowed:
-            raise ValueError(
-                "Token id {} is out of vocabulary".format(max_input_id))
+        max_prompt_len = self.model_config.max_model_len
+        if len(prompt_ids) > max_prompt_len:
+            if prompt_type == "encoder" and model_config.is_multimodal_model:
+                mm_registry = self.input_preprocessor.mm_registry
+                mm_processor = mm_registry.create_processor(
+                    model_config,
+                    tokenizer=tokenizer,
+                )
+                assert isinstance(mm_processor, EncDecMultiModalProcessor)
 
-        if len(prompt_ids) >= self.model_config.max_model_len:
-            raise ValueError(
-                f"Prompt length of {len(prompt_ids)} is longer than the "
-                f"maximum model length of {self.model_config.max_model_len}.")
+                if mm_processor.pad_dummy_encoder_prompt:
+                    return  # Skip encoder length check for Whisper
 
-        if self.model_config.is_multimodal_model:
-            max_prompt_len = self.model_config.max_model_len
-
-            if len(prompt_ids) > max_prompt_len:
-                raise ValueError(
-                    f"The prompt (total length {len(prompt_ids)}) is too long "
-                    f"to fit into the model (context length {max_prompt_len}). "
+            if model_config.is_multimodal_model:
+                suggestion = (
                     "Make sure that `max_model_len` is no smaller than the "
                     "number of text tokens plus multimodal tokens. For image "
                     "inputs, the number of image tokens depends on the number "
                     "of images, and possibly their aspect ratios as well.")
+            else:
+                suggestion = (
+                    "Make sure that `max_model_len` is no smaller than the "
+                    "number of text tokens.")
+
+            raise ValueError(
+                f"The {prompt_type} prompt (length {len(prompt_ids)}) is "
+                f"longer than the maximum model length of {max_prompt_len}. "
+                f"{suggestion}")
 
             # TODO: Find out how many placeholder tokens are there so we can
             # check that chunked prefill does not truncate them

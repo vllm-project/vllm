@@ -23,7 +23,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Inference-only LLaMA model compatible with HuggingFace weights."""
-from typing import Any, Dict, Iterable, Optional, Set, Tuple, Type, Union
+from typing import Any, Dict, Iterable, Optional, Set, Tuple, Union
 
 import torch
 from torch import nn
@@ -42,7 +42,6 @@ from vllm.model_executor.layers.linear import (MergedColumnParallelLinear,
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
-from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     DEFAULT_VOCAB_PADDING_SIZE, ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import (
@@ -70,6 +69,7 @@ class LlamaMLP(nn.Module):
         quant_config: Optional[QuantizationConfig] = None,
         bias: bool = False,
         prefix: str = "",
+        reduce_results: bool = True,
     ) -> None:
         super().__init__()
         self.gate_up_proj = MergedColumnParallelLinear(
@@ -84,6 +84,7 @@ class LlamaMLP(nn.Module):
             output_size=hidden_size,
             bias=bias,
             quant_config=quant_config,
+            reduce_results=reduce_results,
             prefix=f"{prefix}.down_proj",
         )
         if hidden_act != "silu":
@@ -313,7 +314,7 @@ class LlamaModel(nn.Module):
                  *,
                  vllm_config: VllmConfig,
                  prefix: str = "",
-                 layer_type: Type[LlamaDecoderLayer] = LlamaDecoderLayer):
+                 layer_type: type[nn.Module] = LlamaDecoderLayer):
         super().__init__()
 
         config = vllm_config.model_config.hf_config
@@ -507,10 +508,14 @@ class LlamaForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         "ffn_norm": "post_attention_layernorm",
         "tok_embeddings": "model.embed_tokens",
         "output": "lm_head",
-        "norm": "model.norm"
+        "norm": "model.norm",
     }
 
-    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
+    def __init__(self,
+                 *,
+                 vllm_config: VllmConfig,
+                 prefix: str = "",
+                 layer_type: type[nn.Module] = LlamaDecoderLayer):
         super().__init__()
         config = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
@@ -519,7 +524,8 @@ class LlamaForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         self.lora_config = lora_config
 
         self.model = self._init_model(vllm_config=vllm_config,
-                                      prefix=maybe_prefix(prefix, "model"))
+                                      prefix=maybe_prefix(prefix, "model"),
+                                      layer_type=layer_type)
 
         if get_pp_group().is_last_rank:
             self.unpadded_vocab_size = config.vocab_size
@@ -549,13 +555,16 @@ class LlamaForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         else:
             self.lm_head = PPMissingLayer()
 
-        self.sampler = get_sampler()
-
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors)
 
-    def _init_model(self, vllm_config: VllmConfig, prefix: str = ""):
-        return LlamaModel(vllm_config=vllm_config, prefix=prefix)
+    def _init_model(self,
+                    vllm_config: VllmConfig,
+                    prefix: str = "",
+                    layer_type: type[nn.Module] = LlamaDecoderLayer):
+        return LlamaModel(vllm_config=vllm_config,
+                          prefix=prefix,
+                          layer_type=layer_type)
 
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.get_input_embeddings(input_ids)
@@ -579,11 +588,6 @@ class LlamaForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         logits = self.logits_processor(self.lm_head, hidden_states,
                                        sampling_metadata)
         return logits
-
-    def sample(self, logits: torch.Tensor,
-               sampling_metadata: SamplingMetadata) -> Optional[SamplerOutput]:
-        next_tokens = self.sampler(logits, sampling_metadata)
-        return next_tokens
 
     def load_weights(self, weights: Iterable[Tuple[str,
                                                    torch.Tensor]]) -> Set[str]:

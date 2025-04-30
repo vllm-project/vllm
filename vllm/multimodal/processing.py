@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+import json
 import re
 import sys
 from abc import ABC, abstractmethod
@@ -108,16 +109,46 @@ class PromptUpdateDetails(Generic[_S]):
     full: _S
     """The full content."""
 
-    features: _S
+    is_embed: Optional[Callable[["_BoundPromptSequence"], torch.Tensor]] = None
     """
-    The part of the content that corresponds to feature placeholders;
-    this will be replaced by the output of the vision encoder during model
-    inference.
+    Given :attr:`full`, return a boolean mask of shape `(len(full),)`
+    indicating which positions of `full` to assign embeddings to.
+
+    `None` (default) means to assign embeddings to all positions of `full`.
+
+    The embeddings are obtained by calling
+    :class:`SupportsMultiModal.get_multimodal_embeddings`.
     """
 
     @staticmethod
     def from_seq(seq: _S) -> "PromptUpdateDetails[_S]":
-        return PromptUpdateDetails(full=seq, features=seq)
+        return PromptUpdateDetails(full=seq)
+
+    @staticmethod
+    def select_text(
+        seq: _S,
+        embed_text: str,
+    ) -> "PromptUpdateDetails[_S]":
+
+        def is_embed(full: "_BoundPromptSequence") -> torch.Tensor:
+            embed_token_ids = encode_tokens(full.tokenizer, embed_text)
+
+            return torch.isin(
+                torch.tensor(full.token_ids),
+                torch.tensor(embed_token_ids),
+            )
+
+        return PromptUpdateDetails(full=seq, is_embed=is_embed)
+
+    @staticmethod
+    def select_token_id(
+        seq: _S,
+        embed_token_id: int,
+    ) -> "PromptUpdateDetails[_S]":
+        return PromptUpdateDetails(
+            full=seq,
+            is_embed=lambda f: torch.tensor(f.token_ids) == embed_token_id,
+        )
 
 
 PromptUpdateInfo = Union[PromptSeq, PromptUpdateDetails]
@@ -406,7 +437,7 @@ class _BoundPromptSequence:
 @dataclass
 class _BoundPromptContent:
     full: _BoundPromptSequence
-    features: _BoundPromptSequence
+    is_embed: Optional[Callable[["_BoundPromptSequence"], torch.Tensor]]
 
 
 @dataclass
@@ -466,10 +497,8 @@ class BoundPromptUpdate:
 
         bound_full = _BoundPromptSequence.from_seq(self.tokenizer,
                                                    content.full)
-        bound_features = _BoundPromptSequence.from_seq(self.tokenizer,
-                                                       content.features)
         bound_content = _BoundPromptContent(full=bound_full,
-                                            features=bound_features)
+                                            is_embed=content.is_embed)
 
         if cache_key is not None:
             self._content_cache[cache_key] = bound_content
@@ -605,15 +634,19 @@ class PlaceholderFeaturesInfo:
     item_idx: int
     start_idx: int
     tokens: list[int]
+    is_embed: Optional[torch.Tensor]
 
     @property
     def length(self) -> int:
         return len(self.tokens)
 
     def to_range(self) -> PlaceholderRange:
+        # TODO: Is it worth it to optimize this by stripping the
+        # leading and ending positions where `is_embed=False`?
         return PlaceholderRange(
             offset=self.start_idx,
             length=self.length,
+            is_embed=self.is_embed,
         )
 
 
@@ -806,22 +839,17 @@ def _iter_placeholders(
                     continue
 
                 if prompt[start_idx:end_idx_full] == content_tokens_full:
-                    content_tokens_feat = content.features.token_ids
+                    content_is_embed = content.is_embed
+                    if content_is_embed is not None:
+                        content_is_embed = content_is_embed(content.full)
 
-                    try:
-                        match = next(
-                            iter_token_matches(content_tokens_full,
-                                               content_tokens_feat))
-                        yield PlaceholderFeaturesInfo(
-                            modality=modality,
-                            item_idx=item_idx,
-                            start_idx=start_idx + match.start_idx,
-                            tokens=content_tokens_feat,
-                        )
-                    except StopIteration:
-                        raise AssertionError(
-                            f"{content_tokens_feat=} should be a "
-                            f"subsequence of {content_tokens_full=}") from None
+                    yield PlaceholderFeaturesInfo(
+                        modality=modality,
+                        item_idx=item_idx,
+                        start_idx=start_idx,
+                        tokens=content_tokens_full,
+                        is_embed=content_is_embed,
+                    )
 
                     # Exclude overlapping matches
                     start_idx = end_idx_full
@@ -1007,20 +1035,19 @@ class BaseProcessingInfo:
         """
         raise NotImplementedError
 
-    @abstractmethod
-    def get_mm_max_tokens_per_item(
-        self,
-        seq_len: int,
-        mm_counts: Mapping[str, int],
-    ) -> Mapping[str, int]:
-        """
-        Get the maximum possible number of tokens per data item
-        for each modality.
+    def get_allowed_mm_limits(self) -> Mapping[str, int]:
+        """Return the maximum allowed number of items for each modality."""
+        supported_mm_limits = self.get_supported_mm_limits()
+        mm_config = self.ctx.get_mm_config()
 
-        The dictionary returned by this method should have the same
-        keys as that returned by :meth:`get_supported_mm_limits`.
-        """
-        raise NotImplementedError
+        allowed_limits = dict[str, int]()
+        for modality, supported_limit in supported_mm_limits.items():
+            user_limit = mm_config.get_limit_per_prompt(modality)
+
+            allowed_limits[modality] = (user_limit if supported_limit is None
+                                        else min(user_limit, supported_limit))
+
+        return allowed_limits
 
 
 _I = TypeVar("_I", bound=BaseProcessingInfo)
@@ -1039,12 +1066,6 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
                  *,
                  cache: Optional[ProcessingCache] = None,
                  enable_sanity_checks: bool = True) -> None:
-        if get_repls := getattr(self, "_get_prompt_replacements", None):
-            logger.warning_once("`_get_prompt_replacements` has been renamed "
-                                "to `_get_prompt_updates`. The old name will "
-                                "be removed in an upcoming release.")
-            self._get_prompt_updates = get_repls  # type: ignore[method-assign]
-
         super().__init__()
 
         self.info = info
@@ -1081,14 +1102,25 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         before passing them to :meth:`_get_hf_mm_data`.
         """
         mm_items = self.data_parser.parse_mm_data(mm_data)
-        mm_config = self.info.ctx.get_mm_config()
+        supported_mm_limits = self.info.get_supported_mm_limits()
+        allowed_mm_limits = self.info.get_allowed_mm_limits()
 
         for modality, items in mm_items.items():
-            limit = mm_config.get_limit_per_prompt(modality)
-            if len(items) > limit:
+            supported_limit = supported_mm_limits.get(modality, 0)
+            allowed_limit = allowed_mm_limits.get(modality, 0)
+            num_items = len(items)
+
+            if supported_limit is not None and num_items > supported_limit:
                 raise ValueError(
-                    f"You set {modality}={limit} (or defaulted to 1) in "
-                    f"`--limit-mm-per-prompt`, but passed {len(items)} "
+                    f"The model only supports at most {supported_limit} "
+                    f"{modality} items, but you passed {num_items} "
+                    f"{modality} items in the same prompt.")
+
+            if num_items > allowed_limit:
+                raise ValueError(
+                    "You set or defaulted to "
+                    f"'{json.dumps({modality: allowed_limit})}' in "
+                    f"`--limit-mm-per-prompt`, but passed {num_items} "
                     f"{modality} items in the same prompt.")
 
         return mm_items
@@ -1262,13 +1294,8 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         """
         mm_counts = mm_items.get_all_counts()
 
-        dummy_inputs = self.dummy_inputs.get_dummy_processor_inputs(
-            self.info.ctx.model_config.max_model_len,
-            mm_counts,
-        )
-
         _, mm_kwargs, _ = self._apply_hf_processor_text_mm(
-            prompt_text=dummy_inputs.prompt_text,
+            prompt_text=self.dummy_inputs.get_dummy_text(mm_counts),
             mm_items=mm_items,
             hf_processor_mm_kwargs=hf_processor_mm_kwargs,
         )

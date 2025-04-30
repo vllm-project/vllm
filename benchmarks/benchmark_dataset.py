@@ -64,6 +64,7 @@ class SampleRequest:
 
 class BenchmarkDataset(ABC):
     DEFAULT_SEED = 0
+    IS_MULTIMODAL = False
 
     def __init__(
         self,
@@ -288,7 +289,7 @@ def process_image(image: Any) -> Mapping[str, Any]:
 class RandomDataset(BenchmarkDataset):
     # Default values copied from benchmark_serving.py for the random dataset.
     DEFAULT_PREFIX_LEN = 0
-    DEFAULT_RANGE_RATIO = 1.0
+    DEFAULT_RANGE_RATIO = 0.0
     DEFAULT_INPUT_LEN = 1024
     DEFAULT_OUTPUT_LEN = 128
 
@@ -308,19 +309,32 @@ class RandomDataset(BenchmarkDataset):
         output_len: int = DEFAULT_OUTPUT_LEN,
         **kwargs,
     ) -> list[SampleRequest]:
+        # Enforce range_ratio < 1
+        assert range_ratio < 1.0, (
+            "random_range_ratio must be < 1.0 to ensure a valid sampling range"
+        )
+
         vocab_size = tokenizer.vocab_size
 
         prefix_token_ids = (np.random.randint(
             0, vocab_size, size=prefix_len).tolist() if prefix_len > 0 else [])
 
-        input_low = int(input_len * range_ratio)
-        output_low = int(output_len * range_ratio)
+        # New sampling logic: [X * (1 - b), X * (1 + b)]
+        input_low = int(input_len * (1 - range_ratio))
+        input_high = int(input_len * (1 + range_ratio))
+        output_low = int(output_len * (1 - range_ratio))
+        output_high = int(output_len * (1 + range_ratio))
+
+        # Add logging for debugging
+        logger.info("Sampling input_len from [%s, %s]", input_low, input_high)
+        logger.info("Sampling output_len from [%s, %s]", output_low,
+                    output_high)
 
         input_lens = np.random.randint(input_low,
-                                       input_len + 1,
+                                       input_high + 1,
                                        size=num_requests)
         output_lens = np.random.randint(output_low,
-                                        output_len + 1,
+                                        output_high + 1,
                                         size=num_requests)
         offsets = np.random.randint(0, vocab_size, size=num_requests)
 
@@ -472,11 +486,11 @@ class SonnetDataset(BenchmarkDataset):
 
         # Determine how many poem lines to use.
         num_input_lines = round((input_len - base_offset) / avg_len)
-        num_prefix_lines = round((prefix_len - base_offset) / avg_len)
+        num_prefix_lines = max(round((prefix_len - base_offset) / avg_len), 0)
         prefix_lines = self.data[:num_prefix_lines]
 
         samples = []
-        for _ in range(num_requests):
+        while len(samples) < num_requests:
             extra_lines = random.choices(self.data,
                                          k=num_input_lines - num_prefix_lines)
             prompt = f"{base_prompt}{''.join(prefix_lines + extra_lines)}"
@@ -484,13 +498,14 @@ class SonnetDataset(BenchmarkDataset):
             prompt_formatted = tokenizer.apply_chat_template(
                 msg, add_generation_prompt=True, tokenize=False)
             prompt_len = len(tokenizer(prompt_formatted).input_ids)
-            samples.append(
-                SampleRequest(
-                    prompt=prompt_formatted
-                    if return_prompt_formatted else prompt,
-                    prompt_len=prompt_len,
-                    expected_output_len=output_len,
-                ))
+            if prompt_len <= input_len:
+                samples.append(
+                    SampleRequest(
+                        prompt=prompt_formatted
+                        if return_prompt_formatted else prompt,
+                        prompt_len=prompt_len,
+                        expected_output_len=output_len,
+                    ))
         return samples
 
 
@@ -607,6 +622,7 @@ class ConversationDataset(HuggingFaceDataset):
     SUPPORTED_DATASET_PATHS = {
         'lmms-lab/LLaVA-OneVision-Data', 'Aeala/ShareGPT_Vicuna_unfiltered'
     }
+    IS_MULTIMODAL = True
 
     def sample(self,
                tokenizer: PreTrainedTokenizerBase,
@@ -671,6 +687,7 @@ class VisionArenaDataset(HuggingFaceDataset):
         "lmarena-ai/vision-arena-bench-v0.1":
         lambda x: x["turns"][0][0]["content"]
     }
+    IS_MULTIMODAL = True
 
     def sample(
         self,
@@ -799,5 +816,82 @@ class AIMODataset(HuggingFaceDataset):
                     expected_output_len=output_len,
                     multi_modal_data=None,
                 ))
+        self.maybe_oversample_requests(sampled_requests, num_requests)
+        return sampled_requests
+
+
+# -----------------------------------------------------------------------------
+# ASR Dataset Implementation
+# -----------------------------------------------------------------------------
+
+
+class ASRDataset(HuggingFaceDataset):
+    """
+    Dataset class for processing a ASR dataset for transcription.
+    Tested on the following set:
+
+    +----------------+----------------------------------------+--------------------------+-----------------------------+
+    | Dataset        | Domain                                 | Speaking Style           | hf-subset                   |
+    +----------------+----------------------------------------+--------------------------+-----------------------------+
+    | TED-LIUM       | TED talks                              | Oratory                  | release1, release2, release3|
+    |                |                                        |                          | release3-speaker-adaptation |
+    | VoxPopuli      | European Parliament                    | Oratory                  | en, de, it, fr,  ...        |
+    | LibriSpeech    | Audiobook                              | Narrated                 | "LIUM/tedlium"              |
+    | GigaSpeech     | Audiobook, podcast, YouTube            | Narrated, spontaneous    | xs, s, m, l, xl, dev, test  |
+    | SPGISpeech     | Financial meetings                     | Oratory, spontaneous     | S, M, L, dev, test          |
+    | AMI            | Meetings                               | Spontaneous              | ihm, sdm                    |
+    +----------------+----------------------------------------+--------------------------+-----------------------------+
+
+    """ # noqa: E501
+    SUPPORTED_DATASET_PATHS = {
+        "openslr/librispeech_asr", "facebook/voxpopuli", "LIUM/tedlium",
+        "edinburghcstr/ami", "speechcolab/gigaspeech", "kensho/spgispeech"
+    }
+
+    DEFAULT_OUTPUT_LEN = 128
+    IS_MULTIMODAL = True
+
+    # TODO Whisper-specific. Abstract interface when more models are supported.
+    TRANSCRIPTION_PREAMBLE = "<|startoftranscript|><|en|><|transcribe|>"\
+                              "<|notimestamps|>"
+    skip_long_audios: bool = True
+
+    def sample(
+        self,
+        tokenizer: PreTrainedTokenizerBase,
+        num_requests: int,
+        output_len: Optional[int] = None,
+        **kwargs,
+    ) -> list:
+        import librosa
+        output_len = (output_len
+                      if output_len is not None else self.DEFAULT_OUTPUT_LEN)
+        prompt = ASRDataset.TRANSCRIPTION_PREAMBLE
+        prompt_len = len(tokenizer(prompt).input_ids)
+        sampled_requests = []
+        skipped = 0
+        for item in self.data:
+            if len(sampled_requests) >= num_requests:
+                break
+            audio = item["audio"]
+            y, sr = audio["array"], audio["sampling_rate"]
+            duration_s = librosa.get_duration(y=y, sr=sr)
+            # Whisper max supported duration
+            if self.skip_long_audios and duration_s > 30:
+                skipped += 1
+                continue
+
+            mm_content = {"audio": (y, sr)}
+            sampled_requests.append(
+                SampleRequest(
+                    prompt=prompt,
+                    prompt_len=prompt_len,
+                    expected_output_len=output_len,
+                    multi_modal_data=mm_content,
+                ))
+        if skipped:
+            logger.warning("%d samples discarded from dataset due to" \
+                           " their length being greater than" \
+                           " what Whisper supports.", skipped)
         self.maybe_oversample_requests(sampled_requests, num_requests)
         return sampled_requests

@@ -99,7 +99,7 @@ class SimplePooler(nn.Module):
         pooling_metadata: PoolingMetadata,
     ) -> PoolerOutput:
         pooled_data = self.extract_states(hidden_states, pooling_metadata)
-        pooled_data = self.head(pooled_data)
+        pooled_data = self.head(pooled_data, pooling_metadata)
         pooled_outputs = [self.build_output(data) for data in pooled_data]
         return PoolerOutput(outputs=pooled_outputs)
 
@@ -235,14 +235,28 @@ class PoolerHead(nn.Module):
         self.normalize = normalize
         self.softmax = softmax
 
-    def forward(self, pooled_data: Union[list[torch.Tensor], torch.Tensor]):
+    def forward(self, pooled_data: Union[list[torch.Tensor], torch.Tensor],
+                pooling_metadata: PoolingMetadata):
+
+        dimensions_list = [
+            pooling_param.dimensions
+            for _, pooling_param in pooling_metadata.seq_groups
+        ]
+        if any(d is not None for d in dimensions_list):
+            # change the output dimension
+            assert len(pooled_data) == len(dimensions_list)
+            pooled_data = [
+                vecs if d is None else vecs[..., :d]
+                for vecs, d in zip(pooled_data, dimensions_list)
+            ]
+
         if self.normalize:
             if isinstance(pooled_data, list):
                 pooled_data = [
-                    F.normalize(data, p=2, dim=1) for data in pooled_data
+                    F.normalize(data, p=2, dim=-1) for data in pooled_data
                 ]
             else:
-                pooled_data = F.normalize(pooled_data, p=2, dim=1)
+                pooled_data = F.normalize(pooled_data, p=2, dim=-1)
 
         if self.softmax:
             if isinstance(pooled_data, list):

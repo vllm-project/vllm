@@ -11,6 +11,7 @@ Quantization trades off model precision for smaller memory footprint, allowing l
 supported_hardware
 auto_awq
 bnb
+bitblas
 gguf
 inc
 gptqmodel
@@ -19,4 +20,5 @@ int8
 fp8
 quark
 quantized_kvcache
+torchao
 :::

@@ -8,7 +8,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from functools import partial
 from typing import (TYPE_CHECKING, Any, Callable, ClassVar, Deque, Dict,
-                    Iterable, List, Mapping, NamedTuple, Optional)
+                    Iterable, List, Literal, Mapping, NamedTuple, Optional)
 from typing import Sequence as GenericSequence
 from typing import Set, Type, Union, cast, overload
 
@@ -30,7 +30,7 @@ from vllm.entrypoints.openai.logits_processors import (
     get_logits_processors as get_openai_logits_processors)
 from vllm.executor.executor_base import ExecutorBase
 from vllm.inputs import (INPUT_REGISTRY, InputRegistry, ProcessorInputs,
-                         PromptType)
+                         PromptType, SingletonInputs)
 from vllm.inputs.parse import is_token_prompt, split_enc_dec_inputs
 from vllm.inputs.preprocess import InputPreprocessor
 from vllm.logger import init_logger
@@ -40,6 +40,7 @@ from vllm.model_executor.guided_decoding import (
     get_local_guided_decoding_logits_processor)
 from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
+from vllm.multimodal.processing import EncDecMultiModalProcessor
 from vllm.outputs import (PoolingRequestOutput, RequestOutput,
                           RequestOutputFactory)
 from vllm.pooling_params import PoolingParams
@@ -54,7 +55,7 @@ from vllm.tracing import (SpanAttributes, SpanKind, extract_trace_context,
 from vllm.transformers_utils.detokenizer import Detokenizer
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.transformers_utils.tokenizer_group import (
-    BaseTokenizerGroup, init_tokenizer_from_configs)
+    TokenizerGroup, init_tokenizer_from_configs)
 from vllm.usage.usage_lib import (UsageContext, is_usage_stats_enabled,
                                   usage_message)
 from vllm.utils import (Counter, Device, deprecate_kwargs,
@@ -65,7 +66,6 @@ from vllm.worker.model_runner_base import InputProcessingError
 logger = init_logger(__name__)
 _LOCAL_LOGGING_INTERVAL_SEC = 5
 
-_G = TypeVar("_G", bound=BaseTokenizerGroup, default=BaseTokenizerGroup)
 _O = TypeVar("_O", RequestOutput, PoolingRequestOutput)
 _R = TypeVar("_R", default=Any)
 
@@ -204,7 +204,7 @@ class LLMEngine:
 
         return outputs_
 
-    tokenizer: Optional[BaseTokenizerGroup]
+    tokenizer: Optional[TokenizerGroup]
 
     def __init__(
         self,
@@ -313,11 +313,6 @@ class LLMEngine:
                     self.parallel_config.disable_custom_all_reduce,
                     "split_qk_v": self.cache_config.split_qkv,
                 })
-
-        if self.tokenizer:
-            # Ping the tokenizer to ensure liveness if it runs in a
-            # different process.
-            self.tokenizer.ping()
 
         self.cached_scheduler_outputs = [
             SchedulerOutputState()
@@ -530,21 +525,12 @@ class LLMEngine:
         if model_executor := getattr(self, "model_executor", None):
             model_executor.shutdown()
 
-    def get_tokenizer_group(
-        self,
-        group_type: Type[_G] = BaseTokenizerGroup,
-    ) -> _G:
-        tokenizer_group = self.tokenizer
-
-        if tokenizer_group is None:
+    def get_tokenizer_group(self) -> TokenizerGroup:
+        if self.tokenizer is None:
             raise ValueError("Unable to get tokenizer because "
                              "skip_tokenizer_init is True")
-        if not isinstance(tokenizer_group, group_type):
-            raise TypeError("Invalid type of tokenizer group. "
-                            f"Expected type: {group_type}, but "
-                            f"found type: {type(tokenizer_group)}")
 
-        return tokenizer_group
+        return self.tokenizer
 
     def get_tokenizer(
         self,
@@ -552,11 +538,10 @@ class LLMEngine:
     ) -> AnyTokenizer:
         return self.get_tokenizer_group().get_lora_tokenizer(lora_request)
 
-    def _init_tokenizer(self) -> BaseTokenizerGroup:
+    def _init_tokenizer(self) -> TokenizerGroup:
         return init_tokenizer_from_configs(
             model_config=self.model_config,
             scheduler_config=self.scheduler_config,
-            parallel_config=self.parallel_config,
             lora_config=self.lora_config)
 
     def _verify_args(self) -> None:
@@ -906,6 +891,10 @@ class LLMEngine:
         for scheduler in self.scheduler:
             scheduler.abort_seq_group(
                 request_id, seq_id_to_seq_group=self.seq_id_to_seq_group)
+
+    def get_vllm_config(self) -> VllmConfig:
+        """Gets the vllm configuration."""
+        return self.vllm_config
 
     def get_model_config(self) -> ModelConfig:
         """Gets the model configuration."""
@@ -1941,8 +1930,6 @@ class LLMEngine:
         return self.model_executor.is_sleeping
 
     def check_health(self) -> None:
-        if self.tokenizer:
-            self.tokenizer.check_health()
         self.model_executor.check_health()
 
     def is_tracing_enabled(self) -> bool:
@@ -2023,29 +2010,61 @@ class LLMEngine:
                                lora_request: Optional[LoRARequest]):
         encoder_inputs, decoder_inputs = split_enc_dec_inputs(inputs)
 
-        # For encoder-decoder multimodal models, the max_prompt_len
-        # restricts the decoder prompt length
-        if self.model_config.is_multimodal_model:
-            prompt_inputs = decoder_inputs
-        else:
-            prompt_inputs = encoder_inputs or decoder_inputs
+        if encoder_inputs is not None:
+            self._validate_model_input(encoder_inputs,
+                                       lora_request,
+                                       prompt_type="encoder")
+
+        self._validate_model_input(decoder_inputs,
+                                   lora_request,
+                                   prompt_type="decoder")
+
+    def _validate_model_input(
+        self,
+        prompt_inputs: SingletonInputs,
+        lora_request: Optional[LoRARequest],
+        *,
+        prompt_type: Literal["encoder", "decoder"],
+    ):
+        model_config = self.model_config
+        tokenizer = (None if self.tokenizer is None else
+                     self.tokenizer.get_lora_tokenizer(lora_request))
 
         prompt_ids = prompt_inputs["prompt_token_ids"]
+        if not prompt_ids:
+            if prompt_type == "encoder" and model_config.is_multimodal_model:
+                pass  # Mllama may have empty encoder inputs for text-only data
+            else:
+                raise ValueError(f"The {prompt_type} prompt cannot be empty")
 
-        if prompt_ids is None or len(prompt_ids) == 0:
-            raise ValueError("Prompt cannot be empty")
+        max_prompt_len = self.model_config.max_model_len
+        if len(prompt_ids) > max_prompt_len:
+            if prompt_type == "encoder" and model_config.is_multimodal_model:
+                mm_registry = self.input_preprocessor.mm_registry
+                mm_processor = mm_registry.create_processor(
+                    model_config,
+                    tokenizer=tokenizer or object(),  # Dummy if no tokenizer
+                )
+                assert isinstance(mm_processor, EncDecMultiModalProcessor)
 
-        if self.model_config.is_multimodal_model:
-            max_prompt_len = self.model_config.max_model_len
+                if mm_processor.pad_dummy_encoder_prompt:
+                    return  # Skip encoder length check for Whisper
 
-            if len(prompt_ids) > max_prompt_len:
-                raise ValueError(
-                    f"The prompt (total length {len(prompt_ids)}) is too long "
-                    f"to fit into the model (context length {max_prompt_len}). "
+            if model_config.is_multimodal_model:
+                suggestion = (
                     "Make sure that `max_model_len` is no smaller than the "
                     "number of text tokens plus multimodal tokens. For image "
                     "inputs, the number of image tokens depends on the number "
                     "of images, and possibly their aspect ratios as well.")
+            else:
+                suggestion = (
+                    "Make sure that `max_model_len` is no smaller than the "
+                    "number of text tokens.")
+
+            raise ValueError(
+                f"The {prompt_type} prompt (length {len(prompt_ids)}) is "
+                f"longer than the maximum model length of {max_prompt_len}. "
+                f"{suggestion}")
 
             # TODO: Find out how many placeholder tokens are there so we can
             # check that chunked prefill does not truncate them

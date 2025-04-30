@@ -50,7 +50,7 @@ class NeuronPlatform(Platform):
         if cache_config:
             # neuron needs block_size = max_model_len
             vllm_config.cache_config.block_size = \
-                vllm_config.model_config.max_model_len
+                vllm_config.model_config.max_model_len  # type: ignore
 
     @classmethod
     def is_pin_memory_available(cls) -> bool:
@@ -66,8 +66,4 @@ class NeuronPlatform(Platform):
 
     @classmethod
     def use_all_gather(cls) -> bool:
-        return True
-
-    @classmethod
-    def supports_structured_output(cls) -> bool:
         return True

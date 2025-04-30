@@ -8,6 +8,7 @@
 # Documentation
 # label(str): the name of the test. emoji allowed.
 # fast_check(bool): whether to run this on each commit on fastcheck pipeline.
+# torch_nightly(bool): whether to run this on vllm against torch nightly pipeline.
 # fast_check_only(bool): run this test on fastcheck pipeline only
 # optional(bool): never run this test by default (i.e. need to unblock manually) unless it's scheduled nightly run.
 # command(str): the single command to run for tests. incompatible with commands.
@@ -70,6 +71,7 @@ steps:
 - label: Basic Correctness Test # 30min
   #mirror_hardwares: [amd]
   fast_check: true
+  torch_nightly: true
   source_file_dependencies:
   - vllm/
   - tests/basic_correctness/test_basic_correctness
@@ -104,6 +106,7 @@ steps:
 - label: Entrypoints Test # 40min
   working_dir: "/vllm-workspace/tests"
   fast_check: true
+  torch_nightly: true
   #mirror_hardwares: [amd]
   source_file_dependencies:
   - vllm/
@@ -118,7 +121,7 @@ steps:
   - pytest -v -s entrypoints/llm/test_generate.py # it needs a clean process
   - pytest -v -s entrypoints/llm/test_generate_multiple_loras.py # it needs a clean process
   - VLLM_USE_V1=0 pytest -v -s entrypoints/llm/test_guided_generate.py # it needs a clean process
-  - pytest -v -s entrypoints/openai --ignore=entrypoints/openai/test_oot_registration.py  --ignore=entrypoints/openai/test_chat_with_tool_reasoning.py --ignore=entrypoints/openai/correctness/
+  - pytest -v -s entrypoints/openai --ignore=entrypoints/openai/test_oot_registration.py  --ignore=entrypoints/openai/test_chat_with_tool_reasoning.py --ignore=entrypoints/openai/correctness/ --ignore=entrypoints/openai/test_openai_schema.py
   - pytest -v -s entrypoints/test_chat_utils.py
   - VLLM_USE_V1=0 pytest -v -s entrypoints/offline_mode # Needs to avoid interference with other tests
 
@@ -163,11 +166,6 @@ steps:
   - tests/tracing
   commands:
   - pytest -v -s metrics
-  - "pip install \
-      'opentelemetry-sdk>=1.26.0,<1.27.0' \
-      'opentelemetry-api>=1.26.0,<1.27.0' \
-      'opentelemetry-exporter-otlp>=1.26.0,<1.27.0' \
-      'opentelemetry-semantic-conventions-ai>=0.4.1,<0.5.0'"
   - pytest -v -s tracing
 
 ##### fast check tests  #####
@@ -210,6 +208,8 @@ steps:
     - pytest -v -s v1/sample
     - pytest -v -s v1/worker
     - pytest -v -s v1/structured_output
+    - pytest -v -s v1/spec_decode
+    - pytest -v -s v1/test_serial_utils.py
     - pytest -v -s v1/test_stats.py
     - pytest -v -s v1/test_utils.py
     - pytest -v -s v1/test_oracle.py
@@ -292,6 +292,14 @@ steps:
   command: pytest -v -s lora --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --ignore=lora/test_chatglm3_tp.py --ignore=lora/test_llama_tp.py
   parallelism: 4
 
+- label: PyTorch Compilation Unit Tests
+  source_file_dependencies:
+    - vllm/
+    - tests/compile
+  commands:
+    - pytest -v -s compile/test_pass_manager.py
+    - pytest -v -s compile/test_fusion.py
+
 - label: PyTorch Fullgraph Smoke Test # 9min
   source_file_dependencies:
   - vllm/
@@ -301,7 +309,6 @@ steps:
   # these tests need to be separated, cannot combine
   - pytest -v -s compile/piecewise/test_simple.py
   - pytest -v -s compile/piecewise/test_toy_llama.py
-  - pytest -v -s compile/test_pass_manager.py
 
 - label: PyTorch Fullgraph Test # 18min
   source_file_dependencies:
@@ -310,15 +317,46 @@ steps:
   commands:
   - pytest -v -s compile/test_full_graph.py
 
-- label: Kernels Test %N # 1h each
-  # mirror_hardwares: [amd]
+- label: Kernels Core Operation Test
   source_file_dependencies:
   - csrc/
-  - vllm/attention
-  - tests/kernels
+  - tests/kernels/core
   commands:
-    - pytest -v -s kernels --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
-  parallelism: 4
+    - pytest -v -s kernels/core
+
+- label: Kernels Attention Test %N
+  source_file_dependencies:
+  - csrc/attention/
+  - vllm/attention
+  - vllm/v1/attention
+  - tests/kernels/attention
+  commands:
+    - pytest -v -s kernels/attention --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
+  parallelism: 2
+
+- label: Kernels Quantization Test %N
+  source_file_dependencies:
+  - csrc/quantization/
+  - vllm/model_executor/layers/quantization
+  - tests/kernels/quantization
+  commands:
+    - pytest -v -s kernels/quantization  --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
+  parallelism: 2
+
+- label: Kernels MoE Test
+  source_file_dependencies:
+  - csrc/moe/
+  - tests/kernels/moe
+  - vllm/model_executor/layers/fused_moe/
+  commands:
+    - pytest -v -s kernels/moe
+
+- label: Kernels Mamba Test
+  source_file_dependencies:
+  - csrc/mamba/
+  - tests/kernels/mamba
+  commands:
+    - pytest -v -s kernels/mamba
 
 - label: Tensorizer Test # 11min
   # mirror_hardwares: [amd]
@@ -338,6 +376,13 @@ steps:
   - benchmarks/
   commands:
   - bash scripts/run-benchmarks.sh
+
+- label: Benchmarks CLI Test # 10min
+  source_file_dependencies:
+  - vllm/
+  - tests/benchmarks/
+  commands:
+  - pytest -v -s benchmarks/
 
 - label: Quantization Test # 33min
   source_file_dependencies:
@@ -376,8 +421,10 @@ steps:
   source_file_dependencies:
     - vllm/
     - tests/tool_use
+    - tests/mistral_tool_use
   commands:
     - pytest -v -s tool_use
+    - pytest -v -s mistral_tool_use
 
 #####  models test  #####
 
@@ -389,7 +436,9 @@ steps:
     - pytest -v -s models/test_transformers.py
     - pytest -v -s models/test_registry.py
     # V1 Test: https://github.com/vllm-project/vllm/issues/14531
-    - VLLM_USE_V1=0 pytest -v -s models/test_initialization.py
+    - VLLM_USE_V1=0 pytest -v -s models/test_initialization.py -k 'not llama4 and not plamo2'
+    - VLLM_USE_V1=0 pytest -v -s models/test_initialization.py -k 'llama4'
+    - VLLM_USE_V1=0 pytest -v -s models/test_initialization.py -k 'plamo2'
 
 - label: Language Models Test (Standard) # 32min
   #mirror_hardwares: [amd]
@@ -399,6 +448,8 @@ steps:
   - tests/models/embedding/language
   - tests/models/encoder_decoder/language
   commands:
+    # Install causal-conv1d for plamo2 models here, as it is not compatible with pip-compile.
+    - pip install causal-conv1d
     - pytest -v -s models/decoder_only/language -m 'core_model or quant_model'
     - pytest -v -s models/embedding/language -m core_model
 
@@ -410,6 +461,8 @@ steps:
   - tests/models/embedding/language
   - tests/models/encoder_decoder/language
   commands:
+    # Install causal-conv1d for plamo2 models here, as it is not compatible with pip-compile.
+    - pip install causal-conv1d
     - pytest -v -s models/decoder_only/language -m 'not core_model and not quant_model'
     - pytest -v -s models/embedding/language -m 'not core_model'
 
@@ -426,7 +479,7 @@ steps:
     - pip install git+https://github.com/TIGER-AI-Lab/Mantis.git
     - pytest -v -s models/multimodal
     - pytest -v -s models/decoder_only/audio_language -m 'core_model or quant_model'
-    - pytest -v -s --ignore models/decoder_only/vision_language/test_phi3v.py models/decoder_only/vision_language -m 'core_model or quant_model'
+    - pytest -v -s models/decoder_only/vision_language -m 'core_model or quant_model'
     - pytest -v -s models/embedding/vision_language -m core_model
     - pytest -v -s models/encoder_decoder/audio_language -m core_model
     - pytest -v -s models/encoder_decoder/language -m core_model
@@ -445,10 +498,7 @@ steps:
     - pip install git+https://github.com/TIGER-AI-Lab/Mantis.git
     - pytest -v -s models/decoder_only/audio_language -m 'not core_model and not quant_model'
     - pytest -v -s models/decoder_only/vision_language/test_models.py -m 'split(group=0) and not core_model and not quant_model'
-    # HACK - run phi3v tests separately to sidestep this transformers bug
-    # https://github.com/huggingface/transformers/issues/34307
-    - pytest -v -s models/decoder_only/vision_language/test_phi3v.py
-    - pytest -v -s --ignore models/decoder_only/vision_language/test_models.py --ignore models/decoder_only/vision_language/test_phi3v.py models/decoder_only/vision_language -m 'not core_model and not quant_model'
+    - pytest -v -s --ignore models/decoder_only/vision_language/test_models.py models/decoder_only/vision_language -m 'not core_model and not quant_model'
     - pytest -v -s models/embedding/vision_language -m 'not core_model'
     - pytest -v -s models/encoder_decoder/language -m 'not core_model'
     - pytest -v -s models/encoder_decoder/vision_language -m 'not core_model'
@@ -538,6 +588,7 @@ steps:
   # - pytest -v -s spec_decode/e2e/test_integration_dist_tp2.py
   - VLLM_USE_V1=0 CUDA_VISIBLE_DEVICES=0,1 pytest -v -s test_sharded_state_loader.py
   - VLLM_USE_V1=0 CUDA_VISIBLE_DEVICES=0,1 pytest -v -s kv_transfer/test_disagg.py
+  - CUDA_VISIBLE_DEVICES=0,1 pytest -v -s v1/shutdown
 
 - label: Plugin Tests (2 GPUs) # 40min
   working_dir: "/vllm-workspace/tests"

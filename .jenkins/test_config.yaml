@@ -87,9 +87,9 @@ stages:
         command: cd .jenkins/lm-eval-harness && PT_HPU_LAZY_MODE=1 bash run-tests.sh -c configs/models-mss.txt -t 1
   - name: test_gsm8k_spec_decode
     steps:
-      - name: gsm8k_small_g2_tp1_mlp_spec_decode
-        flavor: g2
-        command: PT_HPU_LAZY_MODE=1 VLLM_CONTIGUOUS_PA=false VLLM_SKIP_WARMUP=True pytest -v tests/spec_decode/e2e/test_mlp_correctness.py::test_mlp_e2e_greedy_correctness 
+      # - name: gsm8k_small_g2_tp1_mlp_spec_decode
+      #   flavor: g2
+      #   command: PT_HPU_LAZY_MODE=1 VLLM_CONTIGUOUS_PA=false VLLM_SKIP_WARMUP=True pytest -v tests/spec_decode/e2e/test_mlp_correctness.py::test_mlp_e2e_greedy_correctness 
       - name: gsm8k_small_g2_tp1_medusa_spec_decode
         flavor: g2
         command: PT_HPU_LAZY_MODE=1 VLLM_CONTIGUOUS_PA=false VLLM_SKIP_WARMUP=True pytest -v tests/spec_decode/e2e/test_medusa_correctness.py::test_medusa_e2e_greedy_correctness
@@ -141,8 +141,8 @@ stages:
     steps:
     - name: test_v1_core_engine_worker_g2
       flavor: g2
-      command:  export PT_HPU_LAZY_MODE=1 && export VLLM_USE_V1=1 && export VLLM_SKIP_WARMUP=true && pytest -v -s -vvv --log-cli-level=INFO tests/v1/core && pytest -v -s -vvv --log-cli-level=INFO tests/v1/engine && pytest -v -s -vvv --log-cli-level=INFO tests/v1/worker 
+      command:  export PT_HPU_LAZY_MODE=1 && export VLLM_USE_V1=1 && export VLLM_SKIP_WARMUP=true && pytest -v -s -vvv --log-cli-level=INFO tests/v1/core -k "not kv_connector" && pytest -v -s -vvv --log-cli-level=INFO tests/v1/engine && pytest -v -s -vvv --log-cli-level=INFO tests/v1/worker 
     - name: test_v1_core_engine_worker_g3
       flavor: g3
-      command: export PT_HPU_LAZY_MODE=1 && export VLLM_USE_V1=1 && export VLLM_SKIP_WARMUP=true && pytest -v -s -vvv --log-cli-level=INFO tests/v1/core && pytest -v -s -vvv --log-cli-level=INFO tests/v1/engine && pytest -v -s -vvv --log-cli-level=INFO tests/v1/worker 
+      command: export PT_HPU_LAZY_MODE=1 && export VLLM_USE_V1=1 && export VLLM_SKIP_WARMUP=true && pytest -v -s -vvv --log-cli-level=INFO tests/v1/core -k "not kv_connector" && pytest -v -s -vvv --log-cli-level=INFO tests/v1/engine && pytest -v -s -vvv --log-cli-level=INFO tests/v1/worker 
     

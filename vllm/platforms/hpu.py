@@ -53,8 +53,11 @@ class HpuPlatform(Platform):
     def check_and_update_config(cls, vllm_config: VllmConfig) -> None:
 
         scheduler_config = vllm_config.scheduler_config
-
         parallel_config = vllm_config.parallel_config
+        if scheduler_config.is_multi_step:
+            parallel_config.worker_cls = \
+                "vllm.worker.multi_step_hpu_worker.MultiStepHPUWorker"
+
         if parallel_config.worker_cls == "auto":
             if envs.VLLM_USE_V1:
                 parallel_config.worker_cls = \

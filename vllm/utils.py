@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import argparse
 import asyncio
 import concurrent
 import contextlib
@@ -26,6 +25,7 @@ import socket
 import subprocess
 import sys
 import tempfile
+import textwrap
 import threading
 import time
 import traceback
@@ -33,15 +33,19 @@ import types
 import uuid
 import warnings
 import weakref
+from argparse import (Action, ArgumentDefaultsHelpFormatter, ArgumentParser,
+                      ArgumentTypeError)
 from asyncio import FIRST_COMPLETED, AbstractEventLoop, Task
 from collections import UserDict, defaultdict
 from collections.abc import (AsyncGenerator, Awaitable, Generator, Hashable,
                              Iterable, Iterator, KeysView, Mapping)
+from concurrent.futures.process import ProcessPoolExecutor
 from dataclasses import dataclass, field
 from functools import cache, lru_cache, partial, wraps
 from types import MappingProxyType
 from typing import (TYPE_CHECKING, Any, Callable, Generic, Literal, NamedTuple,
-                    Optional, Type, TypeVar, Union, cast, overload)
+                    Optional, Sequence, Tuple, Type, TypeVar, Union, cast,
+                    overload)
 from uuid import uuid4
 
 import cachetools
@@ -54,11 +58,15 @@ import torch.types
 import yaml
 import zmq
 import zmq.asyncio
+from packaging import version
 from packaging.version import Version
 from torch.library import Library
 from typing_extensions import Never, ParamSpec, TypeIs, assert_never
 
 import vllm.envs as envs
+# NOTE: import triton_utils to make TritonPlaceholderModule work
+#       if triton is unavailable
+import vllm.triton_utils  # noqa: F401
 from vllm.logger import enable_trace_function_call, init_logger
 
 if TYPE_CHECKING:
@@ -235,6 +243,12 @@ class CacheInfo(NamedTuple):
 
         return self.hits / self.total
 
+    def __sub__(self, other: CacheInfo):
+        return CacheInfo(
+            hits=self.hits - other.hits,
+            total=self.total - other.total,
+        )
+
 
 class LRUCache(cachetools.LRUCache[_K, _V], Generic[_K, _V]):
 
@@ -242,15 +256,26 @@ class LRUCache(cachetools.LRUCache[_K, _V], Generic[_K, _V]):
                  capacity: float,
                  getsizeof: Optional[Callable[[_V], float]] = None):
         super().__init__(capacity, getsizeof)
+
         self.pinned_items = set[_K]()
-        self.capacity = capacity
 
         self._hits = 0
         self._total = 0
+        self._last_info = CacheInfo(hits=0, total=0)
+
+    def __getitem__(self, key: _K, *, update_info: bool = True) -> _V:
+        value = super().__getitem__(key)
+
+        if update_info:
+            self._hits += 1
+            self._total += 1
+
+        return value
 
     def __delitem__(self, key: _K) -> None:
         run_on_remove = key in self
-        value = self.__getitem__(key)
+        value = self.__getitem__(key,
+                                 update_info=False)  # type: ignore[call-arg]
         super().__delitem__(key)
         if key in self.pinned_items:
             # Todo: add warning to inform that del pinned item
@@ -270,11 +295,38 @@ class LRUCache(cachetools.LRUCache[_K, _V], Generic[_K, _V]):
         """Return the internal order dictionary (read-only)."""
         return MappingProxyType(self._LRUCache__order)  # type: ignore
 
-    def stat(self) -> CacheInfo:
-        return CacheInfo(hits=self._hits, total=self._total)
+    @property
+    def capacity(self) -> float:
+        return self.maxsize
+
+    @property
+    def usage(self) -> float:
+        if self.maxsize == 0:
+            return 0
+
+        return self.currsize / self.maxsize
+
+    def stat(self, *, delta: bool = False) -> CacheInfo:
+        """
+        Gets the cumulative number of hits and queries against this cache.
+
+        If :code:`delta=True`, instead gets these statistics
+        since the last call that also passed :code:`delta=True`.
+        """
+        info = CacheInfo(hits=self._hits, total=self._total)
+
+        if delta:
+            info_delta = info - self._last_info
+            self._last_info = info
+            info = info_delta
+
+        return info
 
     def touch(self, key: _K) -> None:
-        self._LRUCache__update(key)  # type: ignore
+        try:
+            self._LRUCache__order.move_to_end(key)  # type: ignore
+        except KeyError:
+            self._LRUCache__order[key] = None  # type: ignore
 
     @overload
     def get(self, key: _K, /) -> Optional[_V]:
@@ -291,7 +343,8 @@ class LRUCache(cachetools.LRUCache[_K, _V], Generic[_K, _V]):
                                     _T]] = None) -> Optional[Union[_V, _T]]:
         value: Optional[Union[_V, _T]]
         if key in self:
-            value = self.__getitem__(key)
+            value = self.__getitem__(
+                key, update_info=False)  # type: ignore[call-arg]
 
             self._hits += 1
         else:
@@ -316,8 +369,9 @@ class LRUCache(cachetools.LRUCache[_K, _V], Generic[_K, _V]):
         if key not in self:
             return default
 
-        value = self[key]
-        del self[key]
+        value = self.__getitem__(key,
+                                 update_info=False)  # type: ignore[call-arg]
+        self.__delitem__(key)
         return value
 
     def put(self, key: _K, value: _V) -> None:
@@ -352,10 +406,6 @@ class LRUCache(cachetools.LRUCache[_K, _V], Generic[_K, _V]):
         while self.currsize > self.capacity:
             self.remove_oldest()
 
-    def clear(self) -> None:
-        while len(self) > 0:
-            self.remove_oldest(remove_pinned=True)
-
     def popitem(self, remove_pinned: bool = False):
         """Remove and return the `(key, value)` pair least recently used."""
         if not remove_pinned:
@@ -370,6 +420,14 @@ class LRUCache(cachetools.LRUCache[_K, _V], Generic[_K, _V]):
             lru_key = next(iter(self.order))
         value = self.pop(cast(_K, lru_key))
         return (lru_key, value)
+
+    def clear(self) -> None:
+        while len(self) > 0:
+            self.remove_oldest(remove_pinned=True)
+
+        self._hits = 0
+        self._total = 0
+        self._last_info = CacheInfo(hits=0, total=0)
 
 
 class PyObjectCache:
@@ -594,12 +652,12 @@ def get_open_port() -> int:
     process. Currently it uses 2 ports.
     """
     if "VLLM_DP_MASTER_PORT" in os.environ:
-        dp_port = envs.VLLM_DP_MASTER_PORT
+        dp_master_port = envs.VLLM_DP_MASTER_PORT
+        reserved_port_range = range(dp_master_port, dp_master_port + 10)
         while True:
-            port = _get_open_port()
-            if dp_port <= port < dp_port + 10:
-                continue
-            return port
+            candidate_port = _get_open_port()
+            if candidate_port not in reserved_port_range:
+                return candidate_port
     return _get_open_port()
 
 
@@ -1283,6 +1341,22 @@ def cuda_is_initialized() -> bool:
     return torch.cuda.is_initialized()
 
 
+def cuda_get_device_properties(device,
+                               names: Sequence[str],
+                               init_cuda=False) -> tuple[Any, ...]:
+    """Get specified CUDA device property values without initializing CUDA in
+    the current process."""
+    if init_cuda or cuda_is_initialized():
+        props = torch.cuda.get_device_properties(device)
+        return tuple(getattr(props, name) for name in names)
+
+    # Run in subprocess to avoid initializing CUDA as a side effect.
+    mp_ctx = multiprocessing.get_context("fork")
+    with ProcessPoolExecutor(max_workers=1, mp_context=mp_ctx) as executor:
+        return executor.submit(cuda_get_device_properties, device, names,
+                               True).result()
+
+
 def weak_bind(bound_method: Callable[..., Any], ) -> Callable[..., None]:
     """Make an instance method that weakly references
     its associated instance and no-ops once that
@@ -1309,7 +1383,7 @@ def run_once(f: Callable[P, None]) -> Callable[P, None]:
     return wrapper
 
 
-class StoreBoolean(argparse.Action):
+class StoreBoolean(Action):
 
     def __call__(self, parser, namespace, values, option_string=None):
         if values.lower() == "true":
@@ -1321,15 +1395,28 @@ class StoreBoolean(argparse.Action):
                              "Expected 'true' or 'false'.")
 
 
-class SortedHelpFormatter(argparse.ArgumentDefaultsHelpFormatter):
+class SortedHelpFormatter(ArgumentDefaultsHelpFormatter):
     """SortedHelpFormatter that sorts arguments by their option strings."""
+
+    def _split_lines(self, text, width):
+        """
+        1. Sentences split across lines have their single newlines removed.
+        2. Paragraphs and explicit newlines are split into separate lines.
+        3. Each line is wrapped to the specified width (width of terminal).
+        """
+        # The patterns also include whitespace after the newline
+        single_newline = re.compile(r"(?<!\n)\n(?!\n)\s*")
+        multiple_newlines = re.compile(r"\n{2,}\s*")
+        text = single_newline.sub(' ', text)
+        lines = re.split(multiple_newlines, text)
+        return sum([textwrap.wrap(line, width) for line in lines], [])
 
     def add_arguments(self, actions):
         actions = sorted(actions, key=lambda x: x.option_strings)
         super().add_arguments(actions)
 
 
-class FlexibleArgumentParser(argparse.ArgumentParser):
+class FlexibleArgumentParser(ArgumentParser):
     """ArgumentParser that allows both underscore and dash in names."""
 
     def __init__(self, *args, **kwargs):
@@ -1380,11 +1467,10 @@ class FlexibleArgumentParser(argparse.ArgumentParser):
             value = int(value)
         except ValueError:
             msg = "Port must be an integer"
-            raise argparse.ArgumentTypeError(msg) from None
+            raise ArgumentTypeError(msg) from None
 
         if not (1024 <= value <= 65535):
-            raise argparse.ArgumentTypeError(
-                "Port must be between 1024 and 65535")
+            raise ArgumentTypeError("Port must be between 1024 and 65535")
 
         return value
 
@@ -2062,12 +2148,13 @@ vllm_lib = Library("vllm", "FRAGMENT")  # noqa
 
 
 def direct_register_custom_op(
-    op_name: str,
-    op_func: Callable,
-    mutates_args: list[str],
-    fake_impl: Optional[Callable] = None,
-    target_lib: Optional[Library] = None,
-    dispatch_key: str = "CUDA",
+        op_name: str,
+        op_func: Callable,
+        mutates_args: list[str],
+        fake_impl: Optional[Callable] = None,
+        target_lib: Optional[Library] = None,
+        dispatch_key: str = "CUDA",
+        tags: Tuple[torch.Tag, ...] = (),
 ):
     """
     `torch.library.custom_op` can have significant overhead because it
@@ -2106,7 +2193,7 @@ def direct_register_custom_op(
         import torch._custom_op.impl
         schema_str = torch._custom_op.impl.infer_schema(op_func, mutates_args)
     my_lib = target_lib or vllm_lib
-    my_lib.define(op_name + schema_str)
+    my_lib.define(op_name + schema_str, tags=tags)
     my_lib.impl(op_name, op_func, dispatch_key=dispatch_key)
     if fake_impl is not None:
         my_lib._register_fake(op_name, fake_impl)
@@ -2706,3 +2793,20 @@ def sha256(input) -> int:
     input_bytes = pickle.dumps(input, protocol=pickle.HIGHEST_PROTOCOL)
     return int.from_bytes(hashlib.sha256(input_bytes).digest(),
                           byteorder="big")
+
+
+def is_torch_equal_or_newer(target: str) -> bool:
+    """Check if the installed torch version is >= the target version.
+
+    Args:
+        target: a version string, like "2.6.0".
+
+    Returns:
+        Whether the condition meets.
+    """
+    try:
+        torch_version = version.parse(str(torch.__version__))
+        return torch_version >= version.parse(target)
+    except Exception:
+        # Fallback to PKG-INFO to load the package info, needed by the doc gen.
+        return Version(importlib.metadata.version('torch')) >= Version(target)
