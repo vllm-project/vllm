@@ -51,7 +51,7 @@ try:
 except ImportError:
     from argparse import ArgumentParser as FlexibleArgumentParser
 
-from vllm.v1.structured_output.utils import (
+from vllm.v1.structured_output.backend_xgrammar import (
     has_xgrammar_unsupported_json_features)
 
 MILLISECONDS_TO_SECONDS_CONVERSION = 1000
@@ -123,6 +123,8 @@ def sample_requests(tokenizer: PreTrainedTokenizerBase,
                 copy.deepcopy(schema) for _ in range(args.num_prompts)
             ]
             for i in range(len(json_schemas)):
+                if "properties" not in json_schemas[i]:
+                    json_schemas[i]["properties"] = {}
                 json_schemas[i]["properties"][
                     f"__optional_field_{uuid.uuid4()}"] = {
                         "type":
@@ -134,7 +136,7 @@ def sample_requests(tokenizer: PreTrainedTokenizerBase,
             json_schemas = [schema] * args.num_prompts
 
         def gen_prompt(index: int):
-            return f"Generate an example of a user profile given the following schema: {json.dumps(get_schema(index))}"  # noqa: E501
+            return f"Generate an example of a brief user profile given the following schema: {json.dumps(get_schema(index))}"  # noqa: E501
 
         def get_schema(index: int):
             return json_schemas[index % len(json_schemas)]
@@ -150,17 +152,17 @@ def sample_requests(tokenizer: PreTrainedTokenizerBase,
 
     elif args.dataset == "grammar":
         schema = """
-            ?start: select_statement
+        root ::= select_statement
 
-            ?select_statement: "SELECT " column_list " FROM " table_name
+        select_statement ::= "SELECT " column " from " table " where " condition
 
-            ?column_list: column_name ("," column_name)*
+        column ::= "col_1 " | "col_2 "
 
-            ?table_name: identifier
+        table ::= "table_1 " | "table_2 "
 
-            ?column_name: identifier
+        condition ::= column "= " number
 
-            ?identifier: /[a-zA-Z_][a-zA-Z0-9_]*/
+        number ::= "1 " | "2 "
         """
         prompt = "Generate an SQL query to show the 'username' \
             and 'email' from the 'users' table."
@@ -231,7 +233,8 @@ def sample_requests(tokenizer: PreTrainedTokenizerBase,
                 idx -= len_dataset
             schema = dataset["schema"][idx]
             prompt = tokenizer.apply_chat_template(dataset["prompt"][idx],
-                                                   tokenize=False)
+                                                   tokenize=False,
+                                                   add_generation_prompt=True)
             input_len = len(tokenizer(prompt).input_ids)
             completion = dataset["completion"][idx]
 
@@ -849,7 +852,7 @@ if __name__ == "__main__":
                             'json', 'json-unique', 'grammar', 'regex',
                             'choice', 'xgrammar_bench'
                         ])
-    parser.add_argument("--json_schema_path",
+    parser.add_argument("--json-schema-path",
                         type=str,
                         default=None,
                         help="Path to json schema.")

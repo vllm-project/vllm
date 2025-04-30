@@ -38,6 +38,37 @@ class ModelRequestData(NamedTuple):
 # Unless specified, these settings have been tested to work on a single L4.
 
 
+# Granite Speech
+def run_granite_speech(question: str, audio_count: int) -> ModelRequestData:
+    # NOTE - the setting in this example are somehat different than what is
+    # optimal for granite speech, and it is generally recommended to use beam
+    # search. Check the model README for suggested settings.
+    # https://huggingface.co/ibm-granite/granite-speech-3.3-8b
+    model_name = "ibm-granite/granite-speech-3.3-8b"
+
+    engine_args = EngineArgs(
+        model=model_name,
+        trust_remote_code=True,
+        max_model_len=2048,
+        max_num_seqs=2,
+        enable_lora=True,
+        max_lora_rank=64,
+        limit_mm_per_prompt={"audio": audio_count},
+    )
+
+    # The model has an audio-specific lora directly in its model dir;
+    # it should be enabled whenever you pass audio inputs to the model.
+    speech_lora_path = model_name
+    audio_placeholder = "<|audio|>" * audio_count
+    prompts = f"<|start_of_role|>system<|end_of_role|>Knowledge Cutoff Date: April 2024.\nToday's Date: December 19, 2024.\nYou are Granite, developed by IBM. You are a helpful AI assistant<|end_of_text|>\n<|start_of_role|>user<|end_of_role|>{audio_placeholder}{question}<|end_of_text|>\n<|start_of_role|>assistant<|end_of_role|>"  # noqa: E501
+
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompt=prompts,
+        lora_requests=[LoRARequest("speech", 1, speech_lora_path)],
+    )
+
+
 # MiniCPM-O
 def run_minicpmo(question: str, audio_count: int) -> ModelRequestData:
     model_name = "openbmb/MiniCPM-o-2_6"
@@ -209,6 +240,7 @@ def run_whisper(question: str, audio_count: int) -> ModelRequestData:
 
 
 model_example_map = {
+    "granite_speech": run_granite_speech,
     "minicpmo": run_minicpmo,
     "phi4_mm": run_phi4mm,
     "qwen2_audio": run_qwen2_audio,

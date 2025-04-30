@@ -49,7 +49,6 @@ class PunicaWrapperTPU(PunicaWrapperBase):
         torch.ops.xla.dynamo_set_buffer_donor_(self._lora_indices_per_batch,
                                                True)
 
-    def mark_compiled(self):
         torch._dynamo.mark_dynamic(self._token_lora_indices, 0)
         torch._dynamo.mark_dynamic(self._embeddings_indices, 1)
         torch._dynamo.mark_dynamic(self._sampler_indices_padded, 0)

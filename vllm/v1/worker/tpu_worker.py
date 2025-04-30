@@ -22,7 +22,7 @@ from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import (AttentionSpec, KVCacheConfig,
                                         KVCacheSpec)
 from vllm.v1.outputs import ModelRunnerOutput
-from vllm.v1.utils import bind_kv_cache
+from vllm.v1.utils import bind_kv_cache, report_usage_stats
 from vllm.v1.worker.tpu_model_runner import TPUModelRunner
 
 logger = init_logger(__name__)
@@ -83,6 +83,10 @@ class TPUWorker:
         if self.model_config.seed is None:
             self.model_config.seed = 0
 
+        if vllm_config.lora_config is not None:
+            raise NotImplementedError(
+                "The V1 TPU backend doesn't support LoRA serving")
+
     def init_device(self):
         os.environ["PJRT_DEVICE"] = "TPU"
         # Note: Currently the XLA compiler wrongly uses 2D ring strategy on 1D
@@ -133,6 +137,10 @@ class TPUWorker:
 
         # Init ModelRunner here, so that we have access to self.device.
         self.model_runner = TPUModelRunner(self.vllm_config, self.device)
+
+        if rank == 0:
+            # If usage stat is enabled, collect relevant info.
+            report_usage_stats(self.vllm_config)
 
     def determine_available_memory(self) -> int:
         kv_caches: dict[str, torch.Tensor] = {}

@@ -101,7 +101,6 @@ class MQLLMEngineClient(EngineClient):
         self.tokenizer = init_tokenizer_from_configs(
             model_config=self.model_config,
             scheduler_config=engine_config.scheduler_config,
-            parallel_config=engine_config.parallel_config,
             lora_config=engine_config.lora_config)
         self.input_preprocessor = InputPreprocessor(self.model_config,
                                                     self.tokenizer)
@@ -616,9 +615,9 @@ class MQLLMEngineClient(EngineClient):
                 build_guided_decoding_logits_processor_async(
                     sampling_params=params,
                     tokenizer=await self.get_tokenizer(lora_request),
-                    default_guided_backend=(self.decoding_config.guided_decoding_backend
+                    default_guided_backend=(self.decoding_config.backend
                         if self.decoding_config
-                        else DecodingConfig.guided_decoding_backend),
+                        else DecodingConfig.backend),
                     model_config=self.model_config,
                     reasoning_backend=self.decoding_config.reasoning_backend,
                 )

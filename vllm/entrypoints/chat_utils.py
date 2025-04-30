@@ -27,10 +27,11 @@ from openai.types.chat import (ChatCompletionMessageToolCallParam,
                                ChatCompletionToolMessageParam)
 from openai.types.chat.chat_completion_content_part_input_audio_param import (
     InputAudio)
+from pydantic import TypeAdapter
 # yapf: enable
-# pydantic needs the TypedDict from typing_extensions
 from transformers import (PreTrainedTokenizer, PreTrainedTokenizerFast,
                           ProcessorMixin)
+# pydantic needs the TypedDict from typing_extensions
 from typing_extensions import Required, TypeAlias, TypedDict
 
 from vllm.config import ModelConfig
@@ -495,9 +496,10 @@ class BaseMultiModalItemTracker(ABC, Generic[_T]):
             if model_type.startswith("llava"):
                 return self._cached_token_str(self._tokenizer,
                                               hf_config.image_token_index)
+
             if model_type in ("aya_vision", "chameleon", "deepseek_vl_v2",
-                              "internvl_chat", "skywork_chat", "NVLM_D",
-                              "h2ovl_chat", "idefics3", "smolvlm"):
+                              "internvl_chat", "ovis2", "skywork_chat",
+                              "NVLM_D", "h2ovl_chat", "idefics3", "smolvlm"):
                 return "<image>"
             if model_type in ("mllama", "llama4"):
                 return "<|image|>"
@@ -516,7 +518,7 @@ class BaseMultiModalItemTracker(ABC, Generic[_T]):
 
             raise TypeError(f"Unknown {modality} model type: {model_type}")
         elif modality == "audio":
-            if model_type == "ultravox":
+            if model_type in ("ultravox", "granite_speech"):
                 return "<|audio|>"
             if model_type == "phi4mm":
                 return f"<|audio_{current_count}|>"
@@ -879,12 +881,13 @@ def _get_full_multimodal_text_prompt(placeholder_counts: dict[str, int],
 
 # No need to validate using Pydantic again
 _TextParser = partial(cast, ChatCompletionContentPartTextParam)
-_ImageParser = partial(cast, ChatCompletionContentPartImageParam)
 _ImageEmbedsParser = partial(cast, ChatCompletionContentPartImageEmbedsParam)
-_AudioParser = partial(cast, ChatCompletionContentPartAudioParam)
 _InputAudioParser = partial(cast, ChatCompletionContentPartInputAudioParam)
 _RefusalParser = partial(cast, ChatCompletionContentPartRefusalParam)
-_VideoParser = partial(cast, ChatCompletionContentPartVideoParam)
+# Need to validate url objects
+_ImageParser = TypeAdapter(ChatCompletionContentPartImageParam).validate_python
+_AudioParser = TypeAdapter(ChatCompletionContentPartAudioParam).validate_python
+_VideoParser = TypeAdapter(ChatCompletionContentPartVideoParam).validate_python
 
 _ContentPart: TypeAlias = Union[str, dict[str, str], InputAudio]
 
@@ -1095,7 +1098,11 @@ def _parse_chat_message_content(
         if role == 'assistant':
             parsed_msg = _AssistantParser(message)
 
-            if "tool_calls" in parsed_msg:
+            # The 'tool_calls' is not None check ensures compatibility.
+            # It's needed only if downstream code doesn't strictly
+            # follow the OpenAI spec.
+            if ("tool_calls" in parsed_msg
+                and parsed_msg["tool_calls"] is not None):
                 result_msg["tool_calls"] = list(parsed_msg["tool_calls"])
         elif role == "tool":
             parsed_msg = _ToolParser(message)
@@ -1192,14 +1199,25 @@ def apply_hf_chat_template(
             "allowed, so you must provide a chat template if the tokenizer "
             "does not define one.")
 
-    return tokenizer.apply_chat_template(
-        conversation=conversation,  # type: ignore[arg-type]
-        tools=tools,  # type: ignore[arg-type]
-        chat_template=hf_chat_template,
-        tokenize=tokenize,
-        **kwargs,
-    )
+    try:
 
+        return tokenizer.apply_chat_template(
+            conversation=conversation,  # type: ignore[arg-type]
+            tools=tools,  # type: ignore[arg-type]
+            chat_template=hf_chat_template,
+            tokenize=tokenize,
+            **kwargs,
+        )
+
+    # External library exceptions can sometimes occur despite the framework's
+    # internal exception management capabilities.
+    except Exception as e:
+
+        # Log and report any library-related exceptions for further
+        # investigation.
+        logger.exception(
+            "An error occurred in `transformers` while applying chat template")
+        raise ValueError from e
 
 def apply_mistral_chat_template(
     tokenizer: MistralTokenizer,
@@ -1208,6 +1226,8 @@ def apply_mistral_chat_template(
     tools: Optional[list[dict[str, Any]]],
     **kwargs: Any,
 ) -> list[int]:
+    from mistral_common.exceptions import MistralCommonException
+
     # The return value of resolve_mistral_chat_template is always None,
     # and we won't use it.
     resolve_mistral_chat_template(
@@ -1225,5 +1245,16 @@ def apply_mistral_chat_template(
     # if input does not comply with the expected format.
     # We convert those assertion errors to ValueErrors so they can be
     # are properly caught in the preprocessing_input step
-    except AssertionError as e:
+    except (AssertionError, MistralCommonException) as e:
+        raise ValueError from e
+
+    # External library exceptions can sometimes occur despite the framework's
+    # internal exception management capabilities.
+    except Exception as e:
+
+        # Log and report any library-related exceptions for further
+        # investigation.
+        logger.exception(
+            "An error occurred in `mistral_common` while applying chat "
+            "template")
         raise ValueError from e

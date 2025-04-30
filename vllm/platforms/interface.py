@@ -39,6 +39,7 @@ class _Backend(enum.Enum):
     TRITON_ATTN_VLLM_V1 = enum.auto()
     XFORMERS = enum.auto()
     ROCM_FLASH = enum.auto()
+    ROCM_AITER_MLA = enum.auto()
     TORCH_SDPA = enum.auto()
     FLASHINFER = enum.auto()
     TRITON_MLA = enum.auto()  # Supported by V1
@@ -430,8 +431,8 @@ class Platform:
         if device is not None and hasattr(device, key):
             return getattr(device, key)
         else:
-            logger.warning("Current platform %s doesn't has '%s' attribute.",
-                           self.device_name, key)
+            logger.warning("Current platform %s does not have '%s'" \
+            " attribute.", self.device_name, key)
             return None
 
     @classmethod

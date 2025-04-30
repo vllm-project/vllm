@@ -56,8 +56,7 @@ class TPUWorker(LoRANotSupportedWorkerBase, LocalOrDistributedWorkerBase):
 
         if vllm_config.lora_config is not None:
             raise NotImplementedError(
-                """The V0 TPU backend doesn't support LoRA serving, please try \
-                    V1 by setting VLLM_USE_V1=1""")
+                "The V0 TPU backend doesn't support LoRA serving")
 
     def init_device(self) -> None:
         os.environ["PJRT_DEVICE"] = "TPU"
@@ -168,8 +167,8 @@ class TPUWorker(LoRANotSupportedWorkerBase, LocalOrDistributedWorkerBase):
         usable_memory_size = int(total_memory_size *
                                  self.cache_config.gpu_memory_utilization)
         tpu_kv_cache_bytes = max(usable_memory_size - profiled, 0)
-        dtype_btyes = get_dtype_size(self.cache_dtype)
-        block_size_bytes = (dtype_btyes * self.cache_config.block_size *
+        dtype_bytes = get_dtype_size(self.cache_dtype)
+        block_size_bytes = (dtype_bytes * self.cache_config.block_size *
                             num_layers * 2 * head_size * num_kv_heads)
         num_tpu_blocks = tpu_kv_cache_bytes // block_size_bytes
         num_tpu_blocks = (num_tpu_blocks // 8) * 8  # Round down to 8.
