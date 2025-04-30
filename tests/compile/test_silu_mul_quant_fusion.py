@@ -38,7 +38,7 @@ def test_fusion_silu_and_mul_quant(num_tokens, hidden_size):
     config.compilation_config = CompilationConfig(
         pass_config=CompilationConfig.PassConfig(enable_fusion=True,
                                                  enable_reshape=True))
-    fusion_pass = ActivationQuantFusionPass.instance(config)
+    fusion_pass = ActivationQuantFusionPass(config)
 
     backend = TestBackend(fusion_pass)
     model = TestModel()

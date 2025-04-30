@@ -58,7 +58,7 @@ def test_fix_functionalization(model: str, quant_key: QuantKey,
                                           enable_noop=True))
     noop_pass = NoOpEliminationPass(vllm_config)
     fusion_pass = FusionPass.instance(vllm_config)
-    act_quant_fusion_pass = ActivationQuantFusionPass.instance(vllm_config)
+    act_quant_fusion_pass = ActivationQuantFusionPass(vllm_config)
 
     passes = [noop_pass, fusion_pass, act_quant_fusion_pass
               ] if do_fusion else [noop_pass]
