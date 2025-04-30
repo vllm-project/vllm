@@ -40,8 +40,8 @@ def break_fp4_bytes(a, dtype):
     combined = torch.stack((low, high), dim=1).flatten()
     
     # Vectorized sign and magnitude extraction
-    signs = (combined & 0x08).to(torch.bool)  # Sign bits
-    abs_vals = (combined & 0x07).to(torch.long)                # Magnitude indices
+    signs = (combined & 0x08).to(torch.bool) # Sign bits
+    abs_vals = (combined & 0x07).to(torch.long) # Magnitude indices
     
     # Device-aware lookup and sign application
     kE2M1 = kE2M1ToFloat.to(device=a.device)

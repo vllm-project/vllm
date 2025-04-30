@@ -24,7 +24,6 @@ from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     Fp8LinearOp, requantize_with_max_scale)
 from vllm.model_executor.parameter import (ModelWeightParameter,
                                            PerTensorScaleParameter)
-from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
 
 logger = init_logger(__name__)
@@ -167,6 +166,7 @@ class ModelOptFp8LinearMethod(LinearMethodBase):
                                      input_scale=layer.input_scale,
                                      bias=bias)
 
+
 class ModelOptNvFp4Config(QuantizationConfig):
     """Config class for ModelOpt FP4."""
 
@@ -213,8 +213,8 @@ class ModelOptNvFp4Config(QuantizationConfig):
                              "`hf_quant_config.json` file for your model's "
                              "quant configuration.")
         is_checkpoint_nvfp4_serialized = ("NVFP4" in quant_method)
-        if not ("group_size" and "kv_cache_quant_algo" and 
-                                            "exclude_modules") in quant_config:
+        if ("group_size" and "kv_cache_quant_algo"
+                and "exclude_modules") not in quant_config:
             raise ValueError("NVFP4 quantization requires group size and "
                              "kv_cache_quant_algo specified in "
                              "hf_quant_config.json")
@@ -223,8 +223,8 @@ class ModelOptNvFp4Config(QuantizationConfig):
         exclude_modules = quant_config["exclude_modules"]
         return cls(is_checkpoint_nvfp4_serialized, kv_cache_quant_algo,
                    exclude_modules, group_size)
-    
-    def is_layer_excluded(self, prefix: str, exclude_modules:List):
+
+    def is_layer_excluded(self, prefix: str, exclude_modules: List):
         import re
         for pattern in exclude_modules:
             regex_str = pattern.replace('.', r'\.').replace('*', r'.*')
@@ -237,7 +237,7 @@ class ModelOptNvFp4Config(QuantizationConfig):
         from vllm.attention.layer import Attention  # Avoid circular import
         if isinstance(layer, LinearBase):
             if (is_layer_skipped(prefix, self.exclude_modules)
-                or  self.is_layer_excluded(prefix, self.exclude_modules)):
+                    or self.is_layer_excluded(prefix, self.exclude_modules)):
                 return UnquantizedLinearMethod()
             return ModelOptNvFp4LinearMethod(self)
         elif isinstance(layer, Attention):
@@ -432,22 +432,22 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
     Args: 
         quant_config: NVFP4 Quant Config
     """
-    
+
     def __init__(self, quant_config: ModelOptNvFp4Config):
         self.quant_config = quant_config
-    
+
     def create_weights(self, layer: torch.nn.Module, num_experts: int,
                        hidden_size: int, intermediate_size_per_partition: int,
                        params_dtype: torch.dtype, **extra_weight_attrs):
         if not self.quant_config.is_checkpoint_nvfp4_serialized:
             raise ValueError("NVFP4 quantization was selected, "
                              " dynamic quantization is not supported.")
-            
+
         layer.quant_config = self.quant_config
         weight_dtype = torch.uint8
         weight_scale_dtype = torch.float8_e4m3fn
         weight_loader = extra_weight_attrs.get("weight_loader")
-        # GEMM 1 
+        # GEMM 1
         w13_weight = ModelWeightParameter(
             data=torch.empty(
                 num_experts,
@@ -460,7 +460,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
             weight_loader=weight_loader)
         layer.register_parameter("w13_weight", w13_weight)
 
-       # GEMM 2
+        # GEMM 2
         w2_weight = ModelWeightParameter(
             data=torch.empty(
                 num_experts,
@@ -472,7 +472,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
             output_dim=2,
             weight_loader=weight_loader)
         layer.register_parameter("w2_weight", w2_weight)
-        
+
         w13_weight_scale = ModelWeightParameter(
             data=torch.empty(
                 num_experts,
@@ -484,44 +484,46 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
             output_dim=2,
             weight_loader=weight_loader)
         layer.register_parameter("w13_weight_scale", w13_weight_scale)
-        
+
         w2_weight_scale = ModelWeightParameter(
             data=torch.empty(
                 num_experts,
                 hidden_size,
                 # 2 fp4 items are packed in the input dimension
-                intermediate_size_per_partition // self.quant_config.group_size,
+                intermediate_size_per_partition //
+                self.quant_config.group_size,
                 dtype=weight_scale_dtype),
             input_dim=1,
             output_dim=2,
             weight_loader=weight_loader)
         layer.register_parameter("w2_weight_scale", w2_weight_scale)
-        
+
         extra_weight_attrs.update(
-             {"quant_method": FusedMoeWeightScaleSupported.BLOCK.value})
-        
-        w13_weight_scale_2 = PerTensorScaleParameter(data=torch.empty(
-            num_experts, 2, dtype=torch.float32),
-                                                 weight_loader=weight_loader)
+            {"quant_method": FusedMoeWeightScaleSupported.BLOCK.value})
+
+        w13_weight_scale_2 = PerTensorScaleParameter(
+            data=torch.empty(num_experts, 2, dtype=torch.float32),
+            weight_loader=weight_loader)
         layer.register_parameter("w13_weight_scale_2", w13_weight_scale_2)
-        
-       
-        w2_weight_scale_2 = PerTensorScaleParameter(data=torch.empty(
-            num_experts, dtype=torch.float32),
+
+        w2_weight_scale_2 = PerTensorScaleParameter(
+            data=torch.empty(num_experts, dtype=torch.float32),
             weight_loader=weight_loader)
         layer.register_parameter("w2_weight_scale_2", w2_weight_scale_2)
-    
+
         extra_weight_attrs.update(
-             {"quant_method": FusedMoeWeightScaleSupported.TENSOR.value})
-         
+            {"quant_method": FusedMoeWeightScaleSupported.TENSOR.value})
+
         w13_input_scale = PerTensorScaleParameter(data=torch.empty(
-            num_experts, dtype=torch.float32), weight_loader=weight_loader)
-        layer.register_parameter("w13_input_scale", w13_input_scale) 
-        
+            num_experts, dtype=torch.float32),
+                                                  weight_loader=weight_loader)
+        layer.register_parameter("w13_input_scale", w13_input_scale)
+
         w2_input_scale = PerTensorScaleParameter(data=torch.empty(
-            num_experts, dtype=torch.float32), weight_loader=weight_loader)
+            num_experts, dtype=torch.float32),
+                                                 weight_loader=weight_loader)
         layer.register_parameter("w2_input_scale", w2_input_scale)
-  
+
     def swizzle_blockscale(self, scale: torch.tensor):
         assert (scale.dtype == torch.float8_e4m3fn)
         # Pad and blockwise interleave weight_scale
@@ -546,29 +548,34 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
                 if scale_ndim == 2 else swizzled_scale.reshape(B, M, K))
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        
-        # GEMM 1  
-        w13_weight_scale_2 = torch.amax(layer.w13_weight_scale_2, dim=-1) 
-        layer.w13_weight_scale_2 = Parameter(w13_weight_scale_2, requires_grad=False)
 
-        layer.g1_alphas = Parameter(layer.w13_input_scale * layer.w13_weight_scale_2,
-                                requires_grad=False)
+        # GEMM 1
+        w13_weight_scale_2 = torch.amax(layer.w13_weight_scale_2, dim=-1)
+        layer.w13_weight_scale_2 = Parameter(w13_weight_scale_2,
+                                             requires_grad=False)
+
+        layer.g1_alphas = Parameter(layer.w13_input_scale *
+                                    layer.w13_weight_scale_2,
+                                    requires_grad=False)
 
         assert (layer.w13_weight_scale.shape[2] % 16 == 0), (
             "Expected weight_scale.dim(1) to be divisible by 16")
         assert (layer.w13_weight_scale.dtype == torch.float8_e4m3fn), (
             "Weight Blockscale must be represented as FP8-E4M3")
-        w13_blockscale_swizzled = self.swizzle_blockscale(layer.w13_weight_scale)
+        w13_blockscale_swizzled = self.swizzle_blockscale(
+            layer.w13_weight_scale)
 
         layer.w13_blockscale_swizzled = Parameter(w13_blockscale_swizzled,
-                                                requires_grad=False)
+                                                  requires_grad=False)
 
         # GEMM 2
-        w2_weight_scale_2 = torch.amax(layer.w2_weight_scale_2, dim=-1) 
-        layer.w2_weight_scale_2 = Parameter(w2_weight_scale_2, requires_grad=False)
+        w2_weight_scale_2 = torch.amax(layer.w2_weight_scale_2, dim=-1)
+        layer.w2_weight_scale_2 = Parameter(w2_weight_scale_2,
+                                            requires_grad=False)
 
-        layer.g2_alphas = Parameter(layer.w2_input_scale * layer.w2_weight_scale_2,
-                                requires_grad=False)
+        layer.g2_alphas = Parameter(layer.w2_input_scale *
+                                    layer.w2_weight_scale_2,
+                                    requires_grad=False)
 
         assert (layer.w2_weight_scale.shape[2] % 16 == 0), (
             "Expected weight_scale.dim(1) to be divisible by 16")
@@ -577,9 +584,9 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         w2_blockscale_swizzled = self.swizzle_blockscale(layer.w2_weight_scale)
 
         layer.w2_blockscale_swizzled = Parameter(w2_blockscale_swizzled,
-                                                requires_grad=False)
+                                                 requires_grad=False)
         return
-          
+
     def apply(
         self,
         layer: torch.nn.Module,
@@ -599,7 +606,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         activation: str = "silu",
     ):
         assert activation == "silu", "Only SiLU activation is supported."
-        
+
         topk_weights, topk_ids = FusedMoE.select_experts(
             hidden_states=x,
             router_logits=router_logits,
@@ -613,20 +620,20 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
             e_score_correction_bias=e_score_correction_bias)
 
         # Cutlass moe takes in full precision a and fp4 precision weights
-        return cutlass_moe_fp4(a=x, 
-                        w1_fp4=layer.w13_weight, 
-                        w1_blockscale=layer.w13_blockscale_swizzled,
-                        w1_tensorscale=layer.w13_weight_scale_2, #Note that this is s_enc
-                        w2_fp4=layer.w2_weight, 
-                        w2_blockscale=layer.w2_blockscale_swizzled,
-                        w2_tensorscale=layer.w2_weight_scale_2, #Note that this is s_enc
-                        topk_weights=topk_weights,
-                        topk_ids=topk_ids,
-                        m=x.shape[0],
-                        n=layer.w2_weight.shape[2] * 2,
-                        k=x.shape[1],
-                        e=layer.w13_weight.shape[0],
-                        a1_gscale=layer.g1_alphas,
-                        a2_gscale=layer.g2_alphas,
-                        device=x.device
-        ).to(x.dtype)
+        return cutlass_moe_fp4(
+            a=x,
+            w1_fp4=layer.w13_weight,
+            w1_blockscale=layer.w13_blockscale_swizzled,
+            w1_tensorscale=layer.w13_weight_scale_2,  #Note that this is s_enc
+            w2_fp4=layer.w2_weight,
+            w2_blockscale=layer.w2_blockscale_swizzled,
+            w2_tensorscale=layer.w2_weight_scale_2,  #Note that this is s_enc
+            topk_weights=topk_weights,
+            topk_ids=topk_ids,
+            m=x.shape[0],
+            n=layer.w2_weight.shape[2] * 2,
+            k=x.shape[1],
+            e=layer.w13_weight.shape[0],
+            a1_gscale=layer.g1_alphas,
+            a2_gscale=layer.g2_alphas,
+            device=x.device).to(x.dtype)

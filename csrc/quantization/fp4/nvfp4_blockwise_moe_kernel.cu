@@ -29,7 +29,6 @@
 #include "cutlass/util/reference/host/tensor_compare.h"
 #include <cassert>
 
-#define DEBUG
 using namespace cute;
 
 template <typename ElementAB, typename ElementC, typename ElementSF,
@@ -56,8 +55,8 @@ __global__ void __get_group_gemm_starts(
   // size for block in block scale.
   int64_t group_size = 16;
   int64_t m = static_cast<int64_t>(problem_sizes_as_shapes[expert_id * 3]);
-  int64_t n =  static_cast<int64_t>(problem_sizes_as_shapes[expert_id * 3 + 1]);
-  int64_t k =  static_cast<int64_t>(problem_sizes_as_shapes[expert_id * 3 + 2]);
+  int64_t n = static_cast<int64_t>(problem_sizes_as_shapes[expert_id * 3 + 1]);
+  int64_t k = static_cast<int64_t>(problem_sizes_as_shapes[expert_id * 3 + 2]);
   assert((m >= 0 && n == N && k == K && k % 2 == 0) &&
          "unexpected problem sizes");
 
@@ -88,16 +87,10 @@ __global__ void __get_group_gemm_starts(
   LayoutSFA* layout_sfa_ptr = layout_sfa_base_as_int + expert_id;
   LayoutSFB* layout_sfb_ptr = layout_sfb_base_as_int + expert_id;
 
-  *layout_sfa_ptr =
-      ScaleConfig::tile_atom_to_shape_SFA(cute::make_shape(static_cast<int>(m),
-                                                           static_cast<int>(n),
-                                                           static_cast<int>(k),
-                                                           1));
-  *layout_sfb_ptr =
-      ScaleConfig::tile_atom_to_shape_SFB(cute::make_shape(static_cast<int>(m),
-                                                           static_cast<int>(n),
-                                                           static_cast<int>(k),
-                                                           1));
+  *layout_sfa_ptr = ScaleConfig::tile_atom_to_shape_SFA(cute::make_shape(
+      static_cast<int>(m), static_cast<int>(n), static_cast<int>(k), 1));
+  *layout_sfb_ptr = ScaleConfig::tile_atom_to_shape_SFB(cute::make_shape(
+      static_cast<int>(m), static_cast<int>(n), static_cast<int>(k), 1));
 }
 
 #define __CALL_GET_STARTS_KERNEL_BLOCKSCALE(ELEMENT_AB_TYPE, SF_TYPE,         \
@@ -165,14 +158,9 @@ template <typename OutType>
 void run_fp4_blockwise_scaled_group_mm(
     torch::Tensor& output, const torch::Tensor& a, const torch::Tensor& b,
     const torch::Tensor& a_blockscale, const torch::Tensor& b_blockscales,
-    const torch::Tensor& alphas,
-    // const torch::Tensor &stride_a,
-    // const torch::Tensor &stride_b,
-    // const torch::Tensor &stride_c,
-    // const torch::Tensor &layout_sfa_old,
-    // const torch::Tensor &layout_sfb_old,
-    const torch::Tensor& problem_sizes, const torch::Tensor& expert_offsets,
-    const torch::Tensor& sf_offsets, int M, int N, int K) {
+    const torch::Tensor& alphas, const torch::Tensor& problem_sizes,
+    const torch::Tensor& expert_offsets, const torch::Tensor& sf_offsets,
+    int M, int N, int K) {
   using ProblemShape =
       cutlass::gemm::GroupProblemShape<Shape<int32_t, int32_t, int32_t>>;
   using ElementType = cutlass::float_e2m1_t;

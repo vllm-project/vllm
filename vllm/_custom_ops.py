@@ -795,7 +795,6 @@ def cutlass_fp4_moe_mm(a_tensors: torch.Tensor,
     """
     m_topk = a_tensors.shape[0]
     n = b_tensors.shape[1]
-    e = b_tensors.shape[0]
     c_shape = (m_topk, n) 
     c = torch.empty(c_shape, device=device, dtype=out_dtype)
 

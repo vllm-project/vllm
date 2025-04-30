@@ -92,6 +92,7 @@ def dequantize_to_dtype(tensor_fp4,
 @pytest.mark.parametrize("k", [1024, 256, 128,256])
 @pytest.mark.parametrize("e", [32,64,256])
 @pytest.mark.parametrize("topk", [4, 6,8])
+@pytest.mark.parametrize("dtype", [torch.half, torch.bfloat16])
 @torch.inference_mode()
 def test_cutlass_fp4_moe_no_graph(
     m: int,
@@ -105,8 +106,6 @@ def test_cutlass_fp4_moe_no_graph(
             VllmConfig(parallel_config=ParallelConfig(
                 pipeline_parallel_size=1))):
 
-        dtype = torch.half
-
         a = torch.randn((m, k), device="cuda", dtype=dtype) / 10
         w1 = torch.randn((e, 2 * n, k), device="cuda", dtype=dtype) / 10
         quant_blocksize = 16
@@ -118,21 +117,12 @@ def test_cutlass_fp4_moe_no_graph(
                                     device="cuda",
                                     dtype=torch.float8_e4m3fn)
 
-        # n_b_scales = 2 * n if per_out_ch else 1
-        # k_b_scales = k if per_out_ch else 1
-
         w1_q = torch.empty((e, 2 * n, k // 2),
                            device="cuda",
                            dtype=torch.uint8)
         w2_q = torch.empty((e, k, n // 2), device="cuda", dtype=torch.uint8)
-
         w1_gs = torch.empty((e, ), device="cuda", dtype=torch.float32)
         w2_gs = torch.empty((e, ), device="cuda", dtype=torch.float32)
-
-        ab_strides1 = torch.full((e, ), k, device="cuda", dtype=torch.int64)
-        c_strides1 = torch.full((e, ), 2 * n, device="cuda", dtype=torch.int64)
-        ab_strides2 = torch.full((e, ), n, device="cuda", dtype=torch.int64)
-        c_strides2 = torch.full((e, ), k, device="cuda", dtype=torch.int64)
 
         for expert in range(e):
             w1_amax = torch.abs(w1).max().to(torch.float32)
@@ -145,17 +135,6 @@ def test_cutlass_fp4_moe_no_graph(
 
             w2_q[expert], w2_blockscale[expert] = ops.scaled_fp4_quant(
                 w2[expert], w2_gs[expert])
-
-        if False:
-            # not required here because weights are already swizzled
-            # from the quantization above.
-            w1_bs_swizzled = swizzle_blockscale(w1_blockscale)
-            w2_bs_swizzled = swizzle_blockscale(w2_blockscale)
-
-        ab_strides1 = torch.full((e, ), k, device="cuda", dtype=torch.int64)
-        c_strides1 = torch.full((e, ), 2 * n, device="cuda", dtype=torch.int64)
-        ab_strides2 = torch.full((e, ), n, device="cuda", dtype=torch.int64)
-        c_strides2 = torch.full((e, ), k, device="cuda", dtype=torch.int64)
 
         score = torch.randn((m, e), device="cuda", dtype=dtype)
         topk_weights, topk_ids = fused_topk(a, score, topk, renormalize=False)

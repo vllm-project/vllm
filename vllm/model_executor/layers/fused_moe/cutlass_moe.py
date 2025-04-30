@@ -274,9 +274,10 @@ def cutlass_moe_fp4(
     ops.get_cutlass_moe_mm_data(topk_ids, expert_offsets, problem_sizes1,
                                 problem_sizes2, a_map, c_map, e,n,k)
 
-    rep_a_fp4, rep_a_blockscale, rep_a_gs, sf_offsets = ops.scaled_expert_fp4_quant(
-                                    a, a1_gscale, expert_offsets, use_expert_map=True, 
-                                    expert_map=a_map, use_dynamic_scaling=True)
+    (rep_a_fp4, rep_a_blockscale, rep_a_gs,
+                            sf_offsets) = ops.scaled_expert_fp4_quant(
+                            a, a1_gscale, expert_offsets, use_expert_map=True,
+                            expert_map=a_map, use_dynamic_scaling=True)
     
     alphas =  (w1_tensorscale / rep_a_gs).clamp(max=FLT_MAX,
                                                 min=FLT_MIN).to(torch.float32)
@@ -292,9 +293,10 @@ def cutlass_moe_fp4(
     
     torch.ops._C.silu_and_mul(intermediate, c1)
      
-    int_fp4, int_blockscale, int_gs, sf_offsets = ops.scaled_expert_fp4_quant(  
-                   intermediate, a2_gscale, expert_offsets, use_expert_map=False,
-                                                    use_dynamic_scaling=True)
+    (int_fp4, int_blockscale, int_gs, 
+				sf_offsets) = ops.scaled_expert_fp4_quant(  
+               intermediate, a2_gscale, expert_offsets, use_expert_map=False,
+                                                  use_dynamic_scaling=True)
 
 
     alphas_2 = (w2_tensorscale / int_gs).clamp(max=FLT_MAX,
