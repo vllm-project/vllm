@@ -11,6 +11,7 @@ import jsonschema
 import pytest
 from pydantic import BaseModel
 
+from vllm.config import TokenizerMode
 from vllm.entrypoints.llm import LLM
 from vllm.outputs import RequestOutput
 from vllm.platforms import current_platform
@@ -75,7 +76,7 @@ def test_structured_output(
     sample_regex: str,
     sample_guided_choice: str,
     structured_output_backend: str,
-    tokenizer_mode: str,
+    tokenizer_mode: TokenizerMode,
     model_name: str,
     speculative_config: dict[str, Any],
 ):
@@ -86,16 +87,17 @@ def test_structured_output(
     enforce_eager = bool(not current_platform.is_tpu())
     # Use a single LLM instance for several scenarios to
     # speed up the test suite.
-    llm = LLM(model=model_name,
-              enforce_eager=enforce_eager,
-              max_model_len=1024,
-              guided_decoding_backend=guided_decoding_backend,
-              guided_decoding_disable_any_whitespace=True,
-              tokenizer_mode=tokenizer_mode,
-              speculative_config=speculative_config,
-              structured_output_config=dict(backend=structured_output_backend,
-                                            disable_any_whitespace=True),
-              tokenizer_mode=tokenizer_mode)
+    llm = LLM(
+        model=model_name,
+        enforce_eager=enforce_eager,
+        max_model_len=1024,
+        tokenizer_mode=tokenizer_mode,
+        speculative_config=speculative_config,
+        structured_output_config={
+            'backend': structured_output_backend,
+            'disable_any_whitespace': True,
+        },
+    )
 
     #
     # Test 1: Generate JSON output based on a provided schema
@@ -104,12 +106,13 @@ def test_structured_output(
         temperature=1.0,
         max_tokens=1000,
         guided_decoding=GuidedDecodingParams(json=sample_json_schema))
-    outputs = llm.generate(prompts=[
-        f"Give an example JSON for an employee profile "
-        f"that fits this schema: {sample_json_schema}"
-    ] * 2,
-                           sampling_params=sampling_params,
-                           use_tqdm=True)
+    outputs = llm.generate(
+        [
+            f"Give an example JSON for an employee profile that fits this schema: {sample_json_schema}"  # noqa: E501
+        ] * 2,
+        sampling_params=sampling_params,
+        use_tqdm=True,
+    )
 
     assert outputs is not None
 
@@ -541,11 +544,15 @@ def test_structured_output_auto_mode(
 def test_guidance_no_additional_properties(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("VLLM_USE_V1", "1")
 
-    llm = LLM(model="Qwen/Qwen2.5-1.5B-Instruct",
-              max_model_len=1024,
-              guided_decoding_backend="guidance",
-              guided_decoding_disable_any_whitespace=True,
-              guided_decoding_disable_additional_properties=True)
+    llm = LLM(
+        model="Qwen/Qwen2.5-1.5B-Instruct",
+        max_model_len=1024,
+        structured_output_config={
+            'backend': 'guidance',
+            'disable_any_whitespace': True,
+            'disable_additional_properties': True
+        },
+    )
 
     schema = {
         'type': 'object',
@@ -579,7 +586,7 @@ def test_guidance_no_additional_properties(monkeypatch: pytest.MonkeyPatch):
                                          max_tokens=256,
                                          guided_decoding=guided_params)
 
-        outputs = llm.generate(prompts=prompt, sampling_params=sampling_params)
+        outputs = llm.generate(prompt, sampling_params=sampling_params)
         assert outputs is not None
         generated_text = outputs[0].outputs[0].text
         assert generated_text is not None
