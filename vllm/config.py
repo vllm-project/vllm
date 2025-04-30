@@ -18,7 +18,7 @@ from functools import cached_property
 from importlib.util import find_spec
 from pathlib import Path
 from typing import (TYPE_CHECKING, Any, Callable, ClassVar, Literal, Optional,
-                    Protocol, TypeVar, Union, cast, get_args, get_origin, Dict)
+                    Protocol, TypeVar, Union, cast, get_args, get_origin)
 
 import torch
 from pydantic import BaseModel, Field, PrivateAttr
