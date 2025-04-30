@@ -1332,6 +1332,22 @@ class FlexibleArgumentParser(ArgumentParser):
             kwargs['formatter_class'] = SortedHelpFormatter
         super().__init__(*args, **kwargs)
 
+    def add_argument(self, *args: Any, **kwargs: Any):
+        # add a deprecated=True with optional deprecated_reason to signify
+        # reasons for deprecating this args
+        if kwargs.pop("deprecated", False):
+            deprecated_message = kwargs.pop("deprecated_reason", None)
+            if 'help' in kwargs:
+                kwargs['help'] = (
+                    f"[DEPRECATED]{(' ' + deprecated_message) or ''}.\n{kwargs['help']}"  # noqa: E501
+                )
+            else:
+                kwargs['help'] = (
+                    f"[DEPRECATED]{(' ' + deprecated_message) or ''}"  # noqa: E501
+                )
+
+        super().add_argument(*args, **kwargs)
+
     def parse_args(self, args=None, namespace=None):
         if args is None:
             args = sys.argv[1:]
