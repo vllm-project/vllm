@@ -480,7 +480,7 @@ class DeepseekV2MLAAttention(nn.Module):
             kv_c_normed,
             k_pe,
             output_shape=(hidden_states.shape[0],
-                          self.num_heads * self.qk_rope_head_dim))
+                          self.num_local_heads * self.qk_rope_head_dim))
         return self.o_proj(attn_out)[0]
 
 
