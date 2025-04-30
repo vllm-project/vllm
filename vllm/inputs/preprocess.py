@@ -236,7 +236,6 @@ class InputPreprocessor:
         mm_processor_kwargs: Optional[Mapping[str, object]],
         lora_request: Optional[LoRARequest],
         return_mm_hashes: bool = False,
-        cache_salt: Optional[str] = None,
     ) -> MultiModalInputs:
         """
         Apply the model's multi-modal processor to a multi-modal prompt,
@@ -256,11 +255,8 @@ class InputPreprocessor:
         if mm_processor_kwargs is None:
             mm_processor_kwargs = {}
 
-        inputs = mm_processor.apply(prompt, mm_data, mm_processor_kwargs,
-                                    return_mm_hashes)
-        if cache_salt is not None:
-            inputs["cache_salt"] = cache_salt
-        return inputs
+        return mm_processor.apply(prompt, mm_data, mm_processor_kwargs,
+                                  return_mm_hashes)
 
     async def _process_multimodal_async(
         self,
@@ -269,7 +265,6 @@ class InputPreprocessor:
         mm_processor_kwargs: Optional[Mapping[str, object]],
         lora_request: Optional[LoRARequest],
         return_mm_hashes: bool = False,
-        cache_salt: Optional[str] = None,
     ) -> MultiModalInputs:
         """Async version of :meth:`_process_multimodal`."""
         # At the moment on model (PrithviGeoSpatialMAE) requires to be
@@ -286,11 +281,8 @@ class InputPreprocessor:
         if mm_processor_kwargs is None:
             mm_processor_kwargs = {}
 
-        inputs = mm_processor.apply(prompt, mm_data, mm_processor_kwargs,
-                                    return_mm_hashes)
-        if cache_salt is not None:
-            inputs["cache_salt"] = cache_salt
-        return inputs
+        return mm_processor.apply(prompt, mm_data, mm_processor_kwargs,
+                                  return_mm_hashes)
 
     def _get_prompt_data(self, parsed_prompt: Union[ParsedStrPrompt,
                                                     ParsedTextPrompt,
@@ -342,14 +334,16 @@ class InputPreprocessor:
         # If multimodal data is present, process and return immediately
         if parsed["type"] != "str" and parsed["content"].get(
                 "multi_modal_data") is not None:
-            return self._process_multimodal(
+            inputs = self._process_multimodal(
                 prompt_text if prompt_text is not None else prompt_token_ids,
                 parsed["content"]["multi_modal_data"],
                 parsed["content"].get("mm_processor_kwargs"),
                 lora_request=lora_request,
                 return_mm_hashes=return_mm_hashes,
-                cache_salt=cache_salt,
             )
+            if cache_salt is not None:
+                inputs["cache_salt"] = cache_salt
+            return inputs
 
         if prompt_token_ids is None:
             prompt_token_ids = self._tokenize_prompt(
@@ -380,14 +374,16 @@ class InputPreprocessor:
 
         if parsed["type"] != "str" and parsed["content"].get(
                 "multi_modal_data") is not None:
-            return await self._process_multimodal_async(
+            inputs = await self._process_multimodal_async(
                 prompt_token_ids if prompt_text is None else prompt_text,
                 parsed["content"]["multi_modal_data"],
                 parsed["content"].get("mm_processor_kwargs"),
                 lora_request=lora_request,
                 return_mm_hashes=return_mm_hashes,
-                cache_salt=cache_salt,
             )
+            if cache_salt is not None:
+                inputs["cache_salt"] = cache_salt
+            return inputs
 
         if prompt_token_ids is None:
             prompt_token_ids = await self._tokenize_prompt_async(
