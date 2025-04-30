@@ -10,7 +10,7 @@ from typing import (Annotated, Any, Callable, ClassVar, Generic, Optional,
                     TypedDict, TypeVar, Union)
 
 from fastapi import Request
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 from starlette.datastructures import Headers
 
 import vllm.envs as envs
@@ -109,8 +109,7 @@ class RequestProcessingMixin(BaseModel):
     engine_prompts: Optional[list[TokensPrompt]] = \
                             Field(default_factory=list)
 
-    class Config:
-        arbitrary_types_allowed = True
+    model_config = ConfigDict(arbitrary_types_allowed=True)
 
 
 class ResponseGenerationMixin(BaseModel):
@@ -123,15 +122,14 @@ class ResponseGenerationMixin(BaseModel):
     final_res_batch: list[Union[RequestOutput, PoolingRequestOutput]] = Field(
         default_factory=list)
 
-    class Config:
-        arbitrary_types_allowed = True
+    model_config = ConfigDict(arbitrary_types_allowed=True)
 
 
 class ServeContext(RequestProcessingMixin, ResponseGenerationMixin, BaseModel,
                    Generic[RequestT]):
     # Shared across all requests
     request: RequestT
-    raw_request: Request
+    raw_request: Optional[Request] = None
     model_name: str
     request_id: str
     created_time: int = Field(default_factory=lambda: int(time.time()))
@@ -142,22 +140,20 @@ class ServeContext(RequestProcessingMixin, ResponseGenerationMixin, BaseModel,
     tokenizer: Optional[AnyTokenizer] = None
     truncate_prompt_tokens: Optional[Annotated[int, Field(ge=1)]] = None
 
-    class Config:
-        arbitrary_types_allowed = True
+    # `protected_namespaces` resolves Pydantic v2's warning
+    # on conflict with protected namespace "model_"
+    model_config = ConfigDict(
+        protected_namespaces=(),
+        arbitrary_types_allowed=True,
+    )
 
 
-class ClassificationServeContext(ServeContext[ClassificationRequest]):
-
-    class Config:
-        arbitrary_types_allowed = True
+ClassificationServeContext = ServeContext[ClassificationRequest]
 
 
 class EmbeddingServeContext(ServeContext[EmbeddingRequest]):
     chat_template: Optional[str] = None
     chat_template_content_format: ChatTemplateContentFormatOption
-
-    class Config:
-        arbitrary_types_allowed = True
 
 
 # Used to resolve the Pydantic error related to
