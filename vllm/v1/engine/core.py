@@ -259,6 +259,8 @@ class EngineCore:
         self.structured_output_manager.clear_backend()
         if self.model_executor:
             self.model_executor.shutdown()
+        if self.scheduler:
+            self.scheduler.shutdown()
 
     def profile(self, is_start: bool = True):
         self.model_executor.profile(is_start)
