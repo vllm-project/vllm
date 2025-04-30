@@ -359,6 +359,8 @@ class MistralTokenizer(TokenizerBase):
 
     def encode(self,
                text: str,
+               truncation: Optional[bool] = None,
+               max_length: Optional[int] = None,
                add_special_tokens: Optional[bool] = None) -> List[int]:
         # `encode` should only be used for prompt completion
         # it should never be used for chat_completion.
