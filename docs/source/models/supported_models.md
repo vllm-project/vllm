@@ -990,7 +990,7 @@ See [this page](#generative-models) for more information on how to use generativ
   * Mistral3
   * T + I<sup>+</sup>
   * `mistralai/Mistral-Small-3.1-24B-Instruct-2503`, etc.
-  *
+  * ✅︎
   * ✅︎
   * ✅︎
 - * `MllamaForConditionalGeneration`
@@ -1013,6 +1013,13 @@ See [this page](#generative-models) for more information on how to use generativ
   * `nvidia/NVLM-D-72B`, etc.
   *
   * ✅︎
+  * ✅︎
+- * `Ovis2ForConditionalGeneration`<sup>^</sup>
+  * Ovis2
+  * T + I<sup>+</sup>
+  * `AIDC-AI/Ovis2-1B`, `AIDC-AI/Ovis2-2B`, etc.
+  *
+  *
   * ✅︎
 - * `PaliGemmaForConditionalGeneration`
   * PaliGemma, PaliGemma 2
