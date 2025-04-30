@@ -607,7 +607,7 @@ class GPTQMarlinMoEMethod(FusedMoEMethodBase):
         activation: str = "silu",
     ) -> torch.Tensor:
         assert activation == "silu", "Only SiLU activation is supported."
-        if apply_router_weight_on_input is not None:
+        if apply_router_weight_on_input:
             raise NotImplementedError(
                 "Apply router weight on input is not supported for"
                 "fused Marlin MoE method.")

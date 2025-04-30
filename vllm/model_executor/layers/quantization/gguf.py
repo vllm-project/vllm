@@ -343,6 +343,7 @@ class GGUFMoEMethod(FusedMoEMethodBase):
         activation: str = "silu",
     ):
         assert activation == "silu", "Only SiLU activation is supported."
+        assert expert_map is None, "Expert maps not supported yet"
         if apply_router_weight_on_input:
             raise NotImplementedError(
                 "Apply router weight on input is not supported for"
