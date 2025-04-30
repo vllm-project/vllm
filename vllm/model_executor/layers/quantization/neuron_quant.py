@@ -6,6 +6,7 @@ from typing import Any, Dict, List, Optional
 
 from torch.nn import Module
 
+from vllm.model_executor.layers.quantization import QuantizationMethods
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
 
@@ -30,7 +31,7 @@ class NeuronQuantConfig(QuantizationConfig):
         self.dequant_dtype = dequant_dtype
         self.quantize_method = quantize_method
 
-    def get_name(self) -> str:
+    def get_name(self) -> QuantizationMethods:
         return "neuron_quant"
 
     def get_supported_act_dtypes(self) -> List[str]:
