@@ -10,10 +10,16 @@ from typing import Callable, Optional
 
 import pytest
 import torch
-from pplx_kernels import AllToAll
-from pplx_kernels.nvshmem import (nvshmem_alloc_empty_unique_id,
-                                  nvshmem_finalize, nvshmem_get_unique_id,
-                                  nvshmem_init)
+
+try:
+    from pplx_kernels import AllToAll
+    from pplx_kernels.nvshmem import (nvshmem_alloc_empty_unique_id,
+                                      nvshmem_finalize, nvshmem_get_unique_id,
+                                      nvshmem_init)
+    has_pplx = False
+except ImportError as ex:
+    has_pplx = False
+
 from torch.multiprocessing import (
     spawn)  # pyright: ignore[reportPrivateImportUsage]
 from typing_extensions import Concatenate, ParamSpec
@@ -43,6 +49,11 @@ P = ParamSpec("P")
 require_multi_node = pytest.mark.skipif(
     "MASTER_ADDR" not in os.environ,
     reason="Requires multi-node environment",
+)
+
+requires_pplx = pytest.mark.skipif(
+    not has_pplx,
+    reason="Requires PPLX kernels",
 )
 
 
@@ -420,6 +431,7 @@ def _pplx_dispatch_combine(
 @pytest.mark.parametrize("topk", TOP_KS)
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 @pytest.mark.parametrize("world_dp_size", [[2, 1]])  #, [[4, 2]])
+@pytest.mark.skipif(not has_pplx, reason="PPLX kernels not available.")
 def test_pplx_dispatch_combine(
     m: int,
     n: int,
@@ -543,6 +555,7 @@ def _pplx_moe(
 @pytest.mark.parametrize("topk", TOP_KS)
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 @pytest.mark.parametrize("world_dp_size", [[2, 1]])  #, [4, 2]])
+@pytest.mark.skipif(not has_pplx, reason="PPLX kernels not available.")
 def test_pplx_moe(
     m: int,
     n: int,

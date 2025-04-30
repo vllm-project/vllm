@@ -23,6 +23,7 @@ If you only need to use the distributed environment without model/pipeline
 """
 import contextlib
 import gc
+import importlib
 import pickle
 import weakref
 from collections import namedtuple
@@ -34,9 +35,6 @@ from unittest.mock import patch
 
 import torch
 import torch.distributed
-from pplx_kernels.nvshmem import (nvshmem_alloc_empty_unique_id,
-                                  nvshmem_finalize, nvshmem_get_unique_id,
-                                  nvshmem_init)
 from torch.distributed import Backend, ProcessGroup
 
 import vllm.envs as envs
@@ -944,7 +942,12 @@ PPLX_DID_INIT: bool = False
 
 @run_once
 def pplx_init(rank, world_size):
-    if world_size > 1:
+    has_pplx = importlib.util.find_spec("pplx_kernels") is not None
+
+    if has_pplx and world_size > 1:
+        from pplx_kernels.nvshmem import (nvshmem_alloc_empty_unique_id,
+                                          nvshmem_get_unique_id,
+                                          nvshmem_init)
         try:
             global PPLX_DID_INIT
             logger.debug(f"PPLX_INIT {rank} {world_size}")
@@ -964,6 +967,7 @@ def pplx_init(rank, world_size):
 def pplx_finalize():
     global PPLX_DID_INIT
     if PPLX_DID_INIT:
+        from pplx_kernels.nvshmem import nvshmem_finalize
         nvshmem_finalize()
 
 

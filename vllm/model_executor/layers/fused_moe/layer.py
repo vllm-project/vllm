@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
+import importlib
 import threading
 import weakref
 from abc import abstractmethod
@@ -7,7 +8,6 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Callable, List, Optional, Tuple
 
-import pplx_kernels as pplx  # TODO: guard this
 import torch
 import torch.nn.functional as F
 from torch.nn.parameter import UninitializedParameter
@@ -30,6 +30,8 @@ from vllm.platforms import current_platform
 from vllm.platforms.interface import CpuArchEnum
 from vllm.utils import direct_register_custom_op
 
+has_pplx = importlib.util.find_spec("pplx_kernels") is not None
+
 if current_platform.is_cuda_alike():
     from .dispatch_combine import StandardDispatchCombine
     from .fused_batched_moe import BatchedDispatchCombine, BatchedTritonExperts
@@ -37,7 +39,8 @@ if current_platform.is_cuda_alike():
     from .modular_kernel import (FusedMoEModularKernel,
                                  FusedMoEPermuteExpertsUnpermute,
                                  FusedMoEQuantizeDispatchCombine)
-    from .pplx_dispatch_combine import PplxDispatchCombine
+    if has_pplx:
+        from .pplx_dispatch_combine import PplxDispatchCombine
 else:
     fused_experts = None  # type: ignore
 if is_rocm_aiter_moe_enabled():
@@ -123,6 +126,9 @@ class AllToAllCache:
         self._lock = threading.RLock()  # Reentrant lock for thread safety
 
     def get_or_create(self, **kwargs):
+        assert has_pplx
+        import pplx_kernels as pplx
+
         # Create a hashable key from the kwargs
         key = tuple(sorted((k, v) for k, v in kwargs.items()))
 
@@ -652,7 +658,7 @@ class FusedMoE(torch.nn.Module):
         dispatch_combine: FusedMoEQuantizeDispatchCombine = None
 
         # TODO: move to method?
-        if self.dp_size > 1:
+        if self.dp_size > 1 and has_pplx:
             logger.info("using pplx dispatch")
             max_num_tokens = MOE_DP_CHUNK_SIZE  # // moe.dp_size
             world_size = moe.ep_size
