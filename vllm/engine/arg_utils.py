@@ -49,18 +49,6 @@ TypeHint = Union[type[Any], object]
 TypeHintT = Union[type[T], object]
 
 
-class DeprecatedAction(argparse.Action):
-
-    def __init__(self, option_strings, dest, message=None, **kwargs):
-        super().__init__(option_strings, dest, nargs=0, help=argparse.SUPPRESS)
-        self.message = message or \
-            f"The parameter --{option_strings[0][2:]}"" is deprecated."
-
-    def __call__(self, parser, namespace, values, option_string=None):
-        logger.warning(self.message)
-        setattr(namespace, self.dest, None)
-
-
 def optional_type(
         return_type: Callable[[str], T]) -> Callable[[str], Optional[T]]:
 
@@ -377,8 +365,6 @@ class EngineArgs:
 
     additional_config: Optional[Dict[str, Any]] = None
 
-    # Deprecated, use reasoning_parser instead
-    enable_reasoning: Optional[bool] = None
     reasoning_parser: str = DecodingConfig.reasoning_backend
 
     use_tqdm_on_load: bool = LoadConfig.use_tqdm_on_load
@@ -814,7 +800,7 @@ class EngineArgs:
 
         parser.add_argument(
             "--enable-reasoning",
-            action=DeprecatedAction,
+            action="store_true",
             default=False,
             help=
             "[DEPRECATED] Use --reasoning-parser instead. " \

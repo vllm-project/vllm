@@ -58,7 +58,7 @@ class OpenAIServingChat(OpenAIServing):
         chat_template: Optional[str],
         chat_template_content_format: ChatTemplateContentFormatOption,
         return_tokens_as_token_ids: bool = False,
-        reasoning_parser: Optional[str] = None,
+        reasoning_parser: str = "",
         enable_auto_tools: bool = False,
         tool_parser: Optional[str] = None,
         enable_prompt_tokens_details: bool = False,
@@ -83,12 +83,12 @@ class OpenAIServingChat(OpenAIServing):
 
         self.reasoning_parser: Optional[Callable[[AnyTokenizer],
                                                  ReasoningParser]] = None
-        self.enable_reasoning: bool = self.reasoning_parser is not None
         if reasoning_parser:
             try:
                 self.reasoning_parser = (
                     ReasoningParserManager.get_reasoning_parser(
                         reasoning_parser))
+                assert self.reasoning_parser is not None
             except Exception as e:
                 raise TypeError(
                     f"{reasoning_parser=} has not been registered") from e
@@ -421,15 +421,12 @@ class OpenAIServingChat(OpenAIServing):
             not tool_choice_function_name
             and self._should_stream_with_auto_tool_parsing(request))
 
-        should_stream_with_reasoning_parsing = (
-            self._should_stream_with_reasoning_parsing(request))
-
         all_previous_token_ids: Optional[list[list[int]]]
         function_name_returned: Optional[list[bool]] = None
 
         # Only one of these will be used, thus previous_texts and
         # all_previous_token_ids will not be used twice in the same iteration.
-        if tool_choice_auto or should_stream_with_reasoning_parsing:
+        if tool_choice_auto or self.reasoning_parser:
             # These are only required in "auto" tool choice case
             previous_texts = [""] * num_choices
             all_previous_token_ids = [[]] * num_choices
@@ -444,12 +441,7 @@ class OpenAIServingChat(OpenAIServing):
             previous_texts, all_previous_token_ids = None, None
 
         try:
-            # There is no need to check if the reasoning_parser is None
-            # because the should_stream_with_reasoning_parsing check
-            # already ensures that the reasoning_parser is not None.
-            # but the pre-commit hook requires it.
-            if should_stream_with_reasoning_parsing and \
-                self.reasoning_parser:
+            if self.reasoning_parser:
                 reasoning_parser = self.reasoning_parser(tokenizer)
         except RuntimeError as e:
             logger.exception("Error in reasoning parser creation.")
@@ -589,7 +581,7 @@ class OpenAIServingChat(OpenAIServing):
                     delta_message: Optional[DeltaMessage]
 
                     # just update previous_texts and previous_token_ids
-                    if tool_choice_auto or should_stream_with_reasoning_parsing:
+                    if tool_choice_auto or self.reasoning_parser:
                         assert previous_texts is not None
                         assert all_previous_token_ids is not None
                         previous_text = previous_texts[i]
@@ -600,7 +592,7 @@ class OpenAIServingChat(OpenAIServing):
 
                     # handle streaming deltas for tools with named tool_choice
                     if tool_choice_function_name:
-                        if (self.enable_reasoning
+                        if (self.reasoning_parser
                                 and not reasoning_parser.is_reasoning_end(
                                     previous_token_ids)):
                             assert reasoning_parser is not None
@@ -627,7 +619,7 @@ class OpenAIServingChat(OpenAIServing):
                                     current_text = ""
                         else:
                             # Just to add remaining `content`
-                            if self.enable_reasoning:
+                            if self.reasoning_parser:
                                 delta_text = previous_text + delta_text
                                 current_text = ""
 
@@ -657,7 +649,7 @@ class OpenAIServingChat(OpenAIServing):
 
                     # handle streaming deltas for tools with "auto" tool choice
                     # and reasoning parser
-                    elif tool_choice_auto and self.enable_reasoning:
+                    elif tool_choice_auto and self.reasoning_parser:
                         assert tool_parser is not None
                         assert reasoning_parser is not None
                         assert added_content_delta_arr is not None
@@ -725,8 +717,7 @@ class OpenAIServingChat(OpenAIServing):
                                 delta_token_ids=output.token_ids,
                                 request=request))
                     # when only reasoning
-                    elif self.enable_reasoning:
-                        assert reasoning_parser is not None
+                    elif self.reasoning_parser:
                         delta_message = (reasoning_parser.
                                          extract_reasoning_content_streaming(
                                              previous_text,
@@ -741,7 +732,7 @@ class OpenAIServingChat(OpenAIServing):
                         delta_message = DeltaMessage(content=delta_text)
 
                     # update the previous values for the next iteration
-                    if tool_choice_auto or should_stream_with_reasoning_parsing:
+                    if tool_choice_auto or self.reasoning_parser:
                         assert previous_texts is not None
                         assert all_previous_token_ids is not None
                         previous_texts[i] = current_text
@@ -928,16 +919,9 @@ class OpenAIServingChat(OpenAIServing):
                 )
             else:
                 logprobs = None
-
-            should_stream_with_reasoning_parsing = (
-                self._should_stream_with_reasoning_parsing(request))
-            # In the OpenAI API the finish_reason is "tools_called"
-            # if the tool choice is auto and the model produced a tool
-            # call. The same is not true for named function calls
             auto_tools_called = False
 
-            if should_stream_with_reasoning_parsing and \
-                self.reasoning_parser:
+            if self.reasoning_parser:
                 try:
                     reasoning_parser = self.reasoning_parser(tokenizer)
                 except RuntimeError as e:
@@ -1171,17 +1155,6 @@ class OpenAIServingChat(OpenAIServing):
         """
         return (request.tools and self.tool_parser and self.enable_auto_tools
                 and request.tool_choice in ['auto', None])
-
-    def _should_stream_with_reasoning_parsing(self,
-                                              request: ChatCompletionRequest):
-        """
-            Utility function to check if streamed tokens should go through the
-            reasoning parser that was configured.
-    
-            We only want to do this IF reasoning is enabled and a reasoning 
-            parser is configured.
-            """
-        return self.reasoning_parser
 
     def _should_check_for_unstreamed_tool_arg_tokens(
         self,
