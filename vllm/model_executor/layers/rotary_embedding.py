@@ -1496,7 +1496,7 @@ def get_rope(
     if key in _ROPE_DICT:
         return _ROPE_DICT[key]
 
-    if rope_scaling is None:
+    if not rope_scaling:
         rotary_emb = RotaryEmbedding(head_size, rotary_dim, max_position, base,
                                      is_neox_style, dtype)
     else:
