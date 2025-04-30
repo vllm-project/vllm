@@ -24,7 +24,6 @@ class CachedRequestState:
 
     req_id: str
     prompt_token_ids: list[int]
-    prompt: Optional[str]
     mm_inputs: list[MultiModalKwargs]
     mm_positions: list[PlaceholderRange]
     sampling_params: SamplingParams

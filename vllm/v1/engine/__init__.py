@@ -49,9 +49,6 @@ class EngineCoreRequest(
     # due to circular imports and typing we have in data.py
 
     request_id: str
-    # NOTE(ywang96): original text prompt is needed when a request is added to
-    # Detokenizer, but set to None when it is added to EngineCoreClient.
-    prompt: Optional[str]
     prompt_token_ids: list[int]
     mm_inputs: Optional[Sequence[Optional[MultiModalKwargs]]]
     mm_hashes: Optional[list[str]]
@@ -60,6 +57,7 @@ class EngineCoreRequest(
     eos_token_id: Optional[int]
     arrival_time: float
     lora_request: Optional[LoRARequest]
+    cache_salt: Optional[str]
 
     # Used in DP case to indicate which wave of requests this is expected to
     # belong to, to cover a race condition where the request is sent before

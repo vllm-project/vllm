@@ -124,6 +124,10 @@ def subtuple(obj: object,
     return _TYPE_CACHE[typename]['object'](**values)  # type: ignore
 
 
+def round_up(value: int, k: int):
+    return (value + k - 1) // k * k
+
+
 def align_workers(value, op):
     group = get_world_group().cpu_group
     world_size = torch.distributed.get_world_size()
@@ -718,6 +722,7 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
                                                  self.use_merged_prefill,
                                                  self.max_model_len)
         self.graphed_buckets: Set[Any] = set()
+        self.use_contiguous_pa = envs.VLLM_USE_HPU_CONTIGUOUS_CACHE_FETCH
 
         self._set_gc_threshold()
         if self.vllm_config.cache_config.enable_prefix_caching:
@@ -771,10 +776,6 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
             ]
         gc.set_threshold(*requested_gc_thrs)
 
-        # Multi-modal data support
-        self.multi_modal_input_mapper = MULTIMODAL_REGISTRY \
-            .create_input_mapper(self.model_config)
-
         self.skip_warmup = os.environ.get('VLLM_SKIP_WARMUP',
                                           'false').lower() == 'true'
 
@@ -819,6 +820,9 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
                     max_pos_embeddings = (
                         self.model.config.text_config.max_position_embeddings)
 
+                # Use get_text_config() in case of multimodal models
+                text_config = self.model_config.hf_config.get_text_config()
+
                 self.lora_manager = LRUCacheWorkerLoRAManager(
                     self.scheduler_config.max_num_seqs,
                     self.scheduler_config.max_num_batched_tokens,
@@ -827,7 +831,8 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
                     self.device,
                     self.model.embedding_modules,
                     self.model.embedding_padding_modules,
-                    max_position_embeddings=max_pos_embeddings,
+                    max_position_embeddings=text_config.
+                    max_position_embeddings,
                 )
                 self.model = self.lora_manager.create_lora_manager(self.model)
 
