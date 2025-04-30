@@ -2,10 +2,15 @@
 
 import inspect
 from abc import ABC, abstractmethod
-from typing import Any, Dict, List, Optional, Type
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Type
 
 import torch
 from torch import nn
+
+if TYPE_CHECKING:
+    from vllm.model_executor.layers.quantization import QuantizationMethods
+else:
+    QuantizationMethods = str
 
 
 class QuantizeMethodBase(ABC):
@@ -66,7 +71,7 @@ class QuantizationConfig(ABC):
         self.packed_modules_mapping: Dict[str, List[str]] = dict()
 
     @abstractmethod
-    def get_name(self) -> str:
+    def get_name(self) -> QuantizationMethods:
         """Name of the quantization method."""
         raise NotImplementedError
 
@@ -99,8 +104,8 @@ class QuantizationConfig(ABC):
         raise NotImplementedError
 
     @classmethod
-    def override_quantization_method(cls, hf_quant_cfg,
-                                     user_quant) -> Optional[str]:
+    def override_quantization_method(
+            cls, hf_quant_cfg, user_quant) -> Optional[QuantizationMethods]:
         """
            Detects if this quantization method can support a given checkpoint
            format by overriding the user specified quantization method -- 

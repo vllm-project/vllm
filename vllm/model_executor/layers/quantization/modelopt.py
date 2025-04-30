@@ -11,6 +11,7 @@ from vllm._custom_ops import (cutlass_scaled_fp4_mm,
 from vllm.logger import init_logger
 from vllm.model_executor.layers.linear import (LinearBase, LinearMethodBase,
                                                UnquantizedLinearMethod)
+from vllm.model_executor.layers.quantization import QuantizationMethods
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig, QuantizeMethodBase)
 from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
@@ -42,7 +43,7 @@ class ModelOptFp8Config(QuantizationConfig):
                            " the format is experimental and could change.")
 
     @classmethod
-    def get_name(cls) -> str:
+    def get_name(cls) -> QuantizationMethods:
         return "modelopt"
 
     @classmethod
@@ -184,8 +185,8 @@ class ModelOptNvFp4Config(QuantizationConfig):
             self.exclude_modules = exclude_modules
 
     @classmethod
-    def get_name(cls) -> str:
-        return "modelopt_nvfp4"
+    def get_name(cls) -> QuantizationMethods:
+        return "nvfp4"
 
     @classmethod
     def get_supported_act_dtypes(cls) -> List[torch.dtype]:

@@ -13,6 +13,7 @@ from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.fused_moe.layer import (FusedMoE,
                                                         FusedMoEMethodBase)
 from vllm.model_executor.layers.linear import LinearBase, LinearMethodBase
+from vllm.model_executor.layers.quantization import QuantizationMethods
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig, QuantizeMethodBase)
 from vllm.model_executor.layers.vocab_parallel_embedding import (
@@ -31,7 +32,7 @@ class GGUFConfig(QuantizationConfig):
     def __repr__(self) -> str:
         return ("GGUFConfig()")
 
-    def get_name(self) -> str:
+    def get_name(self) -> QuantizationMethods:
         return "gguf"
 
     def get_supported_act_dtypes(self) -> List[torch.dtype]:

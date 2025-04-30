@@ -7,6 +7,7 @@ import torch
 from vllm.model_executor.layers.linear import (LinearBase, LinearMethodBase,
                                                UnquantizedLinearMethod,
                                                set_weight_attrs)
+from vllm.model_executor.layers.quantization import QuantizationMethods
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
 from vllm.utils import direct_register_custom_op
@@ -56,7 +57,7 @@ class BitsAndBytesConfig(QuantizationConfig):
                 f"llm_int8_skip_modules={self.llm_int8_skip_modules})")
 
     @classmethod
-    def get_name(self) -> str:
+    def get_name(self) -> QuantizationMethods:
         return "bitsandbytes"
 
     @classmethod
