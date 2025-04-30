@@ -86,9 +86,8 @@ class SingleTypeKVCacheManager(ABC):
         """
 
         num_required_blocks = cdiv(num_tokens, self.block_size)
-        num_new_blocks = max(
-            num_required_blocks - len(new_computed_blocks) -
-            len(self.req_to_blocks[request_id]), 0)
+        num_new_blocks = num_required_blocks - len(new_computed_blocks) - \
+            len(self.req_to_blocks[request_id])
         # If a computed block of a request is an eviction candidate (in the
         # free queue and ref_cnt == 0), it will be changed from a free block
         # to a computed block when the request is allocated, so we also count
@@ -152,17 +151,13 @@ class SingleTypeKVCacheManager(ABC):
             self.req_to_blocks[request_id].extend(new_blocks)
             return new_blocks
 
-    def cache_blocks(self, request: Request,
-                     new_computed_blocks: list[KVCacheBlock],
-                     block_hashes: list[BlockHashType],
+    def cache_blocks(self, request: Request, block_hashes: list[BlockHashType],
                      num_tokens: int) -> None:
         """
         Cache the blocks for the request.
 
         Args:
             request: The request.
-            new_computed_blocks: The new computed blocks just hitting the
-                prefix cache.
             block_hashes: The block hashes of the request.
             num_tokens: The total number of tokens that need to be cached 
                 (including tokens that are already cached).

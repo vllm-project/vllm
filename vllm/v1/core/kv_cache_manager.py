@@ -233,8 +233,7 @@ class KVCacheManager:
         # not cache any speculated tokens. We only cache blocks with
         # generated (accepted) tokens.
         self.single_type_manager.cache_blocks(
-            request, new_computed_blocks,
-            self.req_to_block_hashes[request.request_id],
+            request, self.req_to_block_hashes[request.request_id],
             num_computed_tokens + num_new_tokens - len(request.spec_token_ids))
 
         return new_blocks
