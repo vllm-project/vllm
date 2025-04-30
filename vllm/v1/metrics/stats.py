@@ -36,8 +36,8 @@ class CachingMetrics:
             Defaults to 1000.
     """
 
-    def __init__(self, interval: int = 1000):
-        self.interval = interval
+    def __init__(self, max_recent_requests: int = 1000):
+        self.max_recent_requests = max_recent_requests
         # The current aggregated values.
         self.aggregated_requests = 0
         self.aggregated_query_total = 0
@@ -52,7 +52,7 @@ class CachingMetrics:
         are being scheduled and are looking for computed blocks.
 
         When there are more than `interval` requests, the oldest set of
-        requestsare removed from the metrics.
+        requests are removed from the metrics.
 
         Args:
             stats: The cache stats.
@@ -69,7 +69,7 @@ class CachingMetrics:
         self.aggregated_query_hit += stats.hits
 
         # Remove the oldest stats if the number of requests exceeds.
-        if self.aggregated_requests > self.interval:
+        if self.aggregated_requests > self.max_recent_requests:
             old_requests, old_queries, old_hits = self.query_queue.popleft()
             self.aggregated_requests -= old_requests
             self.aggregated_query_total -= old_queries
