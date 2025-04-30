@@ -2,6 +2,7 @@
 
 import sys
 import types
+from abc import ABC
 from importlib.util import find_spec
 
 from vllm.logger import init_logger
@@ -25,6 +26,8 @@ if not HAS_TRITON:
             self.autotune = self._dummy_decorator("autotune")
             self.heuristics = self._dummy_decorator("heuristics")
             self.language = TritonLanguagePlaceholder()
+            self.Config = self._dummy_decorator("Config")
+            self.__version__ = ""
             logger.warning_once(
                 "Triton is not installed. Using dummy decorators. "
                 "Install it via `pip install triton` to enable kernel"
@@ -43,11 +46,36 @@ if not HAS_TRITON:
 
         def __init__(self):
             super().__init__("triton.language")
-            self.constexpr = None
+            self.constexpr = lambda x: x
             self.dtype = None
+            self.extra = None
+            self.math = None
+            self.tensor = None
+
+    class TritonCompilerPlaceholder(types.ModuleType):
+
+        def __init__(self):
+            super().__init__("triton.compiler")
+            self.CompiledKernel = ABC
+
+    class TritonRuntimeAutotunerPlaceholder(types.ModuleType):
+
+        def __init__(self):
+            super().__init__("triton.runtime.autotuner")
+            self.OutOfResources = ABC
+
+    class TritonRuntimeJitPlaceholder(types.ModuleType):
+
+        def __init__(self):
+            super().__init__("triton.runtime.jit")
+            self.KernelInterface = ABC
 
     sys.modules['triton'] = TritonPlaceholder()
     sys.modules['triton.language'] = TritonLanguagePlaceholder()
+    sys.modules['triton.compiler'] = TritonCompilerPlaceholder()
+    sys.modules[
+        'triton.runtime.autotuner'] = TritonRuntimeAutotunerPlaceholder()
+    sys.modules['triton.runtime.jit'] = TritonRuntimeJitPlaceholder()
 
 if 'triton' in sys.modules:
     logger.info("Triton module has been replaced with a placeholder.")
