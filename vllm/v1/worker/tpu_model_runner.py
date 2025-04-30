@@ -180,6 +180,7 @@ class TPUModelRunner:
             max_num_reqs=self.max_num_reqs,
             max_model_len=self.max_model_len,
             max_num_blocks_per_req=self.max_num_blocks_per_req,
+            max_num_batched_tokens=self.max_num_tokens,
             device=self.device,
             pin_memory=self.pin_memory,
             vocab_size=self.vocab_size,
@@ -198,10 +199,6 @@ class TPUModelRunner:
                                          device="cpu")
         self.positions_np = self.positions_cpu.numpy()
 
-        self.slot_mapping_cpu = torch.zeros(self.max_num_tokens,
-                                            dtype=torch.int64,
-                                            device="cpu")
-        self.slot_mapping_np = self.slot_mapping_cpu.numpy()
         self.block_table_cpu = torch.zeros(
             (self.max_num_reqs, self.max_num_blocks_per_req),
             dtype=self.input_batch.block_table.get_cpu_tensor().dtype,
@@ -439,6 +436,7 @@ class TPUModelRunner:
                 if attn_module.sliding_window is not None:
                     kv_cache_spec[layer_name] = SlidingWindowSpec(
                         block_size=block_size,
+                        num_query_heads=attn_module.num_heads,
                         num_kv_heads=attn_module.num_kv_heads,
                         head_size=attn_module.head_size,
                         dtype=attn_module.dtype,
@@ -448,6 +446,7 @@ class TPUModelRunner:
                 else:
                     kv_cache_spec[layer_name] = FullAttentionSpec(
                         block_size=block_size,
+                        num_query_heads=attn_module.num_heads,
                         num_kv_heads=attn_module.num_kv_heads,
                         head_size=attn_module.head_size,
                         dtype=attn_module.dtype,
@@ -534,7 +533,8 @@ class TPUModelRunner:
         block_offsets = positions_np % self.block_size
         np.add(block_numbers * self.block_size,
                block_offsets,
-               out=self.slot_mapping_np[:total_num_scheduled_tokens])
+               out=self.input_batch.block_table.
+               slot_mapping_cpu[:total_num_scheduled_tokens])
 
         # Prepare the attention metadata.
         self.query_start_loc_np[0] = 0
@@ -558,10 +558,12 @@ class TPUModelRunner:
         self.position_ids = self.positions_cpu[:
                                                padded_total_num_scheduled_tokens].to(
                                                    self.device)
-        self.slot_mapping_cpu[total_num_scheduled_tokens:] = _PAD_SLOT_ID
-        slot_mapping = self.slot_mapping_cpu[:
-                                             padded_total_num_scheduled_tokens].to(
-                                                 self.device)
+        self.input_batch.block_table.slot_mapping_cpu[
+            total_num_scheduled_tokens:] = _PAD_SLOT_ID
+        slot_mapping = (
+            self.input_batch.block_table.
+            slot_mapping_cpu[:padded_total_num_scheduled_tokens].to(
+                self.device))
         block_tables = self.block_table_cpu[:self.max_num_reqs]
         block_tables[:num_reqs, :self.max_num_blocks_per_req] = (
             self.input_batch.block_table.get_cpu_tensor()[:num_reqs])

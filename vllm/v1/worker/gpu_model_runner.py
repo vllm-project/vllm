@@ -11,6 +11,7 @@ import torch.distributed
 import torch.nn as nn
 
 from vllm.attention import AttentionType, get_attn_backend
+from vllm.attention.backends.abstract import AttentionMetadataBuilder
 from vllm.attention.layer import Attention
 from vllm.config import (CompilationLevel, VllmConfig,
                          get_layers_from_vllm_config)
@@ -139,10 +140,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             raise NotImplementedError(
                 "Non-Attention backend is not supported by V1 GPUModelRunner.")
 
-        self.attn_metadata_builder = self.attn_backend.get_builder_cls()(
-            weakref.proxy(self))
-        self.cascade_attn_enabled = not self.model_config.disable_cascade_attn
-
         # Multi-modal data support
         self.mm_registry = MULTIMODAL_REGISTRY
         self.uses_mrope = model_config.uses_mrope
@@ -163,6 +160,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # Initialize in initialize_kv_cache
         self.kv_caches: list[torch.Tensor] = []
         self.kv_cache_config = cast(KVCacheConfig, None)
+        self.attn_metadata_builder: type[AttentionMetadataBuilder] = cast(
+            type[AttentionMetadataBuilder], None)
 
         # req_id -> (input_id -> encoder_output)
         self.encoder_cache: dict[str, dict[int, torch.Tensor]] = {}
@@ -197,6 +196,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             pin_memory=self.pin_memory,
             vocab_size=model_config.get_vocab_size(),
         )
+
+        self.cascade_attn_enabled = not self.model_config.disable_cascade_attn
 
         self.use_cuda_graph = (self.vllm_config.compilation_config.level
                                == CompilationLevel.PIECEWISE
@@ -1766,6 +1767,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.vllm_config.compilation_config.static_forward_context,
             self.kv_caches)
 
+        self.attn_metadata_builder = self.attn_backend.get_builder_cls()(
+            weakref.proxy(self),
+            kv_cache_config.kv_cache_groups[0].kv_cache_spec,
+            self.input_batch.block_table)
+
     def get_kv_cache_spec(self) -> dict[str, KVCacheSpec]:
         """
         Generates the KVCacheSpec by parsing the kv cache format from each
@@ -1785,6 +1791,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 if attn_module.sliding_window is not None:
                     kv_cache_spec[layer_name] = SlidingWindowSpec(
                         block_size=block_size,
+                        num_query_heads=attn_module.num_heads,
                         num_kv_heads=attn_module.num_kv_heads,
                         head_size=attn_module.head_size,
                         dtype=self.kv_cache_dtype,
@@ -1793,6 +1800,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 else:
                     kv_cache_spec[layer_name] = FullAttentionSpec(
                         block_size=block_size,
+                        num_query_heads=attn_module.num_heads,
                         num_kv_heads=attn_module.num_kv_heads,
                         head_size=attn_module.head_size,
                         dtype=self.kv_cache_dtype,
