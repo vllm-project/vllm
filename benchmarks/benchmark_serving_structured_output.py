@@ -304,7 +304,7 @@ async def get_request(
 
 
 def calculate_metrics(
-    input_requests: list[tuple[str, int, int]],
+    input_requests: list[SampleRequest],
     outputs: list[RequestFuncOutput],
     dur_s: float,
     tokenizer: PreTrainedTokenizerBase,
@@ -406,6 +406,84 @@ def calculate_metrics(
     )
 
     return metrics, actual_output_lens
+
+
+def print_metrics_to_console(
+        metrics: BenchmarkMetrics,
+        benchmark_duration: float,
+        selected_percentile_metrics: list[str],
+        goodput_config_dict: Optional[dict[str, float]] = None) -> dict:
+    """
+    Print the benchmark result to the console, also return the result as a dict
+    for further processing (e.g. saving to a file).
+    """
+    print("{s:{c}^{n}}".format(s=' Benchmark Result ', n=50, c='='))
+    print("{:<40} {:<10}".format("Successful requests:", metrics.completed))
+    print("{:<40} {:<10.2f}".format("Benchmark duration (s):",
+                                    benchmark_duration))
+    print("{:<40} {:<10}".format("Total input tokens:", metrics.total_input))
+    print("{:<40} {:<10}".format("Total generated tokens:",
+                                 metrics.total_output))
+    print("{:<40} {:<10.2f}".format("Request throughput (req/s):",
+                                    metrics.request_throughput))
+    if goodput_config_dict:
+        print("{:<40} {:<10.2f}".format("Request goodput (req/s):",
+                                        metrics.request_goodput))
+    print("{:<40} {:<10.2f}".format("Output token throughput (tok/s):",
+                                    metrics.output_throughput))
+    print("{:<40} {:<10.2f}".format("Total Token throughput (tok/s):",
+                                    metrics.total_token_throughput))
+
+    result = {
+        "duration": benchmark_duration,
+        "completed": metrics.completed,
+        "total_input_tokens": metrics.total_input,
+        "total_output_tokens": metrics.total_output,
+        "request_throughput": metrics.request_throughput,
+        "output_throughput": metrics.output_throughput,
+        "total_token_throughput": metrics.total_token_throughput,
+    }
+
+    def process_one_metric(
+        # E.g., "ttft"
+        metric_attribute_name: str,
+        # E.g., "TTFT"
+        metric_name: str,
+        # E.g., "Time to First Token"
+        metric_header: str,
+    ):
+        # This function prints and adds statistics of the specified
+        # metric.
+        if metric_attribute_name not in selected_percentile_metrics:
+            return
+        print("{s:{c}^{n}}".format(s=metric_header, n=50, c='-'))
+        print("{:<40} {:<10.2f}".format(
+            f"Mean {metric_name} (ms):",
+            getattr(metrics, f"mean_{metric_attribute_name}_ms")))
+        print("{:<40} {:<10.2f}".format(
+            f"Median {metric_name} (ms):",
+            getattr(metrics, f"median_{metric_attribute_name}_ms")))
+        result[f"mean_{metric_attribute_name}_ms"] = getattr(
+            metrics, f"mean_{metric_attribute_name}_ms")
+        result[f"median_{metric_attribute_name}_ms"] = getattr(
+            metrics, f"median_{metric_attribute_name}_ms")
+        result[f"std_{metric_attribute_name}_ms"] = getattr(
+            metrics, f"std_{metric_attribute_name}_ms")
+        for p, value in getattr(metrics,
+                                f"percentiles_{metric_attribute_name}_ms"):
+            p_word = str(int(p)) if int(p) == p else str(p)
+            print("{:<40} {:<10.2f}".format(f"P{p_word} {metric_name} (ms):",
+                                            value))
+            result[f"p{p_word}_{metric_attribute_name}_ms"] = value
+
+    process_one_metric("ttft", "TTFT", "Time to First Token")
+    process_one_metric("tpot", "TPOT",
+                       "Time per Output Token (excl. 1st token)")
+    process_one_metric("itl", "ITL", "Inter-token Latency")
+    process_one_metric("e2el", "E2EL", "End-to-end Latency")
+    print("=" * 50)
+
+    return result
 
 
 async def benchmark(
@@ -558,38 +636,15 @@ async def benchmark(
         goodput_config_dict=goodput_config_dict,
     )
 
-    print("{s:{c}^{n}}".format(s=' Serving Benchmark Result ', n=50, c='='))
-    print("{:<40} {:<10}".format("Successful requests:", metrics.completed))
-    print("{:<40} {:<10.2f}".format("Benchmark duration (s):",
-                                    benchmark_duration))
-    print("{:<40} {:<10}".format("Total input tokens:", metrics.total_input))
-    print("{:<40} {:<10}".format("Total generated tokens:",
-                                 metrics.total_output))
-    print("{:<40} {:<10.2f}".format("Request throughput (req/s):",
-                                    metrics.request_throughput))
-    if goodput_config_dict:
-        print("{:<40} {:<10.2f}".format("Request goodput (req/s):",
-                                        metrics.request_goodput))
-    print("{:<40} {:<10.2f}".format("Output token throughput (tok/s):",
-                                    metrics.output_throughput))
-    print("{:<40} {:<10.2f}".format("Total Token throughput (tok/s):",
-                                    metrics.total_token_throughput))
+    ret = [{
+        'generated': output.generated_text,
+        'expected': gt
+    } for output, gt in zip(outputs, expected)]
 
-    result = {
-        "duration":
-        benchmark_duration,
-        "completed":
-        metrics.completed,
-        "total_input_tokens":
-        metrics.total_input,
-        "total_output_tokens":
-        metrics.total_output,
-        "request_throughput":
-        metrics.request_throughput,
-        "output_throughput":
-        metrics.output_throughput,
-        "total_token_throughput":
-        metrics.total_token_throughput,
+    result = print_metrics_to_console(metrics, benchmark_duration,
+                                      selected_percentile_metrics,
+                                      goodput_config_dict)
+    result.merge({
         "ttft_description":
         pd.Series([output.ttft for output in outputs]).describe().to_dict(),
         "tpot_description":
@@ -600,52 +655,7 @@ async def benchmark(
         "ttfts": [output.ttft for output in outputs],
         "itls": [output.itl for output in outputs],
         "errors": [output.error for output in outputs],
-    }
-
-    ret = [{
-        'generated': output.generated_text,
-        'expected': gt
-    } for output, gt in zip(outputs, expected)]
-
-    def process_one_metric(
-        # E.g., "ttft"
-        metric_attribute_name: str,
-        # E.g., "TTFT"
-        metric_name: str,
-        # E.g., "Time to First Token"
-        metric_header: str,
-    ):
-        # This function prints and adds statistics of the specified
-        # metric.
-        if metric_attribute_name not in selected_percentile_metrics:
-            return
-        print("{s:{c}^{n}}".format(s=metric_header, n=50, c='-'))
-        print("{:<40} {:<10.2f}".format(
-            f"Mean {metric_name} (ms):",
-            getattr(metrics, f"mean_{metric_attribute_name}_ms")))
-        print("{:<40} {:<10.2f}".format(
-            f"Median {metric_name} (ms):",
-            getattr(metrics, f"median_{metric_attribute_name}_ms")))
-        result[f"mean_{metric_attribute_name}_ms"] = getattr(
-            metrics, f"mean_{metric_attribute_name}_ms")
-        result[f"median_{metric_attribute_name}_ms"] = getattr(
-            metrics, f"median_{metric_attribute_name}_ms")
-        result[f"std_{metric_attribute_name}_ms"] = getattr(
-            metrics, f"std_{metric_attribute_name}_ms")
-        for p, value in getattr(metrics,
-                                f"percentiles_{metric_attribute_name}_ms"):
-            p_word = str(int(p)) if int(p) == p else str(p)
-            print("{:<40} {:<10.2f}".format(f"P{p_word} {metric_name} (ms):",
-                                            value))
-            result[f"p{p_word}_{metric_attribute_name}_ms"] = value
-
-    process_one_metric("ttft", "TTFT", "Time to First Token")
-    process_one_metric("tpot", "TPOT",
-                       "Time per Output Token (excl. 1st token)")
-    process_one_metric("itl", "ITL", "Inter-token Latency")
-    process_one_metric("e2el", "E2EL", "End-to-end Latency")
-
-    print("=" * 50)
+    })
 
     return result, ret
 
@@ -903,6 +913,11 @@ def get_structured_output_argparser():
         help=
         "Name or path of the tokenizer, if not using the default tokenizer.",  # noqa: E501
     )
+    parser.add_argument(
+        "--ignore-eos",
+        action="store_true",
+        help="Set ignore_eos flag when sending the benchmark request."
+        "Warning: ignore_eos is not supported in deepspeed_mii and tgi.")
     return parser
 
 
@@ -983,11 +998,6 @@ if __name__ == "__main__":
         "{backend}-{args.request_rate}qps-{base_model_id}-{current_dt}.json"
         " format.",
     )
-    parser.add_argument(
-        "--ignore-eos",
-        action="store_true",
-        help="Set ignore_eos flag when sending the benchmark request."
-        "Warning: ignore_eos is not supported in deepspeed_mii and tgi.")
     parser.add_argument(
         "--percentile-metrics",
         type=str,
