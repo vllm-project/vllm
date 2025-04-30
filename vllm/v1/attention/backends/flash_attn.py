@@ -94,9 +94,6 @@ class FlashAttentionMetadata:
     scheduler_metadata: Optional[torch.Tensor] = None
     prefix_scheduler_metadata: Optional[torch.Tensor] = None
 
-    # For logging.
-    num_input_tokens: int = 0  # Number of tokens including padding.
-
     # for local attention
     @dataclass
     class LocalAttentionMetadata:
@@ -372,7 +369,7 @@ class FlashAttentionMetadataBuilder:
             suffix_kv_lens = torch.from_numpy(suffix_kv_lens).to(
                 self.runner.device)
             prefix_scheduler_metadata = schedule(
-                batch_size=num_reqs,
+                batch_size=1,
                 cu_query_lens=cu_prefix_query_lens,
                 max_query_len=num_actual_tokens,
                 seqlens=prefix_kv_lens,

@@ -100,7 +100,7 @@ class MultiModalRegistry:
         model_config: "ModelConfig",
     ) -> Mapping[str, int]:
         """
-        Get the maximum number of tokens per data item from each modality based 
+        Get the maximum number of tokens per data item from each modality based
         on underlying model configuration.
         """
         if not model_config.is_multimodal_model:
@@ -126,11 +126,11 @@ class MultiModalRegistry:
     ) -> Mapping[str, int]:
         """
         Get the maximum number of tokens per data item from each modality based
-        on underlying model configuration, excluding modalities that user 
+        on underlying model configuration, excluding modalities that user
         explicitly disabled via `limit_mm_per_prompt`.
 
         Note:
-            This is currently directly used only in V1 for profiling the memory 
+            This is currently directly used only in V1 for profiling the memory
             usage of a model.
         """
         mm_limits = self.get_mm_limits_per_prompt(model_config)
@@ -262,7 +262,8 @@ class MultiModalRegistry:
         if tokenizer is None:
             tokenizer = cached_tokenizer_from_config(model_config)
         if disable_cache is None:
-            disable_cache = model_config.disable_mm_preprocessor_cache
+            mm_config = model_config.get_multimodal_config()
+            disable_cache = mm_config.disable_mm_preprocessor_cache
 
         model_cls = self._get_model_cls(model_config)
         factories = self._processor_factories[model_cls]
@@ -315,7 +316,9 @@ class MultiModalRegistry:
         token_ids = dummy_data.prompt_token_ids
         if len(token_ids) < seq_len:
             logger.warning_once(
-                f"Expected at least {seq_len} dummy encoder tokens for "
-                f"profiling, but found {len(token_ids)} tokens instead.")
+                "Expected at least %d dummy encoder tokens for profiling, but found %d tokens instead.",  # noqa: E501
+                seq_len,
+                len(token_ids),
+            )
 
         return dummy_data

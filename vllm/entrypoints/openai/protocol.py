@@ -14,6 +14,7 @@ from pydantic import (BaseModel, ConfigDict, Field, TypeAdapter,
                       ValidationInfo, field_validator, model_validator)
 from typing_extensions import TypeAlias
 
+from vllm import envs
 from vllm.entrypoints.chat_utils import ChatCompletionMessageParam
 from vllm.logger import init_logger
 from vllm.pooling_params import PoolingParams
@@ -408,6 +409,15 @@ class ChatCompletionRequest(OpenAIBaseModel):
             "If specified with 'logprobs', tokens are represented "
             " as strings of the form 'token_id:{token_id}' so that tokens "
             "that are not JSON-encodable can be identified."))
+    cache_salt: Optional[str] = Field(
+        default=None,
+        description=(
+            "If specified, the prefix cache will be salted with the provided "
+            "string to prevent an attacker to guess prompts in multi-user "
+            "environments. The salt should be random, protected from "
+            "access by 3rd parties, and long enough to be "
+            "unpredictable (e.g., 43 characters base64-encoded, corresponding "
+            "to 256 bit). Not supported by vLLM engine V0."))
 
     # doc: end-chat-completion-extra-params
 
@@ -726,6 +736,20 @@ class ChatCompletionRequest(OpenAIBaseModel):
                              "`add_generation_prompt` to True.")
         return data
 
+    @model_validator(mode="before")
+    @classmethod
+    def check_cache_salt_support(cls, data):
+        if data.get("cache_salt") is not None:
+            if not envs.VLLM_USE_V1:
+                raise ValueError(
+                    "Parameter 'cache_salt' is not supported with "
+                    "this instance of vLLM, which uses engine V0.")
+            if not isinstance(data["cache_salt"],
+                              str) or not data["cache_salt"]:
+                raise ValueError("Parameter 'cache_salt' must be a "
+                                 "non-empty string if provided.")
+        return data
+
 
 class CompletionRequest(OpenAIBaseModel):
     # Ordered by official OpenAI API documentation
@@ -1014,7 +1038,7 @@ class EmbeddingCompletionRequest(OpenAIBaseModel):
     encoding_format: Literal["float", "base64"] = "float"
     dimensions: Optional[int] = None
     user: Optional[str] = None
-    truncate_prompt_tokens: Optional[Annotated[int, Field(ge=1)]] = None
+    truncate_prompt_tokens: Optional[Annotated[int, Field(ge=-1)]] = None
 
     # doc: begin-embedding-pooling-params
     additional_data: Optional[Any] = None
@@ -1049,7 +1073,7 @@ class EmbeddingChatRequest(OpenAIBaseModel):
     encoding_format: Literal["float", "base64"] = "float"
     dimensions: Optional[int] = None
     user: Optional[str] = None
-    truncate_prompt_tokens: Optional[Annotated[int, Field(ge=1)]] = None
+    truncate_prompt_tokens: Optional[Annotated[int, Field(ge=-1)]] = None
 
     # doc: begin-chat-embedding-pooling-params
     additional_data: Optional[Any] = None
@@ -1116,7 +1140,7 @@ class ScoreRequest(OpenAIBaseModel):
     model: Optional[str] = None
     text_1: Union[list[str], str]
     text_2: Union[list[str], str]
-    truncate_prompt_tokens: Optional[Annotated[int, Field(ge=1)]] = None
+    truncate_prompt_tokens: Optional[Annotated[int, Field(ge=-1)]] = None
 
     # doc: begin-score-pooling-params
     additional_data: Optional[Any] = None
@@ -1142,7 +1166,7 @@ class RerankRequest(OpenAIBaseModel):
     query: str
     documents: list[str]
     top_n: int = Field(default_factory=lambda: 0)
-    truncate_prompt_tokens: Optional[Annotated[int, Field(ge=1)]] = None
+    truncate_prompt_tokens: Optional[Annotated[int, Field(ge=-1)]] = None
 
     # doc: begin-rerank-pooling-params
     additional_data: Optional[Any] = None
@@ -1622,9 +1646,9 @@ class TranscriptionRequest(OpenAIBaseModel):
 
     # doc: begin-transcription-extra-params
     stream: Optional[bool] = False
-    """Custom field not present in the original OpenAI definition. When set, 
+    """Custom field not present in the original OpenAI definition. When set,
     it will enable output to be streamed in a similar fashion as the Chat
-    Completion endpoint. 
+    Completion endpoint.
     """
     # Flattened stream option to simplify form data.
     stream_include_usage: Optional[bool] = False
@@ -1642,7 +1666,7 @@ class TranscriptionRequest(OpenAIBaseModel):
     """
 
     top_p: Optional[float] = None
-    """Enables nucleus (top-p) sampling, where tokens are selected from the 
+    """Enables nucleus (top-p) sampling, where tokens are selected from the
     smallest possible set whose cumulative probability exceeds `p`.
     """
 
@@ -1650,7 +1674,7 @@ class TranscriptionRequest(OpenAIBaseModel):
     """Limits sampling to the `k` most probable tokens at each step."""
 
     min_p: Optional[float] = None
-    """Filters out tokens with a probability lower than `min_p`, ensuring a 
+    """Filters out tokens with a probability lower than `min_p`, ensuring a
     minimum likelihood threshold during sampling.
     """
 
