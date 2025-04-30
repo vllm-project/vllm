@@ -174,8 +174,11 @@ def test_gritlm_offline_generate(monkeypatch: pytest.MonkeyPatch, vllm_runner):
 
         input = "<|user|>\nWhat is the capital of France?\n<|assistant|>\n"
 
-        with vllm_runner(MODEL_NAME,
-                         max_model_len=MAX_MODEL_LEN) as vllm_model:
+        with vllm_runner(
+                MODEL_NAME,
+                task="generate",
+                max_model_len=MAX_MODEL_LEN,
+        ) as vllm_model:
             llm = vllm_model.model
 
             sampling_params = vllm.SamplingParams(temperature=0.0,
@@ -190,7 +193,7 @@ async def test_gritlm_api_server_generate():
     input = "<|user|>\nWhat is the capital of France?\n<|assistant|>\n"
 
     # GritLM embedding implementation is only supported by XFormers backend.
-    args = ["--task", "embed", "--max_model_len", str(MAX_MODEL_LEN)]
+    args = ["--task", "generate", "--max_model_len", str(MAX_MODEL_LEN)]
     env_dict = {STR_BACKEND_ENV_VAR: "XFORMERS"}
 
     with RemoteOpenAIServer(MODEL_NAME, args, env_dict=env_dict) as server:
