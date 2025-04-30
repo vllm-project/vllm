@@ -519,6 +519,17 @@ class LLM:
         executor = self.llm_engine.model_executor
         return executor.apply_model(func)
 
+    def _get_beam_search_lora_requests(
+            beam_width: int, lora_request: Optional[Union[list[LoRARequest],
+                                                          LoRARequest]]):
+        """FIXME"""
+        if lora_request is None:
+            return [None] * beam_width
+        if isinstance(lora_request, LoRARequest):
+            return [lora_request] * beam_width
+        else:
+            return lora_request
+
     def beam_search(
         self,
         prompts: list[Union[TokensPrompt, TextPrompt]],
@@ -541,6 +552,12 @@ class LLM:
         temperature = params.temperature
         ignore_eos = params.ignore_eos
         length_penalty = params.length_penalty
+
+        # TODO - attach the lora request to each beam instance so that when
+        # we make the prompt batch, we can also create the lora request batch
+        # in the same way.
+        lora_requests = self._get_beam_search_lora_requests(
+            beam_width, lora_request)
 
         def sort_beams_key(x: BeamSearchSequence) -> float:
             return get_beam_search_score(x.tokens, x.cum_logprob,
@@ -569,7 +586,7 @@ class LLM:
                                             temperature=temperature)
         instances: list[BeamSearchInstance] = []
 
-        for prompt in prompts:
+        for instance_lora_req, prompt in zip(lora_requests, prompts):
             # Add multimodal processor kwargs & data
             mm_kwargs = {}
             if "multi_modal_data" in prompt:
@@ -585,7 +602,12 @@ class LLM:
                 prompt_tokens = tokenizer.encode(prompt["prompt"])
 
             instances.append(
-                BeamSearchInstance(prompt_tokens, logprobs=None, **mm_kwargs))
+                BeamSearchInstance(
+                    prompt_tokens,
+                    lora_request=instance_lora_req,
+                    logprobs=None,
+                    **mm_kwargs,
+                ), )
 
         for _ in range(max_tokens):
             all_beams: list[BeamSearchSequence] = list(
@@ -599,16 +621,17 @@ class LLM:
             if len(all_beams) == 0:
                 break
 
-            prompts_batch = [
-                create_tokens_prompt_from_beam(beam) for beam in all_beams
-            ]
+            # create the corresponding batch entries for prompt & optional lora
+            prompts_batch, lora_req_batch = zip(
+                *[(create_tokens_prompt_from_beam(beam), beam.lora_request)
+                  for beam in all_beams])
 
             # only runs for one step
             # we don't need to use tqdm here
             output = self.generate(prompts_batch,
                                    sampling_params=beam_search_params,
                                    use_tqdm=False,
-                                   lora_request=lora_request)
+                                   lora_request=lora_req_batch)
 
             for (start, end), instance in zip(instance_start_and_end,
                                               instances):
@@ -626,6 +649,7 @@ class LLM:
                             new_beam = BeamSearchSequence(
                                 tokens=current_beam.tokens + [token_id],
                                 logprobs=current_beam.logprobs + [logprobs],
+                                lora_request=current_beam.lora_request,
                                 cum_logprob=current_beam.cum_logprob +
                                 logprob_obj.logprob,
                                 multi_modal_data=current_beam.multi_modal_data,
