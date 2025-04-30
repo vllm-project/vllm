@@ -6,7 +6,6 @@ from typing import Any, Literal, Optional, Union
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 from habana_frameworks.torch.core.weight_sharing import HabanaParameterWrapper
 from torch.nn.parameter import Parameter, UninitializedParameter
 

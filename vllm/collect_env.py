@@ -267,7 +267,13 @@ def get_nvidia_smi():
 def get_hpu_info():
     try:
         command = ["hl-smi", "-q", "-d", "PRODUCT"]
-        lines = subprocess.Popen(command, stdout=subprocess.PIPE, universal_newlines=True).stdout.readlines()
+        lines = subprocess.Popen(command,
+                                 stdout=subprocess.PIPE,
+                                 universal_newlines=True).stdout
+        if lines:
+            lines = lines.readlines()
+        else:
+            lines = []
         lines = [l.strip('\t') for l in lines]
         hpu_count = None
         hpu_model = None
@@ -275,7 +281,7 @@ def get_hpu_info():
         model_re = re.compile(r'Product Name.+?: (.+)')
         count_re = re.compile(r'Attached AIPs.+?: (\d+)')
         driver_re = re.compile(r'Driver Version.+?: (.+)')
-        for line in lines:            
+        for line in lines:
             if hpu_c := count_re.match(line):
                 hpu_count = hpu_c.group(1)
 

@@ -44,7 +44,7 @@ from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 
 from .interfaces import SupportsLoRA, SupportsPP
-from .utils import (AutoWeightsLoader, is_pp_missing_parameter,
+from .utils import (is_pp_missing_parameter,
                     make_empty_intermediate_tensors_factory, make_layers)
 
 is_hpu = current_platform.is_hpu()

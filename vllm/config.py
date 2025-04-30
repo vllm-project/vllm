@@ -1491,10 +1491,6 @@ class LoadConfig:
     device: Optional[str] = None
     """ Device to which model weights will be loaded, default to
             device_config.device"""
-    model_loader_extra_config: Optional[Union[str, dict]] = field(
-        default_factory=dict)
-    """Directory to download and load the weights, default to the default
-    cache directory of Hugging Face."""
     model_loader_extra_config: dict = field(default_factory=dict)
     """Extra config for model loader. This will be passed to the model loader
     corresponding to the chosen load_format. This should be a JSON string that

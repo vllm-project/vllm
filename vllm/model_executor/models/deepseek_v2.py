@@ -656,7 +656,7 @@ class DeepseekV2DecoderLayer(nn.Module):
             hidden_states = hidden_states.reshape(
                 _batch_size, hidden_states.shape[0] // _batch_size,
                 hidden_states.shape[1])
-        
+
         return hidden_states, residual
 
 

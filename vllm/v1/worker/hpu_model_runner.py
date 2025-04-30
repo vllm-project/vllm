@@ -1671,8 +1671,8 @@ class HPUModelRunner:
                 htorch.core.mark_step()
                 sampling_metadata = self._prepare_sampling(
                     batch_changed, req_id, pad_to=logits_device.shape[0])
-                sampler_output = self.sampler(
-                    logits=logits_device, sampling_metadata=sampling_metadata)
+                sampler_output = self.sampler(logits=logits_device,
+                                              sampling_metadata=sampling_metadata)
                 htorch.core.mark_step()
                 prefill_sampler_outputs.append(sampler_output)
                 if self.input_batch.num_prompt_logprobs:

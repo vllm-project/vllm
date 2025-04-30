@@ -62,7 +62,7 @@ from vllm.multimodal.parse import (ImageProcessorItems, ImageSize,
 from vllm.multimodal.processing import (BaseProcessingInfo,
                                         EncDecMultiModalProcessor,
                                         PromptReplacement, PromptUpdate)
-from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
+from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.platforms import current_platform
 
 from .clip import CLIPMLP

@@ -35,7 +35,7 @@ from vllm.outputs import RequestOutput
 from vllm.platforms import current_platform
 from vllm.sampling_params import BeamSearchParams
 from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, cuda_device_count_stateless,
-                        identity, is_list_of)
+                        identity)
 
 logger = init_logger(__name__)
 

@@ -36,7 +36,8 @@ from vllm.reasoning import ReasoningParserManager
 from vllm.test_utils import MODEL_WEIGHTS_S3_BUCKET, MODELS_ON_S3
 from vllm.transformers_utils.utils import check_gguf_file
 from vllm.usage.usage_lib import UsageContext
-from vllm.utils import FlexibleArgumentParser, GiB_bytes, is_in_ray_actor, StoreBoolean
+from vllm.utils import (FlexibleArgumentParser, GiB_bytes, StoreBoolean,
+                        is_in_ray_actor)
 
 # yapf: enable
 
