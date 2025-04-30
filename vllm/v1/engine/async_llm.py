@@ -82,6 +82,7 @@ class AsyncLLM(EngineClient):
 
         self.model_config = vllm_config.model_config
         self.vllm_config = vllm_config
+        self.structured_output_config = vllm_config.structured_output_config
         self.log_requests = log_requests
         self.log_stats = log_stats
 
@@ -440,7 +441,7 @@ class AsyncLLM(EngineClient):
         return self.model_config
 
     async def get_decoding_config(self):
-        raise ValueError("Not Supported on V1 yet.")
+        return self.structured_output_config
 
     async def get_input_preprocessor(self) -> InputPreprocessor:
         return self.processor.input_preprocessor

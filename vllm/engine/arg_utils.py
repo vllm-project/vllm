@@ -517,34 +517,29 @@ class EngineArgs:
             ' Should be a JSON string.')
         structured_output_group.add_argument(
             "--guided-decoding-backend",
-            help=
-            f"""[DEPRECATED] will be remove in v0.10.x. Use --structured-output-config '{"backend": "auto"}' instead. {structured_output_kwargs['backend']['help']}""",  # noqa: E501
+            # deprecated=True,
             **structured_output_kwargs["backend"],
         )
         structured_output_group.add_argument(
             "--guided-decoding-disable-fallback",
-            help=
-            f"""[DEPRECATED] will be remove in v0.10.x. Use --structured-output-config '{"disable_fallback": false}' instead. {structured_output_kwargs['disable_fallback']['help']}""",  # noqa: E501
+            # deprecated=True,
             **structured_output_kwargs["disable_fallback"],
         )
         structured_output_group.add_argument(
             "--guided-decoding-disable-any-whitespace",
-            help=
-            f"""[DEPRECATED] will be remove in v0.10.x. Use --structured-output-config '{"disable_any_whitespace": true}' instead. {structured_output_kwargs['disable_any_whitespace']['help']}""",  # noqa: E501
+            # deprecated=True,
             **structured_output_kwargs["disable_any_whitespace"],
         )
         structured_output_group.add_argument(
             "--guided-decoding-disable-additional-properties",
-            help=
-            f"""[DEPRECATED] will be remove in v0.10.x. Use --structured-output-config '{"disable_additional_properties": true}' instead. {structured_output_kwargs['disable_additional_properties']['help']}""",  # noqa: E501
+            # deprecated=True,
             **structured_output_kwargs["disable_additional_properties"],
         )
         structured_output_group.add_argument(
             "--reasoning-parser",
             # This choices is a special case because it's not static
             choices=list(ReasoningParserManager.reasoning_parsers),
-            help=
-            f"""[DEPRECATED] will be remove in v0.10.x. Use --structured-output-config '{"reasoning_backend": "deepseek_r1"}'. {structured_output_kwargs['reasoning_backend']['help']}""",  # noqa: E501
+            # deprecated=True,
             **structured_output_kwargs["reasoning_backend"],
         )
 

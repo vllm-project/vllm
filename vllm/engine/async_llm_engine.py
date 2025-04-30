@@ -499,8 +499,8 @@ class _AsyncLLMEngine(LLMEngine):
             prompt_adapter_request=prompt_adapter_request,
         )
 
-        if isinstance(params, SamplingParams) and \
-            params.guided_decoding is not None:
+        # yapf: disable
+        if isinstance(params, SamplingParams) and params.guided_decoding is not None:  # noqa: E501
             # Guided decoding has an async implementation for building logits
             # processors in a separate threadpool.
             # We want to invoke that here instead of using the blocking
@@ -508,11 +508,12 @@ class _AsyncLLMEngine(LLMEngine):
             params = await build_guided_decoding_logits_processor_async(
                 sampling_params=params,
                 tokenizer=await self.get_tokenizer_async(lora_request),
-                default_guided_backend=self.decoding_config.
-                guided_decoding_backend,
-                reasoning_backend=self.decoding_config.reasoning_backend,
-                model_config=self.model_config)
+                default_guided_backend=self.structured_output_config.backend,
+                reasoning_backend=self.structured_output_config.reasoning_backend,
+                model_config=self.model_config,
+            )
 
+        # yapf: enable
         self._add_processed_request(
             request_id=request_id,
             processed_inputs=processed_inputs,

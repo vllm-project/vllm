@@ -95,7 +95,7 @@ class MQLLMEngineClient(EngineClient):
         # Get the configs.
         self.vllm_config = engine_config
         self.model_config = engine_config.model_config
-        self.decoding_config = engine_config.decoding_config
+        self.structured_output_config = engine_config.structured_output_config
 
         # Create the tokenizer group.
         self.tokenizer = init_tokenizer_from_configs(
@@ -381,7 +381,7 @@ class MQLLMEngineClient(EngineClient):
         return self.vllm_config
 
     async def get_decoding_config(self) -> StructuredOutputConfig:
-        return self.decoding_config
+        return self.structured_output_config
 
     async def get_model_config(self) -> ModelConfig:
         return self.model_config
@@ -615,11 +615,11 @@ class MQLLMEngineClient(EngineClient):
                 build_guided_decoding_logits_processor_async(
                     sampling_params=params,
                     tokenizer=await self.get_tokenizer(lora_request),
-                    default_guided_backend=(self.decoding_config.backend
-                        if self.decoding_config
+                    default_guided_backend=(self.structured_output_config.backend
+                        if self.structured_output_config
                         else StructuredOutputConfig.backend),
                     model_config=self.model_config,
-                    reasoning_backend=self.decoding_config.reasoning_backend,
+                    reasoning_backend=self.structured_output_config.reasoning_backend,
                 )
 
         # 1) Create output queue for this requests.

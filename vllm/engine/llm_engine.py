@@ -231,8 +231,7 @@ class LLMEngine:
         self.device_config = vllm_config.device_config
         self.speculative_config = vllm_config.speculative_config  # noqa
         self.load_config = vllm_config.load_config
-        self.decoding_config = vllm_config.decoding_config or StructuredOutputConfig(  # noqa
-        )
+        self.structured_output_config = vllm_config.structured_output_config
         self.prompt_adapter_config = vllm_config.prompt_adapter_config  # noqa
         self.observability_config = vllm_config.observability_config or ObservabilityConfig(  # noqa
         )
@@ -905,7 +904,7 @@ class LLMEngine:
 
     def get_decoding_config(self) -> StructuredOutputConfig:
         """Gets the decoding configuration."""
-        return self.decoding_config
+        return self.structured_output_config
 
     def get_scheduler_config(self) -> SchedulerConfig:
         """Gets the scheduler configuration."""
@@ -2090,19 +2089,20 @@ class LLMEngine:
                 "LLMEngine. Params: %s", guided_decoding)
 
             tokenizer = self.get_tokenizer(lora_request=lora_request)
-            guided_decoding.backend = guided_decoding.backend or \
-                self.decoding_config.backend
+            guided_decoding.backend = guided_decoding.backend or self.structured_output_config.backend  # noqa: E501
 
-            if self.decoding_config.reasoning_backend is not None:
+            if self.structured_output_config.reasoning_backend is not None:
                 logger.debug("Building with reasoning backend %s",
-                             self.decoding_config.reasoning_backend)
+                             self.structured_output_config.reasoning_backend)
 
+            # yapf: disable
             processor = get_local_guided_decoding_logits_processor(
                 guided_params=guided_decoding,
                 tokenizer=tokenizer,
                 model_config=self.model_config,
-                reasoning_backend=self.decoding_config.reasoning_backend,
+                reasoning_backend=self.structured_output_config.reasoning_backend,
             )
+            # yapf: enable
             if processor:
                 logits_processors.append(processor)
 

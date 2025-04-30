@@ -3280,7 +3280,7 @@ class StructuredOutputConfig:
 # For backward compatibility, should remove in v0.10.0
 # given that vllm.config is considered public
 @deprecated(
-    "DecodingConfig is deprecated. Uses 'from vllm.config import StructuredOutputConfig' instead"  # noqa: E501
+    "DecodingConfig is deprecated and has been renamed to StructuredOutputConfig. This will be removed in v0.10.0. Please use 'from vllm.config import StructuredOutputConfig' instead"  # noqa: E501
 )
 class DecodingConfig(StructuredOutputConfig):
     pass
