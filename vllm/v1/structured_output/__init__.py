@@ -29,7 +29,10 @@ logger = init_logger(__name__)
 
 
 class StructuredOutputManager:
-    """Engine-level manager for structured output requests."""
+    """Engine-level manager for structured output requests.
+    This manager holds a backend property used to initialise and compile grammars
+    Each v1 request will then have the compiled grammar assigned to request.structured_output_request.grammar
+    """
 
     def __init__(self, vllm_config: VllmConfig):
         self.backend: Optional[StructuredOutputBackend] = None
@@ -105,9 +108,34 @@ class StructuredOutputManager:
         assert self.backend is not None
         return self.backend.compile_grammar(request_type, grammar_spec)
 
-    def grammar_bitmask(
+    def accept_tokens(self, request: Request, req_id: str,
+                      tokens: list[int]) -> bool:
+        """
+        Called in v1.core.sched.Scheduler.update_from_output after tokens have been accepted
+        Accepts a list of tokens and advances the FSM.
+        Returns True if the FSM was advanced successfully.
+        Returns False if the FSM failed to advance.
+        """
+        assert request.structured_output_request is not None and request.structured_output_request.grammar is not None
+        return request.structured_output_request.grammar.accept_tokens(
+            req_id, tokens)
+
+    def filter_logits(
         self,
-        requests: dict[str, Request],
+        input_batch: InputBatch,
+        device: torch.device,
+        scheduler_output: SchedulerOutput,
+        logits: torch.Tensor,
+        sample_hidden_states: torch.Tensor,
+    ) -> None:
+        """
+        Called in v1.worker.GPUModelRunner.execute_model immediately after the model forward pass"""
+        assert self.backend is not None
+        self.backend.filter_logits(input_batch, device, scheduler_output,
+                                   logits, sample_hidden_states)
+
+    def init_batch(
+        self, requests: dict[str, Request],
         structured_output_request_ids: dict[str, int],
         scheduled_spec_decode_tokens: dict[str, list[int]],
     ) -> Optional[npt.NDArray[np.int32]]:
