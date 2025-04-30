@@ -511,6 +511,13 @@ class ModelConfig:
             sliding_window_len=self.get_hf_config_sliding_window(),
             spec_target_max_model_len=spec_target_max_model_len,
             encoder_config=self.encoder_config)
+        if max_model_len is None and current_platform.is_tpu():
+            logger.warning("--max-model-len is not specified, "
+                           "it's currently using model's default length "
+                           f"{self.max_model_len}, which might be too large."
+                           "Please input with --max-model-len based on your "
+                           "request input length and output length, to avoid "
+                           "unnecessary degradation.")
         self.served_model_name = get_served_model_name(model,
                                                        served_model_name)
         self.multimodal_config = self._init_multimodal_config(

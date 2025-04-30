@@ -1608,8 +1608,8 @@ class EngineArgs:
         # as the platform that vLLM is running on (e.g. the case of scaling
         # vLLM with Ray) and has no GPUs. In this case we use the default
         # values for non-H100/H200 GPUs.
+        from vllm.platforms import current_platform
         try:
-            from vllm.platforms import current_platform
             device_memory = current_platform.get_device_total_memory()
         except Exception:
             # This is only used to set default_max_num_batched_tokens
@@ -1630,11 +1630,36 @@ class EngineArgs:
             }
             default_max_num_seqs = 256
 
+        # tpu specific default values.
+        if current_platform.is_tpu():
+            default_max_num_batched_tokens_tpu = {
+                UsageContext.LLM_CLASS: {
+                    'v6e': 2048,
+                    'v5e': 1024,
+                    'v5p': 512,
+                },
+                UsageContext.OPENAI_API_SERVER: {
+                    'v6e': 1024,
+                    'v5e': 512,
+                    'v5p': 256,
+                }
+            }
+
         use_context_value = usage_context.value if usage_context else None
         if (self.max_num_batched_tokens is None
                 and usage_context in default_max_num_batched_tokens):
-            self.max_num_batched_tokens = default_max_num_batched_tokens[
-                usage_context]
+            if current_platform.is_tpu():
+                from tpu_info import device
+                try:
+                    chip_type, _ = device.get_local_chips()
+                    self.max_num_batched_tokens = default_max_num_batched_tokens_tpu[
+                        usage_context][chip_type.name.lower()]
+                except Exception:
+                    self.max_num_batched_tokens = default_max_num_batched_tokens[
+                        usage_context]
+            else:
+                self.max_num_batched_tokens = default_max_num_batched_tokens[
+                    usage_context]
             logger.debug(
                 "Setting max_num_batched_tokens to %d for %s usage context.",
                 self.max_num_batched_tokens, use_context_value)
