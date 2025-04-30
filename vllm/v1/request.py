@@ -29,11 +29,14 @@ class Request:
         arrival_time: float,
         lora_request: Optional["LoRARequest"] = None,
         structured_output_request: Optional["StructuredOutputRequest"] = None,
+        priority: int = 0,
     ) -> None:
         self.request_id = request_id
         self.sampling_params = sampling_params
         # Because of LoRA, the eos token id can be different for each request.
         self.eos_token_id = eos_token_id
+        # Priority (0 normal, 1 high) for prefix cache eviction ordering.
+        self.priority = priority
         self.lora_request = lora_request
         self.structured_output_request = structured_output_request
 
@@ -77,6 +80,7 @@ class Request:
             assert is_list_of(request.mm_inputs, MultiModalKwargs), (
                 "mm_inputs was not updated in EngineCore.add_request")
 
+        # Preserve priority from EngineCoreRequest for cache eviction ordering
         return cls(
             request_id=request.request_id,
             prompt_token_ids=request.prompt_token_ids,
@@ -89,6 +93,7 @@ class Request:
             lora_request=request.lora_request,
             structured_output_request=StructuredOutputRequest(
                 sampling_params=request.sampling_params),
+            priority=getattr(request, "priority", 0),
         )
 
     def append_output_token_ids(

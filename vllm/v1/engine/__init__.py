@@ -62,6 +62,9 @@ class EngineCoreRequest(
     # belong to, to cover a race condition where the request is sent before
     # a wave finished notification is received.
     current_wave: int = 0
+    # Priority of the request: 0 (normal) or 1 (high). Higher priority requests
+    # have their prefix cache freed last (evicted later).
+    priority: int = 0
 
 
 class EngineCoreEventType(enum.IntEnum):

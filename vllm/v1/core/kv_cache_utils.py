@@ -248,6 +248,24 @@ class FreeKVCacheBlockQueue:
 
         block.next_free_block = None
         self.num_free_blocks += 1
+    
+    def appendleft(self, block: KVCacheBlock) -> None:
+        """Put a block at the front of the free list and increase num_free_blocks by 1.
+
+        Args:
+            block: The block to prepend.
+        """
+        if self.free_list_head is not None:
+            # Link the new block before the current head.
+            block.next_free_block = self.free_list_head
+            self.free_list_head.prev_free_block = block
+            self.free_list_head = block
+        else:
+            # The free list is empty.
+            self.free_list_head = self.free_list_tail = block
+            block.next_free_block = None
+        block.prev_free_block = None
+        self.num_free_blocks += 1
 
     def get_all_free_blocks(self) -> list[KVCacheBlock]:
         """Get all free blocks in the free list. Mainly used for testing.
