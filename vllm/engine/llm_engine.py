@@ -644,6 +644,7 @@ class LLMEngine:
         params: Union[SamplingParams, PoolingParams],
         arrival_time: Optional[float] = None,
         lora_request: Optional[LoRARequest] = None,
+        tokenization_kwargs: Optional[dict[str, Any]] = None,
         trace_headers: Optional[Mapping[str, str]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
         priority: int = 0,
@@ -677,6 +678,7 @@ class LLMEngine:
             params: Optional[Union[SamplingParams, PoolingParams]] = None,
             arrival_time: Optional[float] = None,
             lora_request: Optional[LoRARequest] = None,
+            tokenization_kwargs: Optional[dict[str, Any]] = None,
             trace_headers: Optional[Mapping[str, str]] = None,
             prompt_adapter_request: Optional[PromptAdapterRequest] = None,
             priority: int = 0,
@@ -757,6 +759,7 @@ class LLMEngine:
 
         processed_inputs = self.input_preprocessor.preprocess(
             prompt,
+            tokenization_kwargs=tokenization_kwargs,
             lora_request=lora_request,
             prompt_adapter_request=prompt_adapter_request,
         )
