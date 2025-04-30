@@ -812,10 +812,11 @@ def _assert_right_kv_cache_manager(
     # Make sure the request stats are right.
     EXPECTED_TOTAL_BLOCKS = num_tokens // block_size
     for req_id in req_ids:
-        blocks = scheduler.kv_cache_manager.req_to_blocks[req_id]
+        blocks = (scheduler.kv_cache_manager.single_type_manager.
+                  req_to_blocks[req_id])
         hashes = scheduler.kv_cache_manager.req_to_block_hashes[req_id]
-        assert (scheduler.kv_cache_manager.num_cached_block[req_id] ==
-                EXPECTED_TOTAL_BLOCKS)
+        assert (scheduler.kv_cache_manager.single_type_manager.
+                num_cached_block[req_id] == EXPECTED_TOTAL_BLOCKS)
         assert len(blocks) == EXPECTED_TOTAL_BLOCKS
         assert len(hashes) == EXPECTED_TOTAL_BLOCKS
 
