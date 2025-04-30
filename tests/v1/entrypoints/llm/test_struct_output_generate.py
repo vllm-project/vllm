@@ -1,3 +1,4 @@
+# ruff: noqa: E501
 # SPDX-License-Identifier: Apache-2.0
 
 from __future__ import annotations
@@ -29,22 +30,20 @@ EAGLE_SPEC_CONFIG = {
     "num_speculative_tokens": 5,
 }
 
+# yapf: disable
 PARAMS_MODELS_BACKENDS_TOKENIZER_MODE_REASONING_PARSER_SPEC_CONFIG = [
     ("mistralai/Ministral-8B-Instruct-2410", "xgrammar", "auto", None, None),
     ("mistralai/Ministral-8B-Instruct-2410", "guidance", "auto", None, None),
-    ("mistralai/Ministral-8B-Instruct-2410", "xgrammar", "mistral", None,
-     None),
+    ("mistralai/Ministral-8B-Instruct-2410", "xgrammar", "mistral", None, None),
     ("Qwen/Qwen2.5-1.5B-Instruct", "xgrammar", "auto", None, None),
-    ("deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B", "xgrammar", "auto",
-     "deepseek_r1", None),
-    ("mistralai/Ministral-8B-Instruct-2410", "guidance", "auto", None,
-     NGRAM_SPEC_CONFIG),
+    ("deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B", "xgrammar", "auto", "deepseek_r1", None),
+    ("Qwen/Qwen3-0.6B", "xgrammar", "auto", "qwen3", None, NGRAM_SPEC_CONFIG),
+    ("mistralai/Ministral-8B-Instruct-2410", "guidance", "auto", None, NGRAM_SPEC_CONFIG),
     #FIXME: This test is flaky on CI thus disabled
-    ("Qwen/Qwen2.5-1.5B-Instruct", "xgrammar", "auto", None, NGRAM_SPEC_CONFIG
-     ),
-    ("meta-llama/Meta-Llama-3.1-8B-Instruct", "xgrammar", "auto", None,
-     EAGLE_SPEC_CONFIG)
+    ("Qwen/Qwen2.5-1.5B-Instruct", "xgrammar", "auto", None, NGRAM_SPEC_CONFIG),
+    ("meta-llama/Meta-Llama-3.1-8B-Instruct", "xgrammar", "auto", None, EAGLE_SPEC_CONFIG)
 ]
+# yapf: enable
 
 PARAMS_MODELS_TOKENIZER_MODE = [
     ("mistralai/Ministral-8B-Instruct-2410", "auto"),
