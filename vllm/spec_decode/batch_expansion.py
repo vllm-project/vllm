@@ -303,30 +303,6 @@ class BatchExpansionTop1Scorer(SpeculativeScorer):
         # Map distinct sequences used to score each token
         # of shape [batch_size * k + 1] back to [batch_size, k + 1].
         contracted_bs, k = proposals.proposal_token_ids.shape
-        if current_platform.is_hpu():
-            (
-                target_sampler_output.sampled_token_ids,
-                target_sampler_output.sampled_token_probs,
-                target_sampler_output.logprobs,
-                target_sampler_output.hidden_states,
-                _,
-                _,
-                _,
-                _,
-            ) = self._split_scoring_output_hpu(target_sampler_output,
-                                               num_scoring_tokens)
-        else:
-            (
-                target_sampler_output.sampled_token_ids,
-                target_sampler_output.sampled_token_probs,
-                target_sampler_output.logprobs,
-                target_sampler_output.hidden_states,
-                _,
-                _,
-                _,
-                _,
-            ) = self._split_scoring_output(target_sampler_output,
-                                           num_scoring_tokens)
 
         # Reshape tensors to original batch size
         target_token_ids = target_sampler_output.sampled_token_ids.reshape(

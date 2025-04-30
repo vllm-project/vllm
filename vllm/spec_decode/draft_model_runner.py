@@ -6,6 +6,7 @@ import torch
 
 from vllm.forward_context import set_forward_context
 from vllm.model_executor.layers.sampler import SamplerOutput
+from vllm.platforms import current_platform
 
 try:
     try:
@@ -19,9 +20,10 @@ try:
             from vllm.attention.backends.hpu_attn import (
                 HPUPagedAttentionMetadata as FlashAttentionMetadata)
 except (ModuleNotFoundError, ImportError, AssertionError) as err:
-    raise RuntimeError(
-        "Draft model speculative decoding currently only supports"
-        "CUDA and ROCm and HPU attention backend.") from err
+    if current_platform.is_cuda_alike():
+        raise RuntimeError(
+            "Draft model speculative decoding currently only supports"
+            "CUDA and ROCm and HPU attention backend.") from err
 
 from vllm.logger import init_logger
 from vllm.multimodal import MultiModalKwargs
@@ -38,6 +40,14 @@ debug_advance_input = False
 # A flag to allow GPU advance step for draft model runner.
 # Set to False for debugging.
 allow_gpu_advance_step = True
+
+
+class GeneralTP1DraftModelRunner(ModelRunnerWrapperBase):
+
+    def __init__(self, model_runner: ModelRunnerBase):
+        super().__init__(model_runner)
+
+        self.indices_of_seq_with_bonus_tokens = None
 
 
 class TP1DraftModelRunner(ModelRunnerWrapperBase):
