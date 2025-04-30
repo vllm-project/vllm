@@ -163,7 +163,7 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
                                           {"1b": "EleutherAI/pythia-1.4b"}),
     "GraniteForCausalLM": _HfExamplesInfo("ibm/PowerLM-3b"),
     "GraniteMoeForCausalLM": _HfExamplesInfo("ibm/PowerMoE-3b"),
-    "GraniteMoeHybridForCausalLM": _HfExamplesInfo("ibm-research/granite-4.0-tiny-test"),
+    "GraniteMoeHybridForCausalLM": _HfExamplesInfo("ibm-research/granite-4.0-tiny-test"),  # noqa: E501
     "GraniteMoeSharedForCausalLM": _HfExamplesInfo("ibm-research/moe-7b-1b-active-shared-experts"),  # noqa: E501
     "Grok1ModelForCausalLM": _HfExamplesInfo("hpcai-tech/grok-1",
                                              trust_remote_code=True),

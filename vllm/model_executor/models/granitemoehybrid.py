@@ -239,7 +239,8 @@ class GraniteMoeHybridAttention(nn.Module):
                 rotary_dim=self.head_dim,
                 max_position=config.max_position_embeddings,
                 base=int(config.rope_theta),
-                rope_scaling=config.rope_scaling if hasattr(config, "rope_scaling") \
+                rope_scaling=config.rope_scaling \
+                    if hasattr(config, "rope_scaling") \
                     and config.rope_scaling is not None else None,
                 is_neox_style=True,
             )
@@ -404,7 +405,7 @@ class GraniteMoeHybridModel(nn.Module):
                 n = n.replace("A_log", "A")
 
             # Logic analogous to: https://github.com/vllm-project/vllm/blob/f49e5aff11c986ed4d45202b1716c5d74786efa9/vllm/model_executor/models/granitemoeshared.py#L215
-            # Mapping different experts' layout: from HF (input_linear, output_linear, router) 
+            # Mapping different experts' layout: from HF (input_linear, output_linear, router)
             # to vLLM (experts_w13({e}.w1, {e}.w2), experts_w3({e}.w3), gate)
             if n.endswith('.block_sparse_moe.input_linear.weight'):
                 for e in range(p.size(0)):
@@ -425,7 +426,7 @@ class GraniteMoeHybridModel(nn.Module):
                         '.block_sparse_moe.output_linear.weight',
                         f".block_sparse_moe.experts.{e}.w2.weight")
                     w2_param = p[e]
-                    _load_expert(n.replace('.output_linear.', '.experts.w2_'), 
+                    _load_expert(n.replace('.output_linear.', '.experts.w2_'),
                                  w2_param, w2_name, shard_id='w2', expert_id=e)
             elif n.endswith('.block_sparse_moe.router.layer.weight'):
                 gate_name = n.replace('.block_sparse_moe.router.layer.weight',
@@ -437,8 +438,8 @@ class GraniteMoeHybridModel(nn.Module):
         return loaded_params
 
 
-class GraniteMoeHybridForCausalLM(nn.Module, HasInnerState, SupportsLoRA, SupportsPP,
-                       IsHybrid, SupportsV0Only, SupportsQuant):
+class GraniteMoeHybridForCausalLM(nn.Module, HasInnerState, SupportsLoRA, 
+        SupportsPP, IsHybrid, SupportsV0Only, SupportsQuant):
     packed_modules_mapping = {}
     embedding_modules = {
         "embed_tokens": "input_embeddings",
