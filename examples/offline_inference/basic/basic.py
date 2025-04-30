@@ -15,11 +15,11 @@ sampling_params = SamplingParams(temperature=0.8, top_p=0.95)
 
 def main():
     # Create an LLM.
-    llm = LLM(model="facebook/opt-125m")
+    llm = LLM(model="facebook/opt-125m", num_gpu_blocks_override=10)
     # Generate texts from the prompts.
     # The output is a list of RequestOutput objects
     # that contain the prompt, generated text, and other information.
-    outputs = llm.generate(prompts, sampling_params)
+    outputs = llm.generate(prompts, sampling_params, priority=[0, 1, 0, 0])
     # Print the outputs.
     print("\nGenerated Outputs:\n" + "-" * 60)
     for output in outputs:

@@ -42,8 +42,10 @@ class BlockHashType(NamedTuple):
 # variable if set such that processes can share the seed if needed.
 # This aligns with the behavior of Python's hash() function, which also uses
 # a random seed if PYTHONHASHSEED is not set.
-NONE_HASH = int.from_bytes(os.urandom(32), byteorder="big") if os.getenv(
-    'PYTHONHASHSEED') is None else sha256(os.getenv('PYTHONHASHSEED'))
+NONE_HASH = int.from_bytes(
+    os.urandom(32),
+    byteorder="big") if os.getenv('PYTHONHASHSEED') is None else sha256(
+        os.getenv('PYTHONHASHSEED'))
 
 
 class PrefixCachingMetrics:
@@ -184,13 +186,20 @@ class FreeKVCacheBlockQueue:
         self.num_free_blocks = len(blocks)
 
         # Initialize the doubly linked list of free blocks.
-        self.free_list_head: Optional[KVCacheBlock] = blocks[0]
-        self.free_list_tail: Optional[KVCacheBlock] = blocks[-1]
-        for i in range(self.num_free_blocks):
-            if i > 0:
-                blocks[i].prev_free_block = blocks[i - 1]
-            if i < self.num_free_blocks - 1:
-                blocks[i].next_free_block = blocks[i + 1]
+        self.free_list_head: Optional[
+            KVCacheBlock] = blocks[0] if blocks else None
+        self.free_list_tail: Optional[
+            KVCacheBlock] = blocks[-1] if blocks else None
+        # Marker for the start of the priority 1 blocks
+        self.priority_1_head: Optional[KVCacheBlock] = None
+        if blocks:
+            for i in range(self.num_free_blocks):
+                if i > 0:
+                    blocks[i].prev_free_block = blocks[i - 1]
+                if i < self.num_free_blocks - 1:
+                    blocks[i].next_free_block = blocks[i + 1]
+        else:
+            self.free_list_head = self.free_list_tail = None
 
     def popleft(self) -> KVCacheBlock:
         """Pop the first free block and reduce num_free_blocks by 1.
@@ -202,6 +211,9 @@ class FreeKVCacheBlockQueue:
             raise ValueError("No free blocks available")
 
         block = self.free_list_head
+        # Update priority_1_head if the popped block was the P1 head
+        if block == self.priority_1_head:
+            self.priority_1_head = block.next_free_block
         self.remove(block)
         return block
 
@@ -211,6 +223,10 @@ class FreeKVCacheBlockQueue:
         Args:
             block: The block to remove.
         """
+        # Update priority_1_head if the removed block was the P1 head
+        if block == self.priority_1_head:
+            self.priority_1_head = block.next_free_block
+
         if block.prev_free_block is not None:
             # Link the previous block to the next block.
             block.prev_free_block.next_free_block = block.next_free_block
@@ -230,12 +246,14 @@ class FreeKVCacheBlockQueue:
         self.num_free_blocks -= 1
 
     def append(self, block: KVCacheBlock) -> None:
-        """Put a block back into the free list and increase
-        num_free_blocks by 1.
+        """Put a block back into the tail of free list (Priority 1 behavior)
+        and increase num_free_blocks by 1.
 
         Args:
             block: The block to append.
         """
+        logger.debug(f"Appending P1 block {block.block_id} to tail.")
+        # Standard append logic
         if self.free_list_tail is not None:
             # Link the last block to the new block.
             self.free_list_tail.next_free_block = block
@@ -245,26 +263,46 @@ class FreeKVCacheBlockQueue:
             # The free list is empty.
             assert self.free_list_head is None
             self.free_list_head = self.free_list_tail = block
-
         block.next_free_block = None
+
+        # If this is the first P1 block, mark it.
+        if self.priority_1_head is None:
+            self.priority_1_head = block
+
         self.num_free_blocks += 1
-    
-    def appendleft(self, block: KVCacheBlock) -> None:
-        """Put a block at the front of the free list and increase num_free_blocks by 1.
+
+    def append_priority_0(self, block: KVCacheBlock) -> None:
+        """Put a block back into the free list before Priority 1 blocks
+        (Priority 0 behavior) and increase num_free_blocks by 1.
 
         Args:
-            block: The block to prepend.
+            block: The block to append.
         """
-        if self.free_list_head is not None:
-            # Link the new block before the current head.
-            block.next_free_block = self.free_list_head
-            self.free_list_head.prev_free_block = block
-            self.free_list_head = block
-        else:
-            # The free list is empty.
-            self.free_list_head = self.free_list_tail = block
+        logger.debug(
+            f"Appending P0 block {block.block_id} before P1 head (current P1 head: {self.priority_1_head.block_id if self.priority_1_head else 'None'})."
+        )
+        if self.priority_1_head is None:
+            # No P1 blocks yet, append to the absolute tail like a P1 block,
+            # but DO NOT mark it as the P1 head.
+            if self.free_list_tail is not None:
+                self.free_list_tail.next_free_block = block
+                block.prev_free_block = self.free_list_tail
+                self.free_list_tail = block
+            else:
+                self.free_list_head = self.free_list_tail = block
             block.next_free_block = None
-        block.prev_free_block = None
+        else:
+            # Insert block just before priority_1_head
+            prev_block = self.priority_1_head.prev_free_block
+            block.next_free_block = self.priority_1_head
+            block.prev_free_block = prev_block
+            self.priority_1_head.prev_free_block = block
+            if prev_block is not None:
+                prev_block.next_free_block = block
+            else:
+                # The priority_1_head was the head, so block becomes the new head
+                self.free_list_head = block
+
         self.num_free_blocks += 1
 
     def get_all_free_blocks(self) -> list[KVCacheBlock]:

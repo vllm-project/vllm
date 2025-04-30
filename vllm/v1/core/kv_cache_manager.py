@@ -309,7 +309,8 @@ class KVCacheManager:
             # freed first.
             ordered_blocks = reversed(blocks)
 
-        self.block_pool.free_blocks(ordered_blocks)
+        self.block_pool.free_blocks(ordered_blocks,
+                                    front=(request.priority == 0))
         self.num_cached_block.pop(request.request_id, None)
 
     def reset_prefix_cache(self) -> bool:

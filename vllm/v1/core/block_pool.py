@@ -233,17 +233,33 @@ class BlockPool:
         Args:
             ordered_blocks: A list of blocks to free ordered by their eviction
                 priority.
-            front: If True, freed blocks are prepended to the free list (evicted sooner);
+            front: If True, freed blocks are "prepended"to the free list (evicted sooner);
+                but still after the truly free blocks.
                 otherwise, appended to the tail (evicted later).
         """
         for block in ordered_blocks:
+            block_id = block.block_id
             block.decr_ref()
             # null_block should not be added to the free list.
             if block.ref_cnt == 0 and block != self.null_block:
                 if front:
-                    self.free_block_queue.appendleft(block)
+                    logger.debug(
+                        f"Freeing block {block_id} with P0 (front=True)")
+                    # Use append_priority_0 for low priority (evict sooner)
+                    self.free_block_queue.append_priority_0(block)
                 else:
+                    logger.debug(
+                        f"Freeing block {block_id} with P1 (front=False)")
+                    # Use append for high priority (evict later)
                     self.free_block_queue.append(block)
+                # Log queue state after adding
+                current_queue = [
+                    b.block_id
+                    for b in self.free_block_queue.get_all_free_blocks()
+                ]
+                logger.debug(
+                    f"Free queue state after freeing {block_id}: {current_queue}"
+                )
 
     def reset_prefix_cache(self) -> bool:
         """Reset prefix cache. This function may be used in RLHF
