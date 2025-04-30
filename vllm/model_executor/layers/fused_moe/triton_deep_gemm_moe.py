@@ -12,11 +12,11 @@ from vllm.model_executor.layers.fused_moe.fused_moe import TritonExperts
 class TritonOrDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
 
     def __init__(self,
-                 use_fp8_w8a8: bool,
-                 use_int8_w8a8: bool,
-                 use_int8_w8a16: bool,
-                 use_int4_w4a16: bool,
-                 per_channel_quant: bool,
+                 use_fp8_w8a8: bool = False,
+                 use_int8_w8a8: bool = False,
+                 use_int8_w8a16: bool = False,
+                 use_int4_w4a16: bool = False,
+                 per_channel_quant: bool = False,
                  block_shape: Optional[List[int]] = None,
                  block_m: Optional[int] = None,
                  allow_deep_gemm: bool = False):

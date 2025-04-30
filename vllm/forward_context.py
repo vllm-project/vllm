@@ -93,7 +93,7 @@ def set_forward_context(attn_metadata: Any,
                                          dtype=torch.int32)
         from vllm.distributed.parallel_state import get_dp_group
         dist.all_reduce(num_tokens_tensor, group=get_dp_group().cpu_group)
-        #TODO device?
+        #TODO device? (tms)
         max_tokens_across_dp = torch.max(
             num_tokens_tensor)  #.to(device="cuda")
         cu_tokens_across_dp_cpu = torch.cumsum(num_tokens_tensor, dim=0)

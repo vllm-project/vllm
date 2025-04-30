@@ -791,7 +791,6 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             del layer.w13_input_scale
             del layer.w2_input_scale
 
-    # Maybe extra args
     def set_dispatch_combine(
             self,
             dispatch_combine: mk.FusedMoEQuantizeDispatchCombine) -> bool:
@@ -801,15 +800,9 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         if self.use_marlin:
             return False
 
-        #block_m = MOE_DP_CHUNK_SIZE * (moe.ep_size // moe.dp_size)
-        #print(f"block_m = {block_m}")
-
         experts = TritonOrDeepGemmExperts(
             use_fp8_w8a8=True,
-            use_int8_w8a16=False,
-            use_int4_w4a16=False,
             block_shape=self.quant_config.weight_block_size,
-            block_m=None,  # TODO
             allow_deep_gemm=self.allow_deep_gemm,
         )
 
