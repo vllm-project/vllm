@@ -497,11 +497,11 @@ class ModelConfig:
                     self.hf_text_config.sliding_window)
 
                 logger.warning_once(
-                    f"{self.hf_text_config.model_type} has interleaved "
-                    "attention, which is currently not supported by the "
-                    f"{backend} backend. Disabling sliding window and capping "
-                    "the max length to the sliding window size "
-                    f"({sliding_window_len_min}).")
+                    "%s has interleaved attention, which is currently not supported by the %s backend. Disabling sliding window and capping the max length to the sliding window size (%s).",  # noqa: E501
+                    self.hf_text_config.model_type,
+                    backend,
+                    sliding_window_len_min,
+                )
                 self.disable_sliding_window = True
             else:
                 # for a model with interleaved attention,
