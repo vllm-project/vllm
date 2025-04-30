@@ -1141,7 +1141,7 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
             return attn_out, rest[0]
         return attn_out
 
-    def _v_up_proj_and_o_proj(self, x):
+    def _v_up_proj(self, x):
         # Convert from (B, N, L) to (N, B, L)
         x = x.view(-1, self.num_heads, self.kv_lora_rank).transpose(0, 1)
         # Multiply (N, B, L) x (N, L, V) -> (N, B, V)
@@ -1151,7 +1151,7 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
         return self.o_proj(x)[0]
 
     # Return `ql_nope`, `q_pe`
-    def _q_proj_and_k_up_proj(self, x):
+    def _k_up_proj(self, x):
         q_nope, q_pe = self.q_proj(x)[0]\
             .view(-1, self.num_heads, self.qk_head_dim)\
             .split([self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1)
@@ -1405,7 +1405,7 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
 
         if has_decode:
             decode_ql_nope, decode_q_pe = \
-                self._q_proj_and_k_up_proj(decode_hs_or_q_c)
+                self._k_up_proj(decode_hs_or_q_c)
             decode_q_pe[...], decode_k_pe[...] = self.rotary_emb(
                 decode_input_positions, decode_q_pe, decode_k_pe)
 
