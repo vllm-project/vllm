@@ -7,7 +7,7 @@ import torch.nn as nn
 from transformers import LlamaConfig
 
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import ModelConfig, VllmConfig
+from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import QKVParallelLinear
@@ -75,6 +75,7 @@ class LlamaDecoderLayer(LlamaDecoderLayer):
         hidden_states = self.mlp(hidden_states)
 
         return hidden_states, residual
+
 
 @support_torch_compile
 class LlamaModel(nn.Module):

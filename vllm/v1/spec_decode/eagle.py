@@ -9,8 +9,8 @@ from vllm.forward_context import set_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader.loader import get_model_loader
 from vllm.model_executor.model_loader.utils import set_default_torch_dtype
-from vllm.model_executor.models.llama_eagle3 import Eagle3LlamaForCausalLM
 from vllm.model_executor.models import ModelRegistry
+from vllm.model_executor.models.llama_eagle3 import Eagle3LlamaForCausalLM
 from vllm.v1.attention.backends.flash_attn import FlashAttentionMetadata
 from vllm.v1.sample.metadata import SamplingMetadata
 
@@ -40,10 +40,9 @@ class EagleProposer:
 
         self.hidden_size = vllm_config.model_config.get_hidden_size()
 
-        self.use_cuda_graph = (
-            self.vllm_config.compilation_config.level
-            == CompilationLevel.PIECEWISE and
-            not self.vllm_config.model_config.enforce_eager)
+        self.use_cuda_graph = (self.vllm_config.compilation_config.level
+                               == CompilationLevel.PIECEWISE and
+                               not self.vllm_config.model_config.enforce_eager)
 
         self.cudagraph_batch_sizes = list(
             reversed(
@@ -133,7 +132,6 @@ class EagleProposer:
         self.positions[:num_tokens] = target_positions
 
         self.hidden_states[:num_tokens] = target_hidden_states
-        hidden_states = self.hidden_states
 
         with set_forward_context(attn_metadata,
                                  self.vllm_config,
@@ -141,7 +139,7 @@ class EagleProposer:
             last_hidden_states, hidden_states = self.model(
                 input_ids=self.input_ids[:num_input_tokens],
                 positions=self.positions[:num_input_tokens],
-                hidden_states=hidden_states[:num_input_tokens],
+                hidden_states=self.hidden_states[:num_input_tokens],
             )
         sample_hidden_states = last_hidden_states[last_token_indices]
         logits = self.model.compute_logits(sample_hidden_states, None)
@@ -212,7 +210,6 @@ class EagleProposer:
             self.positions[:batch_size] = clamped_positions
 
             self.hidden_states[:batch_size] = hidden_states
-            hidden_states = self.hidden_states
 
             # Run the model.
             with set_forward_context(attn_metadata,
@@ -221,7 +218,7 @@ class EagleProposer:
                 last_hidden_states, hidden_states = self.model(
                     input_ids=self.input_ids[:input_batch_size],
                     positions=self.positions[:input_batch_size],
-                    hidden_states=hidden_states[:input_batch_size],
+                    hidden_states=self.hidden_states[:input_batch_size],
                 )
             hidden_states = hidden_states[:batch_size]
             logits = self.model.compute_logits(last_hidden_states[:batch_size],
