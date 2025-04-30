@@ -1307,8 +1307,9 @@ class TPUModelRunner:
         # bitmask with the order of requests
         struct_out_indices: list[int] = []
         mask_indices: list[int] = []
+        assert scheduler_output.structured_output_meta is not None
         for req_id in self.input_batch.req_ids:
-            mask_index = scheduler_output.structured_output_request_ids.get(
+            mask_index = scheduler_output.structured_output_meta.structured_output_request_ids.get(
                 req_id)
             if mask_index is None:
                 continue

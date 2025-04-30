@@ -2,8 +2,16 @@
 
 import enum
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 import torch
+
+from vllm.v1.core.sched.output import SchedulerOutput
+from vllm.v1.worker.gpu_input_batch import InputBatch
+
+if TYPE_CHECKING:
+    from vllm.v1.request import Request
 
 
 class StructuredOutputOptions(enum.Enum):
@@ -59,30 +67,14 @@ class StructuredOutputGrammar(ABC):
             num_tokens (int): The number of tokens to roll back.
         """
 
-    @abstractmethod
-    def fill_bitmask(self, bitmask: torch.Tensor, batch_index: int) -> None:
-        """
-        Fills the bitmask for a specific batch index.
 
-        Args:
-            bitmask (torch.Tensor): The bitmask to fill
-            batch_index (int): The index in the bitmask to fill
-        """
-
-    @abstractmethod
-    def is_terminated(self) -> bool:
-        """
-        Checks whether the structured output process has terminated.
-
-        Returns:
-            bool: True if the process is terminated, False otherwise.
-        """
-
-    @abstractmethod
-    def reset(self):
-        """
-        Resets the state of the structured output grammar.
-        """
+@dataclass
+class StructuredOutputBatchMetaData:
+    """Extend this class to add any additional metadata to the batch
+    """
+    # Dict of request ids to their index within the batch
+    # for filling the next token bitmask
+    structured_output_request_ids: dict[str, int]
 
 
 class StructuredOutputBackend(ABC):
@@ -103,15 +95,17 @@ class StructuredOutputBackend(ABC):
             StructuredOutputGrammar: The compiled structured output grammar.
         """
 
-    @abstractmethod
-    def allocate_token_bitmask(self, max_num_seqs: int):
-        """
-        Allocates a token bitmask for the specified maximum number of sequences.
+    def init_batch(
+        self, requests: dict[str, "Request"],
+        structured_output_request_ids: dict[str, int],
+        scheduled_spec_decode_tokens: dict[str, list[int]]
+    ) -> StructuredOutputBatchMetaData:
+        return StructuredOutputBatchMetaData(structured_output_request_ids)
 
-        Args:
-            max_num_seqs (int): The maximum number of sequences for which
-              to allocate the bitmask.
-        """
+    def filter_logits(self, input_batch: InputBatch, device: torch.device,
+                      scheduler_output: SchedulerOutput, logits: torch.Tensor,
+                      sample_hidden_states: torch.Tensor) -> None:
+        pass
 
     @abstractmethod
     def destroy(self):

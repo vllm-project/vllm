@@ -13,9 +13,10 @@ from vllm.sampling_params import SamplingParams
 from vllm.transformers_utils.tokenizer_group import init_tokenizer_from_configs
 from vllm.transformers_utils.tokenizers.mistral import MistralTokenizer
 from vllm.utils import LazyLoader
-from vllm.v1.structured_output.backend_types import (StructuredOutputBackend,
-                                                     StructuredOutputGrammar,
+from vllm.v1.structured_output.backend_types import (StructuredOutputGrammar,
                                                      StructuredOutputOptions)
+from vllm.v1.structured_output.bitmasking_grammar import (
+    BitmaskGrammar, BitmaskStructuredOutputBackend)
 from vllm.v1.structured_output.utils import (choice_as_grammar,
                                              convert_lark_to_ebnf,
                                              grammar_is_likely_lark)
@@ -28,10 +29,10 @@ else:
 logger = init_logger(__name__)
 
 
-class XgrammarBackend(StructuredOutputBackend):
+class XgrammarBackend(BitmaskStructuredOutputBackend):
 
     def __init__(self, vllm_config: VllmConfig):
-        self.vllm_config = vllm_config
+        super().__init__(vllm_config)
         tokenizer_group = init_tokenizer_from_configs(
             model_config=vllm_config.model_config,
             scheduler_config=vllm_config.scheduler_config,
@@ -139,7 +140,7 @@ class XgrammarBackend(StructuredOutputBackend):
 
 
 @dataclass
-class XgrammarGrammar(StructuredOutputGrammar):
+class XgrammarGrammar(BitmaskGrammar):
     # NOTE: This would be a generic-enough class for
     # supporting different backends, in the future.
     # For now, just xgrammar.
