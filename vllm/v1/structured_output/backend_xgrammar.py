@@ -137,7 +137,6 @@ class XgrammarGrammar(StructuredOutputGrammar):
     # supporting different backends, in the future.
     # For now, just xgrammar.
     #
-    # TODO: support max_rollback_tokens
     # https://xgrammar.mlc.ai/docs/api/python/index.html#xgrammar.GrammarMatcher.find_jump_forward_string
     # for jump-forward decoding
 
@@ -164,6 +163,27 @@ class XgrammarGrammar(StructuredOutputGrammar):
             self.num_processed_tokens += 1
         return True
 
+    def validate_tokens(self, tokens: list[int]) -> list[int]:
+        """Checks if the list of tokens are accepted by the FSM in sequence.
+        Will not advance the FSM.
+
+        Returns the prefix list of tokens that are accepted by the FSM.
+        """
+        accepted_tokens = []
+        for token in tokens:
+            if self.matcher.accept_token(token):
+                accepted_tokens.append(token)
+            else:
+                break
+        if len(accepted_tokens) > 0:
+            # Rollback the FSM to the initial state
+            self.matcher.rollback(len(accepted_tokens))
+        return accepted_tokens
+
+    def rollback(self, num_tokens: int) -> None:
+        self.matcher.rollback(num_tokens)
+        self.num_processed_tokens -= num_tokens
+
     def fill_bitmask(self, bitmask: torch.Tensor, idx: int) -> None:
         self.matcher.fill_next_token_bitmask(bitmask, idx)
 
@@ -177,10 +197,6 @@ class XgrammarGrammar(StructuredOutputGrammar):
     def find_jump_string(self) -> str | None:
         jf_string = self.matcher.find_jump_forward_string()
         return jf_string if jf_string else None
-
-    def rollback(self, num_tokens: int) -> None:
-        self.matcher.rollback(num_tokens)
-        self.num_processed_tokens -= num_tokens
 
 
 def has_xgrammar_unsupported_json_features(schema: dict[str, Any]) -> bool:
