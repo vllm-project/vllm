@@ -25,8 +25,9 @@ from vllm.config import (BlockSize, CacheConfig, CacheDType, CompilationConfig,
                          PromptAdapterConfig, SchedulerConfig, SchedulerPolicy,
                          SpeculativeConfig, StructuredOutputBackend,
                          StructuredOutputBackendV1, StructuredOutputConfig,
-                         TaskOption, TokenizerMode, TokenizerPoolConfig,
-                         VllmConfig, get_attr_docs, get_field)
+                         StructuredOutputOptions, TaskOption, TokenizerMode,
+                         TokenizerPoolConfig, VllmConfig, get_attr_docs,
+                         get_field)
 from vllm.executor.executor_base import ExecutorBase
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import QuantizationMethods
@@ -325,7 +326,7 @@ class EngineArgs:
         bool] = SchedulerConfig.enable_chunked_prefill
     disable_chunked_mm_input: bool = SchedulerConfig.disable_chunked_mm_input
 
-    structured_output_config: Optional[Dict[str, Any]] = None
+    structured_output_config: Optional[StructuredOutputOptions] = None
     # To be removed in v0.10.x
     guided_decoding_backend: StructuredOutputBackend = \
         StructuredOutputConfig.backend

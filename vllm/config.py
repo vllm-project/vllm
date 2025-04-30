@@ -16,8 +16,9 @@ from dataclasses import (MISSING, dataclass, field, fields, is_dataclass,
                          replace)
 from importlib.util import find_spec
 from pathlib import Path
-from typing import (TYPE_CHECKING, Any, Callable, ClassVar, Literal, Optional,
-                    Protocol, TypeVar, Union, cast, get_args, get_origin)
+from typing import (TYPE_CHECKING, Annotated, Any, Callable, ClassVar, Literal,
+                    Optional, Protocol, TypedDict, TypeVar, Union, cast,
+                    get_args, get_origin)
 
 import torch
 from pydantic import BaseModel, Field, PrivateAttr
@@ -3184,6 +3185,15 @@ StructuredOutputBackendV0 = Literal["auto", "outlines", "lm-format-enforcer",
 StructuredOutputBackendV1 = Literal["auto", "xgrammar", "guidance"]
 StructuredOutputBackend = Literal[StructuredOutputBackendV0,
                                   StructuredOutputBackendV1]
+
+
+# This class is purely to use for typing
+class StructuredOutputOptions(TypedDict, total=False):
+    backend: Annotated[str, StructuredOutputBackend]
+    reasoning_backend: Optional[str]
+    disable_fallback: bool
+    disable_any_whitespace: bool
+    disable_additional_properties: bool
 
 
 @config

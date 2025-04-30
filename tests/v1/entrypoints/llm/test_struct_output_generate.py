@@ -11,7 +11,7 @@ import jsonschema
 import pytest
 from pydantic import BaseModel
 
-from vllm.config import TokenizerMode
+from vllm.config import StructuredOutputBackend, TokenizerMode
 from vllm.entrypoints.llm import LLM
 from vllm.outputs import RequestOutput
 from vllm.platforms import current_platform
@@ -75,7 +75,7 @@ def test_structured_output(
     sample_sql_lark: str,
     sample_regex: str,
     sample_guided_choice: str,
-    structured_output_backend: str,
+    structured_output_backend: StructuredOutputBackend,
     tokenizer_mode: TokenizerMode,
     model_name: str,
     speculative_config: dict[str, Any],
@@ -94,8 +94,8 @@ def test_structured_output(
         tokenizer_mode=tokenizer_mode,
         speculative_config=speculative_config,
         structured_output_config={
-            'backend': structured_output_backend,
-            'disable_any_whitespace': True,
+            "backend": structured_output_backend,
+            "disable_any_whitespace": True,
         },
     )
 
@@ -498,14 +498,16 @@ def test_structured_output_auto_mode(
     monkeypatch: pytest.MonkeyPatch,
     unsupported_json_schema: dict[str, Any],
     model_name: str,
-    tokenizer_mode: str,
+    tokenizer_mode: TokenizerMode,
 ):
     monkeypatch.setenv("VLLM_USE_V1", "1")
 
-    llm = LLM(model=model_name,
-              max_model_len=1024,
-              structured_output_config=dict(backend="auto"),
-              tokenizer_mode=tokenizer_mode)
+    llm = LLM(
+        model=model_name,
+        max_model_len=1024,
+        structured_output_config={"backend": "auto"},
+        tokenizer_mode=tokenizer_mode,
+    )
 
     sampling_params = SamplingParams(
         temperature=1.0,

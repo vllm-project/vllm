@@ -13,7 +13,8 @@ from typing_extensions import TypeVar, deprecated
 
 from vllm.beam_search import (BeamSearchInstance, BeamSearchOutput,
                               BeamSearchSequence, get_beam_search_score)
-from vllm.config import CompilationConfig, ModelDType, TokenizerMode
+from vllm.config import (CompilationConfig, ModelDType,
+                         StructuredOutputOptions, TokenizerMode)
 from vllm.engine.arg_utils import (EngineArgs, HfOverrides, PoolerConfig,
                                    TaskOption)
 from vllm.engine.llm_engine import LLMEngine
@@ -188,7 +189,7 @@ class LLM:
         task: TaskOption = "auto",
         override_pooler_config: Optional[PoolerConfig] = None,
         compilation_config: Optional[Union[int, dict[str, Any]]] = None,
-        structured_output_config: Optional[dict[str, Any]] = None,
+        structured_output_config: Optional[StructuredOutputOptions] = None,
         **kwargs,
     ) -> None:
         """LLM constructor."""
