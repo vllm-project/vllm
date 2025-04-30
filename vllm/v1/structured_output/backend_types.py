@@ -36,6 +36,30 @@ class StructuredOutputGrammar(ABC):
         """
 
     @abstractmethod
+    def validate_tokens(self, tokens: list[int]) -> list[int]:
+        """
+        Validates the provided tokens against the grammar.
+        Will not advance the FSM.
+
+        Args:
+            tokens (list[int]): A list of token IDs to validate.
+
+        Returns:
+            list[int]: A list of accepted token IDs. Will be a prefix
+                of the input tokens, and empty if none are accepted.
+        """
+
+    @abstractmethod
+    def rollback(self, num_tokens: int) -> None:
+        """
+        Rolls back the state of the grammar by a specified number of tokens.
+        Will also revert counters for the number of processed tokens.
+
+        Args:
+            num_tokens (int): The number of tokens to roll back.
+        """
+
+    @abstractmethod
     def fill_bitmask(self, bitmask: torch.Tensor, batch_index: int) -> None:
         """
         Fills the bitmask for a specific batch index.
