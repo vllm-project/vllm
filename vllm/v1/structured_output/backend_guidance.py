@@ -13,9 +13,10 @@ import torch
 from vllm.logger import init_logger
 from vllm.sampling_params import SamplingParams
 from vllm.utils import LazyLoader
-from vllm.v1.structured_output.backend_types import (StructuredOutputBackend,
-                                                     StructuredOutputGrammar,
+from vllm.v1.structured_output.backend_types import (StructuredOutputGrammar,
                                                      StructuredOutputOptions)
+from vllm.v1.structured_output.bitmasking_grammar import (
+    BitmaskGrammar, BitmaskStructuredOutputBackend)
 from vllm.v1.structured_output.request import get_structured_output_key
 
 if TYPE_CHECKING:
@@ -96,7 +97,7 @@ class GuidanceBackend(StructuredOutputBackend):
 
 
 @dataclass
-class GuidanceGrammar(StructuredOutputGrammar):
+class GuidanceGrammar(BitmaskGrammar):
     ll_matcher: llguidance.LLMatcher
     ll_tokenizer: llguidance.LLTokenizer
     vocab_size: int
