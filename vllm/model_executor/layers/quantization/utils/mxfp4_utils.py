@@ -6,6 +6,7 @@ import torch
 OCP_MX_BLOCK_SIZE = 32
 
 
+
 def per_token_group_quant_mxfp4(x: torch.Tensor,
                                 block_k: int,
                                 scale_calculation_mode: str = "even"
