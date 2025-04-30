@@ -1,3 +1,5 @@
+(configuration)=
+
 # Configuration
 
 API documentation for vLLM's configuration classes.
