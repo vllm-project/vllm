@@ -774,7 +774,7 @@ __global__ void Marlin(
   // all remaining shared memory is used to cache A (input)
   // sh_a_max_row is at least ` stages * 16 * thread_m_blocks `
   int sh_a_max_row =
-      (max_shared_mem / 16 - shm_size_used) / (thread_k_blocks * 2);
+      ((max_shared_mem - 1024) / 16 - shm_size_used) / (thread_k_blocks * 2);
 
   // Register storage for double buffer of shared memory reads.
   FragA frag_a[2][thread_m_blocks];
@@ -835,6 +835,7 @@ __global__ void Marlin(
   bool should_load_a = true;
   int max_num_stage_groups =
       ((sh_a_max_row - moe_block_size) / moe_block_size + 1) / stages;
+  max_num_stage_groups = max(max_num_stage_groups, 1);
   auto fetch_to_shared = [&](int pipe, int a_off, bool pred = true,
                              int pipe_a = 0) {
     if (pred) {
