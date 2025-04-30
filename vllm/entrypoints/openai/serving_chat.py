@@ -83,13 +83,12 @@ class OpenAIServingChat(OpenAIServing):
 
         self.reasoning_parser: Optional[Callable[[AnyTokenizer],
                                                  ReasoningParser]] = None
-        self.enable_reasoning: bool = False
+        self.enable_reasoning: bool = self.reasoning_parser is not None
         if reasoning_parser:
             try:
                 self.reasoning_parser = (
                     ReasoningParserManager.get_reasoning_parser(
                         reasoning_parser))
-                self.enable_reasoning = True
             except Exception as e:
                 raise TypeError(
                     f"{reasoning_parser=} has not been registered") from e
@@ -1182,7 +1181,7 @@ class OpenAIServingChat(OpenAIServing):
             We only want to do this IF reasoning is enabled and a reasoning 
             parser is configured.
             """
-        return self.enable_reasoning and self.reasoning_parser
+        return self.reasoning_parser
 
     def _should_check_for_unstreamed_tool_arg_tokens(
         self,
