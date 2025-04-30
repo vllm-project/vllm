@@ -159,8 +159,8 @@ void run_fp4_blockwise_scaled_group_mm(
     torch::Tensor& output, const torch::Tensor& a, const torch::Tensor& b,
     const torch::Tensor& a_blockscale, const torch::Tensor& b_blockscales,
     const torch::Tensor& alphas, const torch::Tensor& problem_sizes,
-    const torch::Tensor& expert_offsets, const torch::Tensor& sf_offsets,
-    int M, int N, int K) {
+    const torch::Tensor& expert_offsets, const torch::Tensor& sf_offsets, int M,
+    int N, int K) {
   using ProblemShape =
       cutlass::gemm::GroupProblemShape<Shape<int32_t, int32_t, int32_t>>;
   using ElementType = cutlass::float_e2m1_t;

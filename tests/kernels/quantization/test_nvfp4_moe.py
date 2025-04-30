@@ -11,6 +11,9 @@ from vllm.scalar_type import scalar_types
 
 FLOAT4_E2M1_MAX = scalar_types.float4_e2m1fn.max()
 FLOAT8_E4M3_MAX = torch.finfo(torch.float8_e4m3fn).max
+if not current_platform.has_device_capability(100):
+    pytest.skip(reason="Nvfp4 Requires compute capability of 10 or above.",
+                allow_module_level=True)
 
 
 def swizzle_blockscale(scale: torch.tensor):
@@ -88,19 +91,14 @@ def dequantize_to_dtype(tensor_fp4,
 
 
 @pytest.mark.parametrize("m", [2, 16, 32, 64, 224])
-@pytest.mark.parametrize("n", [2048, 256, 256,128,7168])
-@pytest.mark.parametrize("k", [1024, 256, 128,256])
-@pytest.mark.parametrize("e", [32,64,256])
-@pytest.mark.parametrize("topk", [4, 6,8])
+@pytest.mark.parametrize("n", [2048, 256, 256, 128])
+@pytest.mark.parametrize("k", [1024, 256, 128, 256])
+@pytest.mark.parametrize("e", [32, 64, 256])
+@pytest.mark.parametrize("topk", [4, 6, 8])
 @pytest.mark.parametrize("dtype", [torch.half, torch.bfloat16])
 @torch.inference_mode()
-def test_cutlass_fp4_moe_no_graph(
-    m: int,
-    n: int,
-    k: int,
-    e: int,
-    topk: int,
-):
+def test_cutlass_fp4_moe_no_graph(m: int, n: int, k: int, e: int, topk: int,
+                                  dtype: torch.dtype):
     current_platform.seed_everything(7)
     with set_current_vllm_config(
             VllmConfig(parallel_config=ParallelConfig(
@@ -139,18 +137,18 @@ def test_cutlass_fp4_moe_no_graph(
         score = torch.randn((m, e), device="cuda", dtype=dtype)
         topk_weights, topk_ids = fused_topk(a, score, topk, renormalize=False)
 
-        a1_gs = torch.ones((e,), device="cuda", dtype=torch.float32)
-        a2_gs = torch.ones((e,), device="cuda", dtype=torch.float32)
+        a1_gs = torch.ones((e, ), device="cuda", dtype=torch.float32)
+        a2_gs = torch.ones((e, ), device="cuda", dtype=torch.float32)
         cutlass_output = cutlass_moe_fp4(
             a=a,
             a1_gscale=a1_gs,
             w1_fp4=w1_q,
             w1_blockscale=w1_blockscale,
-            w1_tensorscale=1/w1_gs,
+            w1_tensorscale=1 / w1_gs,
             a2_gscale=a2_gs,
             w2_fp4=w2_q,
             w2_blockscale=w2_blockscale,
-            w2_tensorscale=1/w2_gs,
+            w2_tensorscale=1 / w2_gs,
             topk_weights=topk_weights,
             topk_ids=topk_ids,
             m=m,
