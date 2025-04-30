@@ -1253,6 +1253,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             next_token_ids = torch.tensor(next_token_ids,
                                           dtype=torch.int32,
                                           device=self.device)
+            eagle_attn_metadata = attn_metadata[self.drafter.attn_layer_name]
 
             if spec_decode_metadata is None:
                 # input_ids can be None for multimodal models.
@@ -1264,8 +1265,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                         dim=-1)
                 else:
                     target_hidden_states = hidden_states[:num_scheduled_tokens]
-                target_slot_mapping = attn_metadata.slot_mapping
-                cu_num_tokens = attn_metadata.query_start_loc
+                target_slot_mapping = eagle_attn_metadata.slot_mapping
+                cu_num_tokens = eagle_attn_metadata.query_start_loc
             else:
                 # TODO(woosuk): Refactor this.
                 num_draft_tokens = spec_decode_metadata.num_draft_tokens
@@ -1279,7 +1280,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     device=self.device,
                 )
                 cu_num_tokens, token_indices = self.drafter.prepare_inputs(
-                    attn_metadata.query_start_loc,
+                    eagle_attn_metadata.query_start_loc,
                     num_rejected_tokens,
                 )
                 target_token_ids = self.input_ids[token_indices]
@@ -1289,7 +1290,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                         [h[token_indices] for h in aux_hidden_states], dim=-1)
                 else:
                     target_hidden_states = hidden_states[token_indices]
-                target_slot_mapping = attn_metadata.slot_mapping[token_indices]
+                target_slot_mapping = eagle_attn_metadata.slot_mapping[
+                    token_indices]
 
             draft_token_ids = self.drafter.propose(
                 target_token_ids=target_token_ids,
@@ -1298,7 +1300,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 target_slot_mapping=target_slot_mapping,
                 next_token_ids=next_token_ids,
                 cu_num_tokens=cu_num_tokens,
-                block_table=attn_metadata.block_table,
+                block_table=eagle_attn_metadata.block_table,
                 sampling_metadata=sampling_metadata,
             )
             spec_token_ids = draft_token_ids.tolist()
