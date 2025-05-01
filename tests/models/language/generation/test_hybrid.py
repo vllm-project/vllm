@@ -23,6 +23,9 @@ SSM_MODELS = [
 
 HYBRID_MODELS = [
     "ai21labs/Jamba-tiny-dev",
+    # NOTE: ibm-research/granite-4.0-tiny-test are skipped currently as
+    # the HF model URLs not available yet
+    "ibm-research/granite-4.0-tiny-test",
     # NOTE: Running Plamo2 in transformers implementation requires to install
     # causal-conv1d package, which is not listed as a test dependency as it's
     # not compatible with pip-compile.
@@ -46,6 +49,9 @@ def test_models(
     max_tokens: int,
     num_logprobs: int,
 ) -> None:
+    if model == "ibm-research/granite-4.0-tiny-test":
+        pytest.skip(reason="HF model URLs not available yet")
+    
     with hf_runner(model) as hf_model:
         hf_outputs = hf_model.generate_greedy_logprobs_limit(
             example_prompts, max_tokens, num_logprobs)
