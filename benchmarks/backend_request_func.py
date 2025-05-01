@@ -201,6 +201,7 @@ async def async_request_deepspeed_mii(
                                      timeout=AIOHTTP_TIMEOUT) as session:
 
         payload = {
+            "model": request_func_input.model,
             "prompt": request_func_input.prompt,
             "max_tokens": request_func_input.output_len,
             "temperature": 0.01,  # deepspeed-mii does not accept 0.0 temp.
