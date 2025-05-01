@@ -297,18 +297,24 @@ def chunk_by_rank(t, r, w):
     return t[(r * chunk):(r + 1) * chunk]
 
 
-def torch_pplx_dispatch_combine(pgi, dp_size, a, w1, w2, scores, topk):
+ata = None
+
+def pplx_dispatch_combine(pgi, dp_size, a, topk_weight, topk_ids, num_experts):
     assert torch.cuda.current_device() == pgi.local_rank
 
+    topk = topk_ids.shape[1]
+
+    #tokens_per_expert = torch.bincount(topk_ids.view(-1), minlength=num_experts)
+
     num_tokens, hidden_dim = a.shape
-    num_experts = w1.shape[0]
     block_size = 128
     device = pgi.device
     rank = pgi.rank
     world_size = pgi.world_size
-    rank_num_tokens = rank_chunk(num_tokens, rank, world_size)
-    max_num_tokens = max(num_tokens, 1)
+    max_num_tokens = rank_chunk(num_tokens, 0, world_size)
+    print(f"MAX_NUM_TOKENS = {max_num_tokens}")
 
+    global ata
     ata = AllToAll.internode(
         max_num_tokens=max_num_tokens,
         num_experts=num_experts,
@@ -333,9 +339,11 @@ def torch_pplx_dispatch_combine(pgi, dp_size, a, w1, w2, scores, topk):
     )
 
     a_chunk = chunk_by_rank(a, rank, world_size).to(device)
-    score_chunk = chunk_by_rank(scores, rank, world_size).to(device)
-    chunk_topk_weight, chunk_topk_ids = fused_topk(a_chunk, score_chunk, topk,
-                                                   False)
+    num_tokens = a_chunk.shape[0]
+    chunk_topk_weight = chunk_by_rank(topk_weight, rank, world_size).to(device)
+    chunk_topk_ids = chunk_by_rank(topk_ids, rank, world_size).to(device)
+
+    print(f"{rank}: shapes {a_chunk.shape}, {chunk_topk_weight.shape}, {chunk_topk_ids.shape}, E={num_experts}")
 
     b_a, b_a_scale, expert_num_tokens = dispatch_combine.dispatch(
         a_chunk,
@@ -343,10 +351,12 @@ def torch_pplx_dispatch_combine(pgi, dp_size, a, w1, w2, scores, topk):
         None,
         chunk_topk_weight,
         chunk_topk_ids,
-        num_experts,  # store at PplxDispatchCombine creation?
+        num_experts,
         None,
         False,
     )
+
+    #torch.cuda.synchronize()
 
     if False:
         naive_b_a, tokens_per_expert = torch_dispatch(a_chunk, chunk_topk_ids,
@@ -364,7 +374,7 @@ def torch_pplx_dispatch_combine(pgi, dp_size, a, w1, w2, scores, topk):
     b_a = b_a * 1.5
 
     out = torch.full(
-        (rank_num_tokens, hidden_dim),
+        (max_num_tokens, hidden_dim),
         torch.nan,
         dtype=a.dtype,
         device=device,
@@ -377,22 +387,21 @@ def torch_pplx_dispatch_combine(pgi, dp_size, a, w1, w2, scores, topk):
         chunk_topk_ids,
         False,
     )
-    torch.cuda.synchronize()
 
-    ata.destroy()
+    #torch.cuda.synchronize()
 
-    return out[:rank_num_tokens]
+    #ata.destroy()
+
+    return out[:num_tokens]
 
 
 def _pplx_dispatch_combine(
     pgi: ProcessGroupInfo,
     dp_size: int,
-    m,
-    n,
-    k,
-    e,
-    topk: int,
-    dtype: torch.dtype,
+    a,
+    topk_weight,
+    topk_ids,
+    num_experts,
 ):
     uid = nvshmem_get_unique_id(
     ) if pgi.rank == 0 else nvshmem_alloc_empty_unique_id()
@@ -400,23 +409,20 @@ def _pplx_dispatch_combine(
     nvshmem_init(uid, pgi.rank, pgi.world_size)
     device = pgi.device
 
-    a = torch.randn((m, k), device=device, dtype=dtype) / 10
-    w1 = torch.randn((e, 2 * n, k), device=device, dtype=dtype) / 10
-    w2 = torch.randn((e, k, n), device=device, dtype=dtype) / 10
-    score = torch.randn((m, e), device=device, dtype=dtype)
+    k = a.shape[1]
+    topk = topk_ids.shape[1]
 
-    topk_weight, topk_ids = fused_topk(a, score, topk, False)
-
-    a_rep = torch.repeat_interleave(a, topk, dim=0)
+    a_rep = torch.repeat_interleave(a, topk, dim=0).to(device)
 
     torch_output = (a_rep.view(-1, topk, k) * 1.5 *
-                    topk_weight.view(-1, topk, 1)).sum(dim=1).to(a.dtype)
+                    topk_weight.view(-1, topk, 1).to(device)).sum(dim=1).to(a.dtype)
 
-    pplx_output = torch_pplx_dispatch_combine(pgi, dp_size, a, w1, w2, score,
-                                              topk)
+    pplx_output = pplx_dispatch_combine(pgi, dp_size, a, topk_weight, topk_ids, num_experts)
 
     torch_output = chunk_by_rank(torch_output, pgi.rank,
                                  pgi.world_size).to(pplx_output.device)
+
+    print(f"{pgi.rank}: out shapes {pplx_output.shape}, {torch_output.shape}")
 
     torch.testing.assert_close(pplx_output, torch_output, atol=2e-2, rtol=0)
 
@@ -424,13 +430,13 @@ def _pplx_dispatch_combine(
 
 
 # TODO: M < world_size doesn't appear to be supported by pplx?
-@pytest.mark.parametrize("m", [4, 32, 64, 222])
+@pytest.mark.parametrize("m", [1, 4, 32, 64, 222])
 @pytest.mark.parametrize("n", [128, 1024, 2048])
 @pytest.mark.parametrize("k", [128, 512, 1024])
 @pytest.mark.parametrize("e", NUM_EXPERTS)
 @pytest.mark.parametrize("topk", TOP_KS)
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
-@pytest.mark.parametrize("world_dp_size", [[2, 1]])  #, [[4, 2]])
+@pytest.mark.parametrize("world_dp_size", [[2, 1]]) #[[4, 2]])
 @requires_pplx
 def test_pplx_dispatch_combine(
     m: int,
@@ -443,22 +449,27 @@ def test_pplx_dispatch_combine(
 ):
     current_platform.seed_everything(7)
     world_size, dp_size = world_dp_size
+    device = "cuda"
 
-    parallel_launch(world_size, _pplx_dispatch_combine, dp_size, m, n, k, e,
-                    topk, dtype)
+    a = torch.randn((m, k), device=device, dtype=dtype) / 10
+    score = torch.randn((m, e), device=device, dtype=dtype)
+
+    topk_weight, topk_ids = fused_topk(a, score, topk, False)
+
+    parallel_launch(world_size, _pplx_dispatch_combine, dp_size, a, topk_weight, topk_ids, e)
 
 
-def torch_pplx_moe(pgi, dp_size, a, w1, w2, scores, topk):
+def pplx_moe(pgi, dp_size, a, w1, w2, topk_weight, topk_ids):
     assert torch.cuda.current_device() == pgi.local_rank
 
-    num_tokens, hidden_dim = a.shape
+    hidden_dim = a.shape[1]
     num_experts = w1.shape[0]
     block_size = 128
     device = pgi.device
     rank = pgi.rank
     world_size = pgi.world_size
-    rank_num_tokens = rank_chunk(num_tokens, rank, world_size)
-    max_num_tokens = num_tokens
+    topk = topk_ids.shape[1]
+    max_num_tokens = rank_chunk(a.shape[0], 0, world_size)
 
     ata = AllToAll.internode(
         max_num_tokens=max_num_tokens,
@@ -473,9 +484,6 @@ def torch_pplx_moe(pgi, dp_size, a, w1, w2, scores, topk):
                                 ((hidden_dim + block_size - 1) // block_size *
                                  torch.float32.itemsize)),
     )
-
-    w1 = w1.to(device)
-    w2 = w2.to(device)
 
     dispatch_combine = PplxDispatchCombine(
         ata,
@@ -493,15 +501,14 @@ def torch_pplx_moe(pgi, dp_size, a, w1, w2, scores, topk):
     )
 
     a_chunk = chunk_by_rank(a, rank, world_size).to(device)
-    score_chunk = chunk_by_rank(scores, rank, world_size).to(device)
-    chunk_topk_weight, chunk_topk_ids = fused_topk(a_chunk, score_chunk, topk,
-                                                   False)
+    chunk_topk_weight = chunk_by_rank(topk_weight, rank, world_size).to(device)
+    chunk_topk_ids = chunk_by_rank(topk_ids, rank, world_size).to(device)
 
     out = fused_experts(
         a_chunk,
         # Chunking weights like this only works for batched format
-        chunk_by_rank(w1, rank, world_size),
-        chunk_by_rank(w2, rank, world_size),
+        chunk_by_rank(w1, rank, world_size).to(device),
+        chunk_by_rank(w2, rank, world_size).to(device),
         chunk_topk_weight,
         chunk_topk_ids,
         global_num_experts=num_experts)
@@ -510,7 +517,7 @@ def torch_pplx_moe(pgi, dp_size, a, w1, w2, scores, topk):
 
     ata.destroy()
 
-    return out[:rank_num_tokens]
+    return out
 
 
 def _pplx_moe(
@@ -521,7 +528,6 @@ def _pplx_moe(
     w2: torch.Tensor,
     score: torch.Tensor,
     topk: int,
-    dtype: torch.dtype,
 ):
     uid = nvshmem_get_unique_id(
     ) if pgi.rank == 0 else nvshmem_alloc_empty_unique_id()
@@ -534,7 +540,7 @@ def _pplx_moe(
     with set_current_vllm_config(vllm_config):
         topk_weight, topk_ids = fused_topk(a, score, topk, False)
         torch_output = torch_moe2(a, w1, w2, topk_weight, topk_ids)
-        pplx_output = torch_pplx_moe(pgi, dp_size, a, w1, w2, score, topk)
+        pplx_output = pplx_moe(pgi, dp_size, a, w1, w2, topk_weight, topk_ids)
 
     torch_output = chunk_by_rank(torch_output, pgi.rank,
                                  pgi.world_size).to(pplx_output.device)
@@ -544,8 +550,7 @@ def _pplx_moe(
     nvshmem_finalize()
 
 
-# TODO: M < world_size doesn't appear to be supported by pplx?
-@pytest.mark.parametrize("m", [2, 3, 32, 45, 64, 222])
+@pytest.mark.parametrize("m", [1, 2, 3, 32, 45, 64, 222])
 @pytest.mark.parametrize("n", [128, 1024, 2048])
 @pytest.mark.parametrize("k", [128, 512, 1024])
 @pytest.mark.parametrize("e", NUM_EXPERTS)
@@ -569,5 +574,4 @@ def test_pplx_moe(
     w2 = torch.randn((e, k, n), device="cuda", dtype=dtype) / 10
     score = torch.randn((m, e), device="cuda", dtype=dtype)
 
-    parallel_launch(world_size, _pplx_moe, dp_size, a, w1, w2, score, topk,
-                    dtype)
+    parallel_launch(world_size, _pplx_moe, dp_size, a, w1, w2, score, topk)
