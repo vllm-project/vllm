@@ -1,3 +1,4 @@
+# ruff: noqa: E501
 # SPDX-License-Identifier: Apache-2.0
 
 # yapf: disable
@@ -7,6 +8,7 @@ import json
 import re
 import threading
 from dataclasses import MISSING, dataclass, fields
+from itertools import permutations
 from typing import (Any, Callable, Dict, List, Literal, Optional, Type,
                     TypeVar, Union, cast, get_args, get_origin)
 
@@ -14,20 +16,19 @@ import torch
 from typing_extensions import TypeIs, deprecated
 
 import vllm.envs as envs
-from vllm import version
 from vllm.config import (BlockSize, CacheConfig, CacheDType, CompilationConfig,
-                         ConfigFormat, ConfigType, Device, DeviceConfig,
-                         DistributedExecutorBackend, HfOverrides,
-                         KVEventsConfig, KVTransferConfig, LoadConfig,
-                         LoadFormat, LoRAConfig, ModelConfig, ModelDType,
-                         ModelImpl, MultiModalConfig, ObservabilityConfig,
-                         ParallelConfig, PoolerConfig, PrefixCachingHashAlgo,
-                         PromptAdapterConfig, SchedulerConfig, SchedulerPolicy,
-                         SpeculativeConfig, StructuredOutputBackend,
-                         StructuredOutputBackendV1, StructuredOutputConfig,
-                         StructuredOutputOptions, TaskOption, TokenizerMode,
-                         TokenizerPoolConfig, VllmConfig, get_attr_docs,
-                         get_field)
+                         ConfigFormat, ConfigType, DetailedTraceModules,
+                         Device, DeviceConfig, DistributedExecutorBackend,
+                         HfOverrides, KVEventsConfig, KVTransferConfig,
+                         LoadConfig, LoadFormat, LoRAConfig, ModelConfig,
+                         ModelDType, ModelImpl, MultiModalConfig,
+                         ObservabilityConfig, ParallelConfig, PoolerConfig,
+                         PrefixCachingHashAlgo, PromptAdapterConfig,
+                         SchedulerConfig, SchedulerPolicy, SpeculativeConfig,
+                         StructuredOutputBackend, StructuredOutputBackendV1,
+                         StructuredOutputConfig, StructuredOutputOptions,
+                         TaskOption, TokenizerMode, TokenizerPoolConfig,
+                         VllmConfig, get_attr_docs, get_field)
 from vllm.executor.executor_base import ExecutorBase
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import QuantizationMethods
@@ -41,8 +42,6 @@ from vllm.utils import FlexibleArgumentParser, GiB_bytes, is_in_ray_actor
 # yapf: enable
 
 logger = init_logger(__name__)
-
-ALLOWED_DETAILED_TRACE_MODULES = ["model", "worker", "all"]
 
 # object is used to allow for special typing forms
 T = TypeVar("T")
@@ -343,9 +342,12 @@ class EngineArgs:
     speculative_config: Optional[Dict[str, Any]] = None
 
     qlora_adapter_name_or_path: Optional[str] = None
-    show_hidden_metrics_for_version: Optional[str] = None
-    otlp_traces_endpoint: Optional[str] = None
-    collect_detailed_traces: Optional[str] = None
+    show_hidden_metrics_for_version: Optional[str] = \
+        ObservabilityConfig.show_hidden_metrics_for_version
+    otlp_traces_endpoint: Optional[str] = \
+        ObservabilityConfig.otlp_traces_endpoint
+    collect_detailed_traces: Optional[list[DetailedTraceModules]] = \
+        ObservabilityConfig.collect_detailed_traces
     disable_async_output_proc: bool = not ModelConfig.use_async_output_proc
     scheduling_policy: SchedulerPolicy = SchedulerConfig.policy
     scheduler_cls: Union[str, Type[object]] = SchedulerConfig.scheduler_cls
@@ -700,33 +702,29 @@ class EngineArgs:
                             default=None,
                             help='Name or path of the QLoRA adapter.')
 
-        parser.add_argument('--show-hidden-metrics-for-version',
-                            type=str,
-                            default=None,
-                            help='Enable deprecated Prometheus metrics that '
-                            'have been hidden since the specified version. '
-                            'For example, if a previously deprecated metric '
-                            'has been hidden since the v0.7.0 release, you '
-                            'use --show-hidden-metrics-for-version=0.7 as a '
-                            'temporary escape hatch while you migrate to new '
-                            'metrics. The metric is likely to be removed '
-                            'completely in an upcoming release.')
-
-        parser.add_argument(
-            '--otlp-traces-endpoint',
-            type=str,
-            default=None,
-            help='Target URL to which OpenTelemetry traces will be sent.')
-        parser.add_argument(
-            '--collect-detailed-traces',
-            type=str,
-            default=None,
-            help="Valid choices are " +
-            ",".join(ALLOWED_DETAILED_TRACE_MODULES) +
-            ". It makes sense to set this only if ``--otlp-traces-endpoint`` is"
-            " set. If set, it will collect detailed traces for the specified "
-            "modules. This involves use of possibly costly and or blocking "
-            "operations and hence might have a performance impact.")
+        # Observability arguments
+        observability_kwargs = get_kwargs(ObservabilityConfig)
+        observability_group = parser.add_argument_group(
+            title="ObservabilityConfig",
+            description=ObservabilityConfig.__doc__,
+        )
+        observability_group.add_argument(
+            "--show-hidden-metrics-for-version",
+            **observability_kwargs["show_hidden_metrics_for_version"])
+        observability_group.add_argument(
+            "--otlp-traces-endpoint",
+            **observability_kwargs["otlp_traces_endpoint"])
+        # TODO: generalise this special case
+        choices = observability_kwargs["collect_detailed_traces"]["choices"]
+        metavar = f"{{{','.join(choices)}}}"
+        observability_kwargs["collect_detailed_traces"]["metavar"] = metavar
+        observability_kwargs["collect_detailed_traces"]["choices"] += [
+            ",".join(p)
+            for p in permutations(get_args(DetailedTraceModules), r=2)
+        ]
+        observability_group.add_argument(
+            "--collect-detailed-traces",
+            **observability_kwargs["collect_detailed_traces"])
 
         # Scheduler arguments
         scheduler_kwargs = get_kwargs(SchedulerConfig)
@@ -846,7 +844,7 @@ class EngineArgs:
         # NOTE: This is to allow model loading from S3 in CI
         if (not isinstance(self, AsyncEngineArgs) and envs.VLLM_CI_USE_S3
                 and self.model in MODELS_ON_S3
-                and self.load_format == LoadFormat.AUTO):  # noqa: E501
+                and self.load_format == LoadFormat.AUTO):
             self.model = f"{MODEL_WEIGHTS_S3_BUCKET}/{self.model}"
             self.load_format = LoadFormat.RUNAI_STREAMER
 
@@ -1109,7 +1107,7 @@ class EngineArgs:
 
         if self.structured_output_config is not None:
             logger.info_once(
-                "'structured_output_config' is specified. Other structured outputs related arguments will be ignored"  # noqa: E501
+                "'structured_output_config' is specified. Other structured outputs related arguments will be ignored"
             )
             structured_output_config = StructuredOutputConfig(
                 **self.structured_output_config)
@@ -1120,31 +1118,16 @@ class EngineArgs:
                 backend=self.guided_decoding_backend,
                 disable_fallback=self.guided_decoding_disable_fallback,
                 disable_any_whitespace=self.guided_decoding_disable_any_whitespace,
-                disable_additional_properties=self.guided_decoding_disable_additional_properties,  # noqa: E501
+                disable_additional_properties=self.guided_decoding_disable_additional_properties,
                 reasoning_backend=self.reasoning_parser,
             )
             # yapf: enable
 
-        show_hidden_metrics = False
-        if self.show_hidden_metrics_for_version is not None:
-            show_hidden_metrics = version._prev_minor_version_was(
-                self.show_hidden_metrics_for_version)
-
-        detailed_trace_modules = []
-        if self.collect_detailed_traces is not None:
-            detailed_trace_modules = self.collect_detailed_traces.split(",")
-        for m in detailed_trace_modules:
-            if m not in ALLOWED_DETAILED_TRACE_MODULES:
-                raise ValueError(
-                    f"Invalid module {m} in collect_detailed_traces. "
-                    f"Valid modules are {ALLOWED_DETAILED_TRACE_MODULES}")
         observability_config = ObservabilityConfig(
-            show_hidden_metrics=show_hidden_metrics,
+            show_hidden_metrics_for_version=self.
+            show_hidden_metrics_for_version,
             otlp_traces_endpoint=self.otlp_traces_endpoint,
-            collect_model_forward_time="model" in detailed_trace_modules
-            or "all" in detailed_trace_modules,
-            collect_model_execute_time="worker" in detailed_trace_modules
-            or "all" in detailed_trace_modules,
+            collect_detailed_traces=self.collect_detailed_traces,
         )
 
         config = VllmConfig(
