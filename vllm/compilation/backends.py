@@ -45,6 +45,7 @@ class CompilerManager:
         self.cache: Dict[Tuple[Optional[int], int, str], Any] = dict()
         cls = InductorAdaptor if use_inductor else EagerAdaptor
         self.compiler = cls()
+        self.is_cache_updated = False
 
     def compute_hash(self, vllm_config: VllmConfig) -> str:
         return self.compiler.compute_hash(vllm_config)
@@ -66,11 +67,11 @@ class CompilerManager:
                                        disable_cache=disable_cache)
 
     def save_to_file(self):
-        if self.disable_cache:
+        if self.disable_cache or not self.is_cache_updated:
             return
+        printer = pprint.PrettyPrinter(indent=4)
+        data = printer.pformat(self.cache)
         with open(self.cache_file_path, "w") as f:
-            printer = pprint.PrettyPrinter(indent=4)
-            data = printer.pformat(self.cache)
             f.write(data)
 
     def load(self,
@@ -131,6 +132,7 @@ class CompilerManager:
         if handle is not None:
             self.cache[(runtime_shape, graph_index,
                         self.compiler.name)] = handle
+            self.is_cache_updated = True
             if graph_index == 0:
                 # adds some info logging for the first graph
                 logger.info("Cache the graph of shape %s for later use",
