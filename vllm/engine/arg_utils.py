@@ -12,7 +12,7 @@ from typing import (Any, Callable, Dict, List, Literal, Optional, Type,
                     TypeVar, Union, cast, get_args, get_origin)
 
 import torch
-from pydantic import RootModel
+from pydantic import TypeAdapter
 from pydantic.dataclasses import is_pydantic_dataclass
 from typing_extensions import TypeIs, deprecated
 
@@ -173,8 +173,8 @@ def get_kwargs(cls: ConfigType) -> dict[str, Any]:
         # Set other kwargs based on the type hints
         json_tip = "\n\nShould be a valid JSON string."
         if dataclass_hint is not None:
-            root_model = RootModel[dataclass_hint]
-            kwargs[name]["type"] = root_model.model_validate_json
+            type_adapter = TypeAdapter(dataclass_hint)
+            kwargs[name]["type"] = type_adapter.model_validate_json
             # Special case for configs with a from_cli method
             if hasattr(dataclass_hint, "from_cli"):
                 kwargs[name]["type"] = dataclass_hint.from_cli

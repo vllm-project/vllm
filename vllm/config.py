@@ -19,12 +19,11 @@ from pathlib import Path
 from typing import (TYPE_CHECKING, Any, Callable, ClassVar, Literal, Optional,
                     Protocol, TypeVar, Union, cast, get_args, get_origin)
 
-import pydantic.dataclasses
 import torch
-from pydantic import BaseModel, Field, PrivateAttr
+from pydantic import BaseModel, Field, PrivateAttr, TypeAdapter
 from torch.distributed import ProcessGroup, ReduceOp
 from transformers import PretrainedConfig
-from typing_extensions import TypeIs, deprecated
+from typing_extensions import deprecated
 
 import vllm.envs as envs
 from vllm import version
@@ -48,6 +47,8 @@ from vllm.utils import (GiB_bytes, LayerBlockType, cuda_device_count_stateless,
                         random_uuid, resolve_obj_by_qualname)
 
 if TYPE_CHECKING:
+    from dataclasses import dataclass
+
     from _typeshed import DataclassInstance
     from ray.util.placement_group import PlacementGroup
 
@@ -58,6 +59,8 @@ if TYPE_CHECKING:
 
     ConfigType = type[DataclassInstance]
 else:
+    from pydantic.dataclasses import dataclass
+
     QuantizationConfig = None
     ConfigType = type
 
@@ -212,19 +215,13 @@ def get_field(cls: ConfigType, name: str) -> Field:
         f"{cls.__name__}.{name} must have a default value or default factory.")
 
 
-def dataclass(cls: ConfigT, *args, **kwargs) -> ConfigT:
-    config = kwargs.pop("config", {})
-    config["arbitrary_types_allowed"] = True
-    kwargs["config"] = config
-    return pydantic.dataclasses.dataclass(cls, *args, **kwargs)
-
-
 TokenizerMode = Literal["auto", "slow", "mistral", "custom"]
 ModelDType = Literal["auto", "half", "float16", "bfloat16", "float", "float32"]
 
 
+# Arbitrary types allowed is required for torch.device
 @config
-@dataclass
+@dataclass(config={"arbitrary_types_allowed": True})  # type: ignore
 class ModelConfig:
     """Configuration for the model."""
 
@@ -2119,8 +2116,9 @@ class SchedulerConfig:
 Device = Literal["auto", "cuda", "neuron", "cpu", "tpu", "xpu", "hpu"]
 
 
+# Arbitrary types allowed is required for torch.device
 @config
-@dataclass
+@dataclass(config={"arbitrary_types_allowed": True})  # type: ignore
 class DeviceConfig:
     """Configuration for the device to use for vLLM execution."""
 
@@ -2654,8 +2652,9 @@ class SpeculativeConfig:
 LoRADType = Literal["auto", "float16", "bfloat16"]
 
 
+# Arbitrary types allowed is required for torch.dtype
 @config
-@dataclass
+@dataclass(config={"arbitrary_types_allowed": True})  # type: ignore
 class LoRAConfig:
     """Configuration for LoRA."""
 
@@ -2750,8 +2749,9 @@ class LoRAConfig:
                 "V1 LoRA does not support long LoRA, please use V0.")
 
 
+# Arbitrary types allowed is required for torch.dtype
 @config
-@dataclass
+@dataclass(config={"arbitrary_types_allowed": True})  # type: ignore
 class PromptAdapterConfig:
     """Configuration for PromptAdapters."""
 
@@ -3442,8 +3442,7 @@ class KVTransferConfig:
                                usedforsecurity=False).hexdigest()
         return hash_str
 
-    def __post_init__(self, __context: Any) -> None:
-
+    def __post_init__(self) -> None:
         if self.kv_role is not None and self.kv_role not in KV_ROLE:
             raise ValueError(f"Unsupported kv_role: {self.kv_role}. "
                              f"Supported roles are {KV_ROLE=}")
@@ -3453,17 +3452,17 @@ class KVTransferConfig:
                              f"is set, supported roles are {KV_ROLE=}")
 
     @property
-    def is_kv_transfer_instance(self) -> TypeIs[KVRole]:
+    def is_kv_transfer_instance(self) -> bool:
         return self.kv_connector is not None and \
             self.kv_role in KV_ROLE
 
     @property
-    def is_kv_producer(self) -> TypeIs[KVProducer]:
+    def is_kv_producer(self) -> bool:
         return self.kv_connector is not None and \
             self.kv_role in KV_PRODUCER
 
     @property
-    def is_kv_consumer(self) -> TypeIs[KVConsumer]:
+    def is_kv_consumer(self) -> bool:
         return self.kv_connector is not None and \
             self.kv_role in KV_CONSUMER
 
@@ -3739,7 +3738,8 @@ class CompilationConfig:
             "pass_config",
             "traced_files",
         }
-        return self.model_dump_json(exclude=exclude, exclude_unset=True)
+        return TypeAdapter(self).model_dump_json(exclude=exclude,
+                                                 exclude_unset=True)
 
     __str__ = __repr__
 
@@ -3750,7 +3750,7 @@ class CompilationConfig:
             return cls(level=int(cli_value))
         # do not use `eval`, it is dangerous and can execute arbitrary code
         dict_value = ast.literal_eval(cli_value)
-        return CompilationConfig.model_validate(dict_value)
+        return TypeAdapter(CompilationConfig).model_validate(dict_value)
 
     def model_post_init(self, __context: Any) -> None:
 
