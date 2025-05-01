@@ -365,8 +365,9 @@ class EngineArgs:
     calculate_kv_scales: bool = CacheConfig.calculate_kv_scales
 
     additional_config: Optional[Dict[str, Any]] = None
-    enable_reasoning: Optional[bool] = None
-    reasoning_parser: Optional[str] = DecodingConfig.reasoning_backend
+    enable_reasoning: Optional[bool] = None  # DEPRECATED
+    reasoning_parser: str = DecodingConfig.reasoning_backend
+
     use_tqdm_on_load: bool = LoadConfig.use_tqdm_on_load
 
     def __post_init__(self):
@@ -509,9 +510,11 @@ class EngineArgs:
         guided_decoding_group.add_argument(
             "--enable-reasoning",
             action=argparse.BooleanOptionalAction,
-            help="Whether to enable reasoning_content for the model. "
-            "If enabled, the model will be able to generate reasoning content."
-        )
+            help="[DEPRECATED] The `--enable-reasoning` flag is deprecated as "
+            "of v0.8.6. Use `--reasoning-parser` to specify the reasoning "
+            "parser backend insteadThis flag (`--enable-reasoning`) will be "
+            "removed in v0.10.0. When `--reasoning-parser` is specified, "
+            "reasoning mode is automatically enabled.")
         guided_decoding_group.add_argument(
             "--reasoning-parser",
             # This choices is a special case because it's not static
@@ -1090,7 +1093,6 @@ class EngineArgs:
             disable_additional_properties=\
                 self.guided_decoding_disable_additional_properties,
             reasoning_backend=self.reasoning_parser
-            if self.enable_reasoning else None,
         )
 
         observability_config = ObservabilityConfig(
