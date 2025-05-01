@@ -12,14 +12,14 @@ import textwrap
 import warnings
 from collections import Counter
 from contextlib import contextmanager
-from dataclasses import (MISSING, dataclass, field, fields, is_dataclass,
-                         replace)
+from dataclasses import MISSING, field, fields, is_dataclass, replace
 from functools import cached_property
 from importlib.util import find_spec
 from pathlib import Path
 from typing import (TYPE_CHECKING, Any, Callable, ClassVar, Literal, Optional,
                     Protocol, TypeVar, Union, cast, get_args, get_origin)
 
+import pydantic.dataclasses
 import torch
 from pydantic import BaseModel, Field, PrivateAttr
 from torch.distributed import ProcessGroup, ReduceOp
@@ -210,6 +210,13 @@ def get_field(cls: ConfigType, name: str) -> Field:
         return field(default=default)
     raise ValueError(
         f"{cls.__name__}.{name} must have a default value or default factory.")
+
+
+def dataclass(cls: ConfigT, *args, **kwargs) -> ConfigT:
+    config = kwargs.pop("config", {})
+    config["arbitrary_types_allowed"] = True
+    kwargs["config"] = config
+    return pydantic.dataclasses.dataclass(cls, *args, **kwargs)
 
 
 TokenizerMode = Literal["auto", "slow", "mistral", "custom"]
