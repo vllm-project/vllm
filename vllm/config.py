@@ -3379,9 +3379,6 @@ class ObservabilityConfig:
 KVProducer = Literal["kv_producer", "kv_both"]
 KVConsumer = Literal["kv_consumer", "kv_both"]
 KVRole = Literal[KVProducer, KVConsumer]
-KV_PRODUCER = get_args(KVProducer)
-KV_CONSUMER = get_args(KVConsumer)
-KV_ROLE = get_args(KVRole)
 
 
 @config
@@ -3443,28 +3440,28 @@ class KVTransferConfig:
         return hash_str
 
     def __post_init__(self) -> None:
-        if self.kv_role is not None and self.kv_role not in KV_ROLE:
+        if self.kv_role is not None and self.kv_role not in get_args(KVRole):
             raise ValueError(f"Unsupported kv_role: {self.kv_role}. "
-                             f"Supported roles are {KV_ROLE}")
+                             f"Supported roles are {get_args(KVRole)}")
 
         if self.kv_connector is not None and self.kv_role is None:
             raise ValueError("Please specify kv_disagg_role when kv_connector "
-                             f"is set, supported roles are {KV_ROLE}")
+                             f"is set, supported roles are {get_args(KVRole)}")
 
     @property
     def is_kv_transfer_instance(self) -> bool:
         return self.kv_connector is not None and \
-            self.kv_role in KV_ROLE
+            self.kv_role in get_args(KVRole)
 
     @property
     def is_kv_producer(self) -> bool:
         return self.kv_connector is not None and \
-            self.kv_role in KV_PRODUCER
+            self.kv_role in get_args(KVProducer)
 
     @property
     def is_kv_consumer(self) -> bool:
         return self.kv_connector is not None and \
-            self.kv_role in KV_CONSUMER
+            self.kv_role in get_args(KVConsumer)
 
     def get_from_extra_config(self, key, default) -> Any:
         return self.kv_connector_extra_config.get(key, default)
