@@ -132,8 +132,17 @@ if READTHEDOCS_VERSION_TYPE == "tag":
         os.remove(header_file)
 
 
+def fix_mteb_docs():
+     # mteb installed a library named docs for python
+     # Let's delete it
+     import site
+     import shutil
+     shutil.rmtree(site.getsitepackages()[0] + "/docs")
+
+
 # Generate additional rst documentation here.
 def setup(app):
+    fix_mteb_docs()
     from docs.source.generate_examples import generate_examples
     generate_examples()
 
