@@ -32,7 +32,10 @@ ENV DEBIAN_FRONTEND=noninteractive
 # Install Python and other dependencies
 RUN apt-get update -y \
     && apt-get install -y software-properties-common git curl sudo vim less libgfortran5 \
-    && add-apt-repository ppa:deadsnakes/ppa \
+    && for i in 1 2 3; do \
+        add-apt-repository -y ppa:deadsnakes/ppa && break || \
+        { echo "Attempt $i failed, retrying in 5s..."; sleep 5; }; \
+    done \
     && apt-get update -y \
     && apt-get install -y python${PYTHON_VERSION} python${PYTHON_VERSION}-dev python${PYTHON_VERSION}-venv \
        python${PYTHON_VERSION}-lib2to3 python-is-python3  \

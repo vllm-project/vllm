@@ -21,9 +21,6 @@ from .interface import DeviceCapability, Platform, PlatformEnum, _Backend
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig, VllmConfig
-else:
-    ModelConfig = None
-    VllmConfig = None
 
 logger = init_logger(__name__)
 
@@ -109,7 +106,7 @@ class CudaPlatformBase(Platform):
         pass
 
     @classmethod
-    def check_and_update_config(cls, vllm_config: VllmConfig) -> None:
+    def check_and_update_config(cls, vllm_config: "VllmConfig") -> None:
         parallel_config = vllm_config.parallel_config
         scheduler_config = vllm_config.scheduler_config
         compilation_config = vllm_config.compilation_config
@@ -308,7 +305,7 @@ class CudaPlatformBase(Platform):
         return cls.has_device_capability(89)
 
     @classmethod
-    def supports_v1(cls, model_config: ModelConfig) -> bool:
+    def supports_v1(cls, model_config: "ModelConfig") -> bool:
         return True
 
     @classmethod

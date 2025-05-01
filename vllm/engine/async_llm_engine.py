@@ -493,12 +493,11 @@ class _AsyncLLMEngine(LLMEngine):
             tokenizer = await self.get_tokenizer_async(lora_request)
             self._validate_token_prompt(prompt, tokenizer=tokenizer)
 
-        preprocessed_inputs = await self.input_preprocessor.preprocess_async(
+        processed_inputs = await self.input_preprocessor.preprocess_async(
             prompt,
             lora_request=lora_request,
             prompt_adapter_request=prompt_adapter_request,
         )
-        processed_inputs = self.input_processor(preprocessed_inputs)
 
         if isinstance(params, SamplingParams) and \
             params.guided_decoding is not None:
@@ -526,9 +525,14 @@ class _AsyncLLMEngine(LLMEngine):
         )
 
     async def check_health_async(self) -> None:
-        if self.tokenizer:
-            self.tokenizer.check_health()
         self.model_executor.check_health()
+
+    async def collective_rpc_async(self,
+                                   method: str,
+                                   timeout: Optional[float] = None,
+                                   args: tuple = (),
+                                   kwargs: Optional[dict] = None):
+        raise NotImplementedError
 
 
 async def build_guided_decoding_logits_processor_async(
@@ -1237,6 +1241,17 @@ class AsyncLLMEngine(EngineClient):
 
     async def add_lora(self, lora_request: LoRARequest) -> None:
         self.engine.add_lora(lora_request)
+
+    async def collective_rpc(self,
+                             method: str,
+                             timeout: Optional[float] = None,
+                             args: tuple = (),
+                             kwargs: Optional[dict] = None):
+        """
+        Perform a collective RPC call to the given path.
+        """
+        return await self.engine.collective_rpc_async(method, timeout, args,
+                                                      kwargs)
 
 
 # TODO(v1): Remove this class proxy when V1 goes default.
