@@ -348,6 +348,6 @@ class RocmPlatform(Platform):
     @classmethod
     def has_cdna_target(cls):
         import triton
-        ROCM_CDNA_TARGETS = ["gfx940", "gfx941", "gfx942", "gfx90a", "gfx908"]
+        ROCM_CDNA_TARGETS = ["gfx942", "gfx90a", "gfx908"]
         return triton.runtime.driver.active.get_current_target(
         ).arch in ROCM_CDNA_TARGETS
