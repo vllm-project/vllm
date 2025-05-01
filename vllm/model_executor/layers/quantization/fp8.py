@@ -792,8 +792,11 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             del layer.w2_input_scale
 
     def set_dispatch_combine(
-            self,
-            dispatch_combine: mk.FusedMoEQuantizeDispatchCombine) -> bool:
+        self,
+        dp_size: int,
+        world_size: int,
+        dispatch_combine: mk.FusedMoEQuantizeDispatchCombine,
+    ) -> bool:
         from vllm.model_executor.layers.fused_moe.triton_deep_gemm_moe import (
             TritonOrDeepGemmExperts)
 

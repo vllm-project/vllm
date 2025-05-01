@@ -23,8 +23,8 @@ class PplxDispatchCombine(mk.FusedMoEQuantizeDispatchCombine):
                  a2a: pplx.AllToAll,
                  max_num_tokens: int,
                  world_size: int,
-                 dp_size: int,
                  rank: int,
+                 dp_size: int,
                  quant_dtype: Optional[torch.dtype] = None,
                  block_shape: Optional[List[int]] = None):
         super().__init__()
@@ -33,8 +33,8 @@ class PplxDispatchCombine(mk.FusedMoEQuantizeDispatchCombine):
         self.block_shape = block_shape
         self.max_num_tokens = max_num_tokens
         self.world_size = world_size
-        self.dp_size = dp_size
         self.rank = rank
+        self.dp_size = dp_size
         self.quant_dtype = quant_dtype
 
     def dispatch(
@@ -119,6 +119,7 @@ class PplxDispatchCombine(mk.FusedMoEQuantizeDispatchCombine):
             indices=rank_topk_ids,
             bound_m=bound_m,
         )
+
         return expert_x, expert_x_scale, expert_num_tokens
 
     def combine(

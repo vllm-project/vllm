@@ -347,8 +347,9 @@ def pplx_dispatch_combine(pgi, dp_size, a, topk_weight, topk_ids, num_experts):
         ata,
         max_num_tokens,
         world_size,
-        dp_size,
         rank,
+        dp_size,
+        a.dtype,
     )
 
     a_chunk = chunk_by_rank(a, rank, world_size).to(device)
@@ -486,8 +487,8 @@ def pplx_moe(pgi, dp_size, a, w1, w2, topk_weight, topk_ids):
         ata,
         max_num_tokens,
         world_size,
-        dp_size,
         rank,
+        dp_size,
     )
 
     experts = BatchedExperts(a.shape[0])
@@ -584,13 +585,13 @@ def _pplx_moe(
         topk_weight, topk_ids, _ = fused_topk(a, score, topk, False)
         torch_output = torch_moe2(a, w1, w2, topk_weight, topk_ids)
         pplx_output = pplx_moe(pgi, dp_size, a, w1, w2, topk_weight, topk_ids)
-        #batched_output = _batched_moe(pgi, dp_size, a, w1, w2, topk_weight, topk_ids)
+        batched_output = _batched_moe(pgi, dp_size, a, w1, w2, topk_weight, topk_ids)
 
     torch_output = chunk_by_rank(torch_output, pgi.rank,
                                  pgi.world_size).to(pplx_output.device)
 
     torch.testing.assert_close(pplx_output, torch_output, atol=2e-2, rtol=0)
-    #torch.testing.assert_close(batched_output, torch_output, atol=2e-2, rtol=0)
+    torch.testing.assert_close(batched_output, torch_output, atol=2e-2, rtol=0)
 
     nvshmem_finalize()
 

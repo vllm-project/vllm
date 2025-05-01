@@ -69,11 +69,14 @@ def parse_args():
     parser.add_argument("--enforce-eager",
                         action='store_true',
                         help="Enforce eager mode execution.")
+    parser.add_argument("--trust-remote-code",
+                        action='store_true',
+                        help="Trust remote code.")
     return parser.parse_args()
 
 
 def main(model, dp_size, local_dp_rank, global_dp_rank, dp_master_ip,
-         dp_master_port, GPUs_per_dp_rank, enforce_eager):
+         dp_master_port, GPUs_per_dp_rank, enforce_eager, trust_remote_code):
     os.environ["VLLM_DP_RANK"] = str(global_dp_rank)
     os.environ["VLLM_DP_RANK_LOCAL"] = str(local_dp_rank)
     os.environ["VLLM_DP_SIZE"] = str(dp_size)
@@ -125,6 +128,7 @@ def main(model, dp_size, local_dp_rank, global_dp_rank, dp_master_ip,
               enforce_eager=enforce_eager,
               enable_expert_parallel=True,
               compilation_config=cconfig,
+              trust_remote_code=trust_remote_code,
               )
     outputs = llm.generate(prompts, sampling_params)
     # Print the outputs.
@@ -168,12 +172,12 @@ if __name__ == "__main__":
         proc = Process(target=main,
                        args=(args.model, dp_size, local_dp_rank,
                              global_dp_rank, dp_master_ip, dp_master_port,
-                             tp_size, args.enforce_eager))
+                             tp_size, args.enforce_eager, args.trust_remote_code))
         proc.start()
         procs.append(proc)
     exit_code = 0
     for proc in procs:
-        proc.join(timeout=3000)
+        proc.join(timeout=300)
         if proc.exitcode is None:
             print(f"Killing process {proc.pid} that "
                   f"didn't stop within 5 minutes.")

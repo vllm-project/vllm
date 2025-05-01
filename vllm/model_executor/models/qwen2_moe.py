@@ -156,7 +156,7 @@ class Qwen2MoeSparseMoeBlock(nn.Module):
         if shared_output is not None:
             final_hidden_states = final_hidden_states + shared_output
         if self.tp_size > 1:
-            final_hidden_states = tensor_model_parallel_all_reduce(
+            final_hidden_states = self.experts.maybe_all_reduce_tensor_model_parallel(
                 final_hidden_states)
 
         return final_hidden_states.view(orig_shape)

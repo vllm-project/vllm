@@ -171,6 +171,7 @@ class FusedMoEPermuteExpertsUnpermute(ABC):
 
     def activation(self, activation: str, output: torch.Tensor,
                    input: torch.Tensor) -> None:
+        assert output.shape[-1] * 2 == input.shape[-1]
         if activation == "silu":
             torch.ops._C.silu_and_mul(output, input)
         elif activation == "gelu":
