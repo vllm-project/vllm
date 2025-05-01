@@ -2,7 +2,7 @@
 """
 vLLM Chat Assistant - A Streamlit Web Interface
 
-A streamlined chat interface that quickly integrates 
+A streamlined chat interface that quickly integrates
 with vLLM API server.
 
 Features:
@@ -26,10 +26,11 @@ Usage:
     streamlit run streamlit_openai_chatbot_webserver.py \
         --logger.level=debug
 """
+import os
+from datetime import datetime
+
 import streamlit as st
 from openai import OpenAI
-from datetime import datetime
-import os
 
 # Get command line arguments from environment variables
 openai_api_key = os.getenv('VLLM_API_KEY', "EMPTY")
@@ -52,6 +53,7 @@ if "active_session" not in st.session_state:
 if "api_base_url" not in st.session_state:
     st.session_state.api_base_url = openai_api_base
 
+
 def create_new_chat_session():
     """Create a new chat session with timestamp as ID"""
     session_id = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -60,36 +62,38 @@ def create_new_chat_session():
     st.session_state.active_session = session_id
     st.session_state.messages = []
 
+
 def switch_to_chat_session(session_id):
     """Switch to a different chat session"""
     st.session_state.current_session = session_id
     st.session_state.active_session = session_id
     st.session_state.messages = st.session_state.sessions[session_id]
 
+
 def get_llm_response(messages, model):
     """Get streaming response from llm
-    
+
     Args:
         messages: List of message dictionaries
         model: Name of model
-    
+
     Returns:
         Streaming response object or error message string
     """
     try:
-        response = client.chat.completions.create(
-            model=model,
-            messages=messages,
-            stream=True
-        )
+        response = client.chat.completions.create(model=model,
+                                                  messages=messages,
+                                                  stream=True)
         return response
     except Exception as e:
         st.error(f"Error details: {str(e)}")
         return f"Error: {str(e)}"
 
+
 # Sidebar - API Settings first
 st.sidebar.title("API Settings")
-new_api_base = st.sidebar.text_input("API Base URL:", value=st.session_state.api_base_url)
+new_api_base = st.sidebar.text_input("API Base URL:",
+                                     value=st.session_state.api_base_url)
 if new_api_base != st.session_state.api_base_url:
     st.session_state.api_base_url = new_api_base
     st.rerun()
@@ -105,20 +109,16 @@ if st.sidebar.button("New Session"):
 for session_id in sorted(st.session_state.sessions.keys(), reverse=True):
     # Mark the active session with a pinned button
     if session_id == st.session_state.active_session:
-        st.sidebar.button(
-            f"📍 {session_id}",
-            key=session_id,
-            type="primary",
-            on_click=switch_to_chat_session,
-            args=(session_id,)
-        )
+        st.sidebar.button(f"📍 {session_id}",
+                          key=session_id,
+                          type="primary",
+                          on_click=switch_to_chat_session,
+                          args=(session_id, ))
     else:
-        st.sidebar.button(
-            f"Session {session_id}",
-            key=session_id,
-            on_click=switch_to_chat_session,
-            args=(session_id,)
-        )
+        st.sidebar.button(f"Session {session_id}",
+                          key=session_id,
+                          on_click=switch_to_chat_session,
+                          args=(session_id, ))
 
 # Main interface
 st.title("vLLM Chat Assistant")
@@ -147,7 +147,7 @@ if prompt := st.chat_input("Type your message here..."):
     st.session_state.messages.append({"role": "user", "content": prompt})
     st.session_state.sessions[
         st.session_state.current_session] = st.session_state.messages
-    
+
     # Display user message
     with st.chat_message("user"):
         st.write(prompt)
