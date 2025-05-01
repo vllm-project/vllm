@@ -13,7 +13,6 @@ librosa # required by audio tests in entrypoints/openai
 sentence-transformers
 numba == 0.61.2; python_version > '3.9'
 # testing utils
-awscli
 boto3
 botocore
 datasets
