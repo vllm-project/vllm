@@ -344,13 +344,11 @@ def wait_for_kv_layer_from_connector(layer_name: str):
     connector = get_kv_transfer_group()
 
     forward_context: ForwardContext = get_forward_context()
-
     attn_metadata = forward_context.attn_metadata
     if attn_metadata is None:
         return
     assert isinstance(attn_metadata, dict)
-
-    connector.wait_for_layer_load(attn_metadata[layer_name])
+    connector.wait_for_layer_load(layer_name)
 
 
 def maybe_save_kv_layer_to_connector(
