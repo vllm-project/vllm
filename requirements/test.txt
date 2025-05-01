@@ -396,7 +396,7 @@ opencv-python-headless==4.11.0.86
     # via
     #   -r requirements/test.in
     #   mistral-common
-packaging==24.1
+packaging==24.2
     # via
     #   accelerate
     #   black
@@ -632,7 +632,7 @@ sentence-transformers==3.2.1
     # via -r requirements/test.in
 sentencepiece==0.2.0
     # via mistral-common
-setuptools==75.8.0
+setuptools==77.0.3
     # via
     #   mamba-ssm
     #   pytablewriter
