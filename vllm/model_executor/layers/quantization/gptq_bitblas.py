@@ -25,6 +25,7 @@ from vllm.model_executor.parameter import (ChannelQuantScaleParameter,
                                            PackedColumnParameter,
                                            PackedvLLMParameter,
                                            RowvLLMParameter)
+from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
 
 logger = init_logger(__name__)
@@ -190,6 +191,10 @@ class GPTQBitBLASConfig(QuantizationConfig):
         group_size = quant_config.get("group_size")
         sym = quant_config.get("sym")
         desc_act = quant_config.get("desc_act")
+
+        # temporarily disable on ROCm platform
+        if not current_platform.is_cuda():
+            return False
 
         # If we cannot find the info needed in the config, cannot convert.
         if (num_bits is None or group_size is None or sym is None
