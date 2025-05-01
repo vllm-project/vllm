@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 
-import re
 from collections.abc import Sequence
 from typing import Optional, Union
 
@@ -30,9 +29,6 @@ class Qwen3ReasoningParser(ReasoningParser):
         super().__init__(tokenizer)
         self.think_start_token = "<think>"
         self.think_end_token = "</think>"
-
-        self.reasoning_regex = re.compile(
-            rf"{self.think_start_token}(.*?){self.think_end_token}", re.DOTALL)
 
         if not self.model_tokenizer:
             raise ValueError(
@@ -121,29 +117,34 @@ class Qwen3ReasoningParser(ReasoningParser):
     def extract_reasoning_content(
             self, model_output: str, request: ChatCompletionRequest
     ) -> tuple[Optional[str], Optional[str]]:
+        """
+        Extract reasoning content from the model output.
 
-        # Check if the model output contains the <think> tokens.
+        For text <think>abc</think>xyz:
+        - 'abc' goes to reasoning_content
+        - 'xyz' goes to content
+
+        Returns:
+            tuple[Optional[str], Optional[str]]: reasoning content and content
+        """
+
+        # Check if the model output contains the <think> and </think> tokens.
         if (self.think_start_token not in model_output
                 or self.think_end_token not in model_output):
             return None, model_output
-        else:
-            # Use a regex to find the reasoning content
-            reasoning_content = self.reasoning_regex.findall(model_output)[0]
+        # Check if the <think> is present in the model output, remove it
+        # if it is present.
+        model_output_parts = model_output.partition(self.think_start_token)
+        model_output = model_output_parts[2] if model_output_parts[
+            1] else model_output_parts[0]
+        # Check if the model output contains the </think> tokens.
+        # If the end token is not found, return the model output as is.
+        if self.think_end_token not in model_output:
+            return None, model_output
 
-            # Remove the reasoning content from the model output
-            # Although <think> token is always at the
-            # beginning of the line, we cannot guarantee that the
-            # other models will follow this convention.
-            # Therefore, we need to add :start_index.
-            start_index = model_output.find(self.think_start_token)
-            if start_index != -1:
-                end_index = start_index + len(
-                    f"{self.think_start_token}{reasoning_content}{self.think_end_token}"
-                )
-                model_output = model_output[:start_index] + \
-                                model_output[end_index:]
+        # Extract reasoning content from the model output.
+        reasoning_content, _, content = model_output.partition(
+            self.think_end_token)
 
-                if len(model_output) == 0:
-                    return reasoning_content, None
-
-            return reasoning_content, model_output
+        final_content = content or None
+        return reasoning_content, final_content
