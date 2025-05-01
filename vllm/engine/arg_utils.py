@@ -736,63 +736,20 @@ class EngineArgs:
         scheduler_group.add_argument("--scheduler-cls",
                                      **scheduler_kwargs["scheduler_cls"])
 
-        # Compilation arguments
-        # compilation_kwargs = get_kwargs(CompilationConfig)
-        compilation_group = parser.add_argument_group(
-            title="CompilationConfig",
-            description=CompilationConfig.__doc__,
-        )
-        compilation_group.add_argument(
-            "--compilation-config",
-            "-O",
-            type=CompilationConfig.from_cli,
-            default=None,
-            help="torch.compile configuration for the model. "
-            "When it is a number (0, 1, 2, 3), it will be "
-            "interpreted as the optimization level.\n"
-            "NOTE: level 0 is the default level without "
-            "any optimization. level 1 and 2 are for internal "
-            "testing only. level 3 is the recommended level "
-            "for production.\n"
-            "To specify the full compilation config, "
-            "use a JSON string, e.g. ``{\"level\": 3, "
-            "\"cudagraph_capture_sizes\": [1, 2, 4, 8]}``\n"
-            "Following the convention of traditional "
-            "compilers, using ``-O`` without space is also "
-            "supported. ``-O3`` is equivalent to ``-O 3``.")
-
-        # KVTransfer arguments
-        # kv_transfer_kwargs = get_kwargs(KVTransferConfig)
-        kv_transfer_group = parser.add_argument_group(
-            title="KVTransferConfig",
-            description=KVTransferConfig.__doc__,
-        )
-        kv_transfer_group.add_argument(
-            "--kv-transfer-config",
-            type=KVTransferConfig.from_cli,
-            default=None,
-            help="The configurations for distributed KV cache "
-            "transfer. Should be a JSON string.")
-        kv_transfer_group.add_argument(
-            '--kv-events-config',
-            type=KVEventsConfig.from_cli,
-            default=None,
-            help='The configurations for event publishing.')
-
         # vLLM arguments
-        # vllm_kwargs = get_kwargs(VllmConfig)
+        vllm_kwargs = get_kwargs(VllmConfig)
         vllm_group = parser.add_argument_group(
             title="VllmConfig",
             description=VllmConfig.__doc__,
         )
-        vllm_group.add_argument(
-            "--additional-config",
-            type=json.loads,
-            default=None,
-            help="Additional config for specified platform in JSON format. "
-            "Different platforms may support different configs. Make sure the "
-            "configs are valid for the platform you are using. The input format"
-            " is like '{\"config_key\":\"config_value\"}'")
+        vllm_group.add_argument("--kv-transfer-config",
+                                **vllm_kwargs["kv_transfer_config"])
+        vllm_group.add_argument('--kv-events-config',
+                                **vllm_kwargs["kv_events_config"])
+        vllm_group.add_argument("--compilation-config", "-O",
+                                **vllm_kwargs["compilation_config"])
+        vllm_group.add_argument("--additional-config",
+                                **vllm_kwargs["additional_config"])
 
         # Other arguments
         parser.add_argument('--use-v2-block-manager',
