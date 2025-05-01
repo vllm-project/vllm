@@ -541,6 +541,26 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             layer.register_parameter("w2_weight_scale_inv", w2_weight_scale)
             assert self.quant_config.activation_scheme == "dynamic"
 
+            k = hidden_size
+            n = intermediate_size_per_partition
+            device = layer.w13_weight.device
+            self.ab_strides1 = torch.full((num_experts, ),
+                                        k,
+                                        device=device,
+                                        dtype=torch.int64)
+            self.c_strides1 = torch.full((num_experts, ),
+                                        2 * n,
+                                        device=device,
+                                        dtype=torch.int64)
+            self.ab_strides2 = torch.full((num_experts, ),
+                                        n,
+                                        device=device,
+                                        dtype=torch.int64)
+            self.c_strides2 = torch.full((num_experts, ),
+                                        k,
+                                        device=device,
+                                        dtype=torch.int64)
+
         # Add the quantization method used (per tensor/grouped/channel)
         # to ensure the weight scales are loaded in properly
         extra_weight_attrs.update(
@@ -577,6 +597,22 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             layer.w13_input_scale = None
             layer.w2_input_scale = None
 
+    def fp8_bf16_fp8(self, fp8_tensor, fp8_scale):
+        blocked_tensor = fp8_tensor.view(
+                                        fp8_tensor.shape[0],
+                                        fp8_tensor.shape[1] // 128, 128,
+                                        fp8_tensor.shape[2] // 128,
+                                        128).to(torch.float32)
+        # Because blocked_tensor is 5D, reshape to [B, M//128, 1, N//128, 1]
+        dequant_tensor = (blocked_tensor *
+                  fp8_scale.unsqueeze(2).unsqueeze(4)).view(
+                      fp8_tensor.shape).to(torch.bfloat16).to(torch.float32)
+
+        scale_tensor = torch.abs(dequant_tensor).max() / 448
+        quant_tensor = dequant_tensor / scale_tensor
+
+        return quant_tensor, scale_tensor
+
     def process_weights_after_loading(self, layer: Module) -> None:
         # Lazy import to avoid importing triton too early.
         from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
@@ -600,13 +636,29 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                 w2_weight = layer.w2_weight
                 w2_weight_scale_inv = layer.w2_weight_scale_inv
 
-            # torch.compile() cannot use Parameter subclasses.
-            layer.w13_weight = Parameter(w13_weight, requires_grad=False)
-            layer.w13_weight_scale_inv = Parameter(w13_weight_scale_inv,
-                                                   requires_grad=False)
-            layer.w2_weight = Parameter(w2_weight, requires_grad=False)
-            layer.w2_weight_scale_inv = Parameter(w2_weight_scale_inv,
-                                                  requires_grad=False)
+            if not (envs.VLLM_USE_CUTLASS_MOE_FP8):
+                # torch.compile() cannot use Parameter subclasses.
+                layer.w13_weight = Parameter(w13_weight, requires_grad=False)
+                layer.w13_weight_scale_inv = Parameter(w13_weight_scale_inv,
+                                                    requires_grad=False)
+                layer.w2_weight = Parameter(w2_weight, requires_grad=False)
+                layer.w2_weight_scale_inv = Parameter(w2_weight_scale_inv,
+                                                    requires_grad=False)
+            else:
+                w13_weight, w13_weight_scale_inv = \
+                            self.fp8_bf16_fp8(w13_weight, w13_weight_scale_inv)
+                w2_weight, w2_weight_scale_inv = \
+                            self.fp8_bf16_fp8(w2_weight, w2_weight_scale_inv)
+
+                w13_weight_scale_inv = w13_weight_scale_inv.repeat(w13_weight.size(0))
+                w2_weight_scale_inv = w2_weight_scale_inv.repeat(w2_weight.size(0))
+
+                layer.w13_weight.data.copy_(w13_weight)
+                layer.w13_weight_scale_inv = Parameter(w13_weight_scale_inv, requires_grad=False)
+                layer.w2_weight.data.copy_(w2_weight)
+
+                layer.w2_weight_scale_inv = Parameter(w2_weight_scale_inv, requires_grad=False)
+
             if is_rocm_aiter_moe_enabled():
                 # reshaping weights is required for aiter moe kernel.
                 shuffled_w13, shuffled_w2 = shuffle_weights(
@@ -800,27 +852,50 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             e_score_correction_bias=e_score_correction_bias,
         )
 
-        return fused_experts(
-            x,
-            layer.w13_weight,
-            layer.w2_weight,
-            topk_weights=topk_weights,
-            topk_ids=topk_ids,
-            inplace=True,
-            activation=activation,
-            use_fp8_w8a8=True,
-            global_num_experts=global_num_experts,
-            apply_router_weight_on_input=apply_router_weight_on_input,
-            expert_map=expert_map,
-            w1_scale=(layer.w13_weight_scale_inv
-                      if self.block_quant else layer.w13_weight_scale),
-            w2_scale=(layer.w2_weight_scale_inv
-                      if self.block_quant else layer.w2_weight_scale),
-            a1_scale=layer.w13_input_scale,
-            a2_scale=layer.w2_input_scale,
-            block_shape=self.quant_config.weight_block_size,
-            allow_deep_gemm=self.allow_deep_gemm,
-        )
+
+        if not (envs.VLLM_USE_CUTLASS_MOE_FP8):
+            return fused_experts(
+                x,
+                layer.w13_weight,
+                layer.w2_weight,
+                topk_weights=topk_weights,
+                topk_ids=topk_ids,
+                inplace=True,
+                activation=activation,
+                use_fp8_w8a8=True,
+                global_num_experts=global_num_experts,
+                apply_router_weight_on_input=apply_router_weight_on_input,
+                expert_map=expert_map,
+                w1_scale=(layer.w13_weight_scale_inv
+                        if self.block_quant else layer.w13_weight_scale),
+                w2_scale=(layer.w2_weight_scale_inv
+                        if self.block_quant else layer.w2_weight_scale),
+                a1_scale=layer.w13_input_scale,
+                a2_scale=layer.w2_input_scale,
+                block_shape=self.quant_config.weight_block_size,
+                allow_deep_gemm=self.allow_deep_gemm,
+            )
+        else:
+            from vllm.model_executor.layers.fused_moe import cutlass_moe_fp8
+            return cutlass_moe_fp8(
+                x,
+                layer.w13_weight.transpose(1, 2),
+                layer.w2_weight.transpose(1, 2),
+                layer.w13_weight_scale_inv,
+                layer.w2_weight_scale_inv,
+                topk_weights,
+                topk_ids,
+                self.ab_strides1,
+                self.c_strides1,
+                self.ab_strides2,
+                self.c_strides2,
+                a1_scale=layer.w13_input_scale,
+                a2_scale=layer.w2_input_scale,
+                out_dtype=x.dtype,
+                expert_map=expert_map,
+                apply_router_weight_on_input=apply_router_weight_on_input,
+            )
+
 
 
 class Fp8KVCacheMethod(BaseKVCacheMethod):
