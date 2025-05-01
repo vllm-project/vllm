@@ -162,7 +162,7 @@ class RocmPlatform(Platform):
                         logger.info("Using AITER MLA backend.")
                         return "vllm.v1.attention.backends.mla.rocm_aiter_mla.AiterMLABackend"  # noqa: E501
                     else:
-                        logger.info("Using AITER MLA V1 backend.")
+                        logger.info("Using AITER MLA backend on V1 engine.")
                         return "vllm.attention.backends.rocm_aiter_mla.AiterMLABackend"  # noqa: E501
                 else:
                     raise ValueError(
