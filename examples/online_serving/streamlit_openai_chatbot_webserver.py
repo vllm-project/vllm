@@ -124,10 +124,7 @@ for session_id in sorted(st.session_state.sessions.keys(), reverse=True):
 st.title("vLLM Chat Assistant")
 
 # Initialize OpenAI client with API settings
-client = OpenAI(
-    api_key=openai_api_key,
-    base_url=st.session_state.api_base_url
-)
+client = OpenAI(api_key=openai_api_key, base_url=st.session_state.api_base_url)
 
 # Get and display current model id
 models = client.models.list()
@@ -148,7 +145,8 @@ for message in st.session_state.messages:
 if prompt := st.chat_input("Type your message here..."):
     # Save user message to session
     st.session_state.messages.append({"role": "user", "content": prompt})
-    st.session_state.sessions[st.session_state.current_session] = st.session_state.messages
+    st.session_state.sessions[
+        st.session_state.current_session] = st.session_state.messages
     
     # Display user message
     with st.chat_message("user"):
