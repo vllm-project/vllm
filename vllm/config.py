@@ -24,7 +24,7 @@ import torch
 from pydantic import BaseModel, Field, PrivateAttr
 from torch.distributed import ProcessGroup, ReduceOp
 from transformers import PretrainedConfig
-from typing_extensions import deprecated
+from typing_extensions import TypeIs, deprecated
 
 import vllm.envs as envs
 from vllm import version
@@ -3381,41 +3381,52 @@ class ObservabilityConfig:
             self.collect_detailed_traces[0].split(","))
 
 
-class KVTransferConfig(BaseModel):
+KVProducer = Literal["kv_producer", "kv_both"]
+KVConsumer = Literal["kv_consumer", "kv_both"]
+KVRole = Literal[KVProducer, KVConsumer]
+KV_PRODUCER = get_args(KVProducer)
+KV_CONSUMER = get_args(KVConsumer)
+KV_ROLE = get_args(KVRole)
+
+
+@config
+@dataclass
+class KVTransferConfig:
     """Configuration for distributed KV cache transfer."""
 
-    # The KV connector for vLLM to transmit KV caches between vLLM instances.
     kv_connector: Optional[str] = None
+    """The KV connector for vLLM to transmit KV caches between vLLM instances.
+    """
 
-    # The device used by kv connector to buffer the KV cache.
-    # Currently only support 'cuda'.
     kv_buffer_device: Optional[str] = "cuda"
+    """The device used by kv connector to buffer the KV cache.
+    Currently only support 'cuda'."""
 
-    # The buffer size for TorchDistributedConnector. Measured in number of
-    # bytes. Recommended value: 1e9 (about 1GB).
     kv_buffer_size: float = 1e9
+    """The buffer size for TorchDistributedConnector. Measured in number of
+    bytes. Recommended value: 1e9 (about 1GB)."""
 
-    # Whether this vLLM instance produces, consumes KV cache, or both. Choices
-    # are 'kv_producer', 'kv_consumer', and 'both'.
-    kv_role: Optional[str] = None
+    kv_role: Optional[KVRole] = None
+    """Whether this vLLM instance produces, consumes KV cache, or both. Choices
+    are 'kv_producer', 'kv_consumer', and 'both'."""
 
-    # The rank of this vLLM instance in the KV cache transfer. Typical value:
-    # 0 for prefill instance, 1 for decode instance.
-    # Currently only 1P1D is supported.
     kv_rank: Optional[int] = None
+    """The rank of this vLLM instance in the KV cache transfer. Typical value:
+    0 for prefill instance, 1 for decode instance.
+    Currently only 1P1D is supported."""
 
-    # The number of parallel instances for KV cache transfer. For
-    # PyNcclConnector, this should be 2.
     kv_parallel_size: int = 1
+    """The number of parallel instances for KV cache transfer. For
+    PyNcclConnector, this should be 2."""
 
-    # The KV connector ip, used to build distributed connection
     kv_ip: str = "127.0.0.1"
+    """The KV connector ip, used to build distributed connection."""
 
-    # The KV connector port, used to build distributed connection
     kv_port: int = 14579
+    """The KV connector port, used to build distributed connection."""
 
-    # any extra config that the connector may need
-    kv_connector_extra_config: dict[str, Any] = {}
+    kv_connector_extra_config: dict[str, Any] = field(default_factory=dict)
+    """any extra config that the connector may need."""
 
     def compute_hash(self) -> str:
         """
@@ -3436,40 +3447,30 @@ class KVTransferConfig(BaseModel):
                                usedforsecurity=False).hexdigest()
         return hash_str
 
-    @classmethod
-    def from_cli(cls, cli_value: str) -> "KVTransferConfig":
-        """Parse the CLI value for the kv cache transfer config."""
-        return KVTransferConfig.model_validate_json(cli_value)
+    def __post_init__(self, __context: Any) -> None:
 
-    def model_post_init(self, __context: Any) -> None:
-
-        if self.kv_role is not None and self.kv_role not in [
-                "kv_producer", "kv_consumer", "kv_both"
-        ]:
-            raise ValueError(
-                f"Unsupported kv_role: {self.kv_role}. "
-                f"Supported roles are `kv_producer`, `kv_consumer`, "
-                f"and `kv_both`")
+        if self.kv_role is not None and self.kv_role not in KV_ROLE:
+            raise ValueError(f"Unsupported kv_role: {self.kv_role}. "
+                             f"Supported roles are {KV_ROLE=}")
 
         if self.kv_connector is not None and self.kv_role is None:
             raise ValueError("Please specify kv_disagg_role when kv_connector "
-                             "is set, supported roles are `kv_producer`, "
-                             "`kv_consumer`, and `kv_both`")
+                             f"is set, supported roles are {KV_ROLE=}")
 
     @property
-    def is_kv_transfer_instance(self) -> bool:
+    def is_kv_transfer_instance(self) -> TypeIs[KVRole]:
         return self.kv_connector is not None and \
-            self.kv_role in ["kv_producer", "kv_consumer", "kv_both"]
+            self.kv_role in KV_ROLE
 
     @property
-    def is_kv_producer(self) -> bool:
+    def is_kv_producer(self) -> TypeIs[KVProducer]:
         return self.kv_connector is not None and \
-            self.kv_role in ["kv_producer", "kv_both"]
+            self.kv_role in KV_PRODUCER
 
     @property
-    def is_kv_consumer(self) -> bool:
+    def is_kv_consumer(self) -> TypeIs[KVConsumer]:
         return self.kv_connector is not None and \
-            self.kv_role in ["kv_consumer", "kv_both"]
+            self.kv_role in KV_CONSUMER
 
     def get_from_extra_config(self, key, default) -> Any:
         return self.kv_connector_extra_config.get(key, default)
