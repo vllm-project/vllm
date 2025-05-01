@@ -12,5 +12,6 @@ lws
 modal
 open-webui
 skypilot
+streamlit
 triton
 :::
