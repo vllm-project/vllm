@@ -115,7 +115,7 @@ class LLM:
             to eager mode. Additionally for encoder-decoder models, if the
             sequence length of the encoder input is larger than this, we fall
             back to the eager mode.
-        disable_custom_all_reduce: See :class:`~vllm.config.ParallelConfig`
+        disable_custom_all_reduce: See {class}`~vllm.config.ParallelConfig`
         disable_async_output_proc: Disable async output processing.
             This may result in lower performance.
         hf_token: The token to use as HTTP bearer authorization for remote files
@@ -127,12 +127,12 @@ class LLM:
         compilation_config: Either an integer or a dictionary. If it is an
             integer, it is used as the level of compilation optimization. If it
             is a dictionary, it can specify the full compilation configuration.
-        **kwargs: Arguments for :class:`~vllm.EngineArgs`. (See
-            :ref:`engine-args`)
+        **kwargs: Arguments for {class}`~vllm.EngineArgs`. (See
+            {ref}`engine-args`)
 
     Note:
         This class is intended to be used for offline inference. For online
-        serving, use the :class:`~vllm.AsyncLLMEngine` class instead.
+        serving, use the {class}`~vllm.AsyncLLMEngine` class instead.
     """
 
     DEPRECATE_LEGACY: ClassVar[bool] = True
@@ -141,7 +141,7 @@ class LLM:
     DEPRECATE_INIT_POSARGS: ClassVar[bool] = True
     """
     A flag to toggle whether to deprecate positional arguments in
-    :meth:`LLM.__init__`.
+    {meth}`LLM.__init__`.
     """
 
     @classmethod
@@ -398,7 +398,7 @@ class LLM:
 
         Args:
             prompts: The prompts to the LLM. You may pass a sequence of prompts
-                for batch inference. See :class:`~vllm.inputs.PromptType`
+                for batch inference. See {class}`~vllm.inputs.PromptType`
                 for more details about the format of each prompts.
             sampling_params: The sampling parameters for text generation. If
                 None, we use the default sampling parameters.
@@ -486,7 +486,7 @@ class LLM:
                 `self` argument, in addition to the arguments passed in `args`
                 and `kwargs`. The `self` argument will be the worker object.
             timeout: Maximum time in seconds to wait for execution. Raises a
-                :exc:`TimeoutError` on timeout. `None` means wait indefinitely.
+                {exc}`TimeoutError` on timeout. `None` means wait indefinitely.
             args: Positional arguments to pass to the worker method.
             kwargs: Keyword arguments to pass to the worker method.
 
@@ -660,7 +660,7 @@ class LLM:
         Generate responses for a chat conversation.
 
         The chat conversation is converted into a text prompt using the
-        tokenizer and calls the :meth:`generate` method to generate the
+        tokenizer and calls the {meth}`generate` method to generate the
         responses.
 
         Multi-modal inputs can be passed in the same way you would pass them
@@ -899,7 +899,7 @@ class LLM:
 
         Args:
             prompts: The prompts to the LLM. You may pass a sequence of prompts
-                for batch inference. See :class:`~vllm.inputs.PromptType`
+                for batch inference. See {class}`~vllm.inputs.PromptType`
                 for more details about the format of each prompts.
             pooling_params: The pooling parameters for pooling. If None, we
                 use the default pooling parameters.
@@ -987,7 +987,7 @@ class LLM:
 
         Args:
             prompts: The prompts to the LLM. You may pass a sequence of prompts
-                for batch inference. See :class:`~vllm.inputs.PromptType`
+                for batch inference. See {class}`~vllm.inputs.PromptType`
                 for more details about the format of each prompts.
             pooling_params: The pooling parameters for pooling. If None, we
                 use the default pooling parameters.
@@ -1031,7 +1031,7 @@ class LLM:
 
         Args:
             prompts: The prompts to the LLM. You may pass a sequence of prompts
-                for batch inference. See :class:`~vllm.inputs.PromptType`
+                for batch inference. See {class}`~vllm.inputs.PromptType`
                 for more details about the format of each prompts.
             use_tqdm: Whether to use tqdm to display the progress bar.
             lora_request: LoRA request to use for generation, if any.
@@ -1162,7 +1162,7 @@ class LLM:
             text_1: can be a single prompt or a list of prompts, in which
                 case it has to have the same length as the ``text_2`` list
             text_2: The texts to pair with the query to form the input
-                to the LLM. See :class:`~vllm.inputs.PromptType` for
+                to the LLM. See {class}`~vllm.inputs.PromptType` for
                 more details about the format of each prompts.
             use_tqdm: Whether to use tqdm to display the progress bar.
             lora_request: LoRA request to use for generation, if any.
@@ -1271,7 +1271,7 @@ class LLM:
 
     def wake_up(self, tags: Optional[list[str]] = None):
         """
-        Wake up the engine from sleep mode. See the :meth:`sleep` method
+        Wake up the engine from sleep mode. See the {meth}`sleep` method
         for more details.
         
         Args:

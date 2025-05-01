@@ -2866,7 +2866,7 @@ class PoolerConfig:
     pooling_type: Optional[str] = None
     """
     The pooling method of the pooling model. This should be a key in
-    :class:`vllm.model_executor.layers.pooler.PoolingType`.
+    {class}`vllm.model_executor.layers.pooler.PoolingType`.
     """
 
     normalize: Optional[bool] = None

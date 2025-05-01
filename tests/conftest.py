@@ -118,11 +118,11 @@ class _AudioAssets(_AudioAssetsBase):
 
 
 IMAGE_ASSETS = _ImageAssets()
-"""Singleton instance of :class:`_ImageAssets`."""
+"""Singleton instance of {class}`_ImageAssets`."""
 VIDEO_ASSETS = _VideoAssets()
-"""Singleton instance of :class:`_VideoAssets`."""
+"""Singleton instance of {class}`_VideoAssets`."""
 AUDIO_ASSETS = _AudioAssets()
-"""Singleton instance of :class:`_AudioAssets`."""
+"""Singleton instance of {class}`_AudioAssets`."""
 
 
 @pytest.fixture(scope="function", autouse=True)
@@ -730,7 +730,7 @@ def hf_runner():
 class VllmRunner:
     """
     The default value of some arguments have been modified from
-    :class:`~vllm.LLM` as follows:
+    {class}`~vllm.LLM` as follows:
 
     - `trust_remote_code`: Set to `True` instead of `False` for convenience.
     - `seed`: Set to `0` instead of `None` for test reproducibility.

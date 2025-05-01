@@ -475,7 +475,7 @@ class _AsyncLLMEngine(LLMEngine):
             *,
             inputs: Optional[PromptType] = None,  # DEPRECATED
     ) -> None:
-        """Async version of :meth:`add_request`."""
+        """Async version of {meth}`add_request`."""
         if inputs is not None:
             prompt = inputs
         assert prompt is not None and params is not None
@@ -578,20 +578,20 @@ async def build_guided_decoding_logits_processor_async(
 
 
 class AsyncLLMEngine(EngineClient):
-    """An asynchronous wrapper for :class:`LLMEngine`.
+    """An asynchronous wrapper for {class}`LLMEngine`.
 
-    This class is used to wrap the :class:`LLMEngine` class to make it
+    This class is used to wrap the {class}`LLMEngine` class to make it
     asynchronous. It uses asyncio to create a background loop that keeps
-    processing incoming requests. The :class:`LLMEngine` is kicked by the
+    processing incoming requests. The {class}`LLMEngine` is kicked by the
     generate method when there are requests in the waiting queue. The generate
-    method yields the outputs from the :class:`LLMEngine` to the caller.
+    method yields the outputs from the {class}`LLMEngine` to the caller.
 
     Args:
         log_requests: Whether to log the requests.
         start_engine_loop: If True, the background task to run the engine
             will be automatically started in the generate call.
-        *args: Arguments for :class:`LLMEngine`.
-        **kwargs: Arguments for :class:`LLMEngine`.
+        *args: Arguments for {class}`LLMEngine`.
+        **kwargs: Arguments for {class}`LLMEngine`.
     """
 
     _engine_class: Type[_AsyncLLMEngine] = _AsyncLLMEngine
@@ -981,7 +981,7 @@ class AsyncLLMEngine(EngineClient):
         from the LLMEngine to the caller.
 
         Args:
-            prompt: The prompt to the LLM. See :class:`~vllm.inputs.PromptType`
+            prompt: The prompt to the LLM. See {class}`~vllm.inputs.PromptType`
                 for more details about the format of each input.
             sampling_params: The sampling parameters of the request.
             request_id: The unique id of the request.
@@ -999,7 +999,7 @@ class AsyncLLMEngine(EngineClient):
         Details:
             - If the engine is not running, start the background loop,
               which iteratively invokes
-              :meth:`~vllm.engine.async_llm_engine.AsyncLLMEngine.engine_step`
+              {meth}`~vllm.engine.async_llm_engine.AsyncLLMEngine.engine_step`
               to process the waiting requests.
             - Add the request to the engine's `RequestTracker`.
               On the next background loop, this request will be sent to
@@ -1071,7 +1071,7 @@ class AsyncLLMEngine(EngineClient):
         from the LLMEngine to the caller.
 
         Args:
-            prompt: The prompt to the LLM. See :class:`~vllm.inputs.PromptType`
+            prompt: The prompt to the LLM. See {class}`~vllm.inputs.PromptType`
                 for more details about the format of each input.
             pooling_params: The pooling parameters of the request.
             request_id: The unique id of the request.
@@ -1087,7 +1087,7 @@ class AsyncLLMEngine(EngineClient):
         Details:
             - If the engine is not running, start the background loop,
               which iteratively invokes
-              :meth:`~vllm.engine.async_llm_engine.AsyncLLMEngine.engine_step`
+              {meth}`~vllm.engine.async_llm_engine.AsyncLLMEngine.engine_step`
               to process the waiting requests.
             - Add the request to the engine's `RequestTracker`.
               On the next background loop, this request will be sent to

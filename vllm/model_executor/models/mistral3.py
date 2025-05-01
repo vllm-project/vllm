@@ -564,7 +564,7 @@ class Mistral3ForConditionalGeneration(nn.Module, SupportsLoRA,
             pixel_values: The pixels in each input image.
 
         See also:
-            :class:`Mistral3ImagePixelInputs`
+            {class}`Mistral3ImagePixelInputs`
         """
         if intermediate_tensors is not None:
             inputs_embeds = None

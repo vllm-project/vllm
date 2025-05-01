@@ -275,7 +275,7 @@ class OpenAIServing:
         add_special_tokens: bool = True,
     ) -> TextTokensPrompt:
         """
-        A simpler implementation of :meth:`_tokenize_prompt_input_or_inputs`
+        A simpler implementation of {meth}`_tokenize_prompt_input_or_inputs`
         that assumes single input.
         """
         return next(
@@ -296,7 +296,7 @@ class OpenAIServing:
         add_special_tokens: bool = True,
     ) -> Iterator[TextTokensPrompt]:
         """
-        A simpler implementation of :meth:`_tokenize_prompt_input_or_inputs`
+        A simpler implementation of {meth}`_tokenize_prompt_input_or_inputs`
         that assumes multiple inputs.
         """
         for text in prompt_inputs:

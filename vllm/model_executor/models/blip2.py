@@ -682,7 +682,7 @@ class Blip2ForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP,
             pixel_values: The pixels in each input image.
         
         See also:
-            :class:`Blip2ImageInputs`
+            {class}`Blip2ImageInputs`
         """
 
         if intermediate_tensors is not None:

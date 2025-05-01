@@ -261,9 +261,9 @@ class RejectionSampler(SpecDecodeStochasticBaseSampler):
         True, then a token can be accepted, else it should be
         rejected.
 
-        Given :math:`q(\hat{x}_{n+1}|x_1, \dots, x_n)`, the probability of
-        :math:`\hat{x}_{n+1}` given context :math:`x_1, \dots, x_n` according
-        to the target model, and :math:`p(\hat{x}_{n+1}|x_1, \dots, x_n)`, the
+        Given {math}`q(\hat{x}_{n+1}|x_1, \dots, x_n)`, the probability of
+        {math}`\hat{x}_{n+1}` given context {math}`x_1, \dots, x_n` according
+        to the target model, and {math}`p(\hat{x}_{n+1}|x_1, \dots, x_n)`, the
         same conditional probability according to the draft model, the token
         is accepted with probability:
 
@@ -312,15 +312,15 @@ class RejectionSampler(SpecDecodeStochasticBaseSampler):
         target model is recovered (within hardware numerics).
 
         The probability distribution used in this rejection case is constructed
-        as follows. Given :math:`q(x|x_1, \dots, x_n)`, the probability of
-        :math:`x` given context :math:`x_1, \dots, x_n` according to the target
-        model and :math:`p(x|x_1, \dots, x_n)`, the same conditional probability
+        as follows. Given {math}`q(x|x_1, \dots, x_n)`, the probability of
+        {math}`x` given context {math}`x_1, \dots, x_n` according to the target
+        model and {math}`p(x|x_1, \dots, x_n)`, the same conditional probability
         according to the draft model:
 
         .. math::
             x_{n+1} \sim (q(x|x_1, \dots, x_n) - p(x|x_1, \dots, x_n))_+
 
-        where :math:`(f(x))_+` is defined as:
+        where {math}`(f(x))_+` is defined as:
 
         .. math::
             (f(x))_+ = \frac{\max(0, f(x))}{\sum_x \max(0, f(x))}

@@ -146,7 +146,7 @@ class Platform:
         return self._enum == PlatformEnum.OOT
 
     def is_cuda_alike(self) -> bool:
-        """Stateless version of :func:`torch.cuda.is_available`."""
+        """Stateless version of {func}`torch.cuda.is_available`."""
         return self._enum in (PlatformEnum.CUDA, PlatformEnum.ROCM)
 
     def is_sleep_mode_available(self) -> bool:
@@ -165,7 +165,7 @@ class Platform:
         cls,
         device_id: int = 0,
     ) -> Optional[DeviceCapability]:
-        """Stateless version of :func:`torch.cuda.get_device_capability`."""
+        """Stateless version of {func}`torch.cuda.get_device_capability`."""
         return None
 
     @classmethod
@@ -180,7 +180,7 @@ class Platform:
         The ``capability`` argument can either be:
 
         - A tuple ``(major, minor)``.
-        - An integer ``<major><minor>``. (See :meth:`DeviceCapability.to_int`)
+        - An integer ``<major><minor>``. (See {meth}`DeviceCapability.to_int`)
         """
         current_capability = cls.get_device_capability(device_id=device_id)
         if current_capability is None:

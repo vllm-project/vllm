@@ -308,8 +308,8 @@ class LRUCache(cachetools.LRUCache[_K, _V], Generic[_K, _V]):
         """
         Gets the cumulative number of hits and queries against this cache.
 
-        If :code:`delta=True`, instead gets these statistics
-        since the last call that also passed :code:`delta=True`.
+        If `delta=True`, instead gets these statistics
+        since the last call that also passed `delta=True`.
         """
         info = CacheInfo(hits=self._hits, total=self._total)
 
@@ -982,7 +982,7 @@ def flatten_2d_lists(lists: Iterable[Iterable[T]]) -> list[T]:
 
 def full_groupby(values: Iterable[_V], *, key: Callable[[_V], _K]):
     """
-    Unlike :class:`itertools.groupby`, groups are not broken by
+    Unlike {class}`itertools.groupby`, groups are not broken by
     non-contiguous data.
     """
     groups = defaultdict[_K, list[_V]](list)
@@ -1811,7 +1811,7 @@ class _PlaceholderBase:
     Disallows downstream usage of placeholder modules.
 
     We need to explicitly override each dunder method because
-    :meth:`__getattr__` is not called when they are accessed.
+    {meth}`__getattr__` is not called when they are accessed.
 
     See also:
         [Special method lookup](https://docs.python.org/3/reference/datamodel.html#special-lookup)

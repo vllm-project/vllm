@@ -13,7 +13,7 @@ Below, you can find an explanation of every engine argument:
 ```{eval-rst}
 .. argparse::
     :module: vllm.engine.arg_utils
-    :func: _engine_args_parser
+    {func} _engine_args_parser
     :prog: vllm serve
     :nodefaultconst:
     :markdownhelp:
@@ -27,7 +27,7 @@ Additional arguments are available to the asynchronous engine which is used for 
 ```{eval-rst}
 .. argparse::
     :module: vllm.engine.arg_utils
-    :func: _async_engine_args_parser
+    {func} _async_engine_args_parser
     :prog: vllm serve
     :nodefaultconst:
     :markdownhelp:

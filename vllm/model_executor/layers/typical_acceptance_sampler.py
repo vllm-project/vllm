@@ -113,8 +113,8 @@ class TypicalAcceptanceSampler(SpecDecodeDeterministicBaseSampler):
                 -H(p_{\text{original}}(
                     \cdot | x_1, x_2, \ldots, x_{n+k-1})) \right) \right)
         
-        where :math:`p_{\text{original}}` corresponds to target_probs 
-        and :math:`\epsilon` and :math:`\delta` correspond to hyperparameters
+        where {math}`p_{\text{original}}` corresponds to target_probs 
+        and {math}`\epsilon` and {math}`\delta` correspond to hyperparameters
         specified using self._posterior_threshold and self._posterior_alpha
 
         This method computes the posterior probabilities for the given

@@ -374,13 +374,13 @@ class _ModelRegistry:
         """
         Register an external model to be used in vLLM.
 
-        :code:`model_cls` can be either:
+        `model_cls` can be either:
 
-        - A :class:`torch.nn.Module` class directly referencing the model.
-        - A string in the format :code:`<module>:<class>` which can be used to
+        - A {class}`torch.nn.Module` class directly referencing the model.
+        - A string in the format `<module>:<class>` which can be used to
           lazily import the model. This is useful to avoid initializing CUDA
           when importing the model and thus the related error
-          :code:`RuntimeError: Cannot re-initialize CUDA in forked subprocess`.
+          `RuntimeError: Cannot re-initialize CUDA in forked subprocess`.
         """
         if not isinstance(model_arch, str):
             msg = f"`model_arch` should be a string, not a {type(model_arch)}"
