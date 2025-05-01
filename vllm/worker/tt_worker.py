@@ -117,7 +117,7 @@ class TTCacheEngine:
         Returns the number of KV heads per attention layer (per device). Makes the assumption
         that we are tensor parallel by min(number of devices, number of KV heads).
         '''
-        num_devices = len(device_config.device.get_devices())
+        num_devices = device_config.device.get_num_devices()
         num_kv_heads = model_config.get_num_kv_heads(parallel_config)
         num_kv_heads //= min(num_devices, num_kv_heads)  # TP = num_devices if num_devices < num_kv_heads
         return num_kv_heads
@@ -222,10 +222,10 @@ class TTWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
         """
         # TODO: Add proper implementation which runs profiling on TT devices
         if ("Llama-3.1-8B" in self.model_config.model and 
-            len(self.device_config.device.get_devices()) == 1):  # Llama8B on N150
+            self.device_config.device.get_num_devices() == 1):  # Llama8B on N150
             max_tokens_all_users = 65536
         elif ("Llama-3.2-90B" in self.model_config.model and 
-              len(self.device_config.device.get_devices()) == 8):  # Llama90B on T3K
+              self.device_config.device.get_num_devices() == 8):  # Llama90B on T3K
             max_tokens_all_users = 65536 # [INFO] avoid OOM for Llama-3.2-90B
         else:
             max_tokens_all_users = 131072  # Note: includes num vision tokens for multi-modal
@@ -469,8 +469,7 @@ class TTWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
             self.mesh_device.disable_and_clear_program_cache()
             
             # Dump device profiler
-            for device in self.mesh_device.get_devices():
-                ttnn.DumpDeviceProfiler(device)
+            ttnn.DumpDeviceProfiler(self.mesh_device)
 
             # Close devices
             ttnn.close_mesh_device(self.mesh_device)
