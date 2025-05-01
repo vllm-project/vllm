@@ -182,7 +182,7 @@ See [here](configuration-options) for some common options.
 
 :::{argparse}
 :module: vllm.entrypoints.openai.cli_args
-{func} create_parser_for_docs
+:func: create_parser_for_docs
 :prog: vllm serve
 :::
 
