@@ -414,9 +414,10 @@ def test_generation_config_loading():
 
 
 @pytest.mark.parametrize("pt_load_map_location", [
-    None,
     "cuda",
-    '{"": "cuda"}',
+    {
+        "": "cuda"
+    },
 ])
 def test_load_config_pt_load_map_location(pt_load_map_location):
     load_config = LoadConfig(pt_load_map_location=pt_load_map_location)

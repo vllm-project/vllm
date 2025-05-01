@@ -64,8 +64,7 @@ def optional_type(
     return _optional_type
 
 
-def optional_union_dict_and_str(
-        val: str) -> Optional[Union[str, dict[str, str]]]:
+def union_dict_and_str(val: str) -> Optional[Union[str, dict[str, str]]]:
     if not re.match("^{.*}$", val):
         return str(val)
     else:
@@ -198,7 +197,7 @@ def get_kwargs(cls: ConfigType) -> dict[str, Any]:
         elif contains_type(type_hints,
                            dict) and (contains_type(type_hints, str) or any(
                                is_not_builtin(th) for th in type_hints)):
-            kwargs[name]["type"] = optional_union_dict_and_str
+            kwargs[name]["type"] = union_dict_and_str
         elif contains_type(type_hints, dict):
             # Dict arguments will always be optional
             kwargs[name]["type"] = optional_type(json.loads)
