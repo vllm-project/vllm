@@ -32,7 +32,7 @@ from transformers import PretrainedConfig
 from vllm.model_executor.custom_op import CustomOp
 from vllm.platforms import current_platform
 
-if current_platform.is_cuda_alike():
+if current_platform.is_cuda():
     from vllm.vllm_flash_attn.layers.rotary import apply_rotary_emb
 
 
