@@ -1865,13 +1865,6 @@ class SchedulerConfig:
     This config has no static default. If left unspecified by the user, it will
     be set in `EngineArgs.create_engine_config` based on the usage context."""
 
-    cuda_graph_sizes: list[int] = field(default_factory=lambda: [512])
-    """Cuda graph capture sizes, default is 512.
-    1. if one value is provided, then the capture list would follow the pattern:
-        [1, 2, 4] + [i for i in range(8, cuda_graph_sizes + 1, 8)]
-    2. more than one value (e.g. 1 2 128) is provided,
-        then the capture list will follow the provided list."""
-
     max_num_seqs: int = None  # type: ignore
     """Maximum number of sequences to be processed in a single iteration.
 
@@ -1905,6 +1898,13 @@ class SchedulerConfig:
 
     NOTE: This will be replaced by speculative config in the future; it is
     present to enable correctness tests until then."""
+
+    cuda_graph_sizes: list[int] = field(default_factory=lambda: [512])
+    """Cuda graph capture sizes, default is 512.
+    1. if one value is provided, then the capture list would follow the pattern:
+        [1, 2, 4] + [i for i in range(8, cuda_graph_sizes + 1, 8)]
+    2. more than one value (e.g. 1 2 128) is provided,
+        then the capture list will follow the provided list."""
 
     delay_factor: float = 0.0
     """Apply a delay (of delay factor multiplied by previous
