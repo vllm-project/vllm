@@ -59,7 +59,7 @@ autodoc2_packages = [
 autodoc2_output_dir = "api"
 autodoc2_render_plugin = "myst"
 autodoc2_module_all_regexes = ["^vllm$"]
-autodoc2_hidden_objects = ["dunder", "inherited"]
+autodoc2_hidden_objects = ["undoc", "dunder", "private", "inherited"]
 autodoc2_index_template = None
 
 # Add any paths that contain templates here, relative to this directory.
