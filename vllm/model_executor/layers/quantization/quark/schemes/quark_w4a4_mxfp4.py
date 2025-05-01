@@ -54,7 +54,7 @@ class QuarkW4A4MXFP4(QuarkScheme):
                 qspec=weight_quant_spec,
                 quantizer=None,
                 real_quantized=True,
-                reorder=False,  # TODO: load from config
+                reorder=False,
                 float_dtype=self.out_dtype,
                 scale_shape=layer.weight_scale.shape,
                 zero_point_shape=None,
@@ -119,7 +119,7 @@ class QuarkW4A4MXFP4(QuarkScheme):
                 dq_w = self.weight_quantizer(layer.weight).to(self.out_dtype)
             else:
                 dq_w = layer.weight
-            qdq_x, _ = per_token_group_quant_mxfp4(x, 32)
+            qdq_x, _ = per_token_group_quant_mxfp4(x, OCP_MX_BLOCK_SIZE)
             return F.linear(qdq_x, dq_w, bias)
         else:
             raise NotImplementedError()
