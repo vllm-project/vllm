@@ -1637,7 +1637,7 @@ class ParallelConfig:
     """Use expert parallelism instead of tensor parallelism for MoE layers."""
 
     max_parallel_loading_workers: Optional[int] = None
-    """Maximum number of parallal loading workers when loading model
+    """Maximum number of parallel loading workers when loading model
     sequentially in multiple batches. To avoid RAM OOM when using tensor
     parallel and large models."""
 
