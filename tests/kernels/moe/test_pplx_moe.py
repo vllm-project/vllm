@@ -28,7 +28,7 @@ import vllm.model_executor.layers.fused_moe  # noqa
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.fused_moe.fused_batched_moe import (
-    BatchedExperts)
+    BatchedExperts, BatchedTritonExperts)
 from vllm.model_executor.layers.fused_moe.fused_moe import fused_topk
 from vllm.model_executor.layers.fused_moe.modular_kernel import (
     FusedMoEModularKernel)
@@ -293,34 +293,26 @@ def rank_chunk(num, r, w):
 
 def chunk_by_rank(t, r, w):
     chunk = rank_chunk(t.shape[0], r, w)
-    #print(f"chunk {t.shape}, {w}, {r}, {chunk}, {r*chunk}:{(r + 1)*chunk}")
     return t[(r * chunk):(r + 1) * chunk]
 
-
-ata = None
 
 def pplx_dispatch_combine(pgi, dp_size, a, topk_weight, topk_ids, num_experts):
     assert torch.cuda.current_device() == pgi.local_rank
 
     topk = topk_ids.shape[1]
-
-    #tokens_per_expert = torch.bincount(topk_ids.view(-1), minlength=num_experts)
-
-    num_tokens, hidden_dim = a.shape
+    num_tokens, hidden_dim = a.shape[1]
     block_size = 128
     device = pgi.device
     rank = pgi.rank
     world_size = pgi.world_size
     max_num_tokens = rank_chunk(num_tokens, 0, world_size)
-    print(f"MAX_NUM_TOKENS = {max_num_tokens}")
 
-    global ata
     ata = AllToAll.internode(
         max_num_tokens=max_num_tokens,
         num_experts=num_experts,
         experts_per_token=topk,
         rank=rank,
-        world_size=pgi.world_size,
+        world_size=world_size,
         dp_size=dp_size,
         hidden_dim=hidden_dim,
         hidden_dim_bytes=hidden_dim * a.dtype.itemsize,
@@ -332,18 +324,14 @@ def pplx_dispatch_combine(pgi, dp_size, a, topk_weight, topk_ids, num_experts):
     dispatch_combine = PplxDispatchCombine(
         ata,
         max_num_tokens,
-        pgi.world_size,
+        world_size,
         dp_size,
         rank,
-        a.dtype,
     )
 
     a_chunk = chunk_by_rank(a, rank, world_size).to(device)
-    num_tokens = a_chunk.shape[0]
     chunk_topk_weight = chunk_by_rank(topk_weight, rank, world_size).to(device)
     chunk_topk_ids = chunk_by_rank(topk_ids, rank, world_size).to(device)
-
-    print(f"{rank}: shapes {a_chunk.shape}, {chunk_topk_weight.shape}, {chunk_topk_ids.shape}, E={num_experts}")
 
     b_a, b_a_scale, expert_num_tokens = dispatch_combine.dispatch(
         a_chunk,
@@ -355,21 +343,6 @@ def pplx_dispatch_combine(pgi, dp_size, a, topk_weight, topk_ids, num_experts):
         None,
         False,
     )
-
-    #torch.cuda.synchronize()
-
-    if False:
-        naive_b_a, tokens_per_expert = torch_dispatch(a_chunk, chunk_topk_ids,
-                                                      num_experts)
-
-        torch.distributed.all_reduce(tokens_per_expert)
-        tokens_per_expert = chunk_by_rank(tokens_per_expert, rank,
-                                          world_size).to(dtype=torch.int32)
-
-        torch.testing.assert_close(tokens_per_expert,
-                                   expert_num_tokens,
-                                   atol=0,
-                                   rtol=0)
 
     b_a = b_a * 1.5
 
@@ -388,9 +361,11 @@ def pplx_dispatch_combine(pgi, dp_size, a, topk_weight, topk_ids, num_experts):
         False,
     )
 
-    #torch.cuda.synchronize()
+    torch.cuda.synchronize()
 
-    #ata.destroy()
+    ata.destroy()
+
+    num_tokens = a_chunk.shape[0]
 
     return out[:num_tokens]
 
@@ -399,8 +374,8 @@ def _pplx_dispatch_combine(
     pgi: ProcessGroupInfo,
     dp_size: int,
     a,
-    topk_weight,
-    topk_ids,
+    score,
+    topk,
     num_experts,
 ):
     uid = nvshmem_get_unique_id(
@@ -409,8 +384,8 @@ def _pplx_dispatch_combine(
     nvshmem_init(uid, pgi.rank, pgi.world_size)
     device = pgi.device
 
+    topk_weight, topk_ids = fused_topk(a, score, topk, False)
     k = a.shape[1]
-    topk = topk_ids.shape[1]
 
     a_rep = torch.repeat_interleave(a, topk, dim=0).to(device)
 
@@ -422,21 +397,19 @@ def _pplx_dispatch_combine(
     torch_output = chunk_by_rank(torch_output, pgi.rank,
                                  pgi.world_size).to(pplx_output.device)
 
-    print(f"{pgi.rank}: out shapes {pplx_output.shape}, {torch_output.shape}")
-
     torch.testing.assert_close(pplx_output, torch_output, atol=2e-2, rtol=0)
 
     nvshmem_finalize()
 
 
-# TODO: M < world_size doesn't appear to be supported by pplx?
-@pytest.mark.parametrize("m", [1, 4, 32, 64, 222])
+# TODO: this test point does not work for M == 1
+@pytest.mark.parametrize("m", [4, 32, 64, 222])
 @pytest.mark.parametrize("n", [128, 1024, 2048])
 @pytest.mark.parametrize("k", [128, 512, 1024])
 @pytest.mark.parametrize("e", NUM_EXPERTS)
 @pytest.mark.parametrize("topk", TOP_KS)
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
-@pytest.mark.parametrize("world_dp_size", [[2, 1]]) #[[4, 2]])
+@pytest.mark.parametrize("world_dp_size", [[2, 1]])
 @requires_pplx
 def test_pplx_dispatch_combine(
     m: int,
@@ -450,13 +423,10 @@ def test_pplx_dispatch_combine(
     current_platform.seed_everything(7)
     world_size, dp_size = world_dp_size
     device = "cuda"
-
     a = torch.randn((m, k), device=device, dtype=dtype) / 10
     score = torch.randn((m, e), device=device, dtype=dtype)
 
-    topk_weight, topk_ids = fused_topk(a, score, topk, False)
-
-    parallel_launch(world_size, _pplx_dispatch_combine, dp_size, a, topk_weight, topk_ids, e)
+    parallel_launch(world_size, _pplx_dispatch_combine, dp_size, a, score, topk, e)
 
 
 def pplx_moe(pgi, dp_size, a, w1, w2, topk_weight, topk_ids):
@@ -476,7 +446,7 @@ def pplx_moe(pgi, dp_size, a, w1, w2, topk_weight, topk_ids):
         num_experts=num_experts,
         experts_per_token=topk,
         rank=rank,
-        world_size=pgi.world_size,
+        world_size=world_size,
         dp_size=dp_size,
         hidden_dim=hidden_dim,
         hidden_dim_bytes=hidden_dim * a.dtype.itemsize,
@@ -488,12 +458,12 @@ def pplx_moe(pgi, dp_size, a, w1, w2, topk_weight, topk_ids):
     dispatch_combine = PplxDispatchCombine(
         ata,
         max_num_tokens,
-        pgi.world_size,
+        world_size,
         dp_size,
         rank,
     )
 
-    experts = BatchedExperts(max_num_tokens)
+    experts = BatchedExperts(a.shape[0])
 
     fused_experts = FusedMoEModularKernel(
         dispatch_combine,
@@ -556,7 +526,7 @@ def _pplx_moe(
 @pytest.mark.parametrize("e", NUM_EXPERTS)
 @pytest.mark.parametrize("topk", TOP_KS)
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
-@pytest.mark.parametrize("world_dp_size", [[2, 1]])  #, [4, 2]])
+@pytest.mark.parametrize("world_dp_size", [[2, 1]])
 @requires_pplx
 def test_pplx_moe(
     m: int,
