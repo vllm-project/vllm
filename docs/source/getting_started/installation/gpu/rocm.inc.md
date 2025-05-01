@@ -115,7 +115,6 @@ Currently, there are no pre-built ROCm wheels.
    - The ROCm version of PyTorch, ideally, should match the ROCm driver version.
     :::
 
-
 :::{tip}
 - For MI300x (gfx942) users, to achieve optimal performance, please refer to [MI300x tuning guide](https://rocm.docs.amd.com/en/latest/how-to/tuning-guides/mi300x/index.html) for performance optimization and tuning tips on system and workflow level.
   For vLLM, please refer to [vLLM performance optimization](https://rocm.docs.amd.com/en/latest/how-to/tuning-guides/mi300x/workload.html#vllm-performance-optimization).
