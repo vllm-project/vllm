@@ -69,21 +69,11 @@ class OvisProcessor(ProcessorMixin):
     image_processor_class = "AutoImageProcessor"
     tokenizer_class = "Qwen2Tokenizer"
 
-    def __init__(self, image_processor=None, tokenizer=None, chat_template=None, **kwargs):
-        self.image_token = "<image>" if not hasattr(tokenizer, "image_token") else tokenizer.image_token
-        self.image_pad_token = "<|image_pad|>" if not hasattr(tokenizer, "image_token") else tokenizer.image_token
+    def __init__(self, image_processor=None, tokenizer=None, chat_template=None, image_pad_token=None, **kwargs):
+        self.image_token = "<image>"
+        self.image_pad_token = "<|image_pad|>" if image_pad_token is None else image_pad_token
         super().__init__(image_processor, tokenizer, chat_template=chat_template)
 
-        # self.extra_special_tokens = {
-        #     "image_token": "<image>",
-        #     "image_atom": "<image_atom>",
-        #     "image_start": "<img>",
-        #     "image_prefix": "<pre>",
-        #     "image_col_sep": "<col>",
-        #     "image_row_sep": "<row>",
-        #     "image_end": "</img>",
-        #     'image_pad': '<image_pad>',
-        # }
         self.image_pad_token_id = self.tokenizer.get_vocab()[self.image_pad_token]
         self.extra_special_tokens = {
             "image_token": -200,
