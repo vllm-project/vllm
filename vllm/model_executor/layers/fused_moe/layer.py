@@ -267,7 +267,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             self, dispatch_combine: FusedMoEQuantizeDispatchCombine) -> bool:
         assert self.fused_experts == fused_experts
 
-        experts: FusedMoEPermuteExpertsUnpermute = None
+        experts: Optional[FusedMoEPermuteExpertsUnpermute] = None
 
         if isinstance(dispatch_combine,
                       (BatchedDispatchCombine, PplxDispatchCombine)):
