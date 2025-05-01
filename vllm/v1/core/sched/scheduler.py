@@ -1,12 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from __future__ import annotations
-from evaluator import eqaul_group, count_not_empty
+from .evaluator import eqaul_group, count_not_empty
 import time
 from collections import defaultdict, deque
 from collections.abc import Iterable
 from typing import Optional, Union
-
+from vllm.transformers_utils.tokenizer import get_tokenizer
 from vllm.config import VllmConfig
 from vllm.distributed.kv_events import EventPublisherFactory, KVEventBatch
 from vllm.distributed.kv_transfer.kv_connector.factory import (
@@ -31,7 +31,23 @@ from vllm.v1.spec_decode.metrics import SpecDecodingStats
 from vllm.v1.structured_output import StructuredOutputManager
 
 logger = init_logger(__name__)
+import logging
+logger_myown = logging.getLogger("my_custom_logger")
+logger_myown.setLevel(logging.INFO)  # or DEBUG if you want more detailed logs
 
+# Create handlers
+file_handler = logging.FileHandler("my_own_vllm_logs.txt")
+
+console_handler = logging.StreamHandler()
+
+# Set formatters and add it to handlers
+formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+file_handler.setFormatter(formatter)
+console_handler.setFormatter(formatter)
+
+# Add handlers to the logger
+logger_myown.addHandler(file_handler)
+logger_myown.addHandler(console_handler)
 
 class Scheduler(SchedulerInterface):
 
@@ -53,6 +69,9 @@ class Scheduler(SchedulerInterface):
         self.log_stats = log_stats
         self.structured_output_manager = structured_output_manager
         self.enable_dynasor_abort=True
+        self.tokenizer = get_tokenizer(self.vllm_config.model_config.tokenizer)
+        self.probe_answers={}
+        self.probe_responses={}
 
         # include_finished_set controls whether a separate set of finished
         # request ids should be included in the EngineCoreOutputs returned
@@ -675,6 +694,16 @@ class Scheduler(SchedulerInterface):
             self.add_request(new_request)
             print(f"[Scheduler] Created new request {new_request_id} from {parent_request.request_id}")
 
+    def obtain_answer(self,s):
+        stack = []
+        for i, c in enumerate(s):
+            if c == "{":
+                stack.append(c)
+            elif c == "}":
+                if not stack:
+                    return s[:i]
+                stack.pop()
+        return ""
     def update_from_output(
         self,
         scheduler_output: SchedulerOutput,
@@ -805,10 +834,15 @@ class Scheduler(SchedulerInterface):
             if not stopped:
                 new_running.append(request)
 
-            if self.enable_dynasor_abort:
+            if self.enable_dynasor_abort and "probe" in request.request_id:
+                    self.dynasor_threshold=3
                     uncertain_words = ["wait", "hold", "but", "okay", "no", "hmm"]
                     new_text = self.tokenizer.decode(new_token_ids)
-                    self.probe_responses[req_id].append(new_text)
+                
+                    if req_id not in self.probe_responses:
+                        self.probe_responses[req_id] = [new_text]
+                    else:
+                        self.probe_responses[req_id].append(new_text)
 
                     answer = self.obtain_answer(new_text)
                     print(f"Answer : {answer}")
@@ -845,7 +879,14 @@ class Scheduler(SchedulerInterface):
         return engine_core_outputs
 
     def add_request(self, request: Request) -> None:
-        self.waiting.append(request)
+        if "probe" in request.request_id:
+            self.waiting.insert(0, request)  # COT
+            logger_myown.info(f"Probe request {request.request_id} added to the front of the queue.")
+    
+        else:
+            self.waiting.append(request)
+            logger_myown.info(f"Normal request {request.request_id} added to the queue.")
+        
         self.requests[request.request_id] = request
         if self.log_stats:
             request.record_event(EngineCoreEventType.QUEUED)
@@ -887,6 +928,9 @@ class Scheduler(SchedulerInterface):
         self._cached_reqs_data.pop(request.request_id, None)
         del self.requests[request.request_id]
         self.finished_req_ids.add(request.request_id)
+        # COT
+        self.probe_answers.pop(request.request_id, None)
+        self.probe_responses.pop(request.request_id, None)
 
     def get_num_unfinished_requests(self) -> int:
         return len(self.waiting) + len(self.running)

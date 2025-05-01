@@ -1,7 +1,6 @@
 import vllm
 from vllm import LLM, SamplingParams
-import pandas as pd
-vllm.__version__
+# import pandas as pd
 llm = LLM(model="facebook/opt-125m", distributed_executor_backend="uni")
 
 
@@ -15,10 +14,10 @@ sampling_params = SamplingParams(
 
 tokenizer = llm.get_tokenizer()
 
-from datasets import load_dataset
+# from datasets import load_dataset
 
-ds = load_dataset("openai/gsm8k", "main", split="test")
-ds = ds.select(range(2))
+# ds = load_dataset("openai/gsm8k", "main", split="test")
+# ds = ds.select(range(2))
 import time
 questions = ['What is 2^3?', 'What is 2^10?']
 responses = []
