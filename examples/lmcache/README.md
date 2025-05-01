@@ -8,8 +8,8 @@ This example demonstrates how to run LMCache with disaggregated prefill using NI
 
 ### Prerequisites
 
-- Install [LMCache](https://github.com/ai-dynamo/lmcache)
-- Install [NIXL](https://github.com/ai-dynamo/nixl)
+- Install [LMCache](https://github.com/LMCache/LMCache). You can simply run `pip install lmcache`.
+- Install [NIXL](https://github.com/ai-dynamo/nixl).
 - At least 2 GPUs
 - Valid Hugging Face token (HF_TOKEN) for Llama 3.1 8B Instruct.
 
@@ -44,8 +44,8 @@ The main script generates several log files:
 
 ## 2. CPU Offload Examples
 
-- `cpu_offload_lmcache_v0.py` - CPU offloading implementation for vLLM v0
-- `cpu_offload_lmcache_v1.py` - CPU offloading implementation for vLLM v1
+- `python cpu_offload_lmcache.py -v v0` - CPU offloading implementation for vLLM v0
+- `python cpu_offload_lmcache.py -v v1` - CPU offloading implementation for vLLM v1
 
 ## 3. KV Cache Sharing
 
