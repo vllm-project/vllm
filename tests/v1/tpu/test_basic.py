@@ -8,6 +8,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 import pytest
+from torch_xla._internal import tpu
 
 from vllm.platforms import current_platform
 
@@ -65,15 +66,19 @@ def test_basic(
         assert "1024" in output or "0, 1" in output
 
 
+TP_SIZE_8 = 8
+
+
 @pytest.mark.skipif(not current_platform.is_tpu(),
                     reason="This is a test for TPU only")
+@pytest.mark.skipif(tpu.num_available_chips() < TP_SIZE_8)
 def test_gemma3_27b_with_text_input_and_tp(
     vllm_runner: type[VllmRunner],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     model = "google/gemma-3-27b-it"
     max_tokens = 16
-    tensor_parallel_size = 8
+    tensor_parallel_size = TP_SIZE_8
     max_num_seqs = 4
     prompts = [
         "A robot may not injure a human being",
