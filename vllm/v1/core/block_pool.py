@@ -340,4 +340,3 @@ class BlockPool:
         events = self.kv_event_queue
         self.kv_event_queue = []
         return events
-
