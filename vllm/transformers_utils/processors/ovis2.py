@@ -222,7 +222,7 @@ class OvisProcessor(ProcessorMixin):
 
         # If only images were provided
         return BatchFeature(data=image_features)
-    
+
     def _tokenize_with_image_symbol(self, text_list: list[str]) -> torch.LongTensor:
         batch_token_ids = []
         for text in text_list:
@@ -245,7 +245,7 @@ class OvisProcessor(ProcessorMixin):
     def get_token_value(self, tok):
         return self.extra_special_tokens[tok]
 
-    def construct_image_inductors(self, grid):
+    def construct_image_indicators(self, grid):
         image_placeholders = [self.get_token_value('image_start'),
                               self.get_token_value('image_atom'),
                               self.get_token_value('image_prefix')]
@@ -262,19 +262,7 @@ class OvisProcessor(ProcessorMixin):
 
     def construct_image_placeholders(self, grid):
 
-        image_placeholders = [self.get_token_value('image_start'),
-                              self.get_token_value('image_atom'),
-                              self.get_token_value('image_prefix')]
-        if grid[0] * grid[1] > 1:
-            for r in range(grid[0]):
-                for c in range(grid[1]):
-                    image_placeholders.append(self.get_token_value('image_atom') )
-                    if c < grid[1] - 1:
-                        image_placeholders.append(self.get_token_value('image_col_sep'))
-                if r < grid[0] - 1:
-                    image_placeholders.append(self.get_token_value('image_row_sep'))
-        image_placeholders.append(self.get_token_value('image_end'))
-        # return image_placeholders
+        image_placeholders = self.construct_image_indicators(grid)
 
         image_atom_token_id = self.get_token_value('image_atom')
         # Extract the padding token ID from tokenizer
