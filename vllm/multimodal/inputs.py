@@ -116,14 +116,14 @@ class PlaceholderRange:
 
     Example:
 
-        Prompt: `AAAA BBBB What is in these images?`
+    Prompt: `AAAA BBBB What is in these images?`
 
-        Images A and B will have:
+    Images A and B will have:
 
-        .. code-block::
-
-            A: PlaceholderRange(offset=0, length=4)
-            B: PlaceholderRange(offset=5, length=4)
+    ```
+    A: PlaceholderRange(offset=0, length=4)
+    B: PlaceholderRange(offset=5, length=4)
+    ```
     """
 
     offset: int
@@ -390,17 +390,17 @@ class MultiModalFieldConfig:
 
         Example:
 
-            .. code-block::
+        ```
+        Input:
+            Data: [[AAAA]
+                [BBBB]
+                [CCCC]]
 
-                Input:
-                    Data: [[AAAA]
-                        [BBBB]
-                        [CCCC]]
-
-                Output:
-                    Element 1: [AAAA]
-                    Element 2: [BBBB]
-                    Element 3: [CCCC]
+        Output:
+            Element 1: [AAAA]
+            Element 2: [BBBB]
+            Element 3: [CCCC]
+        ```
         """
         return MultiModalFieldConfig(
             field=MultiModalBatchedField(),
@@ -425,35 +425,35 @@ class MultiModalFieldConfig:
 
         Example:
 
-            .. code-block::
-        
-                Given:
-                    slices: [slice(0, 3), slice(3, 7), slice(7, 9)]
+        ```
+        Given:
+            slices: [slice(0, 3), slice(3, 7), slice(7, 9)]
 
-                Input:
-                    Data: [AAABBBBCC]
+        Input:
+            Data: [AAABBBBCC]
 
-                Output:
-                    Element 1: [AAA]
-                    Element 2: [BBBB]
-                    Element 3: [CC]
-            
-            .. code-block::
+        Output:
+            Element 1: [AAA]
+            Element 2: [BBBB]
+            Element 3: [CC]
+        ```
 
-                Given:
-                    slices: [
-                        (slice(None), slice(0, 3)),
-                        (slice(None), slice(3, 7)),
-                        (slice(None), slice(7, 9))]
-                    dim: 1
+        ```
+        Given:
+            slices: [
+                (slice(None), slice(0, 3)),
+                (slice(None), slice(3, 7)),
+                (slice(None), slice(7, 9))]
+            dim: 1
 
-                Input:
-                    Data: [[A],[A],[A],[B],[B],[B],[B],[C],[C]]
+        Input:
+            Data: [[A],[A],[A],[B],[B],[B],[B],[C],[C]]
 
-                Output:
-                    Element 1: [[A],[A],[A]]
-                    Element 2: [[B],[B],[B],[B]]
-                    Element 3: [[C],[C]]
+        Output:
+            Element 1: [[A],[A],[A]]
+            Element 2: [[B],[B],[B],[B]]
+            Element 3: [[C],[C]]
+        ```
         """
         return MultiModalFieldConfig(
             field=MultiModalFlatField(slices=slices, dim=dim),
@@ -477,33 +477,32 @@ class MultiModalFieldConfig:
 
         Example:
 
-            .. code-block::
-        
-                Given:
-                    size_per_item: [3, 4, 2]
+        ```
+        Given:
+            size_per_item: [3, 4, 2]
 
-                Input:
-                    Data: [AAABBBBCC]
+        Input:
+            Data: [AAABBBBCC]
 
-                Output:
-                    Element 1: [AAA]
-                    Element 2: [BBBB]
-                    Element 3: [CC]
+        Output:
+            Element 1: [AAA]
+            Element 2: [BBBB]
+            Element 3: [CC]
+        ```
 
-            
-            .. code-block::
+        ```
+        Given:
+            slices: [3, 4, 2]
+            dim: 1
 
-                Given:
-                    slices: [3, 4, 2]
-                    dim: 1
+        Input:
+            Data: [[A],[A],[A],[B],[B],[B],[B],[C],[C]]
 
-                Input:
-                    Data: [[A],[A],[A],[B],[B],[B],[B],[C],[C]]
-
-                Output:
-                    Element 1: [[A],[A],[A]]
-                    Element 2: [[B],[B],[B],[B]]
-                    Element 3: [[C],[C]]
+        Output:
+            Element 1: [[A],[A],[A]]
+            Element 2: [[B],[B],[B],[B]]
+            Element 3: [[C],[C]]
+        ```
     
         See also:
             {func}`MultiModalFieldConfig.flat`
@@ -535,19 +534,19 @@ class MultiModalFieldConfig:
 
         Example:
 
-            .. code-block::
-        
-                Given:
-                    batch_size: 4
+        ```
+        Given:
+            batch_size: 4
 
-                Input:
-                    Data: [XYZ]
+        Input:
+            Data: [XYZ]
 
-                Output:
-                    Element 1: [XYZ]
-                    Element 2: [XYZ]
-                    Element 3: [XYZ]
-                    Element 4: [XYZ]
+        Output:
+            Element 1: [XYZ]
+            Element 2: [XYZ]
+            Element 3: [XYZ]
+            Element 4: [XYZ]
+        ```
         """
         return MultiModalFieldConfig(
             field=MultiModalSharedField(batch_size),

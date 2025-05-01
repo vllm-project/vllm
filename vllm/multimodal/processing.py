@@ -213,46 +213,46 @@ class PromptInsertion(PromptUpdate):
 
     Example:
 
-        For each image, insert a number of ``<image>`` feature placeholders
-        equal to the feature size of the vision encoder after the ``<s>`` token:
+    For each image, insert a number of ``<image>`` feature placeholders
+    equal to the feature size of the vision encoder after the ``<s>`` token:
 
-        .. code-block:: python
+    ```python
+    PromptInsertion(
+        modality="image",
+        target="<s>",
+        insertion="<image>" * image_feature_size,
+    )
+    ```
 
-            PromptInsertion(
-                modality="image",
-                target="<s>",
-                insertion="<image>" * image_feature_size,
-            )
+    Insert these tokens at the start of the prompt:
 
-        Insert these tokens at the start of the prompt:
+    ```python
+    PromptInsertion(
+        modality="image",
+        target=PromptIndexTargets.start(),
+        insertion="<image>" * image_feature_size,
+    )
+    ```
 
-        .. code-block:: python
+    Insert these tokens after a prefix ``Images:``:
 
-            PromptInsertion(
-                modality="image",
-                target=PromptIndexTargets.start(),
-                insertion="<image>" * image_feature_size,
-            )
+    ```python
+    PromptInsertion(
+        modality="image",
+        target=PromptIndexTargets.prefix("Images:"),
+        insertion="<image>" * image_feature_size,
+    )
+    ```
 
-        Insert these tokens after a prefix ``Images:``:
+    Insert these tokens at the end of the prompt:
 
-        .. code-block:: python
-
-            PromptInsertion(
-                modality="image",
-                target=PromptIndexTargets.prefix("Images:"),
-                insertion="<image>" * image_feature_size,
-            )
-
-        Insert these tokens at the end of the prompt:
-
-        .. code-block:: python
-
-            PromptInsertion(
-                modality="image",
-                target=PromptIndexTargets.end(),
-                insertion="<image>" * image_feature_size,
-            )
+    ```python
+    PromptInsertion(
+        modality="image",
+        target=PromptIndexTargets.end(),
+        insertion="<image>" * image_feature_size,
+    )
+    ```
     """
 
     insertion: PromptUpdateContent = field(repr=False)
@@ -280,51 +280,51 @@ class PromptReplacement(PromptUpdate):
 
     Example:
 
-        For each image, replace one ``<image>`` input placeholder in the prompt
-        with a number of ``<image>`` feature placeholders
-        equal to the feature size of the vision encoder:
+    For each image, replace one ``<image>`` input placeholder in the prompt
+    with a number of ``<image>`` feature placeholders
+    equal to the feature size of the vision encoder:
 
-        .. code-block:: python
+    ```python
+    PromptReplacement(
+        modality="image",
+        target="<image>",
+        replacement="<image>" * image_feature_size,
+    )
+    ```
 
-            PromptReplacement(
-                modality="image",
-                target="<image>",
-                replacement="<image>" * image_feature_size,
-            )
+    As above, but further pad the feature placeholders with ``<image_bos>``
+    and `<image_eos>``, which are not supposed to be passed to the vision
+    encoder:
 
-        As above, but further pad the feature placeholders with ``<image_bos>``
-        and `<image_eos>``, which are not supposed to be passed to the vision
-        encoder:
+    ```python
+    PromptReplacement(
+        modality="image",
+        target="<image>",
+        replacement=PromptUpdateDetails(
+            full="".join([
+                "<image_bos>",
+                "<image>" * image_feature_size,
+                "<image_eos>",
+            ]),
+            features="<image>" * image_feature_size,
+        ),
+    )
+    ```
 
-        .. code-block:: python
+    To avoid unnecessary tokenization during prompt replacement,
+    we recommended passing token sequences instead of text:
 
-            PromptReplacement(
-                modality="image",
-                target="<image>",
-                replacement=PromptUpdateDetails(
-                    full="".join([
-                        "<image_bos>",
-                        "<image>" * image_feature_size,
-                        "<image_eos>",
-                    ]),
-                    features="<image>" * image_feature_size,
-                ),
-            )
-
-        To avoid unnecessary tokenization during prompt replacement,
-        we recommended passing token sequences instead of text:
-
-        .. code-block:: python
-
-            PromptReplacement(
-                modality="image",
-                target=[image_token_id],
-                replacement=PromptUpdateDetails(
-                    full=([image_bos_id] + [image_token_id] * image_feature_size
-                          + [image_eos_id]),
-                    features=[image_token_id] * image_feature_size,
-                ),
-            )
+    ```python
+    PromptReplacement(
+        modality="image",
+        target=[image_token_id],
+        replacement=PromptUpdateDetails(
+            full=([image_bos_id] + [image_token_id] * image_feature_size
+                    + [image_eos_id]),
+            features=[image_token_id] * image_feature_size,
+        ),
+    )
+    ```
     """
 
     replacement: PromptUpdateContent = field(repr=False)
