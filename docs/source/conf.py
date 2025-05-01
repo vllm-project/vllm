@@ -133,11 +133,11 @@ if READTHEDOCS_VERSION_TYPE == "tag":
 
 
 def fix_mteb_docs():
-     # mteb installed a library named docs for python
-     # Let's delete it
-     import site
-     import shutil
-     shutil.rmtree(site.getsitepackages()[0] + "/docs")
+    # mteb installed a library named docs for python
+    # Let's delete it
+    import shutil
+    import site
+    shutil.rmtree(site.getsitepackages()[0] + "/docs", ignore_errors=True)
 
 
 # Generate additional rst documentation here.
