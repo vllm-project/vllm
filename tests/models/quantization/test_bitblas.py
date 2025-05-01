@@ -8,8 +8,6 @@ bitblas/GPTQ models are in the top 3 selections of each other.
 Note: bitblas internally uses locks to synchronize the threads. This can
 result in very slight nondeterminism for bitblas. As a result, we re-run the 
 test up to 3 times to see if we pass.
-
-Run `pytest tests/models/test_bitblas.py`.
 """
 from dataclasses import dataclass
 

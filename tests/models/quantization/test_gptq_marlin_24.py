@@ -4,8 +4,6 @@
 Note: GPTQ and Marlin_24 do not have bitwise correctness.
 As a result, in this test, we just confirm that the top selected tokens of the
 Marlin/GPTQ models are in the top 3 selections of each other.
-
-Run `pytest tests/models/test_marlin_24.py`.
 """
 from dataclasses import dataclass
 

@@ -395,10 +395,8 @@ steps:
   - csrc/
   - vllm/model_executor/layers/quantization
   - tests/quantization
-  - tests/models/quantization
   commands:
   - VLLM_TEST_FORCE_LOAD_FORMAT=auto pytest -v -s quantization
-  - pytest -v -s models/quantization
 
 - label: LM Eval Small Models # 53min
   working_dir: "/vllm-workspace/.buildkite/lm-eval-harness"
@@ -508,6 +506,14 @@ steps:
   commands:
     - pip install git+https://github.com/TIGER-AI-Lab/Mantis.git
     - pytest -v -s models/multimodal/generation/test_common.py -m 'split(group=1) and not core_model'
+
+- label: Quantized Models Test
+  #mirror_hardwares: [amd]
+  source_file_dependencies:
+  - vllm/model_executor/layers/quantization
+  - tests/models/quantization
+  commands:
+    - pytest -v -s models/quantization
 
 # This test is used only in PR development phase to test individual models and should never run on main
 - label: Custom Models Test
