@@ -19,13 +19,7 @@ PADDING_SLOT_ID = -1
 
 
 class TreeArray:
-    """Array-based representation of a tree for efficient GPU memory usage.
-    
-    This class implements a tree structure using contiguous PyTorch tensors
-    rather than linked objects, which is much more efficient for GPU operations.
-    It allows for building and traversing a tree of tokens for tree-draft
-    speculative decoding.
-    """
+    """Array-based representation of a tree."""
 
     def __init__(self, max_nodes: int, device: torch.device):
         """Initialize a tree with arrays to store node data.
@@ -38,29 +32,28 @@ class TreeArray:
         self.device = device
 
         # Node storage using contiguous tensors for efficient GPU access
-        # Each position i in these arrays corresponds to data for node i
         self.token_ids = torch.zeros(max_nodes,
                                      dtype=torch.int64,
-                                     device=device)  # Token ID for each node
+                                     device=device)
         self.positions = torch.zeros(max_nodes,
                                      dtype=torch.int64,
-                                     device=device)  # Position in sequence
+                                     device=device)
         self.parent_indices = torch.full(
             (max_nodes, ), -1, dtype=torch.int64,
             device=device)  # Index of parent (-1 for root)
         self.local_probs = torch.zeros(max_nodes,
                                        dtype=torch.float32,
                                        device=device)  # P(token|parent)
-        self.global_probs = torch.zeros(
-            max_nodes, dtype=torch.float32,
-            device=device)  # Joint probability of path
+        self.global_probs = torch.zeros(max_nodes,
+                                        dtype=torch.float32,
+                                        device=device)
         self.hidden_states = None
 
         # Tree structure tracking
         self.depths = torch.full((max_nodes, ),
                                  -1,
                                  dtype=torch.int32,
-                                 device=device)  # Depth level of each node
+                                 device=device)
 
         # Sequence length for each node
         self.seq_lens = torch.ones(max_nodes, dtype=torch.int32, device=device)
@@ -91,7 +84,6 @@ class TreeArray:
             Index of the newly added node
         """
         if self.size >= self.max_nodes:
-            # Tree is full, can't add more nodes
             return -1
 
         node_idx = self.size
@@ -112,17 +104,14 @@ class TreeArray:
             self.seq_lens[node_idx] = 1
 
         # Initialize hidden states tensor if this is the first use
-        # Only allocate memory for hidden states when actually needed
         if hidden_state is not None:
             if self.hidden_states is None:
                 hidden_size = hidden_state.shape[-1]
-                # Initialize the hidden_states tensor
                 self.hidden_states = torch.zeros((self.max_nodes, hidden_size),
                                                  dtype=hidden_state.dtype,
                                                  device=self.device)
 
-            # Now copy the hidden state to the appropriate index
-            if self.hidden_states is not None:  # This check satisfies mypy
+            if self.hidden_states is not None:
                 self.hidden_states[node_idx] = hidden_state
 
         return node_idx
@@ -136,17 +125,11 @@ class TreeArray:
         Returns:
             List of node indices at the specified depth
         """
-        # Find nodes at this depth using a mask operation
-        # This is more efficient than iterating through all nodes
         nodes = (self.depths[:self.size] == depth).nonzero().flatten().tolist()
         return nodes
 
     def select_top_k_by_global_prob(self, node_indices: list, k: int) -> list:
         """Select top-k nodes from a list of node indices by global probability.
-        
-        This is a key method for tree-draft as it determines which branches 
-        of the tree to expand in each iteration, prioritizing the most 
-        promising paths.
         
         Args:
             node_indices: List of node indices to choose from
@@ -175,10 +158,6 @@ class TreeArray:
 
     def get_selected_nodes_and_ids(self, max_tokens: int) -> list:
         """Get a list of token IDs from the most probable path in the tree.
-        
-        This extracts the final sequence of token IDs to be used 
-        as draft tokens, finding the most likely path through the tree 
-        based on conditional probabilities.
         
         Args:
             max_tokens: Maximum number of tokens to return
