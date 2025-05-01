@@ -25,7 +25,7 @@ The available APIs depend on the type of model that is being run:
 Please refer to the above pages for more details about each API.
 
 :::{seealso}
-[API Reference](/api/offline_inference/index)
+[API Reference](#offline-inference-api)
 :::
 
 (configuration-options)=
