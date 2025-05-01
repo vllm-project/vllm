@@ -621,7 +621,8 @@ class OpenAIServingChat(OpenAIServing):
                             # process the `content`. Only keep 'content',
                             # remove 'reasoning_content'
                             if reasoning_parser.is_reasoning_end(
-                                    list(output.token_ids)):
+                                    input_ids=list(output.token_ids),
+                                    previous_ids=previous_token_ids):
                                 if delta_message and delta_message.content:
                                     # This need to be added to next `delta_text`
                                     current_text = delta_message.content
@@ -682,7 +683,8 @@ class OpenAIServingChat(OpenAIServing):
                             # Remove the text and token ids related
                             # to 'reasoning_content'.
                             if reasoning_parser.is_reasoning_end(
-                                    list(output.token_ids)):
+                                    input_ids=list(output.token_ids),
+                                    previous_ids=previous_token_ids):
                                 reasoning_end_arr[i] = True
                                 current_token_ids =  \
                                     reasoning_parser.extract_content_ids(
