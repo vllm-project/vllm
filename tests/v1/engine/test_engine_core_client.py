@@ -306,6 +306,7 @@ def test_kv_cache_events(
                 eos_token_id=None,
                 arrival_time=time.time(),
                 lora_request=None,
+                cache_salt=None,
             )
             client.add_request(request)
 
