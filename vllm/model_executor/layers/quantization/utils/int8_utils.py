@@ -85,6 +85,18 @@ def block_dequant(
     return x_dq_block
 
 
+if current_platform.is_rocm():
+
+    @triton.jit
+    def round_int8(x):
+        return x.to(tl.int8)
+else:
+
+    @triton.jit
+    def round_int8(x):
+        return tl.extra.cuda.libdevice.round(x).to(tl.int8)
+
+
 @triton.jit
 def _per_token_quant_int8(
     x_ptr,
@@ -106,7 +118,7 @@ def _per_token_quant_int8(
     absmax = tl.maximum(tl.max(tl.abs(x)), 1e-10)
     scale_x = absmax / 127
     x_q = x * (127 / absmax)
-    x_q = tl.extra.cuda.libdevice.round(x_q).to(tl.int8)
+    x_q = round_int8(x_q)
 
     tl.store(xq_ptr + row_id * stride_xq + cols, x_q, mask=mask)
     tl.store(scale_ptr + row_id, scale_x)
