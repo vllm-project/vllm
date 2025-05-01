@@ -6,6 +6,7 @@ from typing import Optional
 import pytest
 import torch
 
+from vllm.distributed.kv_events import AllBlocksCleared, BlockRemoved
 from vllm.multimodal.inputs import MultiModalKwargs, PlaceholderRange
 from vllm.sampling_params import SamplingParams
 from vllm.utils import sha256
@@ -14,7 +15,7 @@ from vllm.v1.core.kv_cache_manager import KVCacheManager, Request
 from vllm.v1.core.kv_cache_utils import (BlockHashType, KVCacheBlock,
                                          hash_block_tokens)
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
-                                        KVCacheGroupSpec)
+                                        KVCacheGroupSpec, SlidingWindowSpec)
 
 
 def make_request(request_id,
@@ -48,9 +49,10 @@ def make_kv_cache_config(block_size: int, num_blocks: int) -> KVCacheConfig:
         num_blocks=num_blocks,
         tensors={},
         kv_cache_groups=[
-            KVCacheGroupSpec(['layer'],
-                             FullAttentionSpec(block_size, 1, 1, torch.float32,
-                                               False))
+            KVCacheGroupSpec(
+                ["layer"],
+                FullAttentionSpec(block_size, 1, 1, torch.float32, False),
+            )
         ],
     )
 
@@ -784,6 +786,60 @@ def test_prefix_cache_stats_disabled():
     assert manager.prefix_cache_stats is None
 
 
+@pytest.mark.parametrize("blocks_to_cache", [2, 3, 10])
+def test_kv_cache_events(blocks_to_cache: int):
+    block_size = 16
+    num_blocks = blocks_to_cache + 1
+
+    # Allocate Blocks
+    # Should see a single block stored event with a blocks_to_cache number of
+    # block hashes
+    # take_events should reset the kv_event_queue
+    manager = KVCacheManager(
+        make_kv_cache_config(block_size, num_blocks),
+        max_model_len=8192,
+        enable_caching=True,
+        enable_kv_cache_events=True,
+    )
+
+    num_tokens = block_size * blocks_to_cache
+    req0 = make_request("0", list(range(num_tokens)))
+    _ = manager.allocate_slots(req0, num_tokens)
+    events = manager.take_events()
+
+    block = events[-1]
+    assert (len(block.block_hashes) == blocks_to_cache == len(
+        manager.block_pool.cached_block_hash_to_block))
+    assert len(block.token_ids) == block.block_size * len(block.block_hashes)
+    assert len(manager.block_pool.kv_event_queue) == 0
+
+    stored_block_hash = block.block_hashes
+
+    # Remove blocks and send another request
+    # Should see block_to_cache number of removed block events and a new block
+    # stored event
+    manager.free(req0)
+    req1 = make_request("1", list(range(num_tokens)))
+    _ = manager.allocate_slots(req1, num_tokens)
+    events = manager.take_events()
+
+    for blocks in events[:-1]:
+        assert blocks.block_hashes[0] in stored_block_hash
+    assert len(events) == blocks_to_cache + 1
+    assert (isinstance(events[-2], BlockRemoved))
+    assert (len(events[-1].block_hashes) == blocks_to_cache == len(
+        manager.block_pool.cached_block_hash_to_block))
+
+    # All Blocks Cleared
+    # Should see a single all blocks cleared event
+    manager.free(req1)
+    manager.reset_prefix_cache()
+    events = manager.take_events()
+
+    assert isinstance(events[-1], AllBlocksCleared)
+    assert len(manager.block_pool.cached_block_hash_to_block) == 0
+
+
 def test_eagle_enabled_removes_last_block():
     """Verify Eagle does NOT remove blocks when request 
     length is divisible by block size."""
@@ -808,11 +864,11 @@ def test_eagle_enabled_removes_last_block():
     req_eagle = make_request("eagle_divisible", token_ids)
     computed_blocks, num_tokens = manager.get_computed_blocks(req_eagle)
 
-    # Should retain 2 blocks:
+    # Should retain 1 block:
     # 1. Original 3 blocks → pop last hash → 2 matched blocks
-    # 2. last_block_hash is not None → Eagle pop is not SKIPPED
+    # 2. drop last matched block → 1 remaining block
     assert len(computed_blocks.blocks) == 1
-    assert num_tokens == 1 * block_size  # 32 tokens
+    assert num_tokens == 1 * block_size  # 16 tokens
 
 
 def test_eagle_with_partial_blocks():
@@ -839,3 +895,59 @@ def test_eagle_with_partial_blocks():
     # Original match: 2 full blocks → Eagle removes 1 → 1 remaining
     assert len(computed_blocks.blocks) == 1
     assert num_tokens == 1 * block_size
+
+
+def test_eagle_with_sliding_window():
+    """Test Eagle behavior with sliding window."""
+    block_size = 16
+    sliding_window_spec = SlidingWindowSpec(
+        block_size=block_size,
+        num_kv_heads=1,
+        head_size=1,
+        dtype=torch.float32,
+        sliding_window=block_size,
+        use_mla=False,
+    )
+    manager = KVCacheManager(
+        KVCacheConfig(
+            num_blocks=10,
+            tensors={},
+            kv_cache_groups=[KVCacheGroupSpec(['layer'], sliding_window_spec)],
+        ),
+        max_model_len=8192,
+        enable_caching=True,
+        use_eagle=True,
+    )
+
+    # 2 full blocks + 5 tokens (non-divisible length)
+    token_ids = [0] * (2 * block_size + 5)
+    req = make_request("partial_block_test", token_ids)
+
+    # Prime the cache
+    computed_blocks, _ = manager.get_computed_blocks(req)
+    manager.allocate_slots(req, len(token_ids), computed_blocks)
+    # record the block hash of the first block in the request for later use
+    block_hash_first_block = manager.req_to_block_hashes[req.request_id][0]
+    assert block_hash_first_block is not None
+    manager.free(req)
+
+    # New request with Eagle enabled
+    req_eagle = make_request("partial_eagle", token_ids)
+    computed_blocks, num_tokens = manager.get_computed_blocks(req_eagle)
+    # Original match: 2 full blocks → Eagle removes 1 → 1 remaining
+    assert len(computed_blocks.blocks) == 1
+    assert num_tokens == 1 * block_size
+
+    # Evict the first block in the request
+    assert manager.block_pool.get_cached_block(
+        block_hash_first_block) is not None
+    manager.block_pool.cached_block_hash_to_block.pop(block_hash_first_block)
+
+    # New request
+    req_after_evict = make_request("partial_eagle_after_evict", token_ids)
+    computed_blocks, num_tokens = manager.get_computed_blocks(req_after_evict)
+    # Cache miss. The only hit prefix is [NULL_BLOCK, BLOCK_2] if eagle is
+    # not considered. But after dropping the last matched block due to eagle,
+    # there will be no matched prefix.
+    assert len(computed_blocks) == 0
+    assert num_tokens == 0
