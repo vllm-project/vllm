@@ -9,6 +9,7 @@ from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.reasoning import ReasoningParserManager
 from vllm.transformers_utils.tokenizer_group import init_tokenizer_from_configs
+from vllm.utils import LazyLoader
 from vllm.v1.structured_output.backend_guidance import GuidanceBackend
 from vllm.v1.structured_output.backend_types import (StructuredOutputBackend,
                                                      StructuredOutputGrammar)
@@ -21,6 +22,8 @@ if TYPE_CHECKING:
 
     from vllm.reasoning import ReasoningParser
     from vllm.v1.request import Request
+else:
+    torch = LazyLoader("torch", globals(), "torch")
 
 logger = init_logger(__name__)
 
@@ -34,6 +37,7 @@ class StructuredOutputManager:
         self.vllm_config = vllm_config
 
         self._grammar_bitmask: Optional[torch.Tensor] = None
+        self._full_mask = torch.tensor(-1, dtype=torch.int32)
 
         # The default max_workers if not specified is the number of CPUs * 5,
         # which is way too high since these tasks are CPU-bound, not I/O bound.
@@ -111,13 +115,14 @@ class StructuredOutputManager:
         if not structured_output_request_ids:
             return None
 
+        max_num_spec_tokens = 0
+        if self.vllm_config.speculative_config is not None:
+            max_num_spec_tokens = \
+                self.vllm_config.speculative_config.num_speculative_tokens
+
         if self._grammar_bitmask is None:
             assert self.backend is not None
             max_batch_size = self.vllm_config.scheduler_config.max_num_seqs
-            max_num_spec_tokens = 0
-            if self.vllm_config.speculative_config is not None:
-                max_num_spec_tokens = \
-                    self.vllm_config.speculative_config.num_speculative_tokens
 
             # Allocate a bitmask for each token needing to be checked:
             # one for each speculative position, and one more for the
@@ -136,8 +141,9 @@ class StructuredOutputManager:
                              key=lambda x: x[1])
 
         # Reset the relevant part of the bitmask before filling
-        if self.reasoner is not None:
-            bitmask_tensor[:len(ordered_seq)].fill_(-1)
+        bitmask_tensor[:(len(ordered_seq) * (1 + max_num_spec_tokens))].fill_(
+            self._full_mask)
+
         # NOTE: This outer loop can likely be parallelized to improve
         # performance of bitmask generation for large batches.
         for req_id, _ in ordered_seq:
@@ -183,20 +189,21 @@ class StructuredOutputManager:
             assert request.structured_output_request.grammar is not None
         # by default, we should always advance
         # for cases that doesn't uses thinking mode.
-        should_advance = self.reasoner is None
-
-        # if there is a reasoning parser, then will
-        # we will need to determine when to start advancing
-        # the state machine.
         if self.reasoner is not None:
-            if request.structured_output_request.reasoning_ended:
-                should_advance = True
-            elif self.reasoner.is_reasoning_end(request.all_token_ids):
-                request.structured_output_request.reasoning_ended = True
-                should_advance = False
-            else:
-                should_advance = False
-        return should_advance
+            structured_req = request.structured_output_request
+
+            if structured_req.reasoning_ended:
+                return True
+
+            # Check if reasoning ends in *this* step
+            if self.reasoner.is_reasoning_end(request.all_token_ids):
+                # Reasoning just ended, so we shouldn't advanced til
+                # next pass
+                structured_req.reasoning_ended = True
+
+            return False
+        else:
+            return True
 
     def clear_backend(self) -> None:
         if self.backend is not None:
