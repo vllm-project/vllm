@@ -4204,7 +4204,7 @@ class VllmConfig:
                     batch_size_capture_list = sorted(cuda_graph_sizes)
                 else:
                     raise TypeError(
-                        "cuda_graph_sizes need to be int or list[int]")
+                        f"Invalid value for {cuda_graph_sizes=}.")
                 if self.parallel_config.tensor_parallel_size > 1 and \
                     self.compilation_config.pass_config.enable_sequence_parallelism:
                     batch_size_capture_list = \
