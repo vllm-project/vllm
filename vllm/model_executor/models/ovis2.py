@@ -46,8 +46,7 @@ from .utils import merge_multimodal_embeddings
 
 # Cannot find the following number from hf config.
 IMAGE_TOKEN = "<image>"
-IMAGE_ATOM_TOKEN_ID = 151666
-IMAGE_PAD_TOKEN_ID = 151672
+IMAGE_PAD_TOKEN_ID = 151655
 NUMBER_OF_TOKEN_TO_RESERVE_FOR_SEGMENT = 256
 
 
@@ -57,6 +56,12 @@ class Ovis2ImagePatchInputs(TypedDict):
     """
     Shape: 
     `(batch_size * num_patches, patch_size_x * patch_size_y * num_channels)`
+    """
+
+    inducator_tokens: torch.Tensor
+    """
+    Shape: 
+    `(batch_size * (num_patches + 1))`
     """
 
     patches_per_image: List[int]
@@ -138,6 +143,21 @@ class Ovis2DummyInputsBuilder(BaseDummyInputsBuilder[Ovis2ProcessingInfo]):
 
 class Ovis2MultiModalProcessor(BaseMultiModalProcessor[Ovis2ProcessingInfo]):
 
+    def image_indicators_to_visual_tokens(
+        self,
+        image_indicators: list[int],
+    ) -> list[int]:
+        """
+        Filter image indicators placeholders and convert them to corresponding 
+        tokens in visual tokenizer.
+        For example, [-301, -300, -302, -300, -303, -300, -304, -300, -305]
+        should return [vocab_size-1, vocab_size-2, ..., vocab_size-5]
+        """
+        hf_config = self.info.get_hf_config()
+        vte_vocab_size = hf_config.visual_tokenizer_config.vocab_size
+        # -300 is image_atom token, filter them out
+        return [vte_vocab_size + x + 300 for x in image_indicators if x < -300]
+
     def _call_hf_processor(
         self,
         prompt: str,
@@ -156,6 +176,16 @@ class Ovis2MultiModalProcessor(BaseMultiModalProcessor[Ovis2ProcessingInfo]):
             mm_kwargs=mm_kwargs,
         )
 
+        hf_processor = self.info.get_hf_processor()
+        image_indicators = [
+            hf_processor.construct_image_indicators(grid)
+            for grid in processed_outputs["grids"]
+        ]
+        indicator_tokens = [
+            self.image_indicators_to_visual_tokens(indicator)
+            for indicator in image_indicators
+        ]
+        processed_outputs["indicator_tokens"] = indicator_tokens
         return processed_outputs
 
     def _apply_hf_processor_tokens_only(
@@ -171,7 +201,8 @@ class Ovis2MultiModalProcessor(BaseMultiModalProcessor[Ovis2ProcessingInfo]):
         hf_processor_mm_kwargs: Mapping[str, object],
     ) -> Mapping[str, MultiModalFieldConfig]:
         return dict(pixel_values=MultiModalFieldConfig.batched("image"),
-                    grids=MultiModalFieldConfig.batched("image"))
+                    grids=MultiModalFieldConfig.batched("image"),
+                    indicator_tokens=MultiModalFieldConfig.batched("image"))
 
     def _get_prompt_updates(
         self,
@@ -230,12 +261,18 @@ class Ovis2ForConditionalGeneration(nn.Module, SupportsMultiModal):
     def _parse_and_validate_image_input(
             self, **kwargs: object) -> Optional[Ovis2ImagePatchInputs]:
         pixel_values = kwargs.pop("pixel_values", None)
-        if pixel_values is None:
+        indicator_tokens = kwargs.pop("indicator_tokens", None)
+
+        if pixel_values is None and indicator_tokens is None:
             return None
 
-        if pixel_values is not None:
+        if pixel_values is not None and indicator_tokens is not None:
             if not isinstance(pixel_values, (torch.Tensor, list)):
                 raise ValueError("Incorrect type of pixel values. "
+                                 f"Got type: {type(pixel_values)}")
+
+            if not isinstance(indicator_tokens, (torch.Tensor, list)):
+                raise ValueError("Incorrect type of indicator_tokens. "
                                  f"Got type: {type(pixel_values)}")
 
             return Ovis2ImagePatchInputs(
@@ -244,6 +281,8 @@ class Ovis2ForConditionalGeneration(nn.Module, SupportsMultiModal):
                 patches_per_image=[
                     x.shape[0] for x in flatten_bn(pixel_values)
                 ],
+                indicator_tokens=flatten_bn(flatten_bn(indicator_tokens),
+                                            concat=True),
             )
 
         raise AssertionError("This line should be unreachable.")
@@ -252,15 +291,33 @@ class Ovis2ForConditionalGeneration(nn.Module, SupportsMultiModal):
             self, image_input: Ovis2ImagePatchInputs) -> MultiModalEmbeddings:
         image_patches_flat = image_input["flat_data"]
         patches_per_image = image_input["patches_per_image"]
+        indicator_tokens = image_input["indicator_tokens"]
+
+        indicator_per_image = list(
+            map(lambda x: x + 1 if x > 1 else x + 2, patches_per_image))
 
         target_dtype = self.visual_tokenizer.dtype
         visual_tokens = self.visual_tokenizer(
             image_patches_flat.to(target_dtype))
         visual_embeds = self.vte(visual_tokens)  # 1:1 numeric eq.
 
-        return tuple(
-            x.flatten(0, 1)
-            for x in visual_embeds.split(patches_per_image, dim=0))
+        indicator_embeds = self.vte(indicator_tokens)
+        indicator_embeds_per_image = indicator_embeds.split(
+            indicator_per_image)
+
+        visual_embeds_per_image = visual_embeds.split(patches_per_image, dim=0)
+        vision_embeddings = []
+        for indicator, visual in zip(indicator_embeds_per_image,
+                                     visual_embeds_per_image):
+            vision_embeddings_per_image = []
+            for i in range(visual.shape[0]):
+                vision_embeddings_per_image.append(
+                    torch.cat([indicator[i:i + 1], visual[i]], dim=0))
+            vision_embeddings_per_image.append(indicator[i + 1:])
+            vision_embeddings.append(
+                torch.cat(vision_embeddings_per_image, dim=0))
+
+        return tuple(vision_embeddings)
 
     def get_multimodal_embeddings(
             self, **kwargs: object) -> Optional[MultiModalEmbeddings]:
@@ -281,7 +338,7 @@ class Ovis2ForConditionalGeneration(nn.Module, SupportsMultiModal):
         if multimodal_embeddings is not None:
             inputs_embeds = merge_multimodal_embeddings(
                 input_ids, inputs_embeds, multimodal_embeddings,
-                [IMAGE_ATOM_TOKEN_ID, IMAGE_PAD_TOKEN_ID])
+                [IMAGE_PAD_TOKEN_ID])
         return inputs_embeds
 
     def forward(
