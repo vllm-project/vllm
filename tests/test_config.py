@@ -1,12 +1,67 @@
 # SPDX-License-Identifier: Apache-2.0
 
-from dataclasses import asdict
+from dataclasses import MISSING, Field, asdict, dataclass, field
+from typing import Literal, Union
 
 import pytest
 
-from vllm.config import ModelConfig, PoolerConfig
+from vllm.config import ModelConfig, PoolerConfig, config, get_field
 from vllm.model_executor.layers.pooler import PoolingType
 from vllm.platforms import current_platform
+
+
+class TestConfig1:
+    pass
+
+
+@dataclass
+class TestConfig2:
+    a: int
+    """docstring"""
+
+
+@dataclass
+class TestConfig3:
+    a: int = 1
+
+
+@dataclass
+class TestConfig4:
+    a: Union[Literal[1], Literal[2]] = 1
+    """docstring"""
+
+
+@pytest.mark.parametrize(("test_config", "expected_error"), [
+    (TestConfig1, "must be a dataclass"),
+    (TestConfig2, "must have a default"),
+    (TestConfig3, "must have a docstring"),
+    (TestConfig4, "must use a single Literal"),
+])
+def test_config(test_config, expected_error):
+    with pytest.raises(Exception, match=expected_error):
+        config(test_config)
+
+
+def test_get_field():
+
+    @dataclass
+    class TestConfig:
+        a: int
+        b: dict = field(default_factory=dict)
+        c: str = "default"
+
+    with pytest.raises(ValueError):
+        get_field(TestConfig, "a")
+
+    b = get_field(TestConfig, "b")
+    assert isinstance(b, Field)
+    assert b.default is MISSING
+    assert b.default_factory is dict
+
+    c = get_field(TestConfig, "c")
+    assert isinstance(c, Field)
+    assert c.default == "default"
+    assert c.default_factory is MISSING
 
 
 @pytest.mark.parametrize(
@@ -130,7 +185,7 @@ def test_get_pooling_config():
         revision=None,
     )
 
-    pooling_config = model_config._init_pooler_config(None)
+    pooling_config = model_config._init_pooler_config()
     assert pooling_config is not None
 
     assert pooling_config.normalize
@@ -150,11 +205,12 @@ def test_get_pooling_config_from_args():
                                dtype="float16",
                                revision=None)
 
-    override_config = PoolerConfig(pooling_type='CLS', normalize=True)
+    override_pooler_config = PoolerConfig(pooling_type='CLS', normalize=True)
+    model_config.override_pooler_config = override_pooler_config
 
-    pooling_config = model_config._init_pooler_config(override_config)
+    pooling_config = model_config._init_pooler_config()
     assert pooling_config is not None
-    assert asdict(pooling_config) == asdict(override_config)
+    assert asdict(pooling_config) == asdict(override_pooler_config)
 
 
 @pytest.mark.skipif(current_platform.is_rocm(),

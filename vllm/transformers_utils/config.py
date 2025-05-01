@@ -33,10 +33,12 @@ from vllm.transformers_utils.configs import (ChatGLMConfig, Cohere2Config,
                                              EAGLEConfig, ExaoneConfig,
                                              H2OVLChatConfig,
                                              InternVLChatConfig, JAISConfig,
-                                             MedusaConfig, MllamaConfig,
+                                             KimiVLConfig, MedusaConfig,
+                                             MiniMaxText01Config,
+                                             MiniMaxVL01Config, MllamaConfig,
                                              MLPSpeculatorConfig, MPTConfig,
                                              NemotronConfig, NVLM_D_Config,
-                                             Olmo2Config, RWConfig,
+                                             OvisConfig, RWConfig,
                                              SkyworkR1VChatConfig, SolarConfig,
                                              Telechat2Config, UltravoxConfig)
 # yapf: enable
@@ -62,6 +64,7 @@ _CONFIG_REGISTRY: Dict[str, Type[PretrainedConfig]] = {
     "cohere2": Cohere2Config,
     "dbrx": DbrxConfig,
     "deepseek_vl_v2": DeepseekVLV2Config,
+    "kimi_vl": KimiVLConfig,
     "mpt": MPTConfig,
     "RefinedWeb": RWConfig,  # For tiiuae/falcon-40b(-instruct)
     "RefinedWebModel": RWConfig,  # For tiiuae/falcon-7b(-instruct)
@@ -72,9 +75,11 @@ _CONFIG_REGISTRY: Dict[str, Type[PretrainedConfig]] = {
     "exaone": ExaoneConfig,
     "h2ovl_chat": H2OVLChatConfig,
     "internvl_chat": InternVLChatConfig,
+    "minimax_text_01": MiniMaxText01Config,
+    "minimax_vl_01": MiniMaxVL01Config,
     "nemotron": NemotronConfig,
     "NVLM_D": NVLM_D_Config,
-    "olmo2": Olmo2Config,
+    "ovis": OvisConfig,
     "solar": SolarConfig,
     "skywork_chat": SkyworkR1VChatConfig,
     "telechat": Telechat2Config,
@@ -220,13 +225,30 @@ def patch_rope_scaling_dict(rope_scaling: Dict[str, Any]) -> None:
         logger.warning("Replacing legacy rope_type 'mrope' with 'default'")
 
 
-def uses_mrope(config: PretrainedConfig) -> bool:
-    """Detect if the model with this config uses M-ROPE."""
+def _uses_mrope(config: PretrainedConfig) -> bool:
     rope_scaling = getattr(config, "rope_scaling", None)
     if rope_scaling is None:
         return False
 
     return "mrope_section" in rope_scaling
+
+
+def uses_mrope(config: PretrainedConfig) -> bool:
+    """Detect if the model with this config uses M-ROPE."""
+    return _uses_mrope(config) or thinker_uses_mrope(config)
+
+
+def thinker_uses_mrope(config: PretrainedConfig) -> bool:
+    """Detect if the model contains a thinker config and it uses M-ROPE."""
+    thinker_config = getattr(config, "thinker_config", None)
+    if thinker_config is None:
+        return False
+
+    thinker_text_config = getattr(thinker_config, "text_config", None)
+    if thinker_text_config is None:
+        return False
+
+    return uses_mrope(thinker_text_config)
 
 
 def is_encoder_decoder(config: PretrainedConfig) -> bool:
@@ -633,6 +655,11 @@ def load_params_config(model: Union[str, Path], revision: Optional[str],
     config_file_name = "params.json"
 
     config_dict = get_hf_file_to_dict(config_file_name, model, revision)
+    if config_dict is None:
+        raise ValueError(
+            f"Failed to load mistral '{config_file_name}' config for model "
+            f"{model}. Please check if the model is a mistral-format model "
+            f"and if the config file exists.")
     assert isinstance(config_dict, dict)
 
     config_mapping = {
@@ -671,6 +698,9 @@ def load_params_config(model: Union[str, Path], revision: Optional[str],
                 "quant_method": "fp8",
                 "activation_scheme": "static"
             }
+        elif quantization.get("quant_method") == "compressed-tensors":
+            # Pass through the quantization config to compressed-tensors
+            quantization_config = quantization
         else:
             raise ValueError(
                 f"Found unknown quantization='{quantization}' in config")
@@ -688,6 +718,7 @@ def load_params_config(model: Union[str, Path], revision: Optional[str],
 
     if config_type == "multimodal":
         multimodal_config = config_dict.pop("vision_encoder")
+        quantization_config = config_dict.get("quantization_config", {})
 
         config_dict = {
             "text_config": config_dict,
@@ -695,6 +726,8 @@ def load_params_config(model: Union[str, Path], revision: Optional[str],
         }
         config_dict["architectures"] = ["PixtralForConditionalGeneration"]
         config_dict["model_type"] = "pixtral"
+        if quantization_config:
+            config_dict["quantization_config"] = quantization_config
 
     config_dict.update(kwargs)
 
@@ -732,14 +765,22 @@ def get_hf_text_config(config: PretrainedConfig):
     """Get the "sub" config relevant to llm for multi modal models.
     No op for pure text models.
     """
-    if hasattr(config, "text_config"):
+    # This block should be unnecessary after https://github.com/huggingface/transformers/pull/37517
+    if hasattr(config, "thinker_config"):
+        # TODO(suyang.fy): Refactor code.
+        #  For Qwen2.5-Omni, change hf_text_config to
+        #  thinker_config.text_config.
+        return config.thinker_config.text_config
+
+    text_config = config.get_text_config()
+
+    if text_config is not config:
         # The code operates under the assumption that text_config should have
         # `num_attention_heads` (among others). Assert here to fail early
         # if transformers config doesn't align with this assumption.
-        assert hasattr(config.text_config, "num_attention_heads")
-        return config.text_config
-    else:
-        return config
+        assert hasattr(text_config, "num_attention_heads")
+
+    return text_config
 
 
 def try_get_generation_config(

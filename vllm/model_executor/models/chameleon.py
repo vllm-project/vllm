@@ -22,7 +22,6 @@ from vllm.model_executor.layers.linear import (MergedColumnParallelLinear,
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
-from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import (
@@ -30,12 +29,13 @@ from vllm.model_executor.model_loader.weight_utils import (
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.inputs import MultiModalFieldConfig, MultiModalKwargs
+from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig,
+                                    MultiModalKwargs)
 from vllm.multimodal.parse import MultiModalDataItems
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
                                         BaseProcessingInfo, PromptReplacement,
                                         PromptUpdate, PromptUpdateDetails)
-from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
+from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
 
 from .interfaces import (MultiModalEmbeddings, SupportsMultiModal, SupportsPP,
@@ -64,13 +64,6 @@ class ChameleonProcessingInfo(BaseProcessingInfo):
     def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
         return {"image": 1}
 
-    def get_mm_max_tokens_per_item(
-        self,
-        seq_len: int,
-        mm_counts: Mapping[str, int],
-    ) -> Mapping[str, int]:
-        return {"image": self.get_num_image_tokens()}
-
     def get_num_image_tokens(self) -> int:
         processor = self.get_hf_processor()
         return processor.image_seq_length
@@ -79,27 +72,30 @@ class ChameleonProcessingInfo(BaseProcessingInfo):
 class ChameleonDummyInputsBuilder(
         BaseDummyInputsBuilder[ChameleonProcessingInfo]):
 
-    def get_dummy_processor_inputs(
+    def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
+        num_images = mm_counts.get("image", 0)
+
+        processor = self.info.get_hf_processor()
+        image_token = processor.image_token
+
+        return image_token * num_images
+
+    def get_dummy_mm_data(
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-    ) -> ProcessorInputs:
+    ) -> MultiModalDataDict:
         config = self.info.get_hf_config()
 
         width = height = config.vq_config.resolution
         num_images = mm_counts.get("image", 0)
 
-        mm_data = {
+        return {
             "image":
             self._get_dummy_images(width=width,
                                    height=height,
                                    num_images=num_images)
         }
-
-        return ProcessorInputs(
-            prompt_text="<image>" * num_images,
-            mm_data=mm_data,
-        )
 
 
 class ChameleonMultiModalProcessor(
@@ -953,7 +949,6 @@ class ChameleonForConditionalGeneration(nn.Module, SupportsMultiModal,
         logit_scale = getattr(config, "logit_scale", 1.0)
         self.logits_processor = LogitsProcessor(self.unpadded_vocab_size,
                                                 config.vocab_size, logit_scale)
-        self.sampler = get_sampler()
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors)
 
@@ -1057,14 +1052,6 @@ class ChameleonForConditionalGeneration(nn.Module, SupportsMultiModal,
 
         return logits
 
-    def sample(
-        self,
-        logits: torch.Tensor,
-        sampling_metadata: SamplingMetadata,
-    ) -> Optional[SamplerOutput]:
-        next_tokens = self.sampler(logits, sampling_metadata)
-        return next_tokens
-
     def load_weights(self, weights: Iterable[Tuple[str,
                                                    torch.Tensor]]) -> Set[str]:
         stacked_params_mapping = [
@@ -1124,10 +1111,10 @@ class ChameleonForConditionalGeneration(nn.Module, SupportsMultiModal,
                             ".kv_scale", ".attn.kv_scale")
                         if remapped_kv_scale_name not in params_dict:
                             logger.warning_once(
-                                "Found kv scale in the checkpoint (e.g. "
-                                f"{name}), but not found the expected name in "
-                                f"the model (e.g. {remapped_kv_scale_name}). "
-                                "kv-scale is not loaded.")
+                                "Found kv scale in the checkpoint (e.g. %s), but not found the expected name in the model (e.g. %s). kv-scale is not loaded.",  # noqa: E501
+                                name,
+                                remapped_kv_scale_name,
+                            )
                             continue
                         else:
                             name = remapped_kv_scale_name

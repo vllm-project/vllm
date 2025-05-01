@@ -10,6 +10,7 @@ from fastapi import Request
 from pydantic import Field
 from starlette.datastructures import Headers
 
+import vllm.envs as envs
 from vllm.config import ModelConfig
 from vllm.engine.protocol import EngineClient
 # yapf conflicts with isort for this block
@@ -125,18 +126,29 @@ class OpenAIServing:
         self,
         request: AnyRequest,
     ) -> Optional[ErrorResponse]:
+
+        error_response = None
+
         if self._is_model_supported(request.model):
             return None
         if request.model in [
                 lora.lora_name for lora in self.models.lora_requests
         ]:
             return None
+        if envs.VLLM_ALLOW_RUNTIME_LORA_UPDATING and request.model and (
+                load_result := await self.models.resolve_lora(request.model)):
+            if isinstance(load_result, LoRARequest):
+                return None
+            if isinstance(load_result, ErrorResponse) and \
+                load_result.code == HTTPStatus.BAD_REQUEST.value:
+                error_response = load_result
         if request.model in [
                 prompt_adapter.prompt_adapter_name
                 for prompt_adapter in self.models.prompt_adapter_requests
         ]:
             return None
-        return self.create_error_response(
+
+        return error_response or self.create_error_response(
             message=f"The model `{request.model}` does not exist.",
             err_type="NotFoundError",
             status_code=HTTPStatus.NOT_FOUND)
@@ -161,7 +173,7 @@ class OpenAIServing:
         request: AnyRequest,
         tokenizer: AnyTokenizer,
         prompt: str,
-        truncate_prompt_tokens: Optional[Annotated[int, Field(ge=1)]],
+        truncate_prompt_tokens: Optional[Annotated[int, Field(ge=-1)]],
         add_special_tokens: bool,
     ) -> TextTokensPrompt:
         if (self.model_config.encoder_config is not None
@@ -259,7 +271,7 @@ class OpenAIServing:
         request: AnyRequest,
         tokenizer: AnyTokenizer,
         prompt_input: Union[str, list[int]],
-        truncate_prompt_tokens: Optional[Annotated[int, Field(ge=1)]] = None,
+        truncate_prompt_tokens: Optional[Annotated[int, Field(ge=-1)]] = None,
         add_special_tokens: bool = True,
     ) -> TextTokensPrompt:
         """
@@ -280,7 +292,7 @@ class OpenAIServing:
         request: AnyRequest,
         tokenizer: AnyTokenizer,
         prompt_inputs: Iterable[Union[str, list[int]]],
-        truncate_prompt_tokens: Optional[Annotated[int, Field(ge=1)]] = None,
+        truncate_prompt_tokens: Optional[Annotated[int, Field(ge=-1)]] = None,
         add_special_tokens: bool = True,
     ) -> Iterator[TextTokensPrompt]:
         """
@@ -309,7 +321,7 @@ class OpenAIServing:
         request: AnyRequest,
         tokenizer: AnyTokenizer,
         input_or_inputs: Union[str, list[str], list[int], list[list[int]]],
-        truncate_prompt_tokens: Optional[Annotated[int, Field(ge=1)]] = None,
+        truncate_prompt_tokens: Optional[Annotated[int, Field(ge=-1)]] = None,
         add_special_tokens: bool = True,
     ) -> list[TextTokensPrompt]:
         """
@@ -344,7 +356,7 @@ class OpenAIServing:
         request: CompletionLikeRequest,
         tokenizer: AnyTokenizer,
         input_or_inputs: Union[str, list[str], list[int], list[list[int]]],
-        truncate_prompt_tokens: Optional[Annotated[int, Field(ge=1)]] = None,
+        truncate_prompt_tokens: Optional[Annotated[int, Field(ge=-1)]] = None,
         add_special_tokens: bool = True,
     ) -> tuple[list[TextTokensPrompt], list[TokensPrompt]]:
         request_prompts = await self._tokenize_prompt_input_or_inputs_async(
@@ -457,6 +469,9 @@ class OpenAIServing:
             engine_prompt["multi_modal_data"] = mm_data
         if request.mm_processor_kwargs is not None:
             engine_prompt["mm_processor_kwargs"] = request.mm_processor_kwargs
+
+        if hasattr(request, "cache_salt") and request.cache_salt is not None:
+            engine_prompt["cache_salt"] = request.cache_salt
 
         return conversation, [request_prompt], [engine_prompt]
 

@@ -64,6 +64,21 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "    int blocksparse_head_sliding_step) -> ()");
   ops.impl("paged_attention_v2", torch::kCUDA, &paged_attention_v2);
 
+#ifndef USE_ROCM
+  // Merge attn states
+  // Implements section 2.2 of https://www.arxiv.org/pdf/2501.01005
+  // can be used to combine partial attention results (in the split-KV case)
+  ops.def(
+      "merge_attn_states("
+      "    Tensor! output,"
+      "    Tensor!? output_lse,"
+      "    Tensor prefix_output,"
+      "    Tensor prefix_lse,"
+      "    Tensor suffix_output,"
+      "    Tensor suffix_lse) -> ()");
+  ops.impl("merge_attn_states", torch::kCUDA, &merge_attn_states);
+#endif
+
   // Activation ops
   // Activation function used in SwiGLU.
   ops.def("silu_and_mul(Tensor! out, Tensor input) -> ()");
@@ -427,6 +442,13 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   // CUTLASS sparse matrix compressor
   ops.def("cutlass_sparse_compress(Tensor a) -> Tensor[]");
   ops.impl("cutlass_sparse_compress", &cutlass_sparse_compress);
+
+  // CUTLASS MLA decode
+  ops.def(
+      "cutlass_mla_decode(Tensor! out, Tensor q_nope, Tensor q_pe,"
+      "                   Tensor kv_c_and_k_pe_cache, Tensor seq_lens,"
+      "                   Tensor page_table, float scale) -> ()");
+  ops.impl("cutlass_mla_decode", torch::kCUDA, &cutlass_mla_decode);
 
   // Mamba selective scan kernel
   ops.def(

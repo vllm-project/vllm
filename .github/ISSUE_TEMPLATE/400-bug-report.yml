@@ -14,19 +14,19 @@ body:
     description: |
       Please run the following and paste the output below.
       ```sh
-      wget https://raw.githubusercontent.com/vllm-project/vllm/main/collect_env.py
+      wget https://raw.githubusercontent.com/vllm-project/vllm/main/vllm/collect_env.py
       # For security purposes, please feel free to check the contents of collect_env.py before running it.
       python collect_env.py
       ```
       It is suggested to download and execute the latest script, as vllm might frequently update the diagnosis information needed for accurately and quickly responding to issues.
     value: |
       <details>
-      <summary>The output of `python collect_env.py`</summary>
+      <summary>The output of <code>python collect_env.py</code></summary>
 
       ```text
       Your output of `python collect_env.py` here
       ```
-      
+
       </details>
   validations:
     required: true

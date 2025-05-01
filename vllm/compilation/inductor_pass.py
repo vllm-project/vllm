@@ -1,22 +1,51 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import hashlib
-import importlib.metadata
 import inspect
 import json
 import types
+from contextlib import contextmanager
 from typing import Any, Callable, Dict, Optional, Union
 
 import torch
-from packaging.version import Version
 from torch import fx
 
-if Version(importlib.metadata.version('torch')) >= Version("2.6"):
+from vllm.utils import is_torch_equal_or_newer
+
+if is_torch_equal_or_newer("2.6"):
     from torch._inductor.custom_graph_pass import CustomGraphPass
 else:
     # CustomGraphPass is not present in 2.5 or lower, import our version
     from .torch25_custom_graph_pass import (  # noqa: yapf
         Torch25CustomGraphPass as CustomGraphPass)
+
+_pass_context = None
+
+
+class PassContext:
+
+    def __init__(self, runtime_shape: Optional[int]):
+        self.runtime_shape = runtime_shape
+
+
+def get_pass_context() -> PassContext:
+    """Get the current pass context."""
+    assert _pass_context is not None
+    return _pass_context
+
+
+@contextmanager
+def pass_context(runtime_shape: Optional[int]):
+    """A context manager that stores the current pass context,
+    usually it is a list of sizes to specialize.
+    """
+    global _pass_context
+    prev_context = _pass_context
+    _pass_context = PassContext(runtime_shape)
+    try:
+        yield
+    finally:
+        _pass_context = prev_context
 
 
 class InductorPass(CustomGraphPass):
@@ -61,6 +90,9 @@ class InductorPass(CustomGraphPass):
         """
         encoded = json.dumps(dict_, sort_keys=True).encode("utf-8")
         return hashlib.sha256(encoded).hexdigest()
+
+    def is_applicable_for_shape(self, shape: Optional[int]):
+        return True
 
 
 class CallableInductorPass(InductorPass):
