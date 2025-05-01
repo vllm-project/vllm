@@ -3476,7 +3476,9 @@ class KVTransferConfig:
         return self.kv_connector_extra_config.get(key, default)
 
 
-class KVEventsConfig(BaseModel):
+@config
+@dataclass
+class KVEventsConfig:
     """Configuration for KV event publishing."""
 
     enable_kv_cache_events: bool = False
@@ -3514,11 +3516,6 @@ class KVEventsConfig(BaseModel):
     """The topic to use for the event publisher. Consumers can subscribe to
     this topic to receive events.
     """
-
-    @classmethod
-    def from_cli(cls, cli_value: str) -> "KVEventsConfig":
-        """Parse the CLI value for the event publisher config."""
-        return KVEventsConfig.model_validate_json(cli_value)
 
 
 class CompilationLevel:
