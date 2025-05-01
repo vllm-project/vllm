@@ -150,8 +150,15 @@ class Qwen2AudioMultiModalProcessor(
         mm_data: Mapping[str, object],
         mm_kwargs: Mapping[str, Any],
     ) -> BatchFeature:
+        # NOTE - we rename audios -> audio in mm data because transformers has
+        # deprecated audios for the qwen2audio processor and will remove
+        # support for it in transformers 4.54.
+        audios = mm_data.pop("audios", [])
+        if audios:
+            mm_data["audio"] = audios
+
         # Text-only input not supported in composite processor
-        if not mm_data.get("audios", []):
+        if not mm_data.get("audio", []):
             prompt_ids = self.info.get_tokenizer().encode(prompt)
             prompt_ids = self._apply_hf_processor_tokens_only(prompt_ids)
             return BatchFeature(dict(input_ids=[prompt_ids]), tensor_type="pt")
