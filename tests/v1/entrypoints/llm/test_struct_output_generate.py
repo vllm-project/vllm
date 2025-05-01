@@ -11,6 +11,7 @@ import jsonschema
 import pytest
 from pydantic import BaseModel
 
+from vllm.config import StructuredOutputBackend, TokenizerMode
 from vllm.entrypoints.llm import LLM
 from vllm.outputs import RequestOutput
 from vllm.platforms import current_platform
@@ -64,7 +65,7 @@ class CarDescription(BaseModel):
 
 @pytest.mark.skip_global_cleanup
 @pytest.mark.parametrize(
-    "model_name, guided_decoding_backend, tokenizer_mode, speculative_config",
+    "model_name, structured_output_backend, tokenizer_mode, speculative_config",
     PARAMS_MODELS_BACKENDS_TOKENIZER_MODE)
 def test_structured_output(
     monkeypatch: pytest.MonkeyPatch,
@@ -74,8 +75,8 @@ def test_structured_output(
     sample_sql_lark: str,
     sample_regex: str,
     sample_guided_choice: str,
-    guided_decoding_backend: str,
-    tokenizer_mode: str,
+    structured_output_backend: StructuredOutputBackend,
+    tokenizer_mode: TokenizerMode,
     model_name: str,
     speculative_config: dict[str, Any],
 ):
@@ -89,13 +90,17 @@ def test_structured_output(
     enforce_eager = bool(not current_platform.is_tpu())
     # Use a single LLM instance for several scenarios to
     # speed up the test suite.
-    llm = LLM(model=model_name,
-              enforce_eager=enforce_eager,
-              max_model_len=1024,
-              guided_decoding_backend=guided_decoding_backend,
-              guided_decoding_disable_any_whitespace=True,
-              tokenizer_mode=tokenizer_mode,
-              speculative_config=speculative_config)
+    llm = LLM(
+        model=model_name,
+        enforce_eager=enforce_eager,
+        max_model_len=1024,
+        tokenizer_mode=tokenizer_mode,
+        speculative_config=speculative_config,
+        structured_output_config={
+            "backend": structured_output_backend,
+            "disable_any_whitespace": True,
+        },
+    )
 
     #
     # Test 1: Generate JSON output based on a provided schema
@@ -104,12 +109,13 @@ def test_structured_output(
         temperature=1.0,
         max_tokens=1000,
         guided_decoding=GuidedDecodingParams(json=sample_json_schema))
-    outputs = llm.generate(prompts=[
-        f"Give an example JSON for an employee profile "
-        f"that fits this schema: {sample_json_schema}"
-    ] * 2,
-                           sampling_params=sampling_params,
-                           use_tqdm=True)
+    outputs = llm.generate(
+        [
+            f"Give an example JSON for an employee profile that fits this schema: {sample_json_schema}"  # noqa: E501
+        ] * 2,
+        sampling_params=sampling_params,
+        use_tqdm=True,
+    )
 
     assert outputs is not None
 
@@ -161,7 +167,7 @@ def test_structured_output(
         temperature=1.0,
         max_tokens=1000,
         guided_decoding=GuidedDecodingParams(json=unsupported_json_schema))
-    if guided_decoding_backend.startswith("xgrammar"):
+    if structured_output_backend == "xgrammar":
         with pytest.raises(ValueError,
                            match="The provided JSON schema contains features "
                            "not supported by xgrammar."):
@@ -419,7 +425,7 @@ def test_structured_output(
 
     prompt = """
 You have access to the following function to retrieve the weather in a city:
-         
+
     {
         "name": "get_weather",
         "parameters": {
@@ -430,7 +436,7 @@ You have access to the following function to retrieve the weather in a city:
             }
         }
     }
-         
+
 If a you choose to call a function ONLY reply in the following format:
 <{start_tag}={function_name}>{parameters}{end_tag}
 where
@@ -451,7 +457,7 @@ Reminder:
 - Always add your sources when using search results to answer the user query
 
 You are a helpful assistant.
-         
+
 Given the previous instructions, what is the weather in New York City?
 """
 
@@ -495,14 +501,16 @@ def test_structured_output_auto_mode(
     monkeypatch: pytest.MonkeyPatch,
     unsupported_json_schema: dict[str, Any],
     model_name: str,
-    tokenizer_mode: str,
+    tokenizer_mode: TokenizerMode,
 ):
     monkeypatch.setenv("VLLM_USE_V1", "1")
 
-    llm = LLM(model=model_name,
-              max_model_len=1024,
-              guided_decoding_backend="auto",
-              tokenizer_mode=tokenizer_mode)
+    llm = LLM(
+        model=model_name,
+        max_model_len=1024,
+        structured_output_config={"backend": "auto"},
+        tokenizer_mode=tokenizer_mode,
+    )
 
     sampling_params = SamplingParams(
         temperature=1.0,
@@ -541,11 +549,15 @@ def test_structured_output_auto_mode(
 def test_guidance_no_additional_properties(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("VLLM_USE_V1", "1")
 
-    llm = LLM(model="Qwen/Qwen2.5-1.5B-Instruct",
-              max_model_len=1024,
-              guided_decoding_backend="guidance",
-              guided_decoding_disable_any_whitespace=True,
-              guided_decoding_disable_additional_properties=True)
+    llm = LLM(
+        model="Qwen/Qwen2.5-1.5B-Instruct",
+        max_model_len=1024,
+        structured_output_config={
+            'backend': 'guidance',
+            'disable_any_whitespace': True,
+            'disable_additional_properties': True
+        },
+    )
 
     schema = {
         'type': 'object',
@@ -579,7 +591,7 @@ def test_guidance_no_additional_properties(monkeypatch: pytest.MonkeyPatch):
                                          max_tokens=256,
                                          guided_decoding=guided_params)
 
-        outputs = llm.generate(prompts=prompt, sampling_params=sampling_params)
+        outputs = llm.generate(prompt, sampling_params=sampling_params)
         assert outputs is not None
         generated_text = outputs[0].outputs[0].text
         assert generated_text is not None
