@@ -60,11 +60,11 @@ class MinPLogitsProcessor(LogitsProcessor):
                                             pin_memory=pin_memory)
         self.min_p_cpu = self.min_p_cpu_tensor.numpy()
         # Pre-allocated device tensor
-        self.min_p_gpu: torch.Tensor = torch.empty((max_num_reqs, ),
+        self.min_p_device: torch.Tensor = torch.empty((max_num_reqs, ),
                                                    dtype=torch.float32,
                                                    device=device)
         # Current slice of the device tensor
-        self.min_p: torch.Tensor = self.min_p_gpu[:0]
+        self.min_p: torch.Tensor = self.min_p_device[:0]
 
     def update_states(self, batch_update: Optional[BatchUpdate] = None):
         if not batch_update:
@@ -96,7 +96,7 @@ class MinPLogitsProcessor(LogitsProcessor):
         size = batch_update.batch_size
         if self.min_p_count and (needs_update or self.min_p.shape[0] != size):
 
-            self.min_p = self.min_p_gpu[:size]
+            self.min_p = self.min_p_device[:size]
             self.min_p.copy_(self.min_p_cpu_tensor[:size], non_blocking=True)
             self.min_p.unsqueeze_(1)
 

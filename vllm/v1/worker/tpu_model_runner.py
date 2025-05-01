@@ -1065,7 +1065,7 @@ def _get_token_paddings(min_token_size: int, max_token_size: int,
     If padding_gap == 0 then:
         increase 2X each time (exponential)
     else:
-        first increase the size to twice,
+        first increase the size to twice, 
         then increase the padding size by padding_gap.
     """
     # assert min_token_size is power of 2
