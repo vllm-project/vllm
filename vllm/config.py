@@ -3526,76 +3526,28 @@ class CompilationLevel:
     PIECEWISE = 3
 
 
-class CompilationConfig(BaseModel):
-    """
-    Configuration for compilation.
-    It has three parts:
+@dataclass
+class CompilationConfig:
+    """Configuration for compilation. It has three parts:
+
     - Top-level Compilation control:
-        - level: the level of compilation.
-            - 0: no compilation.
-            - 1: dynamo as is.
-            - 2: dynamo once.
-            - 3: piecewise compilation.
-        - debug_dump_path: the path to dump the debug information.
-        - cache_dir: the directory to store the compiled graph, to
-            accelerate Inductor compilation. By default, it will use
-            model-related information to generate a cache directory.
-        - backend: the backend for compilation. It needs to be a string.
-            - "" (empty string): use the default backend.
-            - "eager"/"openxla"/...: use the specified backend registered in PyTorch.
-            - "full.module.name": a qualified name which can be used to import the backend function.
-            We use string to avoid serialization issues when using compilation in a distributed setting.
-            When the compilation level is 1 or 2, the backend is used for the compilation directly (it sees the whole graph).
-            When the compilation level is 3, the backend is used for the piecewise compilation (it sees a part of the graph).
-        - custom_ops: fine-grained control over which custom ops to enable/disable.
-            Use 'all' to enable all, 'none' to disable all.
-            Also specify a list of custom op names to enable (prefixed with a '+'),
-            or disable (prefixed with a '-').
-            Examples:
-                - 'all,-op1' to enable all except op1
-                - 'none,+op1,+op2' to enable only op1 and op2
-            By default, all custom ops are enabled when running without Inductor
-                and disabled when running with Inductor (compile_level >= Inductor).
-        - splitting_ops: a list of ops to split the full graph into subgraphs, used in piecewise compilation.
+        - {attr}`level`
+        - {attr}`debug_dump_path`
+        - {attr}`cache_dir`
+        - {attr}`backend`
+        - {attr}`custom_ops`
+        - {attr}`splitting_ops`
     - CudaGraph capture:
-        - use_cudagraph: whether to use cudagraph inside compilation.
-            - False: cudagraph inside compilation is not used.
-            - True: cudagraph inside compilation is used. It requires
-                that all input buffers have fixed addresses, and all
-                splitting ops write their outputs to input buffers.
-            Note that this is orthogonal to the cudagraph capture logic
-            outside of compilation.
-            TODO: move outside cudagraph logic into compilation.
-            torch.compile will handle cudagraph capture logic in the future.
-        - cudagraph_capture_sizes: sizes to capture cudagraph.
-            - None (default): capture sizes are inferred from vllm config.
-            - list[int]: capture sizes are specified as given.
-        - cudagraph_num_of_warmups: number of warmup runs for cudagraph.
-            It means the first several runs will be treated as warmup runs.
-            Only after that, the execution will be recorded, and the recorded
-            cudagraph will be used for subsequent runs.
-        - cudagraph_copy_inputs: whether to copy input tensors for
-            cudagraph. If the caller can guarantee that the same input buffers
-            are always used, it can set this to False. Otherwise, it should
-            set this to True, and the compiler will copy the input to an
-            internally managed buffer. Default is False.
+        - {attr}`use_cudagraph`
+        - {attr}`cudagraph_capture_sizes`
+        - {attr}`cudagraph_num_of_warmups`
+        - {attr}`cudagraph_copy_inputs`
     - Inductor compilation:
-        - use_inductor: whether to use inductor compilation.
-            - False: inductor compilation is not used. graph runs in eager.
-            - True: inductor compilation is used. one graph for symbolic shape
-                is compiled. In addition, compile for compile_sizes,
-                using configurations in inductor_compile_config.
-        - compile_sizes: sizes to compile for inductor. In addition
-            to integers, it also supports "cudagraph_capture_sizes" to
-            specify the sizes for cudagraph capture.
-        - inductor_compile_config: additional configurations for inductor.
-            - None: use default configurations.
-        - inductor_passes: additional passes for inductor. It is a dictionary
-            from pass name to pass function qualified name. We use function
-            name because the config uses json format. If we pass the config
-            from Python, functions can also be passed directly via Python object
-            constructor, e.g. `CompilationConfig(inductor_passes={"a": func})`
-        - custom inductor passes: see PassConfig for more details
+        - {attr}`use_inductor`
+        - {attr}`compile_sizes`
+        - {attr}`inductor_compile_config`
+        - {attr}`inductor_passes`
+        - custom inductor passes
 
     Why we have different sizes for cudagraph and inductor:
     - cudagraph: a cudagraph captured for a specific size can only be used
@@ -3607,22 +3559,97 @@ class CompilationConfig(BaseModel):
         sufficient for most cases. It might be beneficial to compile for
         certain small batchsizes, where inductor is good at optimizing.
     """ # noqa
+    # Top-level Compilation control
+
     level: int = 0
+    """The level of compilation:
+
+    - 0: no compilation.
+    - 1: dynamo as is.
+    - 2: dynamo once.
+    - 3: piecewise compilation."""
     debug_dump_path: str = ""
+    """The path to dump the debug information."""
     cache_dir: str = ""
+    """The directory to store the compiled graph, to accelerate Inductor
+    compilation. By default, it will use model-related information to generate
+    a cache directory."""
     backend: str = ""
+    """The backend for compilation. It needs to be a string:
+
+    - "" (empty string): use the default backend.
+    - "eager"/"openxla"/...: use the specified backend registered in PyTorch.
+    - "full.module.name": a qualified name which can be used to import the
+
+    backend function.
+    We use string to avoid serialization issues when using compilation in a
+    distributed setting. When the compilation level is 1 or 2, the backend is
+    used for the compilation directly (it sees the whole graph). When the
+    compilation level is 3, the backend is used for the piecewise compilation
+    (it sees a part of the graph)."""
     custom_ops: list[str] = Field(default_factory=list)
+    """Fine-grained control over which custom ops to enable/disable. Use 'all'
+    to enable all, 'none' to disable all. Also specify a list of custom op
+    names to enable (prefixed with a '+'), or disable (prefixed with a '-').
+    Examples:
+
+    - 'all,-op1' to enable all except op1
+    - 'none,+op1,+op2' to enable only op1 and op2
+
+    By default, all custom ops are enabled when running without Inductor and
+    disabled when running with Inductor (compile_level >= Inductor)."""
     splitting_ops: list[str] = Field(default=None)  # type: ignore
+    """A list of ops to split the full graph into subgraphs, used in piecewise
+    compilation."""
 
+    # Inductor capture
     use_inductor: bool = True
-    compile_sizes: Optional[list[Union[int, str]]] = Field(default=None)
-    inductor_compile_config: dict = Field(default_factory=dict)
-    inductor_passes: dict[str, str] = Field(default_factory=dict)
+    """Whether to use inductor compilation:
 
+    - False: inductor compilation is not used. graph runs in eager.
+    - True: inductor compilation is used. one graph for symbolic shape
+        is compiled. In addition, compile for compile_sizes,
+        using configurations in inductor_compile_config."""
+    compile_sizes: Optional[list[Union[int, str]]] = Field(default=None)
+    """Sizes to compile for inductor. In addition
+    to integers, it also supports "cudagraph_capture_sizes" to
+    specify the sizes for cudagraph capture."""
+    inductor_compile_config: dict = Field(default_factory=dict)
+    """Additional configurations for inductor.
+    - None: use default configurations."""
+    inductor_passes: dict[str, str] = Field(default_factory=dict)
+    """Additional passes for inductor. It is a dictionary
+    from pass name to pass function qualified name. We use function
+    name because the config uses JSON format. If we pass the config
+    from Python, functions can also be passed directly via Python object
+    constructor, e.g. `CompilationConfig(inductor_passes={"a": func})`."""
+
+    # CudaGraph compilation
     use_cudagraph: bool = False
+    """Whether to use cudagraph inside compilation.
+    - False: cudagraph inside compilation is not used.
+    - True: cudagraph inside compilation is used. It requires
+        that all input buffers have fixed addresses, and all
+        splitting ops write their outputs to input buffers.
+    Note that this is orthogonal to the cudagraph capture logic
+    outside of compilation.
+    TODO: move outside cudagraph logic into compilation.
+    torch.compile will handle cudagraph capture logic in the future."""
     cudagraph_num_of_warmups: int = 0
+    """Number of warmup runs for cudagraph.
+    It means the first several runs will be treated as warmup runs.
+    Only after that, the execution will be recorded, and the recorded
+    cudagraph will be used for subsequent runs."""
     cudagraph_capture_sizes: Optional[list[int]] = None
+    """Sizes to capture cudagraph.
+    - None (default): capture sizes are inferred from vllm config.
+    - list[int]: capture sizes are specified as given."""
     cudagraph_copy_inputs: bool = False
+    """Whether to copy input tensors for
+    cudagraph. If the caller can guarantee that the same input buffers
+    are always used, it can set this to False. Otherwise, it should
+    set this to True, and the compiler will copy the input to an
+    internally managed buffer. Default is False."""
 
     class PassConfig(BaseModel):
         """
@@ -3661,7 +3688,8 @@ class CompilationConfig(BaseModel):
                     "Fusion enabled but reshape elimination disabled. "
                     "RMSNorm + quant (fp8) fusion might not work")
 
-    pass_config: PassConfig = Field(default_factory=PassConfig)
+    pass_config: PassConfig = field(default_factory=PassConfig)
+    """Custom inductor passes, see PassConfig for more details"""
 
     # not configurable, computed after init
     max_capture_size: int = PrivateAttr
