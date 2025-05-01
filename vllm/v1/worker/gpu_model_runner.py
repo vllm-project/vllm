@@ -24,6 +24,7 @@ from vllm.model_executor.model_loader import get_model
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import MultiModalKwargs, PlaceholderRange
 from vllm.multimodal.utils import group_mm_inputs_by_modality
+from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingType
 from vllm.sequence import IntermediateTensors
 from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, DeviceMemoryProfiler,
@@ -1151,9 +1152,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         sample_hidden_states = hidden_states[logits_indices]
 
-        if self.input_batch.pooling_reqs:
+        if self.input_batch.pooling_params:
             assert self.input_batch.num_reqs ==\
-                 len(self.input_batch.pooling_reqs), \
+                 len(self.input_batch.pooling_params), \
             "Either all or none of the requests in" \
             " a batch must be pooling request"
 
@@ -1664,7 +1665,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                                      device=self.device),
             prompt_token_ids=torch.zeros((num_reqs, req_num_tokens),
                                          dtype=torch.int32,
-                                         device=self.device))
+                                         device=self.device),
+            pooling_params=[PoolingParams()] * num_reqs)
 
         try:
             pooler_output = self.model.pooler(hidden_states=hidden_states,

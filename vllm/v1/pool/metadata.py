@@ -4,6 +4,8 @@ from typing import Optional
 
 import torch
 
+from vllm.pooling_params import PoolingParams
+
 
 @dataclass
 class PoolingMetadata:
@@ -11,3 +13,4 @@ class PoolingMetadata:
 
     prompt_lens: torch.Tensor
     prompt_token_ids: Optional[torch.Tensor]
+    pooling_params: list[PoolingParams]

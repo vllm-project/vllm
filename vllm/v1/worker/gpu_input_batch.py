@@ -228,7 +228,7 @@ class InputBatch:
         # This is updated each time the batch constituents change.
         self.sampling_metadata = self._make_sampling_metadata()
 
-        self.pooling_reqs: set[str] = set()
+        self.pooling_params: dict[str, PoolingParams] = {}
 
     @property
     def token_type_ids_cpu(self) -> np.ndarray:
@@ -367,7 +367,8 @@ class InputBatch:
                 self.bad_words_token_ids[
                     req_index] = sampling_params.bad_words_token_ids
         else:
-            self.pooling_reqs.add(req_id)
+            assert request.pooling_params is not None
+            self.pooling_params[req_id] = request.pooling_params
 
         # Add request lora ID
         if request.lora_request:
@@ -420,7 +421,7 @@ class InputBatch:
             # False means we don't fill with -inf.
             self.allowed_token_ids_mask_cpu_tensor[req_index].fill_(False)
         self.bad_words_token_ids.pop(req_index, None)
-        self.pooling_reqs.discard(req_id)
+        self.pooling_params.pop(req_id, None)
         return req_index
 
     def swap_states(self, i1: int, i2: int) -> None:
@@ -635,10 +636,19 @@ class InputBatch:
 
     @property
     def pooling_metadata(self) -> PoolingMetadata:
+
+        # Note, for now this assumes that all request in the batch
+        # are either sampling or pooling requests
+        assert len(self.req_ids) == len(self.pooling_params)
+        pooling_params = [
+            self.pooling_params[req_id] for req_id in self.req_ids
+        ]
+
         return PoolingMetadata(
             prompt_lens=torch.from_numpy(
                 self.num_prompt_tokens[:self.num_reqs]).to(self.device),
             prompt_token_ids=self.sampling_metadata.prompt_token_ids,
+            pooling_params=pooling_params,
         )
 
     def _make_prompt_token_ids_tensor(self) -> torch.Tensor:
