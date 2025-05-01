@@ -49,6 +49,7 @@ extensions = [
 ]
 myst_enable_extensions = [
     "colon_fence",
+    "fieldlist",
 ]
 autodoc2_packages = [
     {
@@ -60,6 +61,9 @@ autodoc2_output_dir = "api"
 autodoc2_render_plugin = "myst"
 autodoc2_module_all_regexes = ["^vllm$"]
 autodoc2_hidden_objects = ["undoc", "dunder", "private", "inherited"]
+autodoc2_docstring_parser_regexes = [
+    (".*", "docs.source.autodoc2_docstring_parser"),
+]
 autodoc2_index_template = None
 
 # Add any paths that contain templates here, relative to this directory.
