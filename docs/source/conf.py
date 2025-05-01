@@ -19,7 +19,6 @@ import os
 import sys
 
 import requests
-from sphinx.ext import autodoc
 
 logger = logging.getLogger(__name__)
 sys.path.append(os.path.abspath("../.."))
@@ -40,8 +39,6 @@ extensions = [
     "sphinx.ext.linkcode",
     "sphinx.ext.intersphinx",
     "sphinx_copybutton",
-    "sphinx.ext.autodoc",
-    "sphinx.ext.autosummary",
     "autodoc2",
     "myst_parser",
     "sphinxarg.ext",
@@ -218,31 +215,24 @@ def linkcode_resolve(domain, info):
     return f"https://github.com/vllm-project/vllm/blob/main/{filename}#L{lineno}"
 
 
-# Mock out external dependencies here, otherwise the autodoc pages may be blank.
+# Mock out external dependencies here, otherwise sphinx-argparse won't work.
 autodoc_mock_imports = [
+    "huggingface_hub",
+    "pydantic",
+    "zmq",
+    "cloudpickle",
+    "aiohttp",
+    "starlette",
+    "openai", # Required by docs/source/serving/openai_compatible_server.md's vllm.entrypoints.openai.cli_args
+    "fastapi", # Required by docs/source/serving/openai_compatible_server.md's vllm.entrypoints.openai.cli_args
+    "partial_json_parser", # Required by docs/source/serving/openai_compatible_server.md's vllm.entrypoints.openai.cli_args
     "blake3",
-    "compressed_tensors",
     "cpuinfo",
-    "cv2",
-    "torch",
     "transformers",
     "psutil",
-    "prometheus_client",
-    "sentencepiece",
-    "vllm._C",
     "PIL",
     "numpy",
-    'triton',
     "tqdm",
-    "tensorizer",
-    "pynvml",
-    "outlines",
-    "xgrammar",
-    "librosa",
-    "soundfile",
-    "gguf",
-    "lark",
-    "decord",
 ]
 
 for mock_target in autodoc_mock_imports:
@@ -252,18 +242,6 @@ for mock_target in autodoc_mock_imports:
             "autodoc_mock_imports cannot mock modules that have already "
             "been loaded into sys.modules when the sphinx build starts.",
             mock_target)
-
-
-class MockedClassDocumenter(autodoc.ClassDocumenter):
-    """Remove note about base class when a class is derived from object."""
-
-    def add_line(self, line: str, source: str, *lineno: int) -> None:
-        if line == "   Bases: :py:class:`object`":
-            return
-        super().add_line(line, source, *lineno)
-
-
-autodoc.ClassDocumenter = MockedClassDocumenter
 
 intersphinx_mapping = {
     "python": ("https://docs.python.org/3", None),
@@ -275,8 +253,5 @@ intersphinx_mapping = {
     "torch": ("https://pytorch.org/docs/stable", None),
     "psutil": ("https://psutil.readthedocs.io/en/stable", None),
 }
-
-autodoc_preserve_defaults = True
-autodoc_warningiserror = True
 
 navigation_with_keys = False

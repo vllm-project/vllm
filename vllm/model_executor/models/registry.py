@@ -19,7 +19,6 @@ import cloudpickle
 import torch.nn as nn
 
 from vllm.logger import init_logger
-from vllm.utils import is_in_doc_build
 
 from .interfaces import (has_inner_state, has_noops, is_attention_free,
                          is_hybrid, supports_cross_encoding,
@@ -400,8 +399,7 @@ class _ModelRegistry:
                 raise ValueError(msg)
 
             model = _LazyRegisteredModel(*split_str)
-        elif isinstance(model_cls, type) and (is_in_doc_build() or issubclass(
-                model_cls, nn.Module)):
+        elif isinstance(model_cls, type) and issubclass(model_cls, nn.Module):
             model = _RegisteredModel.from_model_cls(model_cls)
         else:
             msg = ("`model_cls` should be a string or PyTorch model class, "
