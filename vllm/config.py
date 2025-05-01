@@ -280,7 +280,7 @@ class ModelConfig:
     max_model_len: int = None  # type: ignore
     """Model context length (prompt and output). If unspecified, will be
     automatically derived from the model config.
-    
+
     When passing via `--max-model-len`, supports k/m/g/K/M/G in human-readable
     format. Examples:\n
     - 1k -> 1000\n
@@ -520,11 +520,11 @@ class ModelConfig:
                     self.hf_text_config.sliding_window)
 
                 logger.warning_once(
-                    f"{self.hf_text_config.model_type} has interleaved "
-                    "attention, which is currently not supported by the "
-                    f"{backend} backend. Disabling sliding window and capping "
-                    "the max length to the sliding window size "
-                    f"({sliding_window_len_min}).")
+                    "%s has interleaved attention, which is currently not supported by the %s backend. Disabling sliding window and capping the max length to the sliding window size (%d).",  # noqa: E501
+                    self.hf_text_config.model_type,
+                    backend,
+                    sliding_window_len_min,
+                )
                 self.disable_sliding_window = True
             else:
                 # for a model with interleaved attention,
@@ -1045,8 +1045,10 @@ class ModelConfig:
         if self.is_attention_free:
             return 0
 
-        if hasattr(self.hf_text_config, "head_dim"):
+        # NOTE: Some configs may set head_dim=None in the config
+        if getattr(self.hf_text_config, "head_dim", None) is not None:
             return self.hf_text_config.head_dim
+
         # FIXME(woosuk): This may not be true for all models.
         return (self.hf_text_config.hidden_size //
                 self.hf_text_config.num_attention_heads)
@@ -1960,6 +1962,8 @@ class SchedulerConfig:
     some image tokens can be scheduled (like TTTTIIIII, leaving IIIII),
     it will be scheduled as TTTT in one step and IIIIIIIIII in the next."""
 
+    # scheduler class or path. "vllm.core.scheduler.Scheduler" (default)
+    # or "mod.custom_class".
     scheduler_cls: Union[str, type[object]] = "vllm.core.scheduler.Scheduler"
     """The scheduler class to use. "vllm.core.scheduler.Scheduler" is the
     default scheduler. Can be a class directly or the path to a class of form
@@ -3465,6 +3469,51 @@ class KVTransferConfig(BaseModel):
         return self.kv_connector_extra_config.get(key, default)
 
 
+class KVEventsConfig(BaseModel):
+    """Configuration for KV event publishing."""
+
+    enable_kv_cache_events: bool = False
+    """If True, enable KV cache events for tracking block storage and removal.
+    Events can be published externally by zmq using the event publisher config.
+    """
+
+    publisher: str = "null"
+    """The publisher to use for publishing kv events. Can be "null", "zmq".
+    """
+
+    endpoint: str = "tcp://*:5557"
+    """The zmq endpoint to use for publishing kv events.
+    """
+
+    replay_endpoint: Optional[str] = None
+    """The zmq endpoint to use for replaying kv events.
+    """
+
+    buffer_steps: int = 10_000
+    """The number of steps to cache for replay endpoint. Will only save
+    events from the last N steps for the replay endpoint.
+    """
+
+    hwm: int = 100_000
+    """The zmq high water mark for the event publisher. After queueing N events,
+    events will start dropping if the consumer is not keeping up.
+    """
+
+    max_queue_size: int = 100_000
+    """The maximum number of events to queue while waiting for publishing.
+    """
+
+    topic: str = ""
+    """The topic to use for the event publisher. Consumers can subscribe to
+    this topic to receive events.
+    """
+
+    @classmethod
+    def from_cli(cls, cli_value: str) -> "KVEventsConfig":
+        """Parse the CLI value for the event publisher config."""
+        return KVEventsConfig.model_validate_json(cli_value)
+
+
 class CompilationLevel:
     # constants for the levels of the compilation process
     NO_COMPILATION = 0
@@ -3827,6 +3876,7 @@ class VllmConfig:
                                                   init=True)  # type: ignore
     kv_transfer_config: KVTransferConfig = field(default=None,
                                                  init=True)  # type: ignore
+    kv_events_config: Optional[KVEventsConfig] = None
     # some opaque config, only used to provide additional information
     # for the hash computation, mainly used for testing, debugging or out of
     # tree config registration.
@@ -4086,6 +4136,18 @@ class VllmConfig:
             if self.cache_config is not None:
                 self.cache_config.enable_prefix_caching = False
 
+        if (self.kv_events_config
+                and self.kv_events_config.enable_kv_cache_events
+                and not self.cache_config.enable_prefix_caching):
+            logger.warning(
+                "KV cache events are on, but prefix caching is not enabled."
+                "Use --enable-prefix-caching to enable.")
+        if (self.kv_events_config and self.kv_events_config.publisher != "null"
+                and not self.kv_events_config.enable_kv_cache_events):
+            logger.warning("KV cache events are disabled,"
+                           "but the scheduler is configured to publish them."
+                           "Modify KVEventsConfig.enable_kv_cache_events"
+                           "to True to enable.")
         current_platform.check_and_update_config(self)
 
         if not self.instance_id:
