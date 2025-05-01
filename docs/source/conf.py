@@ -76,7 +76,7 @@ exclude_patterns: list[str] = [
     "api/vllm/vllm.logger.md",
     "api/vllm/vllm.sampling_params.md",
     "api/vllm/vllm.sequence.md",
-    ]
+]
 
 # Exclude the prompt "$" when copying code
 copybutton_prompt_text = r"\$ "
@@ -186,7 +186,7 @@ def linkcode_resolve(domain, info):
         return None
 
     # Get path from module name
-    file = Path(f"{info["module"].replace('.', '/')}.py")
+    file = Path(f"{info['module'].replace('.', '/')}.py")
     path = VLLM_ROOT / file
     if not path.exists():
         path = VLLM_ROOT / file.with_suffix("") / "__init__.py"
@@ -237,7 +237,7 @@ autodoc_mock_imports = [
     # The mocks below are required by
     # docs/source/serving/openai_compatible_server.md's
     # vllm.entrypoints.openai.cli_args
-    "openai", 
+    "openai",
     "fastapi",
     "partial_json_parser",
 ]
