@@ -62,6 +62,9 @@ class TreeArray:
                                  dtype=torch.int32,
                                  device=device)  # Depth level of each node
 
+        # Sequence length for each node
+        self.seq_lens = torch.ones(max_nodes, dtype=torch.int32, device=device)
+
         # Number of nodes currently in the tree (also serves as next node index)
         self.size = 0
 
@@ -101,6 +104,12 @@ class TreeArray:
         self.local_probs[node_idx] = local_prob
         self.global_probs[node_idx] = global_prob
         self.depths[node_idx] = depth
+
+        # Update sequence length based on parent
+        if parent_idx != -1:
+            self.seq_lens[node_idx] = self.seq_lens[parent_idx] + 1
+        else:
+            self.seq_lens[node_idx] = 1
 
         # Initialize hidden states tensor if this is the first use
         # Only allocate memory for hidden states when actually needed
@@ -609,6 +618,9 @@ class EagleProposer:
         #############################################################################
         # STEP 3: Subsequent forward passes until reaching spec_tree_depth
         #         Selectively expand most promising nodes at each level
+        #
+        # STEP 3.1: forward pass
+        # STEP 3.2: Select top-k nodes
         #############################################################################
 
         # Set up for batch processing
@@ -664,21 +676,29 @@ class EagleProposer:
             clamped_positions = torch.where(exceeds_max_model_len, 0,
                                             batch_positions)
 
-            # Set up attention metadata for batch processing
-            # Create query_start_loc tensor of shape [num_process_nodes + 1]
-            query_start_loc = torch.arange(num_process_nodes + 1,
-                                           device=self.device,
-                                           dtype=torch.int32)
+            # For requests exceeding max model length,
+            # set seq_len to 1 to minimize attention overhead
+            seq_lens = torch.zeros(num_process_nodes,
+                                   device=self.device,
+                                   dtype=torch.int32)
+            for i, (tree_idx, node_idx) in enumerate(nodes_to_process):
+                tree = trees[tree_idx]
+                # Get sequence length from the node
+                seq_lens[i] = tree.seq_lens[node_idx]
+            seq_lens.masked_fill_(exceeds_max_model_len, 1)
 
-            # Initialize FlashAttentionMetadata with all required parameters
+            # Update max_seq_len considering max model length
+            max_seq_len = seq_lens.max().item()
+            max_seq_len = min(max_seq_len, self.max_model_len)
+
             attn_metadata = FlashAttentionMetadata(
                 num_actual_tokens=num_process_nodes,
                 max_query_len=1,
-                query_start_loc=query_start_loc,
-                seq_lens=torch.ones(num_process_nodes,
-                                    device=self.device,
-                                    dtype=torch.int32),
-                max_seq_len=1,
+                query_start_loc=torch.arange(num_process_nodes + 1,
+                                             device=self.device,
+                                             dtype=torch.int32),
+                seq_lens=seq_lens,
+                max_seq_len=max_seq_len,
                 block_table=block_table,  # Reuse block_table from param
                 slot_mapping=None,  # Will be set below
                 use_cascade=False,
