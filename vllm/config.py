@@ -3882,39 +3882,66 @@ class CompilationConfig:
             ]
 
 
+@config
 @dataclass
 class VllmConfig:
     """Dataclass which contains all vllm-related configuration. This
     simplifies passing around the distinct configurations in the codebase.
     """
 
-    model_config: ModelConfig = field(default=None, init=True)  # type: ignore
-    cache_config: CacheConfig = field(default=None, init=True)  # type: ignore
-    parallel_config: ParallelConfig = field(default_factory=ParallelConfig,
-                                            init=True)
-    scheduler_config: SchedulerConfig = field(default_factory=SchedulerConfig,
-                                              init=True)
-    device_config: DeviceConfig = field(default=None,
-                                        init=True)  # type: ignore
-    load_config: LoadConfig = field(default=None, init=True)  # type: ignore
+    model_config: ModelConfig = None  # type: ignore
+    """Model configuration."""
+    cache_config: CacheConfig = None  # type: ignore
+    """Cache configuration."""
+    parallel_config: ParallelConfig = field(default_factory=ParallelConfig)
+    """Parallel configuration."""
+    scheduler_config: SchedulerConfig = field(default_factory=SchedulerConfig)
+    """Scheduler configuration."""
+    device_config: DeviceConfig = None  # type: ignore
+    """Device configuration."""
+    load_config: LoadConfig = None  # type: ignore
+    """Load configuration."""
     lora_config: Optional[LoRAConfig] = None
-    speculative_config: SpeculativeConfig = field(default=None,
-                                                  init=True)  # type: ignore
+    """LoRA configuration."""
+    speculative_config: SpeculativeConfig = None  # type: ignore
+    """Speculative decoding configuration."""
     decoding_config: Optional[DecodingConfig] = None
+    """Decoding configuration."""
     observability_config: Optional[ObservabilityConfig] = None
+    """Observability configuration."""
     prompt_adapter_config: Optional[PromptAdapterConfig] = None
+    """Prompt adapter configuration."""
     quant_config: Optional[QuantizationConfig] = None
-    compilation_config: CompilationConfig = field(default=None,
-                                                  init=True)  # type: ignore
-    kv_transfer_config: KVTransferConfig = field(default=None,
-                                                 init=True)  # type: ignore
+    """Quantization configuration."""
+    compilation_config: CompilationConfig = None  # type: ignore
+    """`torch.compile` configuration for the model.
+
+    When it is a number (0, 1, 2, 3), it will be interpreted as the
+    optimization level.
+
+    NOTE: level 0 is the default level without any optimization. level 1 and 2
+    are for internal testing only. level 3 is the recommended level for
+    production.
+
+    Following the convention of traditional compilers, using `-O` without space
+    is also supported. `-O3` is equivalent to `-O 3`.
+
+    You can specify the full compilation config like so:
+    `{"level": 3, "cudagraph_capture_sizes": [1, 2, 4, 8]}`
+    """
+    kv_transfer_config: KVTransferConfig = None  # type: ignore
+    """The configurations for distributed KV cache transfer."""
     kv_events_config: Optional[KVEventsConfig] = None
+    """The configurations for event publishing."""
     # some opaque config, only used to provide additional information
     # for the hash computation, mainly used for testing, debugging or out of
     # tree config registration.
-    additional_config: SupportsHash = field(default=None,
-                                            init=True)  # type: ignore
+    additional_config: dict = field(default_factory=dict)
+    """Additional config for specified platform. Different platforms may
+    support different configs. Make sure the configs are valid for the platform
+    you are using. Contents must be hashable."""
     instance_id: str = ""
+    """The ID of the vLLM instance."""
 
     def compute_hash(self) -> str:
         """
@@ -3995,7 +4022,8 @@ class VllmConfig:
         else:
             vllm_factors.append("None")
         if self.additional_config:
-            vllm_factors.append(self.additional_config.compute_hash())
+            vllm_factors.append(hash(frozenset(
+                self.additional_config.items())))
         else:
             vllm_factors.append("None")
         factors.append(vllm_factors)
