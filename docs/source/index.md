@@ -194,7 +194,7 @@ contributing/vulnerability_management
 :caption: API Reference
 :maxdepth: 2
 
-api/index
+api/summary
 api/vllm/vllm
 :::
 
