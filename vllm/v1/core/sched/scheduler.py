@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from __future__ import annotations
-
+from evaluator import eqaul_group, count_not_empty
 import time
 from collections import defaultdict, deque
 from collections.abc import Iterable
@@ -52,6 +52,7 @@ class Scheduler(SchedulerInterface):
         self.kv_events_config = vllm_config.kv_events_config
         self.log_stats = log_stats
         self.structured_output_manager = structured_output_manager
+        self.enable_dynasor_abort=True
 
         # include_finished_set controls whether a separate set of finished
         # request ids should be included in the EngineCoreOutputs returned
@@ -637,6 +638,43 @@ class Scheduler(SchedulerInterface):
             encoder_inputs_to_schedule.append(i)
         return encoder_inputs_to_schedule, num_new_tokens, encoder_budget
 
+    def _create_and_add_new_request(self, parent_request: Request,decode_count) -> None:
+        """Create a new prefill Request using (original prompt + decoded outputs + custom string)."""
+        logger_myown.info(
+                f"Request {parent_request.request_id} has {parent_request.num_computed_tokens} computed tokens")
+
+        original_prompt_ids = list(parent_request.prompt_token_ids)
+        decoded_output_ids = list(parent_request.output_token_ids)
+
+        # probe msg  
+        custom_text = "Oh, I suddenly got the answer to the whole program, **Final Answer**:\n\n\\[\\boxed{]"
+        
+        custom_token_ids = list(self.tokenizer.encode(custom_text, add_special_tokens=False))
+
+        # new prefill
+        new_prompt_token_ids = original_prompt_ids + decoded_output_ids + custom_token_ids
+
+        # new unique request ID
+        new_request_id = parent_request.request_id + "_probe_after_" + str(decode_count) + "_token"
+
+        # new Request
+        new_request = Request(
+            request_id=new_request_id,
+            prompt_token_ids=new_prompt_token_ids,
+            sampling_params=parent_request.sampling_params,
+            arrival_time=time.monotonic(),
+            lora_request=parent_request.lora_request,
+            multi_modal_inputs=getattr(parent_request, "multi_modal_inputs", []),
+            multi_modal_hashes=getattr(parent_request, "multi_modal_hashes", []),
+            multi_modal_placeholders=getattr(parent_request, "multi_modal_placeholders", []),
+            eos_token_id=getattr(parent_request, "eos_token_id", None),
+        )
+
+        # Only if request is still running
+        if parent_request.status == RequestStatus.RUNNING:
+            self.add_request(new_request)
+            print(f"[Scheduler] Created new request {new_request_id} from {parent_request.request_id}")
+
     def update_from_output(
         self,
         scheduler_output: SchedulerOutput,
@@ -656,6 +694,14 @@ class Scheduler(SchedulerInterface):
         # loop can be a performance bottleneck. We should do our best to avoid
         # expensive operations inside the loop.
         for request in self.running:
+            if len(request.output_token_ids) == 10:
+                print(f"Request {request.request_id} reached 10 decoded tokens!")
+
+                if "probe" not in request.request_id:
+                    
+                    logger_myown.info(
+                        f"Request {request.request_id} reached 10 decoded tokens!")
+                    self._create_and_add_new_request(request,len(request.output_token_ids))
             req_id = request.request_id
             num_tokens_scheduled = num_scheduled_tokens.get(req_id, 0)
             if num_tokens_scheduled == 0:
@@ -759,6 +805,29 @@ class Scheduler(SchedulerInterface):
             if not stopped:
                 new_running.append(request)
 
+            if self.enable_dynasor_abort:
+                    uncertain_words = ["wait", "hold", "but", "okay", "no", "hmm"]
+                    new_text = self.tokenizer.decode(new_token_ids)
+                    self.probe_responses[req_id].append(new_text)
+
+                    answer = self.obtain_answer(new_text)
+                    print(f"Answer : {answer}")
+                    self.probe_answers[req_id].append(answer)
+
+                    recent_responses = self.probe_responses[req_id][-self.dynasor_threshold:]
+                    probe_certain_count = [
+                        not any(word in res.lower() for word in uncertain_words)
+                        for res in recent_responses
+                    ]
+
+                    if (
+                        eqaul_group(self.probe_answers[req_id][-self.dynasor_threshold:])
+                        and count_not_empty(self.probe_answers[req_id][-self.dynasor_threshold:]) == self.dynasor_threshold
+                        and sum(probe_certain_count) == self.dynasor_threshold
+                    ):
+                        logger_myown.info(f"[Dynasor-Abort] Confident answer detected. Aborting {req_id}.")
+                        self.finish_requests(req_id, RequestStatus.FINISHED_ABORTED)
+                        continue
         # Return the cached request data to the queue so they can be reused.
         for req_data in scheduler_output.scheduled_cached_reqs:
             self._cached_reqs_data[req_data.req_id].append(req_data)
