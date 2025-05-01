@@ -613,8 +613,8 @@ class Scheduler(SchedulerInterface):
             # only cover part of the mm input, roll back to before the mm item.
             if (self.scheduler_config.disable_chunked_mm_input
                     and num_computed_tokens < start_pos
-                    and (num_computed_tokens + num_new_tokens) <
-                (start_pos + num_encoder_tokens)):
+                    and (num_computed_tokens + num_new_tokens)
+                    < (start_pos + num_encoder_tokens)):
                 num_new_tokens = start_pos - num_computed_tokens
                 break
 
