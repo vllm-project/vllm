@@ -221,11 +221,13 @@ class TTWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
         appended to.
         """
         # TODO: Add proper implementation which runs profiling on TT devices
-        if ("Llama-3.1-8B" in self.model_config.model and 
-            self.device_config.device.get_num_devices() == 1):  # Llama8B on N150
+        if ("Llama-3.1-8B" in self.model_config.model and
+            self.device_config.device.get_num_devices() == 1 and
+            "wormhole_b0" in ttnn.get_arch_name()):  # Llama8B on N150
             max_tokens_all_users = 65536
-        elif ("Llama-3.2-90B" in self.model_config.model and 
-              self.device_config.device.get_num_devices() == 8):  # Llama90B on T3K
+        elif ("Llama-3.2-90B" in self.model_config.model and
+              self.device_config.device.get_num_devices() == 8 and
+              "wormhole_b0" in ttnn.get_arch_name()):  # Llama90B on WH T3K
             max_tokens_all_users = 65536 # [INFO] avoid OOM for Llama-3.2-90B
         else:
             max_tokens_all_users = 131072  # Note: includes num vision tokens for multi-modal
@@ -433,8 +435,16 @@ class TTWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
 
     def _open_mesh_device(self):
         num_devices_available = len(ttnn.get_device_ids())
-        
-        mesh_grid_dict = {"N150": (1, 1), "N300": (1, 2), "N150x4": (1, 4), "T3K": (1, 8), "TG": (8, 4)}
+        mesh_grid_dict = {
+            "N150": (1, 1),
+            "P150": (1, 1),
+            "N300": (1, 2),
+            "P300": (1, 2),
+            "N150x4": (1, 4),
+            "P150x4": (1, 4),
+            "T3K": (1, 8),
+            "TG": (8, 4)
+        }
         mesh_device = os.environ.get("MESH_DEVICE")
         if mesh_device is not None:
             assert mesh_device in mesh_grid_dict, f"Invalid MESH_DEVICE: {mesh_device}"
