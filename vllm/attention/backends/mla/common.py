@@ -1214,45 +1214,6 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
         # Convert from (L, N, P) to (N, P, L)
         self.W_UK_T = W_UK.permute(1, 2, 0)
 
-    def _get_prefill_ctx_attn_output(
-            self, index: int, q: torch.Tensor, k: torch.Tensor,
-            v: torch.Tensor,
-            metadata: MLACommonMetadata) -> Tuple[torch.Tensor, ...]:
-        assert metadata.context_chunk_cu_seq_lens is not None
-        assert metadata.context_chunk_max_seq_lens is not None
-
-        # For MLA the v head dim is smaller than qk head dim so we pad
-        # out v with 0s to match the qk head dim
-        v_padded = torch.nn.functional.pad(v, [0, q.shape[-1] - v.shape[-1]],
-                                           value=0)
-        if is_vllm_fa:
-            attn_output, attn_softmax_lse = self.flash_attn_varlen_func(
-                q=q,
-                k=k,
-                v=v_padded,
-                cu_seqlens_q=metadata.query_start_loc,
-                cu_seqlens_k=metadata.context_chunk_cu_seq_lens[index],
-                max_seqlen_q=metadata.max_query_len,
-                max_seqlen_k=metadata.context_chunk_max_seq_lens[index],
-                softmax_scale=self.scale,
-                causal=False,  # Context is unmasked
-                return_softmax_lse=True,
-            )
-        else:
-            attn_output, attn_softmax_lse, _ = self.flash_attn_varlen_func(
-                q=q,
-                k=k,
-                v=v_padded,
-                cu_seqlens_q=metadata.query_start_loc,
-                cu_seqlens_k=metadata.context_chunk_cu_seq_lens[index],
-                max_seqlen_q=metadata.max_query_len,
-                max_seqlen_k=metadata.context_chunk_max_seq_lens[index],
-                softmax_scale=self.scale,
-                causal=False,  # Context is unmasked
-                return_attn_probs=True,
-            )
-        return attn_output, attn_softmax_lse
-
     def _compute_prefill_context(
         self,
         q: torch.Tensor,
