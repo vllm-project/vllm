@@ -365,7 +365,6 @@ def maybe_save_kv_layer_to_connector(
     if attn_metadata is None:
         return
     assert isinstance(attn_metadata, dict)
-
     connector.save_kv_layer(layer_name, kv_cache_layer,
                             attn_metadata[layer_name])
 
