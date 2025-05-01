@@ -37,8 +37,6 @@ attrs==24.2.0
     #   referencing
 audioread==3.0.1
     # via librosa
-awscli==1.35.23
-    # via -r requirements/test.in
 backoff==2.2.1
     # via
     #   -r requirements/test.in
@@ -53,7 +51,6 @@ boto3==1.35.57
     # via tensorizer
 botocore==1.35.57
     # via
-    #   awscli
     #   boto3
     #   s3transfer
 bounded-pool-executor==0.0.3
@@ -81,7 +78,6 @@ click==8.1.7
     #   typer
 colorama==0.4.6
     # via
-    #   awscli
     #   sacrebleu
     #   schemathesis
     #   tqdm-multiprocess
@@ -115,8 +111,6 @@ dnspython==2.7.0
     # via email-validator
 docopt==0.6.2
     # via num2words
-docutils==0.16
-    # via awscli
 einops==0.8.0
     # via
     #   -r requirements/test.in
@@ -472,8 +466,6 @@ pyarrow==18.0.0
     # via
     #   datasets
     #   genai-perf
-pyasn1==0.6.1
-    # via rsa
 pybind11==2.13.6
     # via lm-eval
 pycparser==2.22
@@ -537,7 +529,6 @@ pytz==2024.2
 pyyaml==6.0.2
     # via
     #   accelerate
-    #   awscli
     #   datamodel-code-generator
     #   datasets
     #   genai-perf
@@ -596,16 +587,12 @@ rpds-py==0.20.1
     # via
     #   jsonschema
     #   referencing
-rsa==4.7.2
-    # via awscli
 runai-model-streamer==0.11.0
     # via -r requirements/test.in
 runai-model-streamer-s3==0.11.0
     # via -r requirements/test.in
 s3transfer==0.10.3
-    # via
-    #   awscli
-    #   boto3
+    # via boto3
 sacrebleu==2.4.3
     # via lm-eval
 safetensors==0.4.5
