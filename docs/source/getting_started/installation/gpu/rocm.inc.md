@@ -85,7 +85,7 @@ Currently, there are no pre-built ROCm wheels.
     ```
 
     :::{note}
-    You will need to config the $AITER_BRANCH_OR_COMMIT for your purpose.
+    You will need to config the `$AITER_BRANCH_OR_COMMIT` for your purpose.
     :::
 
 4. Build vLLM. For example, vLLM on ROCM 6.3 can be built with the following steps:
