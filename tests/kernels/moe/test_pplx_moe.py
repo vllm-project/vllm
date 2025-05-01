@@ -300,7 +300,7 @@ def pplx_dispatch_combine(pgi, dp_size, a, topk_weight, topk_ids, num_experts):
     assert torch.cuda.current_device() == pgi.local_rank
 
     topk = topk_ids.shape[1]
-    num_tokens, hidden_dim = a.shape[1]
+    num_tokens, hidden_dim = a.shape
     block_size = 128
     device = pgi.device
     rank = pgi.rank
