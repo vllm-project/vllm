@@ -105,6 +105,8 @@ class EngineCoreOutput(
     stop_reason: Union[int, str, None] = None
     events: Optional[list[EngineCoreEvent]] = None
 
+    num_cached_tokens: int = 0
+
     @property
     def finished(self) -> bool:
         return self.finish_reason is not None
@@ -137,6 +139,7 @@ class EngineCoreOutputs(
     outputs: list[EngineCoreOutput] = []
     scheduler_stats: Optional[SchedulerStats] = None
     timestamp: float = 0.0
+    num_cached_tokens: int = 0
 
     utility_output: Optional[UtilityOutput] = None
     finished_requests: Optional[set[str]] = None

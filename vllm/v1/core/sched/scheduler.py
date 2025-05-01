@@ -334,6 +334,9 @@ class Scheduler(SchedulerInterface):
                 # Total computed tokens (local + external).
                 num_computed_tokens += num_external_tokens
 
+                # Update the statistic
+                request.num_cached_tokens = num_computed_tokens
+
                 # Number of tokens to be scheduled.
                 # We use `request.num_tokens` instead of
                 # `request.num_prompt_tokens` to consider the resumed requests,
@@ -595,8 +598,8 @@ class Scheduler(SchedulerInterface):
             # only cover part of the mm input, roll back to before the mm item.
             if (self.scheduler_config.disable_chunked_mm_input
                     and num_computed_tokens < start_pos
-                    and (num_computed_tokens + num_new_tokens)
-                    < (start_pos + num_encoder_tokens)):
+                    and (num_computed_tokens + num_new_tokens) <
+                (start_pos + num_encoder_tokens)):
                 num_new_tokens = start_pos - num_computed_tokens
                 break
 
@@ -729,7 +732,8 @@ class Scheduler(SchedulerInterface):
                         new_logprobs=new_logprobs,
                         new_prompt_logprobs_tensors=prompt_logprobs_tensors,
                         stop_reason=request.stop_reason,
-                        events=request.take_events()))
+                        events=request.take_events(),
+                        num_cached_tokens=request.num_cached_tokens))
             else:
                 # Invariant: EngineCore returns no partial prefill outputs.
                 assert not prompt_logprobs_tensors

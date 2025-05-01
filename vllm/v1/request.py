@@ -51,6 +51,7 @@ class Request:
         self._all_token_ids: list[int] = self.prompt_token_ids.copy()
         self.spec_token_ids: list[int] = []
         self.num_computed_tokens = 0
+        self.num_cached_tokens = 0
 
         # Multi-modal related
         self.mm_positions = multi_modal_placeholders or []
