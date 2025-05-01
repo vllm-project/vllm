@@ -270,11 +270,12 @@ class PunicaWrapperTPU(PunicaWrapperBase):
         y = y.view(-1, y.shape[-1])
         x = x.view(-1, x.shape[-1])
 
-        buffer = bgmv_shrink(x, lora_a_stacked, self.sampler_indices, scale)
+        sampler_indices = torch.narrow(self._sampler_indices, 0, 0, x.size(0))
+        buffer = bgmv_shrink(x, lora_a_stacked, sampler_indices, scale)
         y = bgmv_expand(buffer,
                         lora_b_stacked,
                         y,
-                        self.sampler_indices,
+                        sampler_indices,
                         add_inputs=True)
         return y.view_as(y_org)
 
