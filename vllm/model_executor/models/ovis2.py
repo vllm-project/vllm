@@ -46,8 +46,7 @@ from .utils import merge_multimodal_embeddings
 
 # Cannot find the following number from hf config.
 IMAGE_TOKEN = "<image>"
-IMAGE_ATOM_TOKEN_ID = 151666
-IMAGE_PAD_TOKEN_ID = 151672
+IMAGE_PAD_TOKEN_ID = 151655
 NUMBER_OF_TOKEN_TO_RESERVE_FOR_SEGMENT = 256
 
 
@@ -338,7 +337,8 @@ class Ovis2ForConditionalGeneration(nn.Module, SupportsMultiModal):
         inputs_embeds = self.llm.get_input_embeddings(input_ids)
         if multimodal_embeddings is not None:
             inputs_embeds = merge_multimodal_embeddings(
-                input_ids, inputs_embeds, multimodal_embeddings, [151655])
+                input_ids, inputs_embeds, multimodal_embeddings,
+                [IMAGE_PAD_TOKEN_ID])
         return inputs_embeds
 
     def forward(
