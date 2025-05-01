@@ -341,6 +341,7 @@ class MPClient(EngineCoreClient):
         executor_class: type[Executor],
         log_stats: bool,
     ):
+        self.vllm_config = vllm_config
         # Serialization setup.
         self.encoder = MsgpackEncoder()
         self.decoder = MsgpackDecoder(EngineCoreOutputs)
@@ -513,6 +514,14 @@ class MPClient(EngineCoreClient):
                 engine.state = CoreEngineState.CONNECTED
             elif status == "READY" and (engine.state
                                         == CoreEngineState.CONNECTED):
+                # Setup KV cache config with initialization state from
+                # engine core process.
+
+                # TODO we'll receive one of these per engine in DP case.
+                # How should we aggregate?
+                self.vllm_config.cache_config.num_gpu_blocks = msg[
+                    "num_gpu_blocks"]
+
                 start_pending[0 if local else 1] -= 1
                 engine.state = CoreEngineState.READY
             else:

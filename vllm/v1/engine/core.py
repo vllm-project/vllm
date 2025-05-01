@@ -117,6 +117,7 @@ class EngineCore:
             logger.info("Batch queue is enabled with size %d",
                         self.batch_queue_size)
             self.batch_queue = queue.Queue(self.batch_queue_size)
+        self.vllm_config = vllm_config
 
     def _initialize_kv_caches(
             self, vllm_config: VllmConfig) -> tuple[int, int, KVCacheConfig]:
@@ -258,6 +259,8 @@ class EngineCore:
         self.structured_output_manager.clear_backend()
         if self.model_executor:
             self.model_executor.shutdown()
+        if self.scheduler:
+            self.scheduler.shutdown()
 
     def profile(self, is_start: bool = True):
         self.model_executor.profile(is_start)
@@ -355,10 +358,12 @@ class EngineCoreProc(EngineCore):
             self.engines_running = False
 
             # Send ready message.
+            num_gpu_blocks = vllm_config.cache_config.num_gpu_blocks
             input_socket.send(
                 msgspec.msgpack.encode({
                     "status": "READY",
-                    "local": on_head_node
+                    "local": on_head_node,
+                    "num_gpu_blocks": num_gpu_blocks,
                 }))
 
             # Background Threads and Queues for IO. These enable us to
