@@ -13,24 +13,6 @@ from vllm.logger import init_logger
 
 logger = init_logger(__name__)
 
-try:
-    from triton_dejavu import jitcache
-except ImportError:
-
-    def jitcache(**kwargs):
-
-        def decorator(func):
-            logger.warning_once(
-                f"triton_dejavu is not installed. {func.__name__} benefits "
-                " from jitcache caching, please install triton_dejavu "
-                " (https://github.com/IBM/triton-dejavu) for best performance."
-                " \nNOTE: Currently does not support Triton 3.3 (and as a "
-                " result) PyTorch 2.7.0+. Please open a PR to remove this NOTE "
-                " once Triton 3.3 is supported.")
-            return func
-
-        return decorator
-
 
 @triton.jit
 def cdiv_fn(x, y):
@@ -45,10 +27,6 @@ def apply_softcap(S, x):
     return x * (p1 - p2) / (p1 + p2)
 
 
-@jitcache(
-    check_keys=[],
-    cache_launch_grid=False,
-)
 @triton.jit
 def kernel_unified_attention_2d(
     output_ptr,  # [num_tokens, num_query_heads, head_size]
