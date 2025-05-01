@@ -42,10 +42,8 @@ class BlockHashType(NamedTuple):
 # variable if set such that processes can share the seed if needed.
 # This aligns with the behavior of Python's hash() function, which also uses
 # a random seed if PYTHONHASHSEED is not set.
-NONE_HASH = int.from_bytes(
-    os.urandom(32),
-    byteorder="big") if os.getenv('PYTHONHASHSEED') is None else sha256(
-        os.getenv('PYTHONHASHSEED'))
+NONE_HASH = int.from_bytes(os.urandom(32), byteorder="big") if os.getenv(
+    'PYTHONHASHSEED') is None else sha256(os.getenv('PYTHONHASHSEED'))
 
 
 class PrefixCachingMetrics:
@@ -252,7 +250,6 @@ class FreeKVCacheBlockQueue:
         Args:
             block: The block to append.
         """
-        logger.debug(f"Appending P1 block {block.block_id} to tail.")
         # Standard append logic
         if self.free_list_tail is not None:
             # Link the last block to the new block.
@@ -278,11 +275,9 @@ class FreeKVCacheBlockQueue:
         Args:
             block: The block to append.
         """
-        logger.debug(
-            f"Appending P0 block {block.block_id} before P1 head (current P1 head: {self.priority_1_head.block_id if self.priority_1_head else 'None'})."
-        )
         if self.priority_1_head is None:
-            # No P1 blocks yet, append to the absolute tail like a P1 block,
+            # No P1 blocks yet, append to the absolute tail like a P1
+            # block,
             # but DO NOT mark it as the P1 head.
             if self.free_list_tail is not None:
                 self.free_list_tail.next_free_block = block
@@ -300,7 +295,8 @@ class FreeKVCacheBlockQueue:
             if prev_block is not None:
                 prev_block.next_free_block = block
             else:
-                # The priority_1_head was the head, so block becomes the new head
+                # The priority_1_head was the head, so block becomes the
+                # new head
                 self.free_list_head = block
 
         self.num_free_blocks += 1
@@ -331,7 +327,10 @@ def need_extra_keys(request: Request) -> bool:
 
     # Multimodal requests need to include the MM hash.
     # LoRA requests need to include the LoRA ID.
-    return bool(request.mm_positions) or (request.lora_request is not None)
+    # Request with provided cache salt need to include the salt.
+    return bool(request.mm_positions) or (request.lora_request
+                                          is not None) or (request.cache_salt
+                                                           is not None)
 
 
 def _gen_mm_extra_hash_keys(request: Request, start_token_idx: int,
@@ -436,8 +435,10 @@ def generate_block_hash_extra_keys(
     mm_extra_keys, new_start_mm_idx = _gen_mm_extra_hash_keys(
         request, start_token_idx, end_token_idx, start_mm_idx)
     lora_extra_keys: list[int] = _gen_lora_extra_hash_keys(request)
+    cache_salt_keys: list[str] = [request.cache_salt] if (
+        start_token_idx == 0 and request.cache_salt) else []
 
-    extra_keys: list[Any] = lora_extra_keys + mm_extra_keys
+    extra_keys: list[Any] = lora_extra_keys + mm_extra_keys + cache_salt_keys
 
     if not extra_keys:
         return None, new_start_mm_idx
@@ -713,10 +714,10 @@ def _get_kv_cache_config_uniform_type(vllm_config: VllmConfig,
 def unify_hybrid_kv_cache_specs(kv_cache_spec: dict[str, KVCacheSpec]):
     """
     Only models with one type of KV cache are supported yet. This function tries
-    to convert the KV cache specs to one type if the model is a hybrid model 
+    to convert the KV cache specs to one type if the model is a hybrid model
     with multiple type of KV cache. It will convert all SlidingWindowSpec to
     FullAttentionSpec if both types are present.
-    
+
     Args:
         kv_cache_spec: The kv cache spec of each attention layer in the model
     """
