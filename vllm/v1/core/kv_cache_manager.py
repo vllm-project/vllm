@@ -5,6 +5,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import Optional
 
+from vllm.distributed.kv_events import KVCacheEvent
 from vllm.logger import init_logger
 from vllm.utils import cdiv, sha256
 from vllm.v1.core.block_pool import BlockPool
@@ -46,6 +47,7 @@ class KVCacheManager:
         caching_hash_algo: str = "builtin",
         use_eagle: bool = False,
         log_stats: bool = False,
+        enable_kv_cache_events: bool = False,
     ) -> None:
         assert len(kv_cache_config.kv_cache_groups) == 1, (
             "KVCacheManager does not support hybrid models with more than 1 "
@@ -63,10 +65,13 @@ class KVCacheManager:
         # FIXME: make prefix cache stats conditional on log_stats
         self.prefix_cache_stats = PrefixCacheStats() if log_stats else None
 
-        self.block_pool = BlockPool(self.num_gpu_blocks, enable_caching)
+        self.block_pool = BlockPool(self.num_gpu_blocks, enable_caching,
+                                    enable_kv_cache_events)
+
         self.specialized_manager = get_specialized_manager(
             kv_cache_spec=kv_cache_spec,
             block_pool=self.block_pool,
+            use_eagle=self.use_eagle,
         )
 
         # Mapping from request ID to blocks to track the blocks allocated
@@ -155,13 +160,6 @@ class KVCacheManager:
 
         computed_blocks = (
             self.specialized_manager.find_longest_cache_hit(block_hashes))
-
-        if self.use_eagle and len(computed_blocks) > 0:
-            # Drop the last matched block if (1) eagle is enabled and
-            # (2) there is a cache hit.
-            # This is to recompute the last block to get the required
-            # hidden states for eagle drafting head.
-            computed_blocks.pop()
 
         if self.log_stats:
             assert self.prefix_cache_stats is not None
@@ -405,3 +403,11 @@ class KVCacheManager:
         is finished, not when it is preempted.
         """
         self.req_to_block_hashes.pop(request.request_id, None)
+
+    def take_events(self) -> list[KVCacheEvent]:
+        """Take the KV cache events from the block pool.
+
+        Returns:
+            A list of KV cache events.
+        """
+        return self.block_pool.take_events()
