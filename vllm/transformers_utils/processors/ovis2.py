@@ -69,20 +69,21 @@ class OvisProcessor(ProcessorMixin):
     image_processor_class = "AutoImageProcessor"
     tokenizer_class = "Qwen2Tokenizer"
 
-    def __init__(self, image_processor=None, tokenizer=None, chat_template=None, **kwargs):
-        self.image_token = "<|image_pad|>" if not hasattr(tokenizer, "image_token") else tokenizer.image_token
-        self.video_token = "<|video_pad|>" if not hasattr(tokenizer, "video_token") else tokenizer.video_token
+    def __init__(self, image_processor=None, tokenizer=None, chat_template=None, image_pad_token=None, **kwargs):
+        self.image_token = "<image>"
+        self.image_pad_token = "<|image_pad|>" if image_pad_token is None else image_pad_token
         super().__init__(image_processor, tokenizer, chat_template=chat_template)
 
+        self.image_pad_token_id = self.tokenizer.get_vocab()[self.image_pad_token]
         self.extra_special_tokens = {
-            "image_token": "<image>",
-            "image_atom": "<image_atom>",
-            "image_start": "<img>",
-            "image_prefix": "<pre>",
-            "image_col_sep": "<col>",
-            "image_row_sep": "<row>",
-            "image_end": "</img>",
-            'image_pad': '<image_pad>',
+            "image_token": -200,
+            "image_atom": -300,
+            "image_start": -301,
+            "image_prefix": -302,
+            "image_col_sep": -303,
+            "image_row_sep": -304,
+            "image_end": -305,
+            'image_pad': self.image_pad_token_id,
         }
 
     def __call__(
@@ -157,58 +158,44 @@ class OvisProcessor(ProcessorMixin):
             if not isinstance(text, list):
                 text = [text]
 
-            tokenized_batched_text = self.tokenizer.batch_encode_plus(
-                text,
-                **output_kwargs["text_kwargs"]
-            )
+            tokenized_batched_text = self._tokenize_with_image_symbol(text)
             image_token_id = self.get_token_value("image_token")
             replaced_ids_list = []
-            replaced_attn_mask_list = []
             idx = 0
-            for ids_tensor, attn_mask in zip(tokenized_batched_text['input_ids'],
-                                             tokenized_batched_text['attention_mask']):
+            for ids_tensor in tokenized_batched_text:
                 if image_token_id in ids_tensor and "image_placeholders" in image_features:
                     if idx < len(image_features["image_placeholders"]):
                         # Converts in list for ease of use
                         ids_list = ids_tensor.tolist()
-                        attn_list = attn_mask.tolist()
 
                         new_ids = []
-                        new_attn = []
 
                         # replace placeholders
                         for i, token_id in enumerate(ids_list):
                             if token_id == image_token_id:
                                 placeholder_ids = image_features["image_placeholders"][idx]
                                 new_ids.extend(placeholder_ids)
-                                new_attn.extend([1] * len(placeholder_ids))
                                 idx += 1
                             else:
                                 new_ids.append(token_id)
-                                new_attn.append(attn_list[i])
 
                         # Converts back to tensors
                         ids_tensor = torch.tensor(new_ids, dtype=torch.long)
-                        attn_mask = torch.tensor(new_attn, dtype=torch.long)
                     else:
                         raise RuntimeError(
                             'Mismatch between the images you provided and the number of placeholder present in the text')
 
                 replaced_ids_list.append(ids_tensor)
-                replaced_attn_mask_list.append(attn_mask)
 
             if replaced_ids_list:
                 replaced_and_tokenized_ids = torch.stack(replaced_ids_list)
-                replaced_and_tokenized_attn_mask = torch.stack(replaced_attn_mask_list)
             else:
                 replaced_and_tokenized_ids = torch.tensor([], dtype=torch.long)
-                replaced_and_tokenized_attn_mask = torch.tensor([], dtype=torch.long)
 
             # Create the output with text features
             output = BatchFeature(
                 data={
                     "input_ids": replaced_and_tokenized_ids,
-                    "attention_mask": replaced_and_tokenized_attn_mask,
                 }
             )
 
@@ -219,10 +206,22 @@ class OvisProcessor(ProcessorMixin):
 
             return output
 
-
         # If only images were provided
         return BatchFeature(data=image_features)
 
+    def _tokenize_with_image_symbol(self, text_list: list[str]) -> torch.LongTensor:
+        batch_token_ids = []
+        for text in text_list:
+            text_chunks = [self.tokenizer(chunk, add_special_tokens=False).input_ids for chunk in
+                           text.split(self.image_token)]
+            token_ids = []
+            num_chuck = len(text_chunks)
+            for i, chunk in enumerate(text_chunks):
+                token_ids.extend(chunk)
+                if i < num_chuck - 1:
+                    token_ids.append(self.get_token_value("image_token"))
+            batch_token_ids.append(token_ids)
+        return torch.tensor(batch_token_ids, dtype=torch.long)
 
     def get_image_size(self):
         height = self.image_processor.crop_size["height"]
@@ -230,10 +229,9 @@ class OvisProcessor(ProcessorMixin):
         return height, width
 
     def get_token_value(self, tok):
-        return self.tokenizer.get_vocab()[self.extra_special_tokens[tok]]
+        return self.extra_special_tokens[tok]
 
-    def construct_image_placeholders(self, grid):
-
+    def construct_image_indicators(self, grid):
         image_placeholders = [self.get_token_value('image_start'),
                               self.get_token_value('image_atom'),
                               self.get_token_value('image_prefix')]
@@ -246,7 +244,11 @@ class OvisProcessor(ProcessorMixin):
                 if r < grid[0] - 1:
                     image_placeholders.append(self.get_token_value('image_row_sep'))
         image_placeholders.append(self.get_token_value('image_end'))
-        # return image_placeholders
+        return image_placeholders
+
+    def construct_image_placeholders(self, grid):
+
+        image_placeholders = self.construct_image_indicators(grid)
 
         image_atom_token_id = self.get_token_value('image_atom')
         # Extract the padding token ID from tokenizer
@@ -255,7 +257,7 @@ class OvisProcessor(ProcessorMixin):
         # Create a new list with padding tokens inserted
         padded_placeholder_tokens = []
         for token in image_placeholders:
-            padded_placeholder_tokens.append(token)
+            padded_placeholder_tokens.append(image_padding_token_id)
             if token == image_atom_token_id:
                 # Add 255 padding tokens after each image atom token
                 padded_placeholder_tokens.extend([image_padding_token_id] * 255)
