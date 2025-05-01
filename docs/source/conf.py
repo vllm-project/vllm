@@ -13,15 +13,17 @@
 # documentation root, use os.path.abspath to make it absolute, like shown here.
 
 import datetime
-import inspect
 import logging
 import os
+import re
 import sys
+from pathlib import Path
 
 import requests
 
 logger = logging.getLogger(__name__)
-sys.path.append(os.path.abspath("../.."))
+VLLM_ROOT = Path(__file__).resolve().parent.parent.parent
+sys.path.append(os.path.abspath(VLLM_ROOT))
 
 # -- Project information -----------------------------------------------------
 
@@ -173,44 +175,38 @@ def linkcode_resolve(domain, info):
         return None
     if not info['module']:
         return None
-    filename = info['module'].replace('.', '/')
-    module = info['module']
 
-    # try to determine the correct file and line number to link to
-    obj = sys.modules[module]
+    # Get path from module name
+    file = Path(f"{info["module"].replace('.', '/')}.py")
+    path = VLLM_ROOT / file
+    if not path.exists():
+        path = VLLM_ROOT / file.with_suffix("") / "__init__.py"
+    if not path.exists():
+        return None
 
-    # get as specific as we can
-    lineno: int = 0
-    filename: str = ""
-    try:
-        for part in info['fullname'].split('.'):
-            obj = getattr(obj, part)
+    # Get the line number of the object
+    with open(path) as f:
+        lines = f.readlines()
+    pattern = f"^((def|class) )?{info['fullname']}.*"
+    for lineno, line in enumerate(lines, 1):
+        if not line or line.startswith("#"):
+            continue
+        if re.match(pattern, line):
+            break
 
-            # Skip decorator wrappers by checking if the object is a function
-            # and has a __wrapped__ attribute (which decorators typically set)
-            while hasattr(obj, '__wrapped__'):
-                obj = obj.__wrapped__
+    # If the line number is not found, return None
+    if lineno == len(lines):
+        return None
 
-            if not (inspect.isclass(obj) or inspect.isfunction(obj)
-                    or inspect.ismethod(obj)):
-                obj = obj.__class__  # Get the class of the instance
-
-            lineno = inspect.getsourcelines(obj)[1]
-            filename = (inspect.getsourcefile(obj)
-                        or f"{filename}.py").split("vllm/", 1)[1]
-    except Exception:
-        # For some things, like a class member, won't work, so
-        # we'll use the line number of the parent (the class)
-        pass
-
-    if filename.startswith("checkouts/"):
+    # If the line number is found, create the URL
+    filename = path.relative_to(VLLM_ROOT)
+    if "checkouts" in filename.parts:
         # a PR build on readthedocs
         pr_number = filename.split("/")[1]
         filename = filename.split("/", 2)[2]
         base, branch = get_repo_base_and_branch(pr_number)
         if base and branch:
             return f"https://github.com/{base}/blob/{branch}/{filename}#L{lineno}"
-
     # Otherwise, link to the source file on the main branch
     return f"https://github.com/vllm-project/vllm/blob/main/{filename}#L{lineno}"
 
