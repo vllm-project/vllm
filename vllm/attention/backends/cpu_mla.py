@@ -273,6 +273,9 @@ class CPUMLAImpl(MLACommonImpl[CPUMLAMetadata]):
             return_softmax=False,
             gen_=None,
             logits_soft_cap=0.0,
+            window_size_left=-1,
+            window_size_right=-1,
+            alibi_slopes=None,
         )
 
         # remove padding
