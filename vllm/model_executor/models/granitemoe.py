@@ -70,6 +70,7 @@ class GraniteMoeMoE(nn.Module):
                  prefix: str = ""):
         super().__init__()
         self.hidden_size = hidden_size
+        self.tp_size = get_tensor_model_parallel_world_size()
 
         # Gate always runs at half / full precision for now.
         self.gate = ReplicatedLinear(hidden_size,
@@ -97,6 +98,11 @@ class GraniteMoeMoE(nn.Module):
         # router_logits: (num_tokens, n_experts)
         router_logits, _ = self.gate(hidden_states)
         final_hidden_states = self.experts(hidden_states, router_logits)
+
+        # Needed?
+        if self.tp_size > 1:
+            final_hidden_states = self.experts.maybe_all_reduce_tensor_model_parallel(final_hidden_states)
+
         return final_hidden_states.view(orig_shape)
 
 

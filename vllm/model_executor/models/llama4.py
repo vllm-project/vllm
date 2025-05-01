@@ -102,7 +102,7 @@ class Llama4MoE(nn.Module):
         experts_out = routed_out + shared_out
 
         if self.tp_size > 1:
-            experts_out = tensor_model_parallel_all_reduce(experts_out)
+            experts_out = self.experts.maybe_all_reduce_tensor_model_parallel(experts_out)
 
         return experts_out
 
