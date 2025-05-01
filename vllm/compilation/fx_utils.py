@@ -67,6 +67,8 @@ def find_getitem(node: fx.Node, idx: int) -> fx.Node:
 
 
 # Asserts that the node only has one user and returns it
+# Even if a node has only 1 user, it might share storage with another node,
+# which might need to be taken into account.
 def get_only_user(node: fx.Node) -> fx.Node:
     assert len(node.users) == 1
     return next(iter(node.users))

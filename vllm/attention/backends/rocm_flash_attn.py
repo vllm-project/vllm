@@ -663,11 +663,6 @@ class ROCmFlashAttentionImpl(AttentionImpl):
         Returns:
             shape = [num_tokens, num_heads * head_size]
         """
-        if output_scale is not None and not self.use_triton_flash_attn:
-            raise NotImplementedError(
-                "fused output quantization only supported for Triton"
-                " implementation in ROCMFlashAttentionImpl for now")
-
         assert output is not None, "Output tensor must be provided."
 
         if output_scale is not None and not self.use_triton_flash_attn:
