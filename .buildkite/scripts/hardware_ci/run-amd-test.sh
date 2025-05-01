@@ -3,6 +3,9 @@
 # This script runs test inside the corresponding ROCm docker container.
 set -o pipefail
 
+# Export Python path
+export PYTHONPATH=".."
+
 # Print ROCm version
 echo "--- Confirming Clean Initial State"
 while true; do
