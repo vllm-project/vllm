@@ -1646,7 +1646,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                         graph_runner.capture(**capture_inputs)
                     self.graph_memory_pool = graph_runner.graph.pool()
                     self.graph_runners[virtual_engine][(
-                        batch_size, use_inputs_embeds)] = (graph_runner)
+                        batch_size, use_inputs_embeds)] = graph_runner
 
         if self.lora_config:
             self._remove_dummy_loras()

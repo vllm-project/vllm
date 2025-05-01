@@ -49,6 +49,7 @@ class EncoderDecoderModelInput(ModelInputForGPUWithSamplingMetadata):
     def as_broadcastable_tensor_dict(self) -> Dict[str, Any]:
         tensor_dict = {
             "input_tokens": self.input_tokens,
+            "inputs_embeds": self.inputs_embeds,
             "input_positions": self.input_positions,
             "encoder_input_tokens": self.encoder_input_tokens,
             "encoder_input_positions": self.encoder_input_positions,
@@ -196,6 +197,7 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
                                  model_input.virtual_engine):
             hidden_or_intermediate_states = model_executable(
                 input_ids=model_input.input_tokens,
+                inputs_embeds=model_input.inputs_embeds,
                 positions=model_input.input_positions,
                 encoder_input_ids=model_input.encoder_input_tokens,
                 encoder_positions=model_input.encoder_input_positions,
