@@ -182,6 +182,9 @@ class StructuredOutputManager:
         return bitmask_tensor.numpy()
 
     def should_advance(self, request: Request) -> bool:
+        if not request.use_structured_output:
+            return False
+
         # To determine whether we can advance the FSM.
         # Supports thinking usage where we skip the reasoning components.
         if TYPE_CHECKING:

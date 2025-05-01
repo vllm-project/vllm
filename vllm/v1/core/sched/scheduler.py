@@ -1,3 +1,4 @@
+# ruff: noqa: E501
 # SPDX-License-Identifier: Apache-2.0
 
 from __future__ import annotations
@@ -721,7 +722,7 @@ class Scheduler(SchedulerInterface):
                 # the outer lists can be of length > 1.
                 new_logprobs = logprobs.slice(req_index, req_index + 1)
 
-            if new_token_ids and request.use_structured_output and self.structured_output_manager.should_advance(  # noqa: E501
+            if new_token_ids and self.structured_output_manager.should_advance(
                     request):
                 if TYPE_CHECKING:
                     assert request.structured_output_request is not None
@@ -733,13 +734,12 @@ class Scheduler(SchedulerInterface):
 
             # Add newly generated spec token ids to the request.
             if spec_token_ids is not None:
-                if request.use_structured_output and self.structured_output_manager.should_advance(  # noqa: E501
-                        request):
+                if self.structured_output_manager.should_advance(request):
                     if TYPE_CHECKING:
                         assert request.structured_output_request is not None
-                        assert request.structured_output_request.grammar is not None  # noqa: E501
+                        assert request.structured_output_request.grammar is not None
                     # Needs to happen after new_token_ids are accepted.
-                    request.spec_token_ids = request.structured_output_request.grammar.validate_tokens(  # noqa: E501
+                    request.spec_token_ids = request.structured_output_request.grammar.validate_tokens(
                         spec_token_ids[req_index])
                 else:
                     request.spec_token_ids = spec_token_ids[req_index]
