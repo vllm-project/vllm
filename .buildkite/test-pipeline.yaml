@@ -398,7 +398,7 @@ steps:
   - tests/models/quantization
   commands:
   - VLLM_TEST_FORCE_LOAD_FORMAT=auto pytest -v -s quantization
-  - pytest -v -s tests/models/quantization
+  - pytest -v -s models/quantization
 
 - label: LM Eval Small Models # 53min
   working_dir: "/vllm-workspace/.buildkite/lm-eval-harness"
