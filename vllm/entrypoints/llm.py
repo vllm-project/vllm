@@ -462,10 +462,12 @@ class LLM:
         self._validate_and_add_requests(
             prompts=parsed_prompts,
             params=sampling_params,
+            use_tqdm=use_tqdm,
             lora_request=lora_request,
             prompt_adapter_request=prompt_adapter_request,
             guided_options=guided_options_request,
-            priority=priority)
+            priority=priority,
+        )
 
         outputs = self._run_engine(use_tqdm=use_tqdm)
         return self.engine_class.validate_outputs(outputs, RequestOutput)
@@ -957,6 +959,7 @@ class LLM:
         self._validate_and_add_requests(
             prompts=parsed_prompts,
             params=pooling_params,
+            use_tqdm=use_tqdm,
             lora_request=lora_request,
             tokenization_kwargs=tokenization_kwargs,
             prompt_adapter_request=prompt_adapter_request,
@@ -1127,6 +1130,7 @@ class LLM:
         self._validate_and_add_requests(
             prompts=parsed_prompts,
             params=pooling_params,
+            use_tqdm=use_tqdm,
             lora_request=lora_request,
             prompt_adapter_request=prompt_adapter_request,
         )
@@ -1332,6 +1336,8 @@ class LLM:
         prompts: Union[PromptType, Sequence[PromptType]],
         params: Union[SamplingParams, Sequence[SamplingParams], PoolingParams,
                       Sequence[PoolingParams]],
+        *,
+        use_tqdm: bool,
         lora_request: Optional[Union[Sequence[LoRARequest], LoRARequest]],
         prompt_adapter_request: Optional[PromptAdapterRequest],
         tokenization_kwargs: Optional[dict[str, Any]] = None,
@@ -1367,7 +1373,11 @@ class LLM:
                 sp.output_kind = RequestOutputKind.FINAL_ONLY
 
         # Add requests to the engine.
-        for i, prompt in enumerate(prompts):
+        it = prompts
+        if use_tqdm:
+            it = tqdm(it, desc="Adding requests")
+
+        for i, prompt in enumerate(it):
             self._add_request(
                 prompt,
                 params[i] if isinstance(params, Sequence) else params,
