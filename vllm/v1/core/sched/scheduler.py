@@ -648,6 +648,7 @@ class Scheduler(SchedulerInterface):
         prompt_logprobs_dict = model_runner_output.prompt_logprobs_dict
         num_scheduled_tokens = scheduler_output.num_scheduled_tokens
 
+        stopped_set: set[str] = set()
         new_running: list[Request] = []
         outputs: list[EngineCoreOutput] = []
         spec_decoding_stats: Optional[SpecDecodingStats] = None
@@ -758,10 +759,15 @@ class Scheduler(SchedulerInterface):
 
             if not stopped:
                 new_running.append(request)
+            else:
+                stopped_set.add(request.request_id)
 
         # Return the cached request data to the queue so they can be reused.
         for req_data in scheduler_output.scheduled_cached_reqs:
-            self._cached_reqs_data[req_data.req_id].append(req_data)
+            # NOTE(rob): since we free stopped reqs above, adding stopped reqs
+            # to _cached_reqs_data will cause a memory leak.
+            if req_data.req_id not in stopped_set:
+                self._cached_reqs_data[req_data.req_id].append(req_data)
 
         self.running = new_running
         engine_core_outputs = EngineCoreOutputs(
