@@ -171,12 +171,14 @@ def get_kwargs(cls: ConfigType) -> dict[str, Any]:
             continue
 
         # Set other kwargs based on the type hints
+        json_tip = "\n\nShould be a valid JSON string."
         if dataclass_hint is not None:
             root_model = RootModel[dataclass_hint]
             kwargs[name]["type"] = root_model.model_validate_json
             # Special case for configs with a from_cli method
             if hasattr(dataclass_hint, "from_cli"):
                 kwargs[name]["type"] = dataclass_hint.from_cli
+            kwargs[name]["help"] += json_tip
         if contains_type(type_hints, bool):
             # Creates --no-<name> and --<name> flags
             kwargs[name]["action"] = argparse.BooleanOptionalAction
@@ -209,6 +211,7 @@ def get_kwargs(cls: ConfigType) -> dict[str, Any]:
         elif contains_type(type_hints, dict):
             # Dict arguments will always be optional
             kwargs[name]["type"] = optional_type(json.loads)
+            kwargs[name]["help"] += json_tip
         elif (contains_type(type_hints, str)
               or any(is_not_builtin(th) for th in type_hints)):
             kwargs[name]["type"] = str
