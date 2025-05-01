@@ -687,6 +687,7 @@ torch::Tensor gptq_marlin_gemm(
   } else {
     c = torch::empty({size_m, size_n}, options);
   }
+  if (size_m == 0) return c;
 
   // Alloc C tmp buffer that is going to be used for the global reduce
   torch::Tensor c_tmp;

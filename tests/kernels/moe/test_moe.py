@@ -314,6 +314,7 @@ def test_fused_marlin_moe(
     quant_type: ScalarType,
     is_k_full: bool,
 ):
+    torch.cuda.manual_seed(0)
     has_zp = quant_type in [scalar_types.uint4, scalar_types.uint8]
 
     if quant_type == scalar_types.float8_e4m3fn:
