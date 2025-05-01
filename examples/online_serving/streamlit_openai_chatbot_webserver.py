@@ -155,12 +155,12 @@ if prompt := st.chat_input("Type your message here..."):
         st.write(prompt)
 
     # Prepare messages for llm
-    messages_for_llm = [
-        {"role": m["role"], "content": m["content"]} 
-        for m in st.session_state.messages
-    ]
+    messages_for_llm = [{
+        "role": m["role"],
+        "content": m["content"]
+    } for m in st.session_state.messages]
 
-     # Generate and display llm response
+    # Generate and display llm response
     with st.chat_message("assistant"):
         message_placeholder = st.empty()
         full_response = ""
@@ -177,8 +177,11 @@ if prompt := st.chat_input("Type your message here..."):
                     if content:
                         full_response += content
                         message_placeholder.markdown(full_response + "▌")
-            
+
             message_placeholder.markdown(full_response)
-      
+
     # Save llm response to session history
-    st.session_state.messages.append({"role": "assistant", "content": full_response})
+    st.session_state.messages.append({
+        "role": "assistant",
+        "content": full_response
+    })
