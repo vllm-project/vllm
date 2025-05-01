@@ -474,15 +474,21 @@ class EngineArgs:
             title="LoadConfig",
             description=LoadConfig.__doc__,
         )
-        load_group.add_argument('--load-format',
+        load_group.add_argument("--load-format",
                                 choices=[f.value for f in LoadFormat],
                                 **load_kwargs["load_format"])
-        load_group.add_argument('--download-dir',
+        load_group.add_argument("--download-dir",
                                 **load_kwargs["download_dir"])
-        load_group.add_argument('--model-loader-extra-config',
+        load_group.add_argument("--model-loader-extra-config",
                                 **load_kwargs["model_loader_extra_config"])
-        load_group.add_argument('--use-tqdm-on-load',
+        load_group.add_argument("--ignore-patterns",
+                                **load_kwargs["ignore_patterns"])
+        load_group.add_argument("--use-tqdm-on-load",
                                 **load_kwargs["use_tqdm_on_load"])
+        load_group.add_argument('--qlora-adapter-name-or-path',
+                                type=str,
+                                default=None,
+                                help='Name or path of the QLoRA adapter.')
 
         # Guided decoding arguments
         guided_decoding_kwargs = get_kwargs(DecodingConfig)
@@ -502,6 +508,14 @@ class EngineArgs:
             "--guided-decoding-disable-additional-properties",
             **guided_decoding_kwargs["disable_additional_properties"])
         guided_decoding_group.add_argument(
+            "--enable-reasoning",
+            action=argparse.BooleanOptionalAction,
+            help="[DEPRECATED] The `--enable-reasoning` flag is deprecated as "
+            "of v0.8.6. Use `--reasoning-parser` to specify the reasoning "
+            "parser backend insteadThis flag (`--enable-reasoning`) will be "
+            "removed in v0.10.0. When `--reasoning-parser` is specified, "
+            "reasoning mode is automatically enabled.")
+        guided_decoding_group.add_argument(
             "--reasoning-parser",
             # This choices is a special case because it's not static
             choices=list(ReasoningParserManager.reasoning_parsers),
@@ -514,27 +528,31 @@ class EngineArgs:
             description=ParallelConfig.__doc__,
         )
         parallel_group.add_argument(
-            '--distributed-executor-backend',
+            "--distributed-executor-backend",
             **parallel_kwargs["distributed_executor_backend"])
         parallel_group.add_argument(
-            '--pipeline-parallel-size', '-pp',
+            "--pipeline-parallel-size", "-pp",
             **parallel_kwargs["pipeline_parallel_size"])
-        parallel_group.add_argument('--tensor-parallel-size', '-tp',
+        parallel_group.add_argument("--tensor-parallel-size", "-tp",
                                     **parallel_kwargs["tensor_parallel_size"])
-        parallel_group.add_argument('--data-parallel-size', '-dp',
+        parallel_group.add_argument("--data-parallel-size", "-dp",
                                     **parallel_kwargs["data_parallel_size"])
         parallel_group.add_argument(
-            '--enable-expert-parallel',
+            "--enable-expert-parallel",
             **parallel_kwargs["enable_expert_parallel"])
         parallel_group.add_argument(
-            '--max-parallel-loading-workers',
+            "--max-parallel-loading-workers",
             **parallel_kwargs["max_parallel_loading_workers"])
         parallel_group.add_argument(
-            '--ray-workers-use-nsight',
+            "--ray-workers-use-nsight",
             **parallel_kwargs["ray_workers_use_nsight"])
         parallel_group.add_argument(
-            '--disable-custom-all-reduce',
+            "--disable-custom-all-reduce",
             **parallel_kwargs["disable_custom_all_reduce"])
+        parallel_group.add_argument("--worker-cls",
+                                    **parallel_kwargs["worker_cls"])
+        parallel_group.add_argument("--worker-extension-cls",
+                                    **parallel_kwargs["worker_extension_cls"])
 
         # KV cache arguments
         cache_kwargs = get_kwargs(CacheConfig)
@@ -542,35 +560,22 @@ class EngineArgs:
             title="CacheConfig",
             description=CacheConfig.__doc__,
         )
-        cache_group.add_argument('--block-size', **cache_kwargs["block_size"])
-        cache_group.add_argument('--gpu-memory-utilization',
+        cache_group.add_argument("--block-size", **cache_kwargs["block_size"])
+        cache_group.add_argument("--gpu-memory-utilization",
                                  **cache_kwargs["gpu_memory_utilization"])
-        cache_group.add_argument('--swap-space', **cache_kwargs["swap_space"])
-        cache_group.add_argument('--kv-cache-dtype',
+        cache_group.add_argument("--swap-space", **cache_kwargs["swap_space"])
+        cache_group.add_argument("--kv-cache-dtype",
                                  **cache_kwargs["cache_dtype"])
-        cache_group.add_argument('--num-gpu-blocks-override',
+        cache_group.add_argument("--num-gpu-blocks-override",
                                  **cache_kwargs["num_gpu_blocks_override"])
         cache_group.add_argument("--enable-prefix-caching",
                                  **cache_kwargs["enable_prefix_caching"])
         cache_group.add_argument("--prefix-caching-hash-algo",
                                  **cache_kwargs["prefix_caching_hash_algo"])
-        cache_group.add_argument('--cpu-offload-gb',
+        cache_group.add_argument("--cpu-offload-gb",
                                  **cache_kwargs["cpu_offload_gb"])
-        cache_group.add_argument('--calculate-kv-scales',
+        cache_group.add_argument("--calculate-kv-scales",
                                  **cache_kwargs["calculate_kv_scales"])
-
-        parser.add_argument('--use-v2-block-manager',
-                            action='store_true',
-                            default=True,
-                            help='[DEPRECATED] block manager v1 has been '
-                            'removed and SelfAttnBlockSpaceManager (i.e. '
-                            'block manager v2) is now the default. '
-                            'Setting this flag to True or False'
-                            ' has no effect on vLLM behavior.')
-
-        parser.add_argument('--disable-log-stats',
-                            action='store_true',
-                            help='Disable logging statistics.')
 
         # Tokenizer arguments
         tokenizer_kwargs = get_kwargs(TokenizerPoolConfig)
@@ -578,11 +583,11 @@ class EngineArgs:
             title="TokenizerPoolConfig",
             description=TokenizerPoolConfig.__doc__,
         )
-        tokenizer_group.add_argument('--tokenizer-pool-size',
+        tokenizer_group.add_argument("--tokenizer-pool-size",
                                      **tokenizer_kwargs["pool_size"])
-        tokenizer_group.add_argument('--tokenizer-pool-type',
+        tokenizer_group.add_argument("--tokenizer-pool-type",
                                      **tokenizer_kwargs["pool_type"])
-        tokenizer_group.add_argument('--tokenizer-pool-extra-config',
+        tokenizer_group.add_argument("--tokenizer-pool-extra-config",
                                      **tokenizer_kwargs["extra_config"])
 
         # Multimodal related configs
@@ -591,13 +596,13 @@ class EngineArgs:
             title="MultiModalConfig",
             description=MultiModalConfig.__doc__,
         )
-        multimodal_group.add_argument('--limit-mm-per-prompt',
+        multimodal_group.add_argument("--limit-mm-per-prompt",
                                       **multimodal_kwargs["limit_per_prompt"])
         multimodal_group.add_argument(
-            '--mm-processor-kwargs',
+            "--mm-processor-kwargs",
             **multimodal_kwargs["mm_processor_kwargs"])
         multimodal_group.add_argument(
-            '--disable-mm-preprocessor-cache',
+            "--disable-mm-preprocessor-cache",
             **multimodal_kwargs["disable_mm_preprocessor_cache"])
 
         # LoRA related configs
@@ -607,25 +612,25 @@ class EngineArgs:
             description=LoRAConfig.__doc__,
         )
         lora_group.add_argument(
-            '--enable-lora',
+            "--enable-lora",
             action=argparse.BooleanOptionalAction,
-            help='If True, enable handling of LoRA adapters.')
-        lora_group.add_argument('--enable-lora-bias',
+            help="If True, enable handling of LoRA adapters.")
+        lora_group.add_argument("--enable-lora-bias",
                                 **lora_kwargs["bias_enabled"])
-        lora_group.add_argument('--max-loras', **lora_kwargs["max_loras"])
-        lora_group.add_argument('--max-lora-rank',
+        lora_group.add_argument("--max-loras", **lora_kwargs["max_loras"])
+        lora_group.add_argument("--max-lora-rank",
                                 **lora_kwargs["max_lora_rank"])
-        lora_group.add_argument('--lora-extra-vocab-size',
+        lora_group.add_argument("--lora-extra-vocab-size",
                                 **lora_kwargs["lora_extra_vocab_size"])
         lora_group.add_argument(
-            '--lora-dtype',
+            "--lora-dtype",
             **lora_kwargs["lora_dtype"],
         )
-        lora_group.add_argument('--long-lora-scaling-factors',
+        lora_group.add_argument("--long-lora-scaling-factors",
                                 **lora_kwargs["long_lora_scaling_factors"])
-        lora_group.add_argument('--max-cpu-loras',
+        lora_group.add_argument("--max-cpu-loras",
                                 **lora_kwargs["max_cpu_loras"])
-        lora_group.add_argument('--fully-sharded-loras',
+        lora_group.add_argument("--fully-sharded-loras",
                                 **lora_kwargs["fully_sharded_loras"])
 
         # PromptAdapter related configs
@@ -635,14 +640,14 @@ class EngineArgs:
             description=PromptAdapterConfig.__doc__,
         )
         prompt_adapter_group.add_argument(
-            '--enable-prompt-adapter',
+            "--enable-prompt-adapter",
             action=argparse.BooleanOptionalAction,
-            help='If True, enable handling of PromptAdapters.')
+            help="If True, enable handling of PromptAdapters.")
         prompt_adapter_group.add_argument(
-            '--max-prompt-adapters',
+            "--max-prompt-adapters",
             **prompt_adapter_kwargs["max_prompt_adapters"])
         prompt_adapter_group.add_argument(
-            '--max-prompt-adapter-token',
+            "--max-prompt-adapter-token",
             **prompt_adapter_kwargs["max_prompt_adapter_token"])
 
         # Device arguments
@@ -659,25 +664,11 @@ class EngineArgs:
             description=SpeculativeConfig.__doc__,
         )
         speculative_group.add_argument(
-            '--speculative-config',
+            "--speculative-config",
             type=json.loads,
             default=None,
-            help='The configurations for speculative decoding.'
-            ' Should be a JSON string.')
-
-        parser.add_argument(
-            '--ignore-patterns',
-            action="append",
-            type=str,
-            default=[],
-            help="The pattern(s) to ignore when loading the model."
-            "Default to `original/**/*` to avoid repeated loading of llama's "
-            "checkpoints.")
-
-        parser.add_argument('--qlora-adapter-name-or-path',
-                            type=str,
-                            default=None,
-                            help='Name or path of the QLoRA adapter.')
+            help="The configurations for speculative decoding. Should be a "
+            "JSON string.")
 
         # Observability arguments
         observability_kwargs = get_kwargs(ObservabilityConfig)
@@ -710,9 +701,9 @@ class EngineArgs:
             description=SchedulerConfig.__doc__,
         )
         scheduler_group.add_argument(
-            '--max-num-batched-tokens',
+            "--max-num-batched-tokens",
             **scheduler_kwargs["max_num_batched_tokens"])
-        scheduler_group.add_argument('--max-num-seqs',
+        scheduler_group.add_argument("--max-num-seqs",
                                      **scheduler_kwargs["max_num_seqs"])
         scheduler_group.add_argument(
             "--max-num-partial-prefills",
@@ -723,70 +714,78 @@ class EngineArgs:
         scheduler_group.add_argument(
             "--long-prefill-token-threshold",
             **scheduler_kwargs["long_prefill_token_threshold"])
-        scheduler_group.add_argument('--num-lookahead-slots',
+        scheduler_group.add_argument("--num-lookahead-slots",
                                      **scheduler_kwargs["num_lookahead_slots"])
-        scheduler_group.add_argument('--scheduler-delay-factor',
+        scheduler_group.add_argument("--scheduler-delay-factor",
                                      **scheduler_kwargs["delay_factor"])
-        scheduler_group.add_argument('--preemption-mode',
+        scheduler_group.add_argument("--preemption-mode",
                                      **scheduler_kwargs["preemption_mode"])
-        scheduler_group.add_argument('--num-scheduler-steps',
+        scheduler_group.add_argument("--num-scheduler-steps",
                                      **scheduler_kwargs["num_scheduler_steps"])
         scheduler_group.add_argument(
-            '--multi-step-stream-outputs',
+            "--multi-step-stream-outputs",
             **scheduler_kwargs["multi_step_stream_outputs"])
-        scheduler_group.add_argument('--scheduling-policy',
+        scheduler_group.add_argument("--scheduling-policy",
                                      **scheduler_kwargs["policy"])
         scheduler_group.add_argument(
-            '--enable-chunked-prefill',
+            "--enable-chunked-prefill",
             **scheduler_kwargs["enable_chunked_prefill"])
         scheduler_group.add_argument(
             "--disable-chunked-mm-input",
             **scheduler_kwargs["disable_chunked_mm_input"])
-        parser.add_argument('--scheduler-cls',
-                            **scheduler_kwargs["scheduler_cls"])
+        scheduler_group.add_argument("--scheduler-cls",
+                                     **scheduler_kwargs["scheduler_cls"])
 
-        parser.add_argument('--compilation-config',
-                            '-O',
-                            type=CompilationConfig.from_cli,
-                            default=None,
-                            help='torch.compile configuration for the model. '
-                            'When it is a number (0, 1, 2, 3), it will be '
-                            'interpreted as the optimization level.\n'
-                            'NOTE: level 0 is the default level without '
-                            'any optimization. level 1 and 2 are for internal '
-                            'testing only. level 3 is the recommended level '
-                            'for production.\n'
-                            'To specify the full compilation config, '
-                            'use a JSON string, e.g. ``{"level": 3, '
-                            '"cudagraph_capture_sizes": [1, 2, 4, 8]}``\n'
-                            'Following the convention of traditional '
-                            'compilers, using ``-O`` without space is also '
-                            'supported. ``-O3`` is equivalent to ``-O 3``.')
+        # Compilation arguments
+        # compilation_kwargs = get_kwargs(CompilationConfig)
+        compilation_group = parser.add_argument_group(
+            title="CompilationConfig",
+            description=CompilationConfig.__doc__,
+        )
+        compilation_group.add_argument(
+            "--compilation-config",
+            "-O",
+            type=CompilationConfig.from_cli,
+            default=None,
+            help="torch.compile configuration for the model. "
+            "When it is a number (0, 1, 2, 3), it will be "
+            "interpreted as the optimization level.\n"
+            "NOTE: level 0 is the default level without "
+            "any optimization. level 1 and 2 are for internal "
+            "testing only. level 3 is the recommended level "
+            "for production.\n"
+            "To specify the full compilation config, "
+            "use a JSON string, e.g. ``{\"level\": 3, "
+            "\"cudagraph_capture_sizes\": [1, 2, 4, 8]}``\n"
+            "Following the convention of traditional "
+            "compilers, using ``-O`` without space is also "
+            "supported. ``-O3`` is equivalent to ``-O 3``.")
 
-        parser.add_argument('--kv-transfer-config',
-                            type=KVTransferConfig.from_cli,
-                            default=None,
-                            help='The configurations for distributed KV cache '
-                            'transfer. Should be a JSON string.')
-        parser.add_argument('--kv-events-config',
-                            type=KVEventsConfig.from_cli,
-                            default=None,
-                            help='The configurations for event publishing.')
+        # KVTransfer arguments
+        # kv_transfer_kwargs = get_kwargs(KVTransferConfig)
+        kv_transfer_group = parser.add_argument_group(
+            title="KVTransferConfig",
+            description=KVTransferConfig.__doc__,
+        )
+        kv_transfer_group.add_argument(
+            "--kv-transfer-config",
+            type=KVTransferConfig.from_cli,
+            default=None,
+            help="The configurations for distributed KV cache "
+            "transfer. Should be a JSON string.")
+        kv_transfer_group.add_argument(
+            '--kv-events-config',
+            type=KVEventsConfig.from_cli,
+            default=None,
+            help='The configurations for event publishing.')
 
-        parser.add_argument(
-            '--worker-cls',
-            type=str,
-            default="auto",
-            help='The worker class to use for distributed execution.')
-        parser.add_argument(
-            '--worker-extension-cls',
-            type=str,
-            default="",
-            help='The worker extension class on top of the worker cls, '
-            'it is useful if you just want to add new functions to the worker '
-            'class without changing the existing functions.')
-
-        parser.add_argument(
+        # vLLM arguments
+        # vllm_kwargs = get_kwargs(VllmConfig)
+        vllm_group = parser.add_argument_group(
+            title="VllmConfig",
+            description=VllmConfig.__doc__,
+        )
+        vllm_group.add_argument(
             "--additional-config",
             type=json.loads,
             default=None,
@@ -795,20 +794,18 @@ class EngineArgs:
             "configs are valid for the platform you are using. The input format"
             " is like '{\"config_key\":\"config_value\"}'")
 
-        parser.add_argument(
-            "--enable-reasoning",
-            action="store_true",
-            default=False,
-            help=
-            "[DEPRECATED] " \
-            "The --enable-reasoning flag is deprecated as of v0.8.6. "
-            "Use --reasoning-parser to specify " \
-            "the reasoning parser backend instead. "
-            "This flag (--enable-reasoning) will be " \
-            "removed in v0.10.0. "
-            "When --reasoning-parser is specified, " \
-            "reasoning mode is automatically enabled."
-        )
+        # Other arguments
+        parser.add_argument('--use-v2-block-manager',
+                            action='store_true',
+                            default=True,
+                            help='[DEPRECATED] block manager v1 has been '
+                            'removed and SelfAttnBlockSpaceManager (i.e. '
+                            'block manager v2) is now the default. '
+                            'Setting this flag to True or False'
+                            ' has no effect on vLLM behavior.')
+        parser.add_argument('--disable-log-stats',
+                            action='store_true',
+                            help='Disable logging statistics.')
 
         return parser
 
