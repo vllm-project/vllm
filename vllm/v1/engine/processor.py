@@ -2,7 +2,7 @@
 
 import time
 from collections.abc import Mapping, Sequence
-from typing import Literal, Optional, Union
+from typing import Any, Literal, Optional, Union
 
 from vllm.config import VllmConfig
 from vllm.inputs import ProcessorInputs, PromptType, SingletonInputs
@@ -144,7 +144,7 @@ class Processor:
         if not params.guided_decoding or not self.decoding_config:
             return
 
-        engine_level_backend = self.decoding_config.guided_decoding_backend
+        engine_level_backend = self.decoding_config.backend
         if params.guided_decoding.backend:
             # Request-level backend selection is not supported in V1.
             # The values may differ if `params` is reused and was set
@@ -152,8 +152,8 @@ class Processor:
             # request. We remember that it was set as a result of `auto`
             # using the `_auto` option set on the backend in the params.
             if (params.guided_decoding.backend != engine_level_backend
-                    and not (engine_level_backend == "auto" and "_auto"
-                             in params.guided_decoding.backend_options())):
+                    and not (engine_level_backend == "auto"
+                             and params.guided_decoding.backend_was_auto)):
                 raise ValueError(
                     "Request-level structured output backend selection is no "
                     "longer supported. The request specified "
@@ -189,7 +189,7 @@ class Processor:
                 # are not supported in xgrammar. Fall back to guidance.
                 params.guided_decoding.backend = "guidance"
             # Remember that this backend was set automatically
-            params.guided_decoding.add_option("_auto")
+            params.guided_decoding.backend_was_auto = True
 
     def process_inputs(
         self,
@@ -198,6 +198,7 @@ class Processor:
         params: Union[SamplingParams, PoolingParams],
         arrival_time: Optional[float] = None,
         lora_request: Optional[LoRARequest] = None,
+        tokenization_kwargs: Optional[dict[str, Any]] = None,
         trace_headers: Optional[Mapping[str, str]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
         priority: int = 0,
@@ -224,6 +225,7 @@ class Processor:
         # 3. Apply prompt adapter to prompt token ids if one exists.
         processed_inputs: ProcessorInputs = self.input_preprocessor.preprocess(
             prompt,
+            tokenization_kwargs=tokenization_kwargs,
             lora_request=lora_request,
             prompt_adapter_request=prompt_adapter_request,
             return_mm_hashes=self.use_hash,
@@ -315,6 +317,7 @@ class Processor:
             eos_token_id=eos_token_id,
             arrival_time=arrival_time,
             lora_request=lora_request,
+            cache_salt=decoder_inputs.get("cache_salt"),
         )
 
     def _validate_model_inputs(self,
