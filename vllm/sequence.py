@@ -342,7 +342,9 @@ class SequenceData(msgspec.Struct,
                     (self._output_embeds, token_embed), dim=0)
             assert self._cached_all_token_embeds is not None
             self._cached_all_token_embeds = torch.cat(
-                (self._cached_all_token_embeds, token_embed), dim=0)
+                (self._cached_all_token_embeds,
+                 token_embed.to(device=self._cached_all_token_embeds.device)),
+                dim=0)
 
     def get_len(self) -> int:
         return len(self._output_token_ids) + len(self._prompt_token_ids)

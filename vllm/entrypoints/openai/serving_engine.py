@@ -179,7 +179,7 @@ class OpenAIServing:
         request: AnyRequest,
         tokenizer: AnyTokenizer,
         prompt: str,
-        truncate_prompt_tokens: Optional[Annotated[int, Field(ge=1)]],
+        truncate_prompt_tokens: Optional[Annotated[int, Field(ge=-1)]],
         add_special_tokens: bool,
     ) -> TextTokensPrompt:
         if (self.model_config.encoder_config is not None
@@ -277,7 +277,7 @@ class OpenAIServing:
         request: AnyRequest,
         tokenizer: AnyTokenizer,
         prompt_input: Union[str, list[int]],
-        truncate_prompt_tokens: Optional[Annotated[int, Field(ge=1)]] = None,
+        truncate_prompt_tokens: Optional[Annotated[int, Field(ge=-1)]] = None,
         add_special_tokens: bool = True,
     ) -> TextTokensPrompt:
         """
@@ -298,7 +298,7 @@ class OpenAIServing:
         request: AnyRequest,
         tokenizer: AnyTokenizer,
         prompt_inputs: Iterable[Union[str, list[int]]],
-        truncate_prompt_tokens: Optional[Annotated[int, Field(ge=1)]] = None,
+        truncate_prompt_tokens: Optional[Annotated[int, Field(ge=-1)]] = None,
         add_special_tokens: bool = True,
     ) -> Iterator[TextTokensPrompt]:
         """
@@ -328,7 +328,7 @@ class OpenAIServing:
         tokenizer: AnyTokenizer,
         input_or_inputs: Optional[Union[str, list[str], list[int],
                                         list[list[int]]]],
-        truncate_prompt_tokens: Optional[Annotated[int, Field(ge=1)]] = None,
+        truncate_prompt_tokens: Optional[Annotated[int, Field(ge=-1)]] = None,
         add_special_tokens: bool = True,
     ) -> Union[list[TextTokensPrompt], list[EmbedsPrompt]]:
         """
@@ -369,7 +369,7 @@ class OpenAIServing:
         request: CompletionLikeRequest,
         tokenizer: AnyTokenizer,
         input_or_inputs: Union[str, list[str], list[int], list[list[int]]],
-        truncate_prompt_tokens: Optional[Annotated[int, Field(ge=1)]] = None,
+        truncate_prompt_tokens: Optional[Annotated[int, Field(ge=-1)]] = None,
         add_special_tokens: bool = True,
     ) -> tuple[Union[list[TextTokensPrompt], list[EmbedsPrompt]], Union[
             list[TokensPrompt], list[EmbedsPrompt]]]:
@@ -484,6 +484,9 @@ class OpenAIServing:
             engine_prompt["multi_modal_data"] = mm_data
         if request.mm_processor_kwargs is not None:
             engine_prompt["mm_processor_kwargs"] = request.mm_processor_kwargs
+
+        if hasattr(request, "cache_salt") and request.cache_salt is not None:
+            engine_prompt["cache_salt"] = request.cache_salt
 
         return conversation, [request_prompt], [engine_prompt]
 

@@ -18,6 +18,12 @@ To use INT4 quantization with vLLM, you'll need to install the [llm-compressor](
 pip install llmcompressor
 ```
 
+Additionally, install `vllm` and `lm-evaluation-harness` for evaluation:
+
+```console
+pip install vllm lm-eval==0.4.4
+```
+
 ## Quantization Process
 
 The quantization process involves four main steps:
@@ -87,7 +93,7 @@ oneshot(
     num_calibration_samples=NUM_CALIBRATION_SAMPLES,
 )
 
-# Save the compressed model
+# Save the compressed model: Meta-Llama-3-8B-Instruct-W4A16-G128
 SAVE_DIR = MODEL_ID.split("/")[1] + "-W4A16-G128"
 model.save_pretrained(SAVE_DIR, save_compressed=True)
 tokenizer.save_pretrained(SAVE_DIR)

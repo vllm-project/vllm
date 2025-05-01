@@ -1,11 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 
-from typing import Dict, List, Type
+from typing import Literal, Type, get_args
 
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
 
-QUANTIZATION_METHODS: List[str] = [
+QuantizationMethods = Literal[
     "aqlm",
     "awq",
     "deepspeedfp",
@@ -15,8 +15,6 @@ QUANTIZATION_METHODS: List[str] = [
     "fbgemm_fp8",
     "modelopt",
     "nvfp4",
-    # The order of gptq methods is important for config.py iteration over
-    # override_quantization_method(..)
     "marlin",
     "bitblas",
     "gguf",
@@ -36,6 +34,7 @@ QUANTIZATION_METHODS: List[str] = [
     "moe_wna16",
     "torchao",
 ]
+QUANTIZATION_METHODS: list[str] = list(get_args(QuantizationMethods))
 
 # The customized quantization methods which will be added to this dict.
 _CUSTOMIZED_METHOD_TO_QUANT_CONFIG = {}
@@ -111,7 +110,7 @@ def get_quantization_config(quantization: str) -> Type[QuantizationConfig]:
     from .torchao import TorchAOConfig
     from .tpu_int8 import Int8TpuConfig
 
-    method_to_config: Dict[str, Type[QuantizationConfig]] = {
+    method_to_config: dict[str, Type[QuantizationConfig]] = {
         "aqlm": AQLMConfig,
         "awq": AWQConfig,
         "deepspeedfp": DeepSpeedFPConfig,
@@ -120,8 +119,6 @@ def get_quantization_config(quantization: str) -> Type[QuantizationConfig]:
         "fbgemm_fp8": FBGEMMFp8Config,
         "modelopt": ModelOptFp8Config,
         "nvfp4": ModelOptNvFp4Config,
-        # The order of gptq methods is important for config.py iteration over
-        # override_quantization_method(..)
         "marlin": MarlinConfig,
         "bitblas": BitBLASConfig,
         "gguf": GGUFConfig,
@@ -150,6 +147,7 @@ def get_quantization_config(quantization: str) -> Type[QuantizationConfig]:
 
 __all__ = [
     "QuantizationConfig",
+    "QuantizationMethods",
     "get_quantization_config",
     "QUANTIZATION_METHODS",
 ]

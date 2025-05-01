@@ -1646,7 +1646,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                         graph_runner.capture(**capture_inputs)
                     self.graph_memory_pool = graph_runner.graph.pool()
                     self.graph_runners[virtual_engine][(
-                        batch_size, use_inputs_embeds)] = (graph_runner)
+                        batch_size, use_inputs_embeds)] = graph_runner
 
         if self.lora_config:
             self._remove_dummy_loras()
@@ -1831,8 +1831,7 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
                                      self.vllm_config, virtual_engine):
                 hidden_or_intermediate_states = model_executable(
                     input_ids=model_input.input_tokens,
-                    inputs_embeds=model_input.inputs_embeds
-                    if model_input.inputs_embeds is not None else None,
+                    inputs_embeds=model_input.inputs_embeds,
                     positions=model_input.input_positions,
                     intermediate_tensors=intermediate_tensors,
                     **MultiModalKwargs.as_kwargs(multi_modal_kwargs,

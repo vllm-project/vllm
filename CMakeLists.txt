@@ -46,8 +46,8 @@ set(HIP_SUPPORTED_ARCHS "gfx906;gfx908;gfx90a;gfx942;gfx950;gfx1030;gfx1100;gfx1
 # requirements.txt files and should be kept consistent.  The ROCm torch
 # versions are derived from docker/Dockerfile.rocm
 #
-set(TORCH_SUPPORTED_VERSION_CUDA "2.6.0")
-set(TORCH_SUPPORTED_VERSION_ROCM "2.6.0")
+set(TORCH_SUPPORTED_VERSION_CUDA "2.7.0")
+set(TORCH_SUPPORTED_VERSION_ROCM "2.7.0")
 
 #
 # Try to find python package with an executable that exactly matches
@@ -241,6 +241,7 @@ set(VLLM_EXT_SRC
   "csrc/quantization/fp8/common.cu"
   "csrc/quantization/fused_kernels/fused_layernorm_dynamic_per_token_quant.cu"
   "csrc/quantization/gguf/gguf_kernel.cu"
+  "csrc/quantization/activation_kernels.cu"
   "csrc/cuda_utils_kernels.cu"
   "csrc/prepare_inputs/advance_step.cu"
   "csrc/custom_all_reduce.cu"

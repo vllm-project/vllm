@@ -2,7 +2,7 @@
 
 import asyncio
 from collections.abc import Mapping
-from typing import Optional, Union, cast
+from typing import Any, Optional, Union, cast
 
 from typing_extensions import assert_never
 
@@ -19,7 +19,8 @@ from vllm.transformers_utils.tokenizer_group import TokenizerGroup
 from .data import (DecoderOnlyInputs, EmbedsInputs, EncoderDecoderInputs,
                    ProcessorInputs, PromptType, SingletonInputs,
                    SingletonPrompt, TokenInputs, embeds_inputs, token_inputs)
-from .parse import (ParsedEmbedsPrompt, is_embeds_inputs,
+from .parse import (ParsedEmbedsPrompt, ParsedStrPrompt, ParsedTextPrompt,
+                    ParsedTokensPrompt, is_embeds_inputs,
                     is_explicit_encoder_decoder_prompt, parse_singleton_prompt)
 
 logger = init_logger(__name__)
@@ -186,18 +187,21 @@ class InputPreprocessor:
         self,
         prompt: str,
         lora_request: Optional[LoRARequest],
+        tokenization_kwargs: Optional[dict[str, Any]] = None,
     ) -> list[int]:
         """
         Apply the model's tokenizer to a text prompt, returning the
         corresponding token IDs.
         """
         tokenizer = self.get_tokenizer_group()
-        add_special_tokens = None
+        if tokenization_kwargs is None:
+            tokenization_kwargs = {}
+
         if self.model_config.hf_config.model_type == "whisper":
             # For Whisper, special tokens should be provided by the user based
             # on the task and language of their request. Also needed to avoid
             # appending an EOS token to the prompt which disrupts generation.
-            add_special_tokens = False
+            tokenization_kwargs["add_special_tokens"] = False
 
         if (self.model_config.encoder_config is not None
                 and self.model_config.encoder_config.get(
@@ -206,25 +210,27 @@ class InputPreprocessor:
 
         return tokenizer.encode(prompt=prompt,
                                 lora_request=lora_request,
-                                add_special_tokens=add_special_tokens)
+                                **tokenization_kwargs)
 
     async def _tokenize_prompt_async(
         self,
         prompt: str,
         lora_request: Optional[LoRARequest],
+        tokenization_kwargs: Optional[dict[str, Any]] = None,
     ) -> list[int]:
         """Async version of :meth:`_tokenize_prompt`."""
         tokenizer = self.get_tokenizer_group()
-        add_special_tokens = None
+        if tokenization_kwargs is None:
+            tokenization_kwargs = {}
+
         if self.model_config.hf_config.model_type == "whisper":
             # For Whisper, special tokens should be provided by the user based
             # on the task and language of their request. Also needed to avoid
             # appending an EOS token to the prompt which disrupts generation.
-            add_special_tokens = False
-        return await tokenizer.encode_async(
-            prompt=prompt,
-            lora_request=lora_request,
-            add_special_tokens=add_special_tokens)
+            tokenization_kwargs["add_special_tokens"] = False
+        return await tokenizer.encode_async(prompt=prompt,
+                                            lora_request=lora_request,
+                                            **tokenization_kwargs)
 
     def _process_multimodal(
         self,
@@ -281,9 +287,33 @@ class InputPreprocessor:
         return mm_processor.apply(prompt, mm_data, mm_processor_kwargs,
                                   return_mm_hashes)
 
+    def _get_prompt_data(self, parsed_prompt: Union[ParsedStrPrompt,
+                                                    ParsedTextPrompt,
+                                                    ParsedTokensPrompt]):
+        prompt_text = None
+        prompt_token_ids = None
+        token_type_ids = None
+        cache_salt = None
+
+        if parsed_prompt["type"] == "str":
+            prompt_text = parsed_prompt["content"]
+        else:
+            cache_salt = parsed_prompt["content"].get("cache_salt")
+            if parsed_prompt["type"] == "text":
+                prompt_text = parsed_prompt["content"]["prompt"]
+            elif parsed_prompt["type"] == "tokens":
+                prompt_token_ids = parsed_prompt["content"].get(
+                    "prompt_token_ids")
+                token_type_ids = parsed_prompt["content"].get("token_type_ids")
+            else:
+                assert_never(parsed_prompt)
+
+        return prompt_text, prompt_token_ids, token_type_ids, cache_salt
+
     def _prompt_to_llm_inputs(
         self,
         prompt: SingletonPrompt,
+        tokenization_kwargs: Optional[dict[str, Any]] = None,
         lora_request: Optional[LoRARequest] = None,
         return_mm_hashes: bool = False,
     ) -> SingletonInputs:
@@ -302,140 +332,84 @@ class InputPreprocessor:
         """
         parsed = parse_singleton_prompt(prompt)
 
-        if parsed["type"] == "str":
-            prompt_text = parsed["content"]
-            prompt_token_ids = self._tokenize_prompt(
-                prompt_text,
-                lora_request=lora_request,
-            )
-
-            return token_inputs(
-                prompt=prompt_text,
-                prompt_token_ids=prompt_token_ids,
-            )
-
-        if parsed["type"] == "tokens":
-            tokens_content = parsed["content"]
-
-            prompt_token_ids = tokens_content["prompt_token_ids"]
-            token_type_ids = tokens_content.get("token_type_ids")
-            multi_modal_data = tokens_content.get("multi_modal_data")
-            mm_processor_kwargs = tokens_content.get("mm_processor_kwargs")
-
-            if multi_modal_data is not None:
-                return self._process_multimodal(
-                    prompt_token_ids,
-                    multi_modal_data,
-                    mm_processor_kwargs,
-                    lora_request=lora_request,
-                    return_mm_hashes=return_mm_hashes,
-                )
-
-            return token_inputs(
-                prompt_token_ids=prompt_token_ids,
-                token_type_ids=token_type_ids,
-            )
-
-        if parsed["type"] == "text":
-            text_content = parsed["content"]
-
-            prompt_text = text_content["prompt"]
-            multi_modal_data = text_content.get("multi_modal_data")
-            mm_processor_kwargs = text_content.get("mm_processor_kwargs")
-
-            if multi_modal_data is not None:
-                return self._process_multimodal(
-                    prompt_text,
-                    multi_modal_data,
-                    mm_processor_kwargs,
-                    lora_request=lora_request,
-                    return_mm_hashes=return_mm_hashes,
-                )
-
-            prompt_token_ids = self._tokenize_prompt(
-                prompt_text,
-                lora_request=lora_request,
-            )
-
-            return token_inputs(
-                prompt=prompt_text,
-                prompt_token_ids=prompt_token_ids,
-            )
-
         if parsed["type"] == "embeds":
             return self._process_prompt_embeds(parsed)
+
+        prompt_text, prompt_token_ids, token_type_ids, cache_salt = \
+            self._get_prompt_data(parsed)
+
+        # If multimodal data is present, process and return immediately
+        if parsed["type"] != "str" and parsed["content"].get(
+                "multi_modal_data") is not None:
+            inputs = self._process_multimodal(
+                prompt_text if prompt_text is not None else prompt_token_ids,
+                parsed["content"]["multi_modal_data"],
+                parsed["content"].get("mm_processor_kwargs"),
+                lora_request=lora_request,
+                return_mm_hashes=return_mm_hashes,
+            )
+            if cache_salt is not None:
+                inputs["cache_salt"] = cache_salt
+            return inputs
+
+        if prompt_token_ids is None:
+            prompt_token_ids = self._tokenize_prompt(
+                prompt_text,
+                lora_request=lora_request,
+                tokenization_kwargs=tokenization_kwargs,
+            )
+
+        return token_inputs(
+            prompt=prompt_text,
+            prompt_token_ids=prompt_token_ids,
+            token_type_ids=token_type_ids,
+            cache_salt=cache_salt,
+        )
 
         assert_never(parsed)
 
     async def _prompt_to_llm_inputs_async(
         self,
         prompt: SingletonPrompt,
+        tokenization_kwargs: Optional[dict[str, Any]] = None,
         lora_request: Optional[LoRARequest] = None,
         return_mm_hashes: bool = False,
     ) -> SingletonInputs:
         """Async version of :meth:`_extract_prompt_components`."""
         parsed = parse_singleton_prompt(prompt)
 
-        if parsed["type"] == "str":
-            prompt_text = parsed["content"]
-            prompt_token_ids = await self._tokenize_prompt_async(
-                prompt_text,
-                lora_request=lora_request,
-            )
-
-            return token_inputs(
-                prompt=prompt_text,
-                prompt_token_ids=prompt_token_ids,
-            )
-
-        if parsed["type"] == "tokens":
-            tokens_content = parsed["content"]
-
-            prompt_token_ids = tokens_content["prompt_token_ids"]
-            multi_modal_data = tokens_content.get("multi_modal_data")
-            mm_processor_kwargs = tokens_content.get("mm_processor_kwargs")
-
-            if multi_modal_data is not None:
-                return await self._process_multimodal_async(
-                    prompt_token_ids,
-                    multi_modal_data,
-                    mm_processor_kwargs,
-                    lora_request=lora_request,
-                    return_mm_hashes=return_mm_hashes,
-                )
-
-            return token_inputs(prompt_token_ids=prompt_token_ids)
-
-        if parsed["type"] == "text":
-            text_content = parsed["content"]
-
-            prompt_text = text_content["prompt"]
-            multi_modal_data = text_content.get("multi_modal_data")
-            mm_processor_kwargs = text_content.get("mm_processor_kwargs")
-
-            if multi_modal_data is not None:
-                return await self._process_multimodal_async(
-                    prompt_text,
-                    multi_modal_data,
-                    mm_processor_kwargs,
-                    lora_request=lora_request,
-                    return_mm_hashes=return_mm_hashes,
-                )
-
-            prompt_token_ids = await self._tokenize_prompt_async(
-                prompt_text,
-                lora_request=lora_request,
-            )
-
-            return token_inputs(
-                prompt=prompt_text,
-                prompt_token_ids=prompt_token_ids,
-            )
-
         if parsed["type"] == "embeds":
             return self._process_prompt_embeds(parsed)
 
-        assert_never(parsed)
+        prompt_text, prompt_token_ids, token_type_ids, cache_salt = \
+            self._get_prompt_data(parsed)
+
+        if parsed["type"] != "str" and parsed["content"].get(
+                "multi_modal_data") is not None:
+            inputs = await self._process_multimodal_async(
+                prompt_token_ids if prompt_text is None else prompt_text,
+                parsed["content"]["multi_modal_data"],
+                parsed["content"].get("mm_processor_kwargs"),
+                lora_request=lora_request,
+                return_mm_hashes=return_mm_hashes,
+            )
+            if cache_salt is not None:
+                inputs["cache_salt"] = cache_salt
+            return inputs
+
+        if prompt_token_ids is None:
+            prompt_token_ids = await self._tokenize_prompt_async(
+                prompt_text,
+                lora_request=lora_request,
+                tokenization_kwargs=tokenization_kwargs,
+            )
+
+        return token_inputs(
+            prompt=prompt_text,
+            prompt_token_ids=prompt_token_ids,
+            token_type_ids=token_type_ids,
+            cache_salt=cache_salt,
+        )
 
     def _process_prompt_embeds(self,
                                parsed: ParsedEmbedsPrompt) -> EmbedsInputs:
@@ -458,6 +432,8 @@ class InputPreprocessor:
                 "prompt_embeds must be of shape (seq_len, hidden_size).")
 
         return embeds_inputs(prompt_embeds=prompt_embeds)
+
+        assert_never(parsed)
 
     def _build_enc_dec_llm_inputs(
         self,
@@ -541,6 +517,11 @@ class InputPreprocessor:
                     mm_hashes=inputs["mm_hashes"],
                     mm_placeholders=inputs["mm_placeholders"],
                 )
+
+            cache_salt = inputs.get("cache_salt")
+            if cache_salt is not None:
+                decoder_inputs["cache_salt"] = cache_salt
+
         elif inputs["type"] == "token":
             # Text-only inputs
             encoder_inputs = token_inputs(prompt="", prompt_token_ids=[])
@@ -552,6 +533,7 @@ class InputPreprocessor:
     def _process_encoder_decoder_prompt(
         self,
         prompt: PromptType,
+        tokenization_kwargs: Optional[dict[str, Any]] = None,
     ) -> EncoderDecoderInputs:
         """
         For encoder/decoder models only:
@@ -588,7 +570,9 @@ class InputPreprocessor:
 
         if is_explicit_encoder_decoder_prompt(prompt):
             encoder_inputs = self._prompt_to_llm_inputs(
-                prompt["encoder_prompt"])
+                prompt["encoder_prompt"],
+                tokenization_kwargs=tokenization_kwargs,
+            )
             if (decoder_input := prompt["decoder_prompt"]) is None:
                 decoder_inputs = None
             else:
@@ -602,7 +586,10 @@ class InputPreprocessor:
                     self._separate_enc_dec_inputs_from_mm_processor_outputs(
                         encoder_inputs, decoder_inputs))
         else:
-            inputs = self._prompt_to_llm_inputs(prompt)
+            inputs = self._prompt_to_llm_inputs(
+                prompt,
+                tokenization_kwargs=tokenization_kwargs,
+            )
             if self.model_config.is_multimodal_model:
                 # Encoder-Decoder Multimodal model
                 encoder_inputs, decoder_inputs = (
@@ -621,6 +608,7 @@ class InputPreprocessor:
     async def _process_encoder_decoder_prompt_async(
         self,
         prompt: PromptType,
+        tokenization_kwargs: Optional[dict[str, Any]] = None,
     ) -> EncoderDecoderInputs:
         """Async version of :meth:`_process_encoder_decoder_prompt`."""
         encoder_inputs: SingletonInputs
@@ -628,13 +616,18 @@ class InputPreprocessor:
 
         if is_explicit_encoder_decoder_prompt(prompt):
             encoder_task = self._prompt_to_llm_inputs_async(
-                prompt["encoder_prompt"])
+                prompt["encoder_prompt"],
+                tokenization_kwargs=tokenization_kwargs,
+            )
 
             if (decoder_input := prompt["decoder_prompt"]) is None:
                 encoder_inputs = await encoder_task
                 decoder_inputs = None
             else:
-                decoder_task = self._prompt_to_llm_inputs_async(decoder_input)
+                decoder_task = self._prompt_to_llm_inputs_async(
+                    decoder_input,
+                    tokenization_kwargs=tokenization_kwargs,
+                )
 
                 encoder_inputs, decoder_inputs = await asyncio.gather(
                     encoder_task, decoder_task)
@@ -648,7 +641,10 @@ class InputPreprocessor:
                     self._separate_enc_dec_inputs_from_mm_processor_outputs(
                         encoder_inputs, decoder_inputs))
         else:
-            inputs = await self._prompt_to_llm_inputs_async(prompt)
+            inputs = await self._prompt_to_llm_inputs_async(
+                prompt,
+                tokenization_kwargs=tokenization_kwargs,
+            )
             if self.model_config.is_multimodal_model:
                 # Encoder-Decoder Multimodal model
                 encoder_inputs, decoder_inputs = (
@@ -688,6 +684,7 @@ class InputPreprocessor:
     def _process_decoder_only_prompt(
         self,
         prompt: SingletonPrompt,
+        tokenization_kwargs: Optional[dict[str, Any]] = None,
         lora_request: Optional[LoRARequest] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
         return_mm_hashes: bool = False,
@@ -710,6 +707,7 @@ class InputPreprocessor:
 
         prompt_comps = self._prompt_to_llm_inputs(
             prompt,
+            tokenization_kwargs=tokenization_kwargs,
             lora_request=lora_request,
             return_mm_hashes=return_mm_hashes,
         )
@@ -722,6 +720,7 @@ class InputPreprocessor:
     async def _process_decoder_only_prompt_async(
         self,
         prompt: SingletonPrompt,
+        tokenization_kwargs: Optional[dict[str, Any]] = None,
         lora_request: Optional[LoRARequest] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
         return_mm_hashes: bool = False,
@@ -729,6 +728,7 @@ class InputPreprocessor:
         """Async version of :meth:`_process_decoder_only_prompt`."""
         prompt_comps = await self._prompt_to_llm_inputs_async(
             prompt,
+            tokenization_kwargs=tokenization_kwargs,
             lora_request=lora_request,
             return_mm_hashes=return_mm_hashes,
         )
@@ -741,6 +741,7 @@ class InputPreprocessor:
     def preprocess(
         self,
         prompt: PromptType,
+        tokenization_kwargs: Optional[dict[str, Any]] = None,
         lora_request: Optional[LoRARequest] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
         return_mm_hashes: bool = False,
@@ -761,6 +762,7 @@ class InputPreprocessor:
         # Decoder-only operation
         return self._process_decoder_only_prompt(
             prompt,
+            tokenization_kwargs=tokenization_kwargs,
             lora_request=lora_request,
             prompt_adapter_request=prompt_adapter_request,
             return_mm_hashes=return_mm_hashes,
@@ -769,6 +771,7 @@ class InputPreprocessor:
     async def preprocess_async(
         self,
         prompt: PromptType,
+        tokenization_kwargs: Optional[dict[str, Any]] = None,
         lora_request: Optional[LoRARequest] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
         return_mm_hashes: bool = False,
@@ -789,6 +792,7 @@ class InputPreprocessor:
         # Decoder-only operation
         return await self._process_decoder_only_prompt_async(
             prompt,
+            tokenization_kwargs=tokenization_kwargs,
             lora_request=lora_request,
             prompt_adapter_request=prompt_adapter_request,
             return_mm_hashes=return_mm_hashes,
