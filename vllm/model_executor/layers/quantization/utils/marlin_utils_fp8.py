@@ -116,6 +116,14 @@ def prepare_fp8_layer_for_marlin(layer: torch.nn.Module,
             # tensor-wise quantization -> channel-wise quantization
             # (1, 1) =>(repeat)=> (1, size_n)
             scales = scales.view(1, 1).repeat_interleave(part_size_n, 1)
+        elif scales.nelement() > 1 and scales.nelement() != part_size_n:
+            assert part_size_n % scales.nelement() == 0
+            s_size = scales.nelement()
+            # tensor-wise quantization (for gate-up proj)
+            #     -> channel-wise quantization
+            # (1, s_size) =>(repeat)=> (1, size_n)
+            scales = scales.view(1, s_size)
+            scales = scales.repeat_interleave(part_size_n // s_size, 1)
         else:
             # channel-wise quantization
             # (1, size_n)
@@ -211,10 +219,18 @@ def prepare_moe_fp8_layer_for_marlin(layer: torch.nn.Module,
         # marlin kernel only support channel-wise and group-wise quantization
         # we need to convert the scales
         if layer.weight_block_size is None:
-            if scales.nelement() == 1:
+            if scales.nelement() == e:
                 # tensor-wise quantization -> channel-wise quantization
                 # (e, 1, 1) =>(repeat)=> (e, 1, size_n)
                 scales = scales.view(e, 1, 1).repeat_interleave(size_n, 2)
+            elif scales.nelement() > e and scales.nelement() != e * size_n:
+                assert (e * size_n) % scales.nelement() == 0
+                s_size = scales.nelement() // e
+                # tensor-wise quantization (for gate-up proj)
+                #     -> channel-wise quantization
+                # (e, 1, s_size) =>(repeat)=> (e, 1, size_n)
+                scales = scales.view(e, 1, s_size)
+                scales = scales.repeat_interleave(size_n // s_size, 2)
             else:
                 # channel-wise quantization
                 # (e, 1, size_n)
