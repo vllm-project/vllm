@@ -80,7 +80,7 @@ def _apply_rotary_emb(x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor,
         is_neox_style: Whether to use the Neox-style or GPT-J-style rotary
             positional embeddings.
     """
-    if current_platform.is_cuda_alike():
+    if current_platform.is_cuda():
         return apply_rotary_emb(x.unsqueeze(0), cos, sin,
                                 not is_neox_style).squeeze(0)
     else:
