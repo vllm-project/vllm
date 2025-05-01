@@ -1,40 +1,41 @@
-(deployment-streamlit)=
+# SPDX-License-Identifier: Apache-2.0
+"""
+vLLM Chat Assistant - A Streamlit Web Interface
 
-# Streamlit
+A streamlined chat interface that quickly integrates 
+with vLLM API server.
 
-[Streamlit](https://github.com/streamlit/streamlit) lets you transform Python scripts into interactive web apps in minutes, instead of weeks. Build dashboards, generate reports, or create chat apps.
+Features:
+- Multiple chat sessions management
+- Streaming response display
+- Configurable API endpoint
+- Real-time chat history
 
-It can be quickly integrated with vLLM as a backend API server, enabling powerful LLM inference via API calls.
+Requirements:
+    pip install streamlit openai
 
-## Prerequisites
+Usage:
+    # Start the app with default settings
+    streamlit run streamlit_openai_chatbot_webserver.py
 
-- Setup vLLM environment
+    # Start with custom vLLM API endpoint
+    VLLM_API_BASE="http://your-server:8000/v1" \
+        streamlit run streamlit_openai_chatbot_webserver.py
 
-## Deploy
-
-- Start the vLLM server with the supported chat completion model, e.g.
-
-```console
-vllm serve qwen/Qwen1.5-0.5B-Chat
-```
-
-- Install streamlit and openai:
-
-```console
-pip install streamlit openai
-```
-
-- Create python file(streamlit_openai_chatbot_webserver.py) and copy the below code into it:
-
-```python
+    # Enable debug mode
+    streamlit run streamlit_openai_chatbot_webserver.py \
+        --logger.level=debug
+"""
 import streamlit as st
 from openai import OpenAI
 from datetime import datetime
 import os
 
+# Get command line arguments from environment variables
 openai_api_key = os.getenv('VLLM_API_KEY', "EMPTY")
 openai_api_base = os.getenv('VLLM_API_BASE', "http://localhost:8000/v1")
 
+# Initialize session states for managing chat sessions
 if "sessions" not in st.session_state:
     st.session_state.sessions = {}
 
@@ -47,6 +48,7 @@ if "messages" not in st.session_state:
 if "active_session" not in st.session_state:
     st.session_state.active_session = None
 
+# Initialize session state for API base URL
 if "api_base_url" not in st.session_state:
     st.session_state.api_base_url = openai_api_base
 
@@ -65,6 +67,15 @@ def switch_to_chat_session(session_id):
     st.session_state.messages = st.session_state.sessions[session_id]
 
 def get_llm_response(messages, model):
+    """Get streaming response from llm
+    
+    Args:
+        messages: List of message dictionaries
+        model: Name of model
+    
+    Returns:
+        Streaming response object or error message string
+    """
     try:
         response = client.chat.completions.create(
             model=model,
@@ -76,6 +87,7 @@ def get_llm_response(messages, model):
         st.error(f"Error details: {str(e)}")
         return f"Error: {str(e)}"
 
+# Sidebar - API Settings first
 st.sidebar.title("API Settings")
 new_api_base = st.sidebar.text_input("API Base URL:", value=st.session_state.api_base_url)
 if new_api_base != st.session_state.api_base_url:
@@ -84,11 +96,14 @@ if new_api_base != st.session_state.api_base_url:
 
 st.sidebar.divider()
 
+# Sidebar - Session Management
 st.sidebar.title("Chat Sessions")
 if st.sidebar.button("New Session"):
     create_new_chat_session()
 
+# Display all sessions in reverse chronological order
 for session_id in sorted(st.session_state.sessions.keys(), reverse=True):
+    # Mark the active session with a pinned button
     if session_id == st.session_state.active_session:
         st.sidebar.button(
             f"📍 {session_id}",
@@ -105,41 +120,52 @@ for session_id in sorted(st.session_state.sessions.keys(), reverse=True):
             args=(session_id,)
         )
 
+# Main interface
 st.title("vLLM Chat Assistant")
 
+# Initialize OpenAI client with API settings
 client = OpenAI(
     api_key=openai_api_key,
     base_url=st.session_state.api_base_url
 )
 
+# Get and display current model id
 models = client.models.list()
 model = models.data[0].id
 st.markdown(f"**Model**: {model}")
 
+# Initialize first session if none exists
 if st.session_state.current_session is None:
     create_new_chat_session()
     st.session_state.active_session = st.session_state.current_session
 
+# Display chat history for current session
 for message in st.session_state.messages:
     with st.chat_message(message["role"]):
         st.write(message["content"])
 
+# Handle user input and generate llm response
 if prompt := st.chat_input("Type your message here..."):
+    # Save user message to session
     st.session_state.messages.append({"role": "user", "content": prompt})
     st.session_state.sessions[st.session_state.current_session] = st.session_state.messages
-
+    
+    # Display user message
     with st.chat_message("user"):
         st.write(prompt)
 
+    # Prepare messages for llm
     messages_for_llm = [
         {"role": m["role"], "content": m["content"]} 
         for m in st.session_state.messages
     ]
 
+     # Generate and display llm response
     with st.chat_message("assistant"):
         message_placeholder = st.empty()
         full_response = ""
 
+        # Get streaming response from llm
         response = get_llm_response(messages_for_llm, model)
         if isinstance(response, str):
             message_placeholder.markdown(response)
@@ -153,22 +179,6 @@ if prompt := st.chat_input("Type your message here..."):
                         message_placeholder.markdown(full_response + "▌")
             
             message_placeholder.markdown(full_response)
-
+      
+    # Save llm response to session history
     st.session_state.messages.append({"role": "assistant", "content": full_response})
-```
-A code example can be found here: <gh-file:examples/online_serving/streamlit_openai_chatbot_webserver.py>
-
-- Start the streamlit web UI and start to chat:
-
-```console
-streamlit run streamlit_openai_chatbot_webserver.py
-
-# or specify the VLLM_API_BASE or VLLM_API_KEY
-VLLM_API_BASE="http://vllm-server-host:vllm-server-port/v1" streamlit run streamlit_openai_chatbot_webserver.py
-
-# start with debug mode to view more details
-streamlit run streamlit_openai_chatbot_webserver.py --logger.level=debug
-```
-
-:::{image} /assets/deployment/streamlit-chat.png
-:::
