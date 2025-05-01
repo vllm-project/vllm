@@ -3738,8 +3738,9 @@ class CompilationConfig:
             "pass_config",
             "traced_files",
         }
-        return TypeAdapter(self).model_dump_json(exclude=exclude,
-                                                 exclude_unset=True)
+        return TypeAdapter(CompilationConfig).dump_json(self,
+                                                        exclude=exclude,
+                                                        exclude_unset=True)
 
     __str__ = __repr__
 
@@ -3750,7 +3751,7 @@ class CompilationConfig:
             return cls(level=int(cli_value))
         # do not use `eval`, it is dangerous and can execute arbitrary code
         dict_value = ast.literal_eval(cli_value)
-        return TypeAdapter(CompilationConfig).model_validate(dict_value)
+        return TypeAdapter(CompilationConfig).validate_python(dict_value)
 
     def model_post_init(self, __context: Any) -> None:
 

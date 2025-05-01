@@ -174,7 +174,7 @@ def get_kwargs(cls: ConfigType) -> dict[str, Any]:
         json_tip = "\n\nShould be a valid JSON string."
         if dataclass_hint is not None:
             type_adapter = TypeAdapter(dataclass_hint)
-            kwargs[name]["type"] = type_adapter.model_validate_json
+            kwargs[name]["type"] = type_adapter.validate_json
             # Special case for configs with a from_cli method
             if hasattr(dataclass_hint, "from_cli"):
                 kwargs[name]["type"] = dataclass_hint.from_cli
