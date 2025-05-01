@@ -4,6 +4,7 @@ from typing import Any, Optional
 
 import torch
 
+from vllm import _custom_ops as ops
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionMetadata, AttentionType)
 from vllm.attention.ops.triton_unified_attention import unified_attention
@@ -163,6 +164,8 @@ class TritonAttentionImpl(AttentionImpl):
             key_cache = key_cache.view(torch.float8_e4m3fn)
             value_cache = value_cache.view(torch.float8_e4m3fn)
             num_tokens, num_heads, head_size = query.shape
+            assert layer._q_scale == 1.0, \
+                "A non 1.0 q_scale is not currently supported."
             query, _ = ops.scaled_fp8_quant(
                 query.reshape(
                     (num_tokens, num_heads * head_size)).contiguous(),
@@ -204,7 +207,7 @@ class TritonAttentionImpl(AttentionImpl):
             window_size=self.sliding_window,
             block_table=block_table,
             softcap=self.logits_soft_cap,
-            q_descale=layer._q_scale.expand(descale_shape),
+            q_descale=None,  # Not supported
             k_descale=layer._k_scale.expand(descale_shape),
             v_descale=layer._v_scale.expand(descale_shape),
         )

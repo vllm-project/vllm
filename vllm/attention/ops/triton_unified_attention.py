@@ -8,7 +8,28 @@
 
 import triton
 import triton.language as tl
-import triton_dejavu
+
+from vllm.logger import init_logger
+
+logger = init_logger(__name__)
+
+try:
+    from triton_dejavu import jitcache
+except ImportError:
+
+    def jitcache(**kwargs):
+
+        def decorator(func):
+            logger.warning_once(
+                f"triton_dejavu is not installed. {func.__name__} benefits "
+                " from jitcache caching, please install triton_dejavu "
+                " (https://github.com/IBM/triton-dejavu) for best performance."
+                " \nNOTE: Currently does not support Triton 3.3 (and as a "
+                " result) PyTorch 2.7.0+. Please open a PR to remove this NOTE "
+                " once Triton 3.3 is supported.")
+            return func
+
+        return decorator
 
 
 @triton.jit
@@ -24,7 +45,7 @@ def apply_softcap(S, x):
     return x * (p1 - p2) / (p1 + p2)
 
 
-@triton_dejavu.jitcache(
+@jitcache(
     check_keys=[],
     cache_launch_grid=False,
 )
@@ -101,7 +122,8 @@ def kernel_unified_attention_2d(
     query_pos = q_block_local_idx * BLOCK_Q + offs_m // num_queries_per_kv
 
     query_offset_0 = cur_batch_in_all_start_index + query_pos
-    query_offset_1 = kv_head_idx * num_queries_per_kv + offs_m % num_queries_per_kv
+    query_offset_1 = kv_head_idx * num_queries_per_kv + \
+        offs_m % num_queries_per_kv
 
     query_offset = (query_offset_0[:, None] * query_stride_0 +
                     query_offset_1[:, None] * query_stride_1 + offs_d[None, :])
@@ -201,7 +223,7 @@ def kernel_unified_attention_2d(
 
         if SLIDING_WINDOW > 0:
             S = tl.where((context_len + query_pos[:, None] - seq_offset)
-                         < SLIDING_WINDOW, S, -10000)
+                         < SLIDING_WINDOW, S, float("-inf"))
 
         if USE_ALIBI_SLOPES:
             S += alibi_slope[:, None] * (seq_offset - context_len)
@@ -209,6 +231,9 @@ def kernel_unified_attention_2d(
         # compute running maximum
         # m_j : (BLOCK_Q * num_queries_per_kv,)
         m_j = tl.maximum(M, tl.max(S, axis=1))
+        # For sliding window there's a chance the max is -inf due to masking of
+        # the entire row. In this case we need to set m_j 0 to avoid NaN
+        m_j = tl.where(m_j > float("-inf"), m_j, 0.0)
 
         # P : (BLOCK_Q * num_queries_per_kv, BLOCK_SIZE,)
         P = tl.exp(S - m_j[:, None])
@@ -262,6 +287,12 @@ def unified_attention(
     v_descale,
     alibi_slopes=None,
 ):
+    assert causal, "Only causal attention is supported"
+    assert q_descale is None, "Q scales not supported"
+
+    block_size = v.shape[1]
+    assert q.element_size() >= 2 or block_size >= 32, \
+        "Block size must be at least 32 for fp8"
 
     use_alibi_slopes = alibi_slopes is not None
 
