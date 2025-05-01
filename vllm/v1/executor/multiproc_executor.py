@@ -57,7 +57,7 @@ class MultiprocExecutor(Executor):
         assert self.world_size == tensor_parallel_size * pp_parallel_size, (
             f"world_size ({self.world_size}) must be equal to the "
             f"tensor_parallel_size ({tensor_parallel_size}) x pipeline"
-            f" parallel_size ({pp_parallel_size}). ")
+            f"_parallel_size ({pp_parallel_size}). ")
 
         # Set multiprocessing envs that are common to V0 and V1
         set_multiprocessing_worker_envs(self.parallel_config)
