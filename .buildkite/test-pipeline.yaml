@@ -476,7 +476,7 @@ steps:
     - pytest -v -s models/language -m core_model
 
 - label: Language Models Test (Extended)
-  mirror_hardwares: [amdexperimental, amdproduction]
+  mirror_hardwares: [amdexperimental]
   optional: true
   source_file_dependencies:
   - vllm/
