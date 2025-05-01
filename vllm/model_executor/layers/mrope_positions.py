@@ -45,10 +45,6 @@ def mrope_get_input_positions_and_delta(
             second_per_grid_ts_np = np.array(second_per_grid_ts,
                                              dtype=np.float64)
 
-        if len(second_per_grid_ts_np) < len(video_grid_thw):
-            raise ValueError(
-                "second_per_grid_ts is shorter than video_grid_thw")
-
         if is_omni:
             if audio_feature_lengths is None:
                 audio_feature_lengths = np.empty((0, ), dtype=np.int64)
@@ -369,7 +365,9 @@ def _vl_get_input_positions_numba(
                 start_t=cur_t + 1,
                 spatial_merge_size=spatial_merge_size,
                 tokens_per_second=tokens_per_second,
-                second_per_grid_t=second_per_grid_ts[cur_video_idx],
+                second_per_grid_t=1.0 \
+                    if cur_video_idx >= len(second_per_grid_ts) \
+                    else second_per_grid_ts[cur_video_idx],
             )
 
             if i == ERR_EXCEEDED:
@@ -651,7 +649,9 @@ def _omni_get_input_positions_numba(
                 start_t=cur_t + 1,
                 spatial_merge_size=spatial_merge_size,
                 tokens_per_second=tokens_per_second,
-                second_per_grid_t=second_per_grid_ts[cur_video_idx],
+                second_per_grid_t=1.0 \
+                    if cur_video_idx >= len(second_per_grid_ts) \
+                    else second_per_grid_ts[cur_video_idx],
                 seconds_per_chunk=seconds_per_chunk,
                 audio_feature_length=audio_feature_lengths[cur_audio_idx],
             )
@@ -673,7 +673,9 @@ def _omni_get_input_positions_numba(
                 start_t=cur_t + 1,
                 spatial_merge_size=spatial_merge_size,
                 tokens_per_second=tokens_per_second,
-                second_per_grid_t=second_per_grid_ts[cur_video_idx],
+                second_per_grid_t=1.0 \
+                    if cur_video_idx >= len(second_per_grid_ts) \
+                    else second_per_grid_ts[cur_video_idx],
             )
 
             if i == ERR_EXCEEDED:
