@@ -1,9 +1,4 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Compare the outputs of HF and vLLM when using greedy sampling.
-
-Run `pytest tests/models/test_models.py`.
-"""
-
 import pytest
 import torch
 
