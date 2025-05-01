@@ -14,7 +14,7 @@ import torch
 # Fixture to set up environment variables and teardown servers after tests
 @pytest.fixture(scope="module", autouse=True)
 def setup_servers():
-    if torch.cuda.device_count() < 4:
+    if torch.cuda.device_count() < 2:
         pytest.skip("Skipping test: fewer than 4 GPUs available")
 
     # Set up environment variables
