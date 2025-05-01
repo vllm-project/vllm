@@ -200,6 +200,11 @@ class PrometheusStatLogger(StatLoggerBase):
             "GPU prefix cache hits, in terms of number of cached blocks.",
             labelnames=labelnames).labels(*labelvalues)
 
+        self.counter_num_tokens_preempted = prometheus_client.Counter(
+            name="vllm:num_tokens_preempted",
+            documentation="Number of tokens from preempted requests",
+            labelnames=labelnames).labels(*labelvalues)
+
         #
         # Counters
         #
@@ -216,11 +221,6 @@ class PrometheusStatLogger(StatLoggerBase):
         self.counter_generation_tokens = prometheus_client.Counter(
             name="vllm:generation_tokens_total",
             documentation="Number of generation tokens processed.",
-            labelnames=labelnames).labels(*labelvalues)
-
-        self.counter_evicted_tokens = prometheus_client.Counter(
-            name="vllm:evicted_tokens_total",
-            documentation="Total number of tokens evicted from KV cache.",
             labelnames=labelnames).labels(*labelvalues)
 
         self.counter_request_success: dict[FinishReason,
@@ -428,10 +428,10 @@ class PrometheusStatLogger(StatLoggerBase):
         self.counter_prompt_tokens.inc(iteration_stats.num_prompt_tokens)
         self.counter_generation_tokens.inc(
             iteration_stats.num_generation_tokens)
-        self.counter_evicted_tokens.inc(scheduler_stats.num_evicted_tokens)
         self.histogram_iteration_tokens.observe(
             iteration_stats.num_prompt_tokens + \
             iteration_stats.num_generation_tokens)
+        self.counter_num_tokens_preempted.inc(scheduler_stats.num_tokens_preempted)
 
         for max_gen_tokens in iteration_stats.max_num_generation_tokens_iter:
             self.histogram_max_num_generation_tokens_request.observe(

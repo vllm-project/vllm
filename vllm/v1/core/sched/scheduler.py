@@ -86,6 +86,8 @@ class Scheduler(SchedulerInterface):
 
         # Track total tokens in waiting queue
         self._waiting_tokens = 0
+        # Track total tokens in preempted requests
+        self._preempted_tokens = 0
 
         # req_id -> Request
         self.requests: dict[str, Request] = {}
@@ -254,6 +256,10 @@ class Scheduler(SchedulerInterface):
                     if self.log_stats:
                         preempted_req.record_event(
                             EngineCoreEventType.PREEMPTED, scheduled_timestamp)
+
+                    # Count tokens from preempted request
+                    preempted_tokens = self._get_request_total_tokens(preempted_req)
+                    self._preempted_tokens += preempted_tokens
 
                     self.waiting.appendleft(preempted_req)
                     preempted_reqs.append(preempted_req)
@@ -862,8 +868,7 @@ class Scheduler(SchedulerInterface):
             num_waiting_reqs=len(self.waiting),
             num_tokens_waiting=self._waiting_tokens,
             gpu_cache_usage=self.kv_cache_manager.usage,
-            num_evicted_tokens=self.kv_cache_manager.block_pool.
-            get_and_reset_evicted_tokens(),
+            num_tokens_preempted=self._preempted_tokens,
             prefix_cache_stats=prefix_cache_stats,
             spec_decoding_stats=spec_decoding_stats,
         )
