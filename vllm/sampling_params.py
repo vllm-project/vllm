@@ -73,36 +73,6 @@ class GuidedDecodingParams:
             structural_tag=structural_tag,
         )
 
-    @property
-    def backend_name(self) -> str:
-        """Return the backend name without any options.
-
-        For example if the backend is "xgrammar:no-fallback", returns "xgrammar"
-        """
-        return (self.backend or "").split(":")[0]
-
-    def backend_options(self) -> list[str]:
-        """Return the backend options as a list of strings."""
-        if not self.backend or ":" not in self.backend:
-            return []
-        return self.backend.split(":")[1].split(",")
-
-    def add_option(self, opt_name: str) -> None:
-        """Adds an option to the backend options."""
-        if not self.backend:
-            self.backend = f":{opt_name}"
-        elif ":" not in self.backend:
-            self.backend += f":{opt_name}"
-        else:
-            options = set(self.backend_options())
-            options.add(opt_name)
-            self.backend = f"{self.backend_name}:{','.join(sorted(options))}"
-
-    def no_fallback(self) -> bool:
-        """Returns True if the "no-fallback" option is supplied for the guided
-        decoding backend"""
-        return "no-fallback" in self.backend_options()
-
     def __post_init__(self):
         """Validate that some fields are mutually exclusive."""
         guide_count = sum([
@@ -216,9 +186,9 @@ class SamplingParams(
         logits_processors: list of functions that modify logits based on
             previously generated tokens, and optionally prompt tokens as
             a first argument.
-        truncate_prompt_tokens: If set to -1, will use the truncation size 
-            supported by the model. If set to an integer k, will use only 
-            the last k tokens from the prompt (i.e., left truncation). 
+        truncate_prompt_tokens: If set to -1, will use the truncation size
+            supported by the model. If set to an integer k, will use only
+            the last k tokens from the prompt (i.e., left truncation).
             Defaults to None (i.e., no truncation).
         guided_decoding: If provided, the engine will construct a guided
             decoding logits processor from these parameters. Defaults to None.
