@@ -29,6 +29,7 @@ class Request:
         arrival_time: float,
         lora_request: Optional["LoRARequest"] = None,
         structured_output_request: Optional["StructuredOutputRequest"] = None,
+        cache_salt: Optional[str] = None,
     ) -> None:
         self.request_id = request_id
         self.sampling_params = sampling_params
@@ -52,6 +53,7 @@ class Request:
         self.spec_token_ids: list[int] = []
         self.num_computed_tokens = 0
         self.num_cached_tokens = 0
+        self.cache_salt: Optional[str] = cache_salt
 
         # Multi-modal related
         self.mm_positions = multi_modal_placeholders or []
@@ -90,6 +92,7 @@ class Request:
             lora_request=request.lora_request,
             structured_output_request=StructuredOutputRequest(
                 sampling_params=request.sampling_params),
+            cache_salt=request.cache_salt,
         )
 
     def append_output_token_ids(

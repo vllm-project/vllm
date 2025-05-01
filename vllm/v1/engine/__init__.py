@@ -57,6 +57,7 @@ class EngineCoreRequest(
     eos_token_id: Optional[int]
     arrival_time: float
     lora_request: Optional[LoRARequest]
+    cache_salt: Optional[str]
 
     # Used in DP case to indicate which wave of requests this is expected to
     # belong to, to cover a race condition where the request is sent before
