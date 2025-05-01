@@ -188,8 +188,7 @@ class SamplingParams(
             a first argument.
         truncate_prompt_tokens: If set to -1, will use the truncation size
             supported by the model. If set to an integer k, will use only
-            the last k tokens from the prompt (i.e., left truncation).
-            Defaults to None (i.e., no truncation).
+            the last k tokens from the prompt (i.e., left truncation). 
         guided_decoding: If provided, the engine will construct a guided
             decoding logits processor from these parameters. Defaults to None.
         logit_bias: If provided, the engine will construct a logits processor
