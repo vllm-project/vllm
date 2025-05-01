@@ -28,7 +28,7 @@ import vllm.model_executor.layers.fused_moe  # noqa
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.fused_moe.fused_batched_moe import (
-    BatchedExperts, BatchedTritonExperts)
+    BatchedExperts)
 from vllm.model_executor.layers.fused_moe.fused_moe import fused_topk
 from vllm.model_executor.layers.fused_moe.modular_kernel import (
     FusedMoEModularKernel)
@@ -390,9 +390,11 @@ def _pplx_dispatch_combine(
     a_rep = torch.repeat_interleave(a, topk, dim=0).to(device)
 
     torch_output = (a_rep.view(-1, topk, k) * 1.5 *
-                    topk_weight.view(-1, topk, 1).to(device)).sum(dim=1).to(a.dtype)
+                    topk_weight.view(-1, topk, 1).to(device)).sum(dim=1).to(
+                        a.dtype)
 
-    pplx_output = pplx_dispatch_combine(pgi, dp_size, a, topk_weight, topk_ids, num_experts)
+    pplx_output = pplx_dispatch_combine(pgi, dp_size, a, topk_weight, topk_ids,
+                                        num_experts)
 
     torch_output = chunk_by_rank(torch_output, pgi.rank,
                                  pgi.world_size).to(pplx_output.device)
@@ -426,7 +428,8 @@ def test_pplx_dispatch_combine(
     a = torch.randn((m, k), device=device, dtype=dtype) / 10
     score = torch.randn((m, e), device=device, dtype=dtype)
 
-    parallel_launch(world_size, _pplx_dispatch_combine, dp_size, a, score, topk, e)
+    parallel_launch(world_size, _pplx_dispatch_combine, dp_size, a, score,
+                    topk, e)
 
 
 def pplx_moe(pgi, dp_size, a, w1, w2, topk_weight, topk_ids):
