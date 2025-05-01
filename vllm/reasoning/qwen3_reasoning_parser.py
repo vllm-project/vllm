@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 
-import re
 from collections.abc import Sequence
 from typing import Optional, Union
 
@@ -30,9 +29,6 @@ class Qwen3ReasoningParser(ReasoningParser):
         super().__init__(tokenizer)
         self.think_start_token = "<think>"
         self.think_end_token = "</think>"
-
-        self.reasoning_regex = re.compile(
-            rf"{self.think_start_token}(.*?){self.think_end_token}", re.DOTALL)
 
         if not self.model_tokenizer:
             raise ValueError(
