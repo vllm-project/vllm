@@ -56,7 +56,6 @@ def build_llm_with_lmcache(lmcache_connector: str, model: str,
     # Set GPU memory utilization to 0.8 for an A40 GPU with 40GB
     # memory. Reduce the value if your GPU has less memory.
     # Note: LMCache supports chunked prefill (see vLLM#14505, LMCache#392).
-    llm_args: EngineArgs
     if vllm_version == "v0":
         llm_args = EngineArgs(
             model=model,
