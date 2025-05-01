@@ -228,9 +228,6 @@ autodoc_mock_imports = [
     "cloudpickle",
     "aiohttp",
     "starlette",
-    "openai", # Required by docs/source/serving/openai_compatible_server.md's vllm.entrypoints.openai.cli_args
-    "fastapi", # Required by docs/source/serving/openai_compatible_server.md's vllm.entrypoints.openai.cli_args
-    "partial_json_parser", # Required by docs/source/serving/openai_compatible_server.md's vllm.entrypoints.openai.cli_args
     "blake3",
     "cpuinfo",
     "transformers",
@@ -238,6 +235,12 @@ autodoc_mock_imports = [
     "PIL",
     "numpy",
     "tqdm",
+    # The mocks below are required by
+    # docs/source/serving/openai_compatible_server.md's
+    # vllm.entrypoints.openai.cli_args
+    "openai", 
+    "fastapi",
+    "partial_json_parser",
 ]
 
 for mock_target in autodoc_mock_imports:
