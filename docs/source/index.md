@@ -194,12 +194,8 @@ contributing/vulnerability_management
 :caption: API Reference
 :maxdepth: 2
 
-api/config
-api/offline_inference/index
-api/engine/index
-api/inference_params
-api/multimodal/index
-api/model/index
+api/index
+api/vllm/vllm
 :::
 
 % Latest news and acknowledgements
