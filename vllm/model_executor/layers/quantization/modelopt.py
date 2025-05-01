@@ -73,11 +73,11 @@ def dequantize_to_dtype(tensor_fp4,
     assert tensor_fp4.dtype == torch.uint8
     m, packed_k = tensor_fp4.shape
     k = packed_k * 2
-    tensor_f32 = break_fp4_bytes(tensor_fp4, dtype)
+    tensor_f32 = break_fp4_bytes(tensor_fp4, torch.float32)
     tensor_f32 = tensor_f32.reshape(m, k // block_size, block_size)
     tensor_sf = tensor_sf.view(torch.float8_e4m3fn)
     tensor_sf = convert_swizzled_to_linear(tensor_sf, m, k, block_size)
-    tensor_sf_dtype = tensor_sf.to(torch.float32) / global_scale
+    tensor_sf_dtype = tensor_sf.to(torch.float32) * global_scale
 
     # scale the tensor
     out = (tensor_f32 * tensor_sf_dtype.unsqueeze(-1)).reshape(m, k)
@@ -488,7 +488,7 @@ class ModelOptNvFp4LinearMethod(LinearMethodBase):
         # print(f"{layer.weight.shape=}")
         output_shape = [x_m, w_n]
         block_size = 16
-
+        """
         # quantize input to (FP4 and interleaved block scale)
         # x_global_scale = layer.input_scale
         x_global_scale = 1 / layer.input_scale
@@ -503,6 +503,7 @@ class ModelOptNvFp4LinearMethod(LinearMethodBase):
         x_blockscale = x_blockscale.unsqueeze(-1) / x_global_scale
         x_dq = (x_fp4 * x_blockscale).reshape(x_m, x_k).to(output_dtype)
         del x_fp4, x_blockscale
+        """
 
         # dequantize weight
         w_fp4 = layer.weight.data.view(torch.uint8)
@@ -512,13 +513,11 @@ class ModelOptNvFp4LinearMethod(LinearMethodBase):
         # print(f"{w_blockscale.shape=}")
         # print(f"{w_global_scale.shape=}")
         w_dq = dequantize_to_dtype(w_fp4, w_blockscale, w_global_scale,
-                                   output_dtype, x.device,
-                                   block_size).to(output_dtype)
-        # print(f"{w_dq.shape=}")
+                                   output_dtype, x.device, block_size)
 
         # matmul
-        out = torch.matmul(x_dq, w_dq.t())
-        del x_dq, w_dq
+        out = torch.matmul(x, w_dq.t())
+        # del x_dq, w_dq
         # print(f"{out.shape=}")
 
         if bias is not None:
