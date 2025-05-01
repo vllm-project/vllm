@@ -1413,7 +1413,7 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
 
         output = torch.empty(attn_metadata.num_prefill_tokens +
                              attn_metadata.num_decode_tokens,
-                             self.qk_nope_head_dim * self.num_heads,
+                             self.v_head_dim * self.num_heads,
                              device=q.device,
                              dtype=q.dtype)
         if has_prefill:
