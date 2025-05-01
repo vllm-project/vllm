@@ -158,10 +158,6 @@ class OvisProcessor(ProcessorMixin):
             if not isinstance(text, list):
                 text = [text]
 
-            # tokenized_batched_text = self.tokenizer.batch_encode_plus(
-            #     text,
-            #     **output_kwargs["text_kwargs"]
-            # )
             tokenized_batched_text = self._tokenize_with_image_symbol(text)
             image_token_id = self.get_token_value("image_token")
             replaced_ids_list = []

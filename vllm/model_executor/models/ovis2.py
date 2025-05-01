@@ -294,14 +294,15 @@ class Ovis2ForConditionalGeneration(nn.Module, SupportsMultiModal):
         patches_per_image = image_input["patches_per_image"]
         indicator_tokens = image_input["indicator_tokens"]
 
-        indicator_per_image = list(map(lambda x: x + 1, patches_per_image))
+        indicator_per_image = list(
+            map(lambda x: x + 1 if x > 1 else x + 2, patches_per_image))
 
         target_dtype = self.visual_tokenizer.dtype
         visual_tokens = self.visual_tokenizer(
             image_patches_flat.to(target_dtype))
         visual_embeds = self.vte(visual_tokens)  # 1:1 numeric eq.
 
-        indicator_embeds = self.vte(indicator_tokens).unsqueeze(1)
+        indicator_embeds = self.vte(indicator_tokens)
         indicator_embeds_per_image = indicator_embeds.split(
             indicator_per_image)
 
@@ -312,8 +313,8 @@ class Ovis2ForConditionalGeneration(nn.Module, SupportsMultiModal):
             vision_embeddings_per_image = []
             for i in range(visual.shape[0]):
                 vision_embeddings_per_image.append(
-                    torch.cat([indicator[i], visual[i]], dim=0))
-            vision_embeddings_per_image.append(indicator[-1])
+                    torch.cat([indicator[i:i + 1], visual[i]], dim=0))
+            vision_embeddings_per_image.append(indicator[i + 1:])
             vision_embeddings.append(
                 torch.cat(vision_embeddings_per_image, dim=0))
 
