@@ -209,10 +209,9 @@ def linkcode_resolve(domain, info):
 
     # If the line number is found, create the URL
     filename = path.relative_to(VLLM_ROOT)
-    if "checkouts" in filename.parts:
+    if "checkouts" in path.parts:
         # a PR build on readthedocs
-        pr_number = filename.split("/")[1]
-        filename = filename.split("/", 2)[2]
+        pr_number = VLLM_ROOT.parent.name
         base, branch = get_repo_base_and_branch(pr_number)
         if base and branch:
             return f"https://github.com/{base}/blob/{branch}/{filename}#L{lineno}"
