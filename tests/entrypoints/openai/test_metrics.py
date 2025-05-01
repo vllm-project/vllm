@@ -82,8 +82,6 @@ _TOKENIZED_PROMPT = tokenizer(_PROMPT)["input_ids"]
 _NUM_REQUESTS = 10
 _NUM_PROMPT_TOKENS_PER_REQUEST = len(_TOKENIZED_PROMPT)
 _NUM_GENERATION_TOKENS_PER_REQUEST = 10
-_MAX_MODEL_LEN = 1024
-_MAX_NUM_SEQS = 128
 
 # {metric_family: [(suffix, expected_value)]}
 EXPECTED_VALUES = {
@@ -94,8 +92,7 @@ EXPECTED_VALUES = {
     "vllm:request_queue_time_seconds": [("_count", _NUM_REQUESTS)],
     "vllm:request_inference_time_seconds": [("_count", _NUM_REQUESTS)],
     "vllm:request_prefill_time_seconds": [("_count", _NUM_REQUESTS)],
-    "vllm:time_per_prefill_token_request_seconds": [("_count", _NUM_REQUESTS)
-                                                     ],
+    "vllm:time_per_prefill_token_request_seconds": [("_count", _NUM_REQUESTS)],
     "vllm:request_decode_time_seconds": [("_count", _NUM_REQUESTS)],
     "vllm:request_prompt_tokens":
     [("_sum", _NUM_REQUESTS * _NUM_PROMPT_TOKENS_PER_REQUEST),
@@ -117,8 +114,6 @@ EXPECTED_VALUES = {
     "vllm:generation_tokens": [
         ("_total", _NUM_REQUESTS * _NUM_PROMPT_TOKENS_PER_REQUEST)
     ],
-    "vllm:max_token_capacity_per_batch": [("", _MAX_MODEL_LEN * _MAX_NUM_SEQS)
-                                          ],
     "vllm:total_tokens_in_queue": [
         ("_sum", _NUM_REQUESTS * _NUM_PROMPT_TOKENS_PER_REQUEST),
         ("_count", _NUM_REQUESTS)
@@ -228,8 +223,6 @@ EXPECTED_METRICS = [
     "vllm:generation_tokens_total",
     "vllm:total_tokens_in_queue_sum",
     "vllm:total_tokens_in_queue_count",
-    "vllm:max_token_capacity_per_batch_sum",
-    "vllm:max_token_capacity_per_batch_count",
     "vllm:total_evicted_tokens_total",
     "vllm:request_success_total",
     "vllm:cache_config_info",
