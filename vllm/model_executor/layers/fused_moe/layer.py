@@ -1058,14 +1058,9 @@ class FusedMoE(torch.nn.Module):
 
         return buffer
 
-    # TODO: will this be cudagraph-able? (probably not)
-    # This should not be necessary.
-    def invalid_pplx(self, hidden_states: torch.Tensor) -> bool:
-        return has_pplx and hidden_states.shape[0] < self.dp_size
-
     def forward(self, hidden_states: torch.Tensor,
                 router_logits: torch.Tensor):
-        if self.use_direct_call or self.invalid_pplx(hidden_states):
+        if self.use_direct_call:
             return self.forward_impl(hidden_states, router_logits)
         else:
             return torch.ops.vllm.moe_forward(hidden_states, router_logits,
