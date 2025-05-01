@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from dataclasses import dataclass
-from typing import Any, Optional, Union
+from typing import Any, Optional
 
 import torch
 
@@ -151,14 +151,13 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
         from aiter import flash_attn_varlen_func
         self.flash_attn_varlen_func = flash_attn_varlen_func
 
-    def _flash_attn_varlen_diff_headdims(
-            self,
-            q: torch.Tensor,
-            k: torch.Tensor,
-            v: torch.Tensor,
-            softmax_scale: float,
-            return_softmax_lse: bool = False,
-            **kwargs) -> Union[tuple[torch.Tensor, ...], torch.Tensor]:
+    def _flash_attn_varlen_diff_headdims(self,
+                                         q,
+                                         k,
+                                         v,
+                                         return_softmax_lse=False,
+                                         softmax_scale=None,
+                                         **kwargs):
         output = self.flash_attn_varlen_func(
             q=q,
             k=k,

@@ -187,7 +187,7 @@ return curr_o @ W_O
 import functools
 from abc import abstractmethod
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Generic, Optional, TypeVar, Union
+from typing import TYPE_CHECKING, Any, Generic, Optional, TypeVar
 
 import torch
 
@@ -649,14 +649,13 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
             self.vllm_flash_attn_version == 3
             and current_platform.get_device_capability()[0] == 9)
 
-    def _flash_attn_varlen_diff_headdims(
-            self,
-            q: torch.Tensor,
-            k: torch.Tensor,
-            v: torch.Tensor,
-            softmax_scale: float,
-            return_softmax_lse: bool = False,
-            **kwargs) -> Union[tuple[torch.Tensor, ...], torch.Tensor]:
+    def _flash_attn_varlen_diff_headdims(self,
+                                         q,
+                                         k,
+                                         v,
+                                         return_softmax_lse=False,
+                                         softmax_scale=None,
+                                         **kwargs):
         maybe_padded_v = v
         if self._pad_v:
             maybe_padded_v = torch.nn.functional.pad(
