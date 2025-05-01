@@ -46,7 +46,7 @@ class Qwen3ReasoningParser(ReasoningParser):
             raise RuntimeError(
                 "Qwen3 reasoning parser could not locate think start/end "
                 "tokens in the tokenizer!")
-        
+
     def is_reasoning_end(self,
                          input_ids: Optional[list[int]],
                          previous_ids: Optional[list[int]] = None) -> bool:
