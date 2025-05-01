@@ -15,7 +15,7 @@ from vllm.model_executor.layers.rotary_embedding import RotaryEmbedding
 def rotary_embedding_opcheck(rot,
                              positions: torch.Tensor,
                              query: torch.Tensor,
-                             key: torch.Tensor,
+                             key: Optional[torch.Tensor] = None,
                              offsets: Optional[torch.Tensor] = None):
     cos_sin_cache = rot.cos_sin_cache.to(query.device, dtype=query.dtype)
 
@@ -37,9 +37,10 @@ def rotary_embedding_opcheck(rot,
 @pytest.mark.parametrize("rotary_dim", [32])
 @pytest.mark.parametrize("head_size", [32, 108])
 @pytest.mark.parametrize("seq_len", [11, 1024])
+@pytest.mark.parametrize("use_key", [True, False])
 def test_rotary_embedding_opcheck(dist_init, device, max_position,
                                   is_neox_style, rotary_dim, head_size,
-                                  seq_len):
+                                  seq_len, use_key):
     batch_size = 1
     base = 10000
     num_heads = 7
@@ -54,7 +55,7 @@ def test_rotary_embedding_opcheck(dist_init, device, max_position,
                         num_heads * head_size,
                         dtype=torch.float32,
                         device=device)
-    key = torch.randn_like(query)
+    key = torch.randn_like(query) if use_key else None
 
     rotary_embedding_opcheck(rot, positions, query, key)
     offsets = torch.zeros(batch_size * seq_len,

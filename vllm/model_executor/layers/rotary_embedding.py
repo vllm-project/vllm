@@ -138,7 +138,7 @@ class RotaryEmbedding(CustomOp):
         self,
         positions: torch.Tensor,
         query: torch.Tensor,
-        key: torch.Tensor,
+        key: Optional[torch.Tensor] = None,
         offsets: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """A PyTorch-native implementation of forward()."""
@@ -157,20 +157,22 @@ class RotaryEmbedding(CustomOp):
                                             self.is_neox_style)
         query = torch.cat((query_rot, query_pass), dim=-1).reshape(query_shape)
 
-        key_shape = key.shape
-        key = key.view(num_tokens, -1, self.head_size)
-        key_rot = key[..., :self.rotary_dim]
-        key_pass = key[..., self.rotary_dim:]
-        key_rot = _apply_rotary_emb_torch(key_rot, cos, sin,
-                                          self.is_neox_style)
-        key = torch.cat((key_rot, key_pass), dim=-1).reshape(key_shape)
+        # key may be None in some cases, e.g. cross-layer KV sharing
+        if key is not None:
+            key_shape = key.shape
+            key = key.view(num_tokens, -1, self.head_size)
+            key_rot = key[..., :self.rotary_dim]
+            key_pass = key[..., self.rotary_dim:]
+            key_rot = _apply_rotary_emb_torch(key_rot, cos, sin,
+                                              self.is_neox_style)
+            key = torch.cat((key_rot, key_pass), dim=-1).reshape(key_shape)
         return query, key
 
     def forward_cuda(
         self,
         positions: torch.Tensor,
         query: torch.Tensor,
-        key: torch.Tensor,
+        key: Optional[torch.Tensor] = None,
         offsets: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         from vllm import _custom_ops as ops
@@ -198,7 +200,7 @@ class RotaryEmbedding(CustomOp):
         self,
         positions: torch.Tensor,
         query: torch.Tensor,
-        key: torch.Tensor,
+        key: Optional[torch.Tensor] = None,
         offsets: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         from vllm._ipex_ops import ipex_ops as ops
@@ -207,21 +209,27 @@ class RotaryEmbedding(CustomOp):
                                                    dtype=query.dtype)
         # ops.rotary_embedding()/batched_rotary_embedding()
         # are in-place operations that update the query and key tensors.
-        if offsets is not None:
-            ops.batched_rotary_embedding(positions, query, key, self.head_size,
-                                         self.cos_sin_cache,
-                                         self.is_neox_style, self.rotary_dim,
-                                         offsets)
+        if key is None:
+            # XPU kernel doesn't support key=None so fall back to native impl
+            # TODO ipex.llm.functional.rotary_embedding_batched support key=None
+            return self.forward_native(positions, query, key, offsets)
         else:
-            ops.rotary_embedding(positions, query, key, self.head_size,
-                                 self.cos_sin_cache, self.is_neox_style)
+            if offsets is not None:
+                ops.batched_rotary_embedding(positions, query, key,
+                                             self.head_size,
+                                             self.cos_sin_cache,
+                                             self.is_neox_style,
+                                             self.rotary_dim, offsets)
+            else:
+                ops.rotary_embedding(positions, query, key, self.head_size,
+                                     self.cos_sin_cache, self.is_neox_style)
         return query, key
 
     def forward_hpu(
         self,
         positions: torch.Tensor,
         query: torch.Tensor,
-        key: torch.Tensor,
+        key: Optional[torch.Tensor] = None,
         offsets: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         from habana_frameworks.torch.hpex.kernels import (
@@ -265,19 +273,21 @@ class RotaryEmbedding(CustomOp):
                                          rope_mode)
         query = torch.cat((query_rot, query_pass), dim=-1).reshape(query_shape)
 
-        key_shape = key.shape
-        key = key.view(num_tokens, -1, self.head_size)
-        key_rot = key[..., :self.rotary_dim]
-        key_pass = key[..., self.rotary_dim:]
-        key_rot = apply_rotary_pos_emb(key_rot, cos, sin, None, 0, rope_mode)
-        key = torch.cat((key_rot, key_pass), dim=-1).reshape(key_shape)
+        if key is not None:
+            key_shape = key.shape
+            key = key.view(num_tokens, -1, self.head_size)
+            key_rot = key[..., :self.rotary_dim]
+            key_pass = key[..., self.rotary_dim:]
+            key_rot = apply_rotary_pos_emb(key_rot, cos, sin, None, 0,
+                                           rope_mode)
+            key = torch.cat((key_rot, key_pass), dim=-1).reshape(key_shape)
         return query, key
 
     def forward_neuron(
         self,
         positions: torch.Tensor,
         query: torch.Tensor,
-        key: torch.Tensor,
+        key: Optional[torch.Tensor] = None,
         offsets: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
 
@@ -319,14 +329,16 @@ class RotaryEmbedding(CustomOp):
 
         query_shape = query.shape
         query = query.view(num_tokens, -1, self.head_size)
-        key_shape = key.shape
-        key = key.view(num_tokens, -1, self.head_size)
+        if key is not None:
+            key_shape = key.shape
+            key = key.view(num_tokens, -1, self.head_size)
 
         if self.rotary_dim == self.head_size:
             query = _apply_rotary_emb(query, cos, sin, self.is_neox_style)
             query = query.reshape(query_shape)
-            key = _apply_rotary_emb(key, cos, sin, self.is_neox_style)
-            key = key.reshape(key_shape)
+            if key is not None:
+                key = _apply_rotary_emb(key, cos, sin, self.is_neox_style)
+                key = key.reshape(key_shape)
         else:
             head_size = query.shape[-1]
             query_reshaped = query.view(-1, head_size)
@@ -339,14 +351,15 @@ class RotaryEmbedding(CustomOp):
             query = torch.cat((query_rot, query_pass),
                               dim=-1).reshape(query_shape)
 
-            key_reshaped = key.view(-1, head_size)
-            key_pass = key_reshaped[:, self.rotary_dim:].view(
-                *key.shape[:-1], head_size - self.rotary_dim)
-            key_rot = key_reshaped[:, :self.rotary_dim].view(
-                *key.shape[:-1], self.rotary_dim)
-            key_rot = _apply_rotary_emb_neuron(key_rot, cos, sin,
-                                               self.is_neox_style)
-            key = torch.cat((key_rot, key_pass), dim=-1).reshape(key_shape)
+            if key is not None:
+                key_reshaped = key.view(-1, head_size)
+                key_pass = key_reshaped[:, self.rotary_dim:].view(
+                    *key.shape[:-1], head_size - self.rotary_dim)
+                key_rot = key_reshaped[:, :self.rotary_dim].view(
+                    *key.shape[:-1], self.rotary_dim)
+                key_rot = _apply_rotary_emb_neuron(key_rot, cos, sin,
+                                                   self.is_neox_style)
+                key = torch.cat((key_rot, key_pass), dim=-1).reshape(key_shape)
         return query, key
 
     def extra_repr(self) -> str:
@@ -672,9 +685,10 @@ class Phi3LongRoPEScaledRotaryEmbedding(nn.Module):
         self,
         positions: torch.Tensor,
         query: torch.Tensor,
-        key: torch.Tensor,
+        key: Optional[torch.Tensor] = None,
         offsets: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
+        assert key is not None
         query = query.view(*query.shape[:-1], -1, self.head_size)
         key = key.view(*key.shape[:-1], -1, self.head_size)
 
@@ -782,10 +796,11 @@ class DeepseekScalingRotaryEmbedding(RotaryEmbedding):
         self,
         positions: torch.Tensor,
         query: torch.Tensor,
-        key: torch.Tensor,
+        key: Optional[torch.Tensor] = None,
         offsets: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """PyTorch-native implementation equivalent to forward()."""
+        assert key is not None
         query_rot = query[..., :self.rotary_dim]
         key_rot = key[..., :self.rotary_dim]
         if self.rotary_dim < self.head_size:
@@ -912,8 +927,9 @@ class Llama4VisionRotaryEmbedding(RotaryEmbedding):
     def forward(
         self,
         query: torch.Tensor,
-        key: torch.Tensor,
+        key: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
+        assert key is not None
         self.cos_sin_cache: torch.Tensor = self.cos_sin_cache.to(query.device)
         query_ = torch.view_as_complex(query.float().reshape(
             *query.shape[:-1], -1, 2))
@@ -957,7 +973,7 @@ class MRotaryEmbedding(RotaryEmbedding):
         self,
         positions: torch.Tensor,
         query: torch.Tensor,
-        key: torch.Tensor,
+        key: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """PyTorch-native implementation equivalent to forward().
 
@@ -969,6 +985,7 @@ class MRotaryEmbedding(RotaryEmbedding):
             key: [num_tokens, num_kv_heads * head_size]
         """
         assert positions.ndim == 1 or positions.ndim == 2
+        assert key is not None
 
         num_tokens = positions.shape[-1]
         cos_sin = self.cos_sin_cache[positions]
