@@ -211,7 +211,7 @@ def linkcode_resolve(domain, info):
     filename = path.relative_to(VLLM_ROOT)
     if "checkouts" in path.parts:
         # a PR build on readthedocs
-        pr_number = VLLM_ROOT.parent.name
+        pr_number = VLLM_ROOT.name
         base, branch = get_repo_base_and_branch(pr_number)
         if base and branch:
             return f"https://github.com/{base}/blob/{branch}/{filename}#L{lineno}"
