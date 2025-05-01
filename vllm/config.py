@@ -14,6 +14,7 @@ from collections import Counter
 from contextlib import contextmanager
 from dataclasses import (MISSING, dataclass, field, fields, is_dataclass,
                          replace)
+from functools import cached_property
 from importlib.util import find_spec
 from pathlib import Path
 from typing import (TYPE_CHECKING, Any, Callable, ClassVar, Literal, Optional,
@@ -26,6 +27,7 @@ from transformers import PretrainedConfig
 from typing_extensions import deprecated
 
 import vllm.envs as envs
+from vllm import version
 from vllm.compilation.inductor_pass import CallableInductorPass, InductorPass
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import (QUANTIZATION_METHODS,
@@ -1043,8 +1045,10 @@ class ModelConfig:
         if self.is_attention_free:
             return 0
 
-        if hasattr(self.hf_text_config, "head_dim"):
+        # NOTE: Some configs may set head_dim=None in the config
+        if getattr(self.hf_text_config, "head_dim", None) is not None:
             return self.hf_text_config.head_dim
+
         # FIXME(woosuk): This may not be true for all models.
         return (self.hf_text_config.hidden_size //
                 self.hf_text_config.num_attention_heads)
@@ -1633,7 +1637,7 @@ class ParallelConfig:
     """Use expert parallelism instead of tensor parallelism for MoE layers."""
 
     max_parallel_loading_workers: Optional[int] = None
-    """Maximum number of parallal loading workers when loading model
+    """Maximum number of parallel loading workers when loading model
     sequentially in multiple batches. To avoid RAM OOM when using tensor
     parallel and large models."""
 
@@ -1894,6 +1898,13 @@ class SchedulerConfig:
 
     NOTE: This will be replaced by speculative config in the future; it is
     present to enable correctness tests until then."""
+
+    cuda_graph_sizes: list[int] = field(default_factory=lambda: [512])
+    """Cuda graph capture sizes, default is 512.
+    1. if one value is provided, then the capture list would follow the pattern:
+        [1, 2, 4] + [i for i in range(8, cuda_graph_sizes + 1, 8)]
+    2. more than one value (e.g. 1 2 128) is provided,
+        then the capture list will follow the provided list."""
 
     delay_factor: float = 0.0
     """Apply a delay (of delay factor multiplied by previous
@@ -3221,10 +3232,9 @@ class DecodingConfig:
     in the JSON schema. This is only supported for the `guidance` backend and
     is used to better align its behaviour with `outlines` and `xgrammar`."""
 
-    reasoning_backend: Optional[str] = None
+    reasoning_backend: str = ""
     """Select the reasoning parser depending on the model that you're using.
-    This is used to parse the reasoning content into OpenAI API format.
-    Required for `--enable-reasoning`."""
+    This is used to parse the reasoning content into OpenAI API format."""
 
     def compute_hash(self) -> str:
         """
@@ -3283,20 +3293,55 @@ class DecodingConfig:
             self.disable_additional_properties = True
 
 
+DetailedTraceModules = Literal["model", "worker", "all"]
+
+
+@config
 @dataclass
 class ObservabilityConfig:
     """Configuration for observability - metrics and tracing."""
-    show_hidden_metrics: bool = False
+
+    show_hidden_metrics_for_version: Optional[str] = None
+    """Enable deprecated Prometheus metrics that have been hidden since the
+    specified version. For example, if a previously deprecated metric has been
+    hidden since the v0.7.0 release, you use
+    `--show-hidden-metrics-for-version=0.7` as a temporary escape hatch while
+    you migrate to new metrics. The metric is likely to be removed completely
+    in an upcoming release."""
+
+    @cached_property
+    def show_hidden_metrics(self) -> bool:
+        """Check if the hidden metrics should be shown."""
+        if self.show_hidden_metrics_for_version is None:
+            return False
+        return version._prev_minor_version_was(
+            self.show_hidden_metrics_for_version)
 
     otlp_traces_endpoint: Optional[str] = None
+    """Target URL to which OpenTelemetry traces will be sent."""
 
-    # Collecting detailed timing information for each request can be expensive.
+    collect_detailed_traces: Optional[list[DetailedTraceModules]] = None
+    """It makes sense to set this only if `--otlp-traces-endpoint` is set. If
+    set, it will collect detailed traces for the specified modules. This
+    involves use of possibly costly and or blocking operations and hence might
+    have a performance impact.
 
-    # If set, collects the model forward time for the request.
-    collect_model_forward_time: bool = False
+    Note that collecting detailed timing information for each request can be
+    expensive."""
 
-    # If set, collects the model execute time for the request.
-    collect_model_execute_time: bool = False
+    @cached_property
+    def collect_model_forward_time(self) -> bool:
+        """Whether to collect model forward time for the request."""
+        return (self.collect_detailed_traces is not None
+                and ("model" in self.collect_detailed_traces
+                     or "all" in self.collect_detailed_traces))
+
+    @cached_property
+    def collect_model_execute_time(self) -> bool:
+        """Whether to collect model execute time for the request."""
+        return (self.collect_detailed_traces is not None
+                and ("worker" in self.collect_detailed_traces
+                     or "all" in self.collect_detailed_traces))
 
     def compute_hash(self) -> str:
         """
@@ -3318,11 +3363,22 @@ class ObservabilityConfig:
         return hash_str
 
     def __post_init__(self):
+        if (self.collect_detailed_traces is not None
+                and len(self.collect_detailed_traces) == 1
+                and "," in self.collect_detailed_traces[0]):
+            self._parse_collect_detailed_traces()
+
         if not is_otel_available() and self.otlp_traces_endpoint is not None:
             raise ValueError(
                 "OpenTelemetry is not available. Unable to configure "
                 "'otlp_traces_endpoint'. Ensure OpenTelemetry packages are "
                 f"installed. Original error:\n{otel_import_error_traceback}")
+
+    def _parse_collect_detailed_traces(self):
+        assert isinstance(self.collect_detailed_traces, list)
+        self.collect_detailed_traces = cast(
+            list[DetailedTraceModules],
+            self.collect_detailed_traces[0].split(","))
 
 
 class KVTransferConfig(BaseModel):
@@ -4186,13 +4242,19 @@ class VllmConfig:
             batch_size_capture_list = []
             if self.model_config is not None and \
                 not self.model_config.enforce_eager:
-                batch_size_capture_list = [1, 2, 4
-                                           ] + [i for i in range(8, 513, 8)]
+                cuda_graph_sizes = self.scheduler_config.cuda_graph_sizes
+                if len(cuda_graph_sizes) == 1:
+                    batch_size_capture_list = [1, 2, 4] + [
+                        i for i in range(8, cuda_graph_sizes[0] + 1, 8)
+                    ]
+                elif len(cuda_graph_sizes) > 1:
+                    batch_size_capture_list = sorted(cuda_graph_sizes)
+                else:
+                    raise TypeError(f"Invalid value for {cuda_graph_sizes=}.")
                 if self.parallel_config.tensor_parallel_size > 1 and \
                     self.compilation_config.pass_config.enable_sequence_parallelism:
                     batch_size_capture_list = \
                         self.update_sizes_for_sequence_parallelism(batch_size_capture_list)
-
                 max_num_tokens = self.scheduler_config.max_num_batched_tokens
                 batch_size_capture_list = [
                     size for size in batch_size_capture_list
