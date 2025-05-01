@@ -12,6 +12,8 @@ from typing import (Any, Callable, Dict, List, Literal, Optional, Type,
                     TypeVar, Union, cast, get_args, get_origin)
 
 import torch
+from pydantic import RootModel
+from pydantic.dataclasses import is_pydantic_dataclass
 from typing_extensions import TypeIs, deprecated
 
 import vllm.envs as envs
@@ -136,20 +138,6 @@ def get_kwargs(cls: ConfigType) -> dict[str, Any]:
     cls_docs = get_attr_docs(cls)
     kwargs = {}
     for field in fields(cls):
-        # Get the default value of the field
-        default = field.default
-        if field.default_factory is not MISSING:
-            default = field.default_factory()
-
-        # Get the help text for the field
-        name = field.name
-        help = cls_docs[name]
-        # Escape % for argparse
-        help = help.replace("%", "%%")
-
-        # Initialise the kwargs dictionary for the field
-        kwargs[name] = {"default": default, "help": help}
-
         # Get the set of possible types for the field
         type_hints: set[TypeHint] = set()
         if get_origin(field.type) is Union:
@@ -157,7 +145,38 @@ def get_kwargs(cls: ConfigType) -> dict[str, Any]:
         else:
             type_hints.add(field.type)
 
+        # If the field is a dataclass, we can use the model_validate_json
+        generator = (th for th in type_hints if is_pydantic_dataclass(th))
+        dataclass_hint = next(generator, None)
+
+        # Get the default value of the field
+        if dataclass_hint is not None:
+            default = {}
+        elif field.default is not MISSING:
+            default = field.default
+        elif field.default_factory is not MISSING:
+            default = field.default_factory()
+
+        # Get the help text for the field
+        name = field.name
+        help = cls_docs[name].strip()
+        # Escape % for argparse
+        help = help.replace("%", "%%")
+
+        # Initialise the kwargs dictionary for the field
+        kwargs[name] = {"default": default, "help": help}
+
+        # Skip the type detection if there is nothing to detect
+        if type_hints == {type(None)}:
+            continue
+
         # Set other kwargs based on the type hints
+        if dataclass_hint is not None:
+            root_model = RootModel[dataclass_hint]
+            kwargs[name]["type"] = root_model.model_validate_json
+            # Special case for configs with a from_cli method
+            if hasattr(dataclass_hint, "from_cli"):
+                kwargs[name]["type"] = dataclass_hint.from_cli
         if contains_type(type_hints, bool):
             # Creates --no-<name> and --<name> flags
             kwargs[name]["action"] = argparse.BooleanOptionalAction
