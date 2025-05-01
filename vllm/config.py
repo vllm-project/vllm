@@ -3445,11 +3445,11 @@ class KVTransferConfig:
     def __post_init__(self) -> None:
         if self.kv_role is not None and self.kv_role not in KV_ROLE:
             raise ValueError(f"Unsupported kv_role: {self.kv_role}. "
-                             f"Supported roles are {KV_ROLE=}")
+                             f"Supported roles are {KV_ROLE}")
 
         if self.kv_connector is not None and self.kv_role is None:
             raise ValueError("Please specify kv_disagg_role when kv_connector "
-                             f"is set, supported roles are {KV_ROLE=}")
+                             f"is set, supported roles are {KV_ROLE}")
 
     @property
     def is_kv_transfer_instance(self) -> bool:
