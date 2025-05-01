@@ -135,10 +135,11 @@ class LoggingStatLogger(StatLoggerBase):
             self.spec_decoding_logging.log(log_fn=log_fn)
 
     def log_engine_initialized(self):
-        logger.info(
-            "vllm cache_config_info with initialization " \
-            "after num_gpu_blocks is: %d",
-            self.vllm_config.cache_config.num_gpu_blocks)
+        if self.vllm_config.cache_config.num_gpu_blocks:
+            logger.info(
+                "Engine %03d: vllm cache_config_info with initialization "
+                "after num_gpu_blocks is: %d", self.engine_index,
+                self.vllm_config.cache_config.num_gpu_blocks)
 
 
 class PrometheusStatLogger(StatLoggerBase):
