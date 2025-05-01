@@ -493,10 +493,10 @@ def test_omni_get_input_positions_and_delta_correctness(test_case):
 def test_missing_mm_item_error(is_omni, modality):
     hf_config = make_omni_hf_config() if is_omni else make_vl_hf_config()
     input_tokens = [1, 2, 3, 4]
-    image_grid_thw = []
-    video_grid_thw = []
-    second_per_grid_ts = []
-    audio_feature_lengths = []
+    image_grid_thw: list[list[int]] = []
+    video_grid_thw: list[list[int]] = []
+    second_per_grid_ts: list[float] = []
+    audio_feature_lengths: list[int] = []
     if modality == "image_grid_thw":
         input_tokens.extend(
             [VISION_START, IMAGE, IMAGE, IMAGE, IMAGE, VISION_END])
