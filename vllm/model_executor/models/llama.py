@@ -248,7 +248,7 @@ class LlamaDecoderLayer(nn.Module):
         self.hidden_size = config.hidden_size
         self.use_fp8 = (isinstance(quant_config, Fp8Config) or
                         (isinstance(quant_config, QuarkConfig)
-                         and quant_config.is_fp8_w8a8())
+                         and quant_config._is_fp8_w8a8())
                         if current_platform.is_fp8_fnuz() else False)
         rope_theta = getattr(config, "rope_theta", 10000)
         rope_scaling = getattr(config, "rope_scaling", None)
