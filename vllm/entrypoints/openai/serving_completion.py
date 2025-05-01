@@ -21,6 +21,7 @@ from vllm.entrypoints.openai.protocol import (CompletionLogProbs,
                                               CompletionResponseStreamChoice,
                                               CompletionStreamResponse,
                                               ErrorResponse,
+                                              PromptTokenUsageInfo,
                                               RequestResponseMetadata,
                                               UsageInfo)
 # yapf: enable
@@ -47,6 +48,7 @@ class OpenAIServingCompletion(OpenAIServing):
         *,
         request_logger: Optional[RequestLogger],
         return_tokens_as_token_ids: bool = False,
+        enable_prompt_tokens_details: bool = False,
     ):
         super().__init__(engine_client=engine_client,
                          model_config=model_config,
@@ -60,6 +62,7 @@ class OpenAIServingCompletion(OpenAIServing):
             source = "model" if source == "auto" else source
             logger.info("Using default completion sampling params from %s: %s",
                         source, self.default_sampling_params)
+        self.enable_prompt_tokens_details = enable_prompt_tokens_details
 
     async def create_completion(
         self,
@@ -260,6 +263,7 @@ class OpenAIServingCompletion(OpenAIServing):
         previous_num_tokens = [0] * num_choices * num_prompts
         has_echoed = [False] * num_choices * num_prompts
         num_prompt_tokens = [0] * num_prompts
+        num_cached_tokens = None  # Add this to track cached tokens
 
         stream_options = request.stream_options
         if stream_options:
@@ -271,6 +275,11 @@ class OpenAIServingCompletion(OpenAIServing):
 
         try:
             async for prompt_idx, res in result_generator:
+                # Store cached tokens if available
+                if (self.enable_prompt_tokens_details
+                        and res.num_cached_tokens is not None):
+                    num_cached_tokens = res.num_cached_tokens
+
                 prompt_token_ids = res.prompt_token_ids
                 prompt_logprobs = res.prompt_logprobs
                 prompt_text = res.prompt
@@ -370,6 +379,13 @@ class OpenAIServingCompletion(OpenAIServing):
                 completion_tokens=total_completion_tokens,
                 total_tokens=total_prompt_tokens + total_completion_tokens)
 
+            # Add prompt tokens details if enabled
+            # and cached tokens are available
+            if (self.enable_prompt_tokens_details
+                    and num_cached_tokens is not None):
+                final_usage_info.prompt_tokens_details = PromptTokenUsageInfo(
+                    cached_tokens=num_cached_tokens)
+
             if include_usage:
                 final_usage_chunk = CompletionStreamResponse(
                     id=request_id,
@@ -404,8 +420,14 @@ class OpenAIServingCompletion(OpenAIServing):
         choices: list[CompletionResponseChoice] = []
         num_prompt_tokens = 0
         num_generated_tokens = 0
+        num_cached_tokens = None  # Store the number of cached tokens
 
         for final_res in final_res_batch:
+            # Store cached tokens value if available
+            if (self.enable_prompt_tokens_details
+                    and final_res.num_cached_tokens is not None):
+                num_cached_tokens = final_res.num_cached_tokens
+
             prompt_token_ids = final_res.prompt_token_ids
             assert prompt_token_ids is not None
             prompt_logprobs = clamp_prompt_logprobs(final_res.prompt_logprobs)
@@ -473,6 +495,11 @@ class OpenAIServingCompletion(OpenAIServing):
             completion_tokens=num_generated_tokens,
             total_tokens=num_prompt_tokens + num_generated_tokens,
         )
+
+        # Add prompt tokens details if enabled and cached tokens are available
+        if self.enable_prompt_tokens_details and num_cached_tokens is not None:
+            usage.prompt_tokens_details = PromptTokenUsageInfo(
+                cached_tokens=num_cached_tokens)
 
         request_metadata.final_usage_info = usage
 

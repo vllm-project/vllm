@@ -270,28 +270,28 @@ class BlockPool:
                 otherwise, appended to the tail (evicted later).
         """
         for block in ordered_blocks:
-            block_id = block.block_id
+            # block_id = block.block_id
             block.decr_ref()
             # null_block should not be added to the free list.
             if block.ref_cnt == 0 and block != self.null_block:
                 if front:
-                    logger.info("Freeing block %s with P0 (front=True)",
-                                block_id)
+                    # logger.info("Freeing block %s with P0 (front=True)",
+                    #             block_id)
                     # Use append_priority_0 for low priority (evict sooner)
                     self.free_block_queue.append_priority_0(block)
                 else:
-                    logger.info("Freeing block %s with P1 (front=False)",
-                                block_id)
+                    # logger.info("Freeing block %s with P1 (front=False)",
+                    #             block_id)
                     # Use append for high priority (evict later)
                     self.free_block_queue.append(block)
                 # Log queue state after adding
-                current_queue = [
-                    (b.block_id, b.block_hash.hash_value)
-                    for b in self.free_block_queue.get_all_free_blocks()
-                    if b.block_hash is not None
-                ]
-                logger.info("Free queue state after freeing "
-                            "%s: %s", block_id, current_queue)
+                # current_queue = [
+                #     (b.block_id, b.block_hash.hash_value)
+                #     for b in self.free_block_queue.get_all_free_blocks()
+                #     if b.block_hash is not None
+                # ]
+                # logger.info("Free queue state after freeing "
+                #             "%s: %s", block_id, current_queue)
 
     def reset_prefix_cache(self) -> bool:
         """Reset prefix cache. This function may be used in RLHF
