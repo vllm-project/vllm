@@ -71,7 +71,8 @@ TP_SIZE_8 = 8
 
 @pytest.mark.skipif(not current_platform.is_tpu(),
                     reason="This is a test for TPU only")
-@pytest.mark.skipif(tpu.num_available_chips() < TP_SIZE_8)
+@pytest.mark.skipif(tpu.num_available_chips() < TP_SIZE_8,
+                    reason=f"This test requires {TP_SIZE_8} TPU chips.")
 def test_gemma3_27b_with_text_input_and_tp(
     vllm_runner: type[VllmRunner],
     monkeypatch: pytest.MonkeyPatch,
