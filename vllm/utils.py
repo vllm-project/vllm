@@ -45,6 +45,7 @@ from types import MappingProxyType
 from typing import (TYPE_CHECKING, Any, Callable, Generic, Literal, NamedTuple,
                     Optional, Sequence, Tuple, Type, TypeVar, Union, cast,
                     overload)
+from urllib.parse import urlparse
 from uuid import uuid4
 
 import cachetools
@@ -2278,6 +2279,27 @@ def get_exception_traceback():
     return err_str
 
 
+def split_zmq_path(path: str) -> Tuple[str, str, str]:
+    """Split a zmq path into its parts."""
+    parsed = urlparse(path)
+    if not parsed.scheme:
+        raise ValueError(f"Invalid zmq path: {path}")
+
+    scheme = parsed.scheme
+    host = parsed.hostname or ""
+    port = str(parsed.port or "")
+
+    if scheme == "tcp" and not all((host, port)):
+        # The host and port fields are required for tcp
+        raise ValueError(f"Invalid zmq path: {path}")
+
+    if scheme != "tcp" and port:
+        # port only makes sense with tcp
+        raise ValueError(f"Invalid zmq path: {path}")
+
+    return scheme, host, port
+
+
 # Adapted from: https://github.com/sgl-project/sglang/blob/v0.4.1/python/sglang/srt/utils.py#L783 # noqa: E501
 def make_zmq_socket(
     ctx: Union[zmq.asyncio.Context, zmq.Context],  # type: ignore[name-defined]
@@ -2316,6 +2338,12 @@ def make_zmq_socket(
 
     if identity is not None:
         socket.setsockopt(zmq.IDENTITY, identity)
+
+    # Determine if the path is a TCP socket with an IPv6 address.
+    # Enable IPv6 on the zmq socket if so.
+    scheme, host, _ = split_zmq_path(path)
+    if scheme == "tcp" and is_valid_ipv6_address(host):
+        socket.setsockopt(zmq.IPV6, 1)
 
     if bind:
         socket.bind(path)
