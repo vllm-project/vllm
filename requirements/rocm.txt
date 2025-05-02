@@ -6,7 +6,6 @@ numba == 0.61.2; python_version > '3.9'
 
 # Dependencies for AMD GPUs
 numpy==1.26.4
-awscli
 boto3
 botocore
 datasets

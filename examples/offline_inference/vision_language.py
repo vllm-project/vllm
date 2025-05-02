@@ -730,11 +730,9 @@ def run_ovis2(questions: list[str], modality: str) -> ModelRequestData:
     assert modality == "image"
 
     model_name = "AIDC-AI/Ovis2-1B"
-    tokenizer = "Isotr0py/Ovis2-tokenizer"
 
     engine_args = EngineArgs(
         model=model_name,
-        tokenizer=tokenizer,
         max_model_len=4096,
         max_num_seqs=2,
         trust_remote_code=True,
@@ -1111,7 +1109,7 @@ def get_multi_modal_input(args):
 
     if args.modality == "video":
         # Input video and question
-        video = VideoAsset(name="sample_demo_1.mp4",
+        video = VideoAsset(name="baby_reading",
                            num_frames=args.num_frames).np_ndarrays
         vid_questions = ["Why is this video funny?"]
 
