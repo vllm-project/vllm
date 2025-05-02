@@ -354,9 +354,8 @@ class PixtralHFMultiModalProcessor(
         image_token_id = hf_config.image_token_index
         image_end_id = vocab[processor.image_end_token]
 
-        vision_config = hf_config.vision_config
-        assert isinstance(vision_config, PixtralVisionConfig)
-        encoder_info = PixtralHFEncoderInfo(vision_config)
+        assert isinstance(hf_config.vision_config, PixtralVisionConfig)
+        encoder_info = PixtralHFEncoderInfo(hf_config)
 
         def get_replacement(item_idx: int):
             images = mm_items.get_items("image", ImageProcessorItems)
