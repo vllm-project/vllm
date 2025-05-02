@@ -248,8 +248,7 @@ def resolve_current_platform_cls_qualname() -> str:
 _current_platform = None
 _init_trace: str = ''
 
-if TYPE_CHECKING:
-    current_platform: Platform
+current_platform: Platform
 
 
 def __getattr__(name: str):
