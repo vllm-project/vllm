@@ -1214,7 +1214,6 @@ __global__ void gemm_half_q_half_alt_4bit_kernel(
   int k = 0;
   int z_w = w / 8;
   int z_mod = (w % 8) * 4;
-  half2 res2;
   half res[BLOCK_M_SIZE_MAX] = {};
 
   unsigned int tmp;
@@ -1239,12 +1238,7 @@ __global__ void gemm_half_q_half_alt_4bit_kernel(
       zeros_tmp[tmp_k] = zero;
     }
     for (int m = 0; m < b_end; m++) {
-#ifndef USE_ROCM
-      res2 = {};
-#else
-      res2.x = __half_as_ushort(__float2half(0));
-      res2.y = __half_as_ushort(__float2half(0));
-#endif
+      half2 res2{};
       res2 = __hfma2(
           __hfma2(deq2[(tmp >> 0) & 0xff][off], scales_tmp[0], zeros_tmp[0]),
           blockvec[m][k + 0], res2);
@@ -1257,12 +1251,7 @@ __global__ void gemm_half_q_half_alt_4bit_kernel(
       res2 = __hfma2(
           __hfma2(deq2[(tmp >> 24) & 0xff][off], scales_tmp[3], zeros_tmp[3]),
           blockvec[m][k + 3], res2);
-#ifndef USE_ROCM
       res[m] = __hadd(res[m], __hadd(res2.x, res2.y));
-#else
-      res[m] = __hadd(
-          res[m], __hadd(__ushort_as_half(res2.x), __ushort_as_half(res2.y)));
-#endif
     }
     i += width;
     k += 4;
@@ -1305,7 +1294,6 @@ __global__ void gemm_half_q_half_alt_8bit_kernel(
   int k = 0;
   int z_w = w / 4;
   int z_mod = (w % 4) * 8;
-  half2 res2;
   half res[BLOCK_M_SIZE_MAX] = {};
 
   unsigned int tmp;
@@ -1330,12 +1318,7 @@ __global__ void gemm_half_q_half_alt_8bit_kernel(
       zeros_tmp[tmp_k] = zero;
     }
     for (int m = 0; m < b_end; m++) {
-#ifndef USE_ROCM
-      res2 = {};
-#else
-      res2.x = __half_as_ushort(__float2half(0));
-      res2.y = __half_as_ushort(__float2half(0));
-#endif
+      half2 res2{};
       half2 v12 = __halves2half2(__int2half_rn(tmp & 0xFF),
                                  __int2half_rn((tmp >> 8) & 0xFF));
       res2 = __hfma2(__hfma2(v12, scales_tmp[0], zeros_tmp[0]),
@@ -1344,12 +1327,7 @@ __global__ void gemm_half_q_half_alt_8bit_kernel(
                                  __int2half_rn((tmp >> 24) & 0xFF));
       res2 = __hfma2(__hfma2(v34, scales_tmp[1], zeros_tmp[1]),
                      blockvec[m][k + 1], res2);
-#ifndef USE_ROCM
       res[m] = __hadd(res[m], __hadd(res2.x, res2.y));
-#else
-      res[m] = __hadd(
-          res[m], __hadd(__ushort_as_half(res2.x), __ushort_as_half(res2.y)));
-#endif
     }
     i += width;
     k += 2;
