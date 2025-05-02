@@ -4,10 +4,11 @@ from unittest.mock import MagicMock
 
 from vllm.config import VllmConfig
 from vllm.engine.arg_utils import EngineArgs
+from vllm.platforms import current_platform
+from vllm.platforms.neuron import NeuronFramework
 from vllm.sampling_params import SamplingParams
 from vllm.sequence import SequenceData, SequenceGroupMetadata
 from vllm.worker.neuron_model_runner import NeuronModelRunner
-from vllm.worker.utils import NeuronFramework, use_transformers_neuronx
 
 os.environ[
     'VLLM_NEURON_FRAMEWORK'] = NeuronFramework.TRANSFORMERS_NEURONX.value
@@ -38,7 +39,7 @@ def test_update_neuron_sampling_params_not_full_batch():
     assert not model_runner._on_device_sampling_disabled
     # Test sampling param updating only when TNx is framework
     # NxDI handles sampling parameter updating inside model
-    if use_transformers_neuronx():
+    if current_platform.use_transformers_neuronx():
         model_mock = MagicMock()
         model_runner.model = model_mock
 
@@ -84,7 +85,7 @@ def test_update_neuron_sampling_params_full_batch():
 
     # Test sampling param updating only when TNx is framework
     # NxDI handles sampling parameter updating inside model
-    if use_transformers_neuronx():
+    if current_platform.use_transformers_neuronx():
         model_mock = MagicMock()
         model_runner.model = model_mock
 

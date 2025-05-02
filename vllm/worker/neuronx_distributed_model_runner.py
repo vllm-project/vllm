@@ -15,9 +15,6 @@ from vllm.sequence import IntermediateTensors
 from vllm.worker.neuron_model_runner import (ModelInputForNeuron,
                                              NeuronModelRunner)
 
-# FIXME(Neuron): need to restore multi-modal support
-# from vllm.multimodal.neuron_multimodal_image_utils import \
-#     decompress_image_from_tensor
 logger = init_logger(__name__)
 
 
@@ -62,7 +59,6 @@ class NeuronxDistributedModelRunner(NeuronModelRunner):
         return sampling_params
 
     def get_multi_modal_data_neuron(self, input_images):
-        # FIXME(Neuron): need to restore multi-modal support
         raise NotImplementedError("need to restore multi-modal support")
 
     @torch.inference_mode()

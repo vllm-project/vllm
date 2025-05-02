@@ -10,14 +10,6 @@ the draft and target model.
 
 from vllm import LLM, SamplingParams
 
-# Configurations
-TARGET_MODEL_PATH = "/home/ubuntu/model_hf/Meta-Llama-3.1-70B-Instruct"
-DRAFT_MODEL_PATH = "/home/ubuntu/model_hf/Llama-3.1-70B-Instruct-EAGLE-Draft"
-BATCH_SIZE = 4
-SEQ_LEN = 2048
-TENSOR_PARALLEL_SIZE = 32
-SPECULATION_LENGTH = 5
-
 # Sample prompts.
 prompts = [
     "What is annapurna labs?",
@@ -28,25 +20,26 @@ sampling_params = SamplingParams(top_k=1, max_tokens=500, ignore_eos=True)
 
 # Create an LLM.
 llm = LLM(
-    model=TARGET_MODEL_PATH,
-    speculative_model=DRAFT_MODEL_PATH,
-    max_num_seqs=BATCH_SIZE,
+    model="/home/ubuntu/model_hf/Meta-Llama-3.1-70B-Instruct",
+    speculative_model=
+    "/home/ubuntu/model_hf/Llama-3.1-70B-Instruct-EAGLE-Draft",
+    max_num_seqs=4,
     # The max_model_len and block_size arguments are required to be same as
     # max sequence length when targeting neuron device.
     # Currently, this is a known limitation in continuous batching support
     # in neuronx-distributed-inference.
-    max_model_len=SEQ_LEN,
-    block_size=SEQ_LEN,
-    speculative_max_model_len=SEQ_LEN,
+    max_model_len=2048,
+    block_size=2048,
+    speculative_max_model_len=2048,
     # The device can be automatically detected when AWS Neuron SDK is installed.
     # The device argument can be either unspecified for automated detection,
     # or explicitly assigned.
     device="neuron",
-    tensor_parallel_size=TENSOR_PARALLEL_SIZE,
-    num_speculative_tokens=SPECULATION_LENGTH,
+    tensor_parallel_size=32,
+    num_speculative_tokens=5,
     override_neuron_config={
         "enable_eagle_speculation": True,
-        "enable_fused_speculatuon": True
+        "enable_fused_speculation": True
     },
 )
 
