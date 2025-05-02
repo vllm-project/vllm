@@ -106,7 +106,7 @@ Load and run the model in `vllm`:
 ```python
 from vllm import LLM
 model = LLM("./Meta-Llama-3-8B-Instruct-FP8-Dynamic")
-model.generate("Hello my name is")
+result = model.generate("Hello my name is")
 print(result[0].outputs[0].text)
 ```
 
