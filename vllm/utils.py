@@ -1384,6 +1384,15 @@ class FlexibleArgumentParser(ArgumentParser):
             _gettext('warning: %(message)s\n') % {'message': message},
             sys.stderr)
 
+    def parse_known_args(
+        self,
+        args: list[str],
+        namespace: Namespace,
+    ) -> tuple[Namespace, list[str]]:
+        namespace, args = super().parse_known_args(args, namespace)
+        print(namespace)
+        return namespace, args
+
     def parse_args(  # type: ignore[override]
         self,
         args: Sequence[str] | None = None,
