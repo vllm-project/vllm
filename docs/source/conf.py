@@ -251,6 +251,7 @@ autodoc_mock_imports = [
     "cpuinfo",
     "transformers",
     "psutil",
+    "vllm._C",
     "PIL",
     "numpy",
     "tqdm",
