@@ -21,12 +21,12 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Inference-only LLaMA model compatible with HuggingFace weights."""
+"""Inference-only SwissAI model compatible with HuggingFace weights."""
 from typing import Any, Dict, Iterable, Optional, Set, Tuple, Type, Union
 
 import torch
 from torch import nn
-from transformers import LlamaConfig
+from transformers import SwissAIConfig
 
 from vllm.attention import Attention
 from vllm.compilation.decorators import support_torch_compile
@@ -34,7 +34,8 @@ from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import XIELU
 from vllm.model_executor.layers.layernorm import RMSNorm
-from vllm.model_executor.layers.linear import (QKVParallelLinear,
+from vllm.model_executor.layers.linear import (ColumnParallelLinear,
+                                               QKVParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
@@ -66,7 +67,7 @@ class SwissAIMLP(nn.Module):
         prefix: str = "",
     ) -> None:
         super().__init__()
-        self.up_proj = RowParallelLinear(
+        self.up_proj = ColumnParallelLinear(
             input_size=hidden_size,
             output_size=intermediate_size,
             bias=bias,
@@ -95,7 +96,7 @@ class SwissAIMLP(nn.Module):
 class SwissAIAttention(nn.Module):
 
     def __init__(self,
-                 config: LlamaConfig,
+                 config: SwissAIConfig,
                  hidden_size: int,
                  num_heads: int,
                  num_kv_heads: int,
@@ -216,7 +217,7 @@ class SwissAIDecoderLayer(nn.Module):
 
     def __init__(
         self,
-        config: LlamaConfig,
+        config: SwissAIConfig,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
