@@ -170,6 +170,26 @@ class XgrammarGrammar(StructuredOutputGrammar):
             self.num_processed_tokens += 1
         return True
 
+    def jump_forward(
+        self,
+        request_id: str,
+    ) -> list[int]:
+        bitmask = xgr.allocate_token_bitmask(1, self.vocab_size)
+        jump_forward_tokens: list[int] = []
+        while not self.is_terminated():
+            self.fill_bitmask(bitmask, 0)
+            is_single, unique_token_id = xgr.testing._is_single_token_bitmask(
+                bitmask,
+                vocab_size=self.vocab_size,
+                index=0,
+            )
+            if not is_single:
+                break
+
+            self.accept_tokens(request_id, [unique_token_id])
+            jump_forward_tokens.append(unique_token_id)
+        return jump_forward_tokens
+
     def validate_tokens(self, tokens: list[int]) -> list[int]:
         """Checks if the list of tokens are accepted by the FSM in sequence.
         Will not advance the FSM.

@@ -721,15 +721,29 @@ class Scheduler(SchedulerInterface):
                 # the outer lists can be of length > 1.
                 new_logprobs = logprobs.slice(req_index, req_index + 1)
 
+            jump_tokens = []
             if new_token_ids and request.use_structured_output:
-                # NOTE: structured_output_request
-                # should not be None if use_structured_output, we have
-                # check above, so safe to ignore type warning
-                request.structured_output_request.grammar.accept_tokens(  # type: ignore[union-attr]
+                assert request.structured_output_request is not None
+                assert request.structured_output_request.grammar is not None
+                request.structured_output_request.grammar.accept_tokens(
                     req_id, new_token_ids)
 
+                if not stopped:
+                    jump_tokens = request.structured_output_request.grammar.jump_forward(
+                        req_id)
+                    for token_id in jump_tokens:
+                        request.append_output_token_ids(token_id)
+                        new_token_ids.append(token_id)
+                        stopped = check_stop(request, self.max_model_len)
+                        if stopped:
+                            break
+                if jump_tokens:
+                    print(f"jump_tokens: {jump_tokens}")
+
             # Add newly generated spec token ids to the request.
-            if spec_token_ids is not None:
+            if jump_tokens:
+                request.spec_token_ids.clear()
+            elif spec_token_ids is not None:
                 if request.use_structured_output:
                     metadata = request.structured_output_request
                     assert metadata is not None and metadata.grammar is not None
