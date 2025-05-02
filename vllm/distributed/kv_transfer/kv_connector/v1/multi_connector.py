@@ -38,8 +38,11 @@ class MultiConnector(KVConnectorBase_V1):
             temp_config.kv_transfer_config = KVTransferConfig(**ktc)
             self._connectors.append(
                 KVConnectorFactory.create_connector_v1(temp_config, role))
+        
+        # A mapping from request id to the connector that is assigned to it.
+        self._requests_to_connector: dict[str, KVConnectorBase_V1] = {}
 
-    # We are overriding the base class method here because we need to bind
+    # We must override the base class method here because we need to bind
     # the metadata to each connector in the order of the connectors in the
     # MultiKVConnectorMetadata.
     def bind_connector_metadata(
@@ -81,14 +84,24 @@ class MultiConnector(KVConnectorBase_V1):
         request: "Request",
         num_computed_tokens: int,
     ) -> int:
-        return max(
-            c.get_num_new_matched_tokens(request, num_computed_tokens)
-            for c in self._connectors)
+        for c in self._connectors:
+            toks = c.get_num_new_matched_tokens(request, num_computed_tokens)
+            # The first connector that has new matched tokens will be assigned
+            # to this request.
+            if toks > 0:
+                self._requests_to_connector[request.req_id] = c
+                return toks
+        return 0
+
 
     def update_state_after_alloc(self, request: "Request",
                                  num_external_tokens: int):
-        for c in self._connectors:
-            c.update_state_after_alloc(request, num_external_tokens)
+        # If the request is not assigned to any connector, we do nothing.
+        if request.req_id not in self._requests_to_connector:
+            return
+        # We assume that the request is assigned to only one connector.
+        c = self._requests_to_connector[request.req_id]
+        c.update_state_after_alloc(request, num_external_tokens)
 
     def build_connector_meta(
             self,
