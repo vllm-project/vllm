@@ -95,7 +95,7 @@ dataproperty==1.0.1
     # via
     #   pytablewriter
     #   tabledata
-datasets==2.21.0
+datasets==3.0.2
     # via
     #   evaluate
     #   lm-eval
@@ -151,7 +151,7 @@ frozenlist==1.5.0
     #   aiohttp
     #   aiosignal
     #   ray
-fsspec==2024.6.1
+fsspec==2024.9.0
     # via
     #   datasets
     #   evaluate
