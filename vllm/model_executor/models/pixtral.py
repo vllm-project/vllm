@@ -916,6 +916,7 @@ class PixtralHFEncoderInfo(VisionEncoderInfo[PixtralVisionConfig]):
         return self.vision_config.image_size
 
     def get_patch_size(self) -> int:
+        # spatial_merge_size is needed for Mistral3
         spatial_merge_size = getattr(self.hf_config, "spatial_merge_size", 1)
         return self.vision_config.patch_size * spatial_merge_size
 
