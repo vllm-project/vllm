@@ -761,7 +761,10 @@ class Scheduler(SchedulerInterface):
 
         # Return the cached request data to the queue so they can be reused.
         for req_data in scheduler_output.scheduled_cached_reqs:
-            self._cached_reqs_data[req_data.req_id].append(req_data)
+            # NOTE(rob): since we free stopped reqs above, adding stopped reqs
+            # to _cached_reqs_data will cause a memory leak.
+            if req_data.req_id not in self.finished_req_ids:
+                self._cached_reqs_data[req_data.req_id].append(req_data)
 
         self.running = new_running
         engine_core_outputs = EngineCoreOutputs(
