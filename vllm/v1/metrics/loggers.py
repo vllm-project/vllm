@@ -431,7 +431,8 @@ class PrometheusStatLogger(StatLoggerBase):
         self.histogram_iteration_tokens.observe(
             iteration_stats.num_prompt_tokens + \
             iteration_stats.num_generation_tokens)
-        self.counter_num_tokens_preempted.inc(scheduler_stats.num_tokens_preempted)
+        self.counter_num_tokens_preempted.inc(
+            scheduler_stats.num_tokens_preempted)
 
         for max_gen_tokens in iteration_stats.max_num_generation_tokens_iter:
             self.histogram_max_num_generation_tokens_request.observe(

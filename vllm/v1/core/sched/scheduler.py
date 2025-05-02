@@ -258,7 +258,8 @@ class Scheduler(SchedulerInterface):
                             EngineCoreEventType.PREEMPTED, scheduled_timestamp)
 
                     # Count tokens from preempted request
-                    preempted_tokens = self._get_request_total_tokens(preempted_req)
+                    preempted_tokens = self._get_request_total_tokens(
+                        preempted_req)
                     self._preempted_tokens += preempted_tokens
 
                     self.waiting.appendleft(preempted_req)
