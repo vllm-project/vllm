@@ -4,20 +4,24 @@ from typing import Any, Callable, Dict, Optional
 
 import torch
 
+import vllm.envs as envs
 import vllm.model_executor.layers.fused_moe  # noqa
 from vllm import _custom_ops as ops
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import (FusedMoE, FusedMoEMethodBase,
                                                   FusedMoeWeightScaleSupported)
+from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
+    OCP_MX_BLOCK_SIZE)
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     all_close_1d, normalize_e4m3fn_to_e4m3fnuz, per_tensor_dequantize)
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
-from vllm.model_executor.layers.quantization.utils.mxfp4_utils import OCP_MX_BLOCK_SIZE
 
 logger = init_logger(__name__)
 
-__all__ = ["QuarkMoEMethod", "QuarkW8A8Fp8MoEMethod", "QuarkW4A4MXFp4MoEMethod"]
+__all__ = [
+    "QuarkMoEMethod", "QuarkW8A8Fp8MoEMethod", "QuarkW4A4MXFp4MoEMethod"
+]
 
 
 class QuarkMoEMethod(FusedMoEMethodBase):
@@ -256,6 +260,7 @@ class QuarkW4A4MXFp4MoEMethod(QuarkMoEMethod):
                 f"{weight_qscheme}, {input_qscheme}")  # noqa E501
 
         self.static_input_scales = not self.input_quant.get("is_dynamic")
+        self.emulate = not current_platform.supports_mx()
 
     def create_weights(self, layer: torch.nn.Module, num_experts: int,
                        hidden_size: int, intermediate_size_per_partition: int,
@@ -263,7 +268,8 @@ class QuarkW4A4MXFp4MoEMethod(QuarkMoEMethod):
 
         # Add the quantization method used (per tensor/grouped/channel)
         # to ensure the weight scales are loaded in properly
-        extra_weight_attrs.update({"quant_method": FusedMoeWeightScaleSupported.BLOCK.value})
+        extra_weight_attrs.update(
+            {"quant_method": FusedMoeWeightScaleSupported.BLOCK.value})
 
         params_dtype = torch.uint8
 
@@ -322,55 +328,56 @@ class QuarkW4A4MXFp4MoEMethod(QuarkMoEMethod):
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         float_dtype = torch.get_default_dtype()
 
-        try:
-            from quark.torch.export.nn.modules import realquantizer
-            from quark.torch.quantization.config.config import (
-                QuantizationSpec)
-        except ImportError as err:
-            raise ImportError(
-                "The package `amd-quark` is required to use AMD Quark "
-                "MX-FP4 models. Please install it with `pip install "
-                "amd-quark`.") from err
+        if self.emulate and not envs.VLLM_QUARK_EMU_MEM_OPT:
+            try:
+                from quark.torch.export.nn.modules import realquantizer
+                from quark.torch.quantization.config.config import (
+                    QuantizationSpec)
+            except ImportError as err:
+                raise ImportError(
+                    "The package `amd-quark` is required to use AMD Quark "
+                    "MX-FP4 models. Please install it with `pip install "
+                    "amd-quark`.") from err
 
-        weight_quant_spec = QuantizationSpec.from_dict(self.weight_quant)
+            weight_quant_spec = QuantizationSpec.from_dict(self.weight_quant)
 
-        # Unpack and dequantize the weights (the operators are in high-precision, with simulated quantization).
-        w13_quantizer = realquantizer.get_real_quantizer(
-            qspec=weight_quant_spec,
-            quantizer=None,
-            real_quantized=True,
-            reorder=False,  # TODO: load from config
-            float_dtype=float_dtype,
-            scale_shape=layer.w13_weight_scale.shape,
-            zero_point_shape=None,
-        )
-        w13_quantizer.scale.data = layer.w13_weight_scale.data
+            # Unpack and dequantize the weights (the operators are in high-precision, with simulated quantization).
+            w13_quantizer = realquantizer.get_real_quantizer(
+                qspec=weight_quant_spec,
+                quantizer=None,
+                real_quantized=True,
+                reorder=False,  # TODO: load from config
+                float_dtype=float_dtype,
+                scale_shape=layer.w13_weight_scale.shape,
+                zero_point_shape=None,
+            )
+            w13_quantizer.scale.data = layer.w13_weight_scale.data
 
-        layer.w13_weight = torch.nn.Parameter(
-            w13_quantizer(layer.w13_weight.data).to(float_dtype),
-            requires_grad=False,
-        )
-        layer.w13_weight_scale = None
+            layer.w13_weight = torch.nn.Parameter(
+                w13_quantizer(layer.w13_weight.data).to(float_dtype),
+                requires_grad=False,
+            )
+            layer.w13_weight_scale = None
 
-        w2_quantizer = realquantizer.get_real_quantizer(
-            qspec=weight_quant_spec,
-            quantizer=None,
-            real_quantized=True,
-            reorder=False,  # TODO: load from config
-            float_dtype=float_dtype,
-            scale_shape=layer.w2_weight_scale.shape,
-            zero_point_shape=None,
-        )
-        w2_quantizer.scale.data = layer.w2_weight_scale.data
+            w2_quantizer = realquantizer.get_real_quantizer(
+                qspec=weight_quant_spec,
+                quantizer=None,
+                real_quantized=True,
+                reorder=False,  # TODO: load from config
+                float_dtype=float_dtype,
+                scale_shape=layer.w2_weight_scale.shape,
+                zero_point_shape=None,
+            )
+            w2_quantizer.scale.data = layer.w2_weight_scale.data
 
-        layer.w2_weight = torch.nn.Parameter(
-            w2_quantizer(layer.w2_weight.data).to(float_dtype),
-            requires_grad=False,
-        )
-        layer.w2_weight_scale = None
+            layer.w2_weight = torch.nn.Parameter(
+                w2_quantizer(layer.w2_weight.data).to(float_dtype),
+                requires_grad=False,
+            )
+            layer.w2_weight_scale = None
 
-        # This call is necessary to release the scales memory.
-        torch.cuda.empty_cache()
+            # This call is necessary to release the scales memory.
+            torch.cuda.empty_cache()
 
     def apply(
         self,
@@ -404,7 +411,7 @@ class QuarkW4A4MXFp4MoEMethod(QuarkMoEMethod):
             scoring_func=scoring_func,
             e_score_correction_bias=e_score_correction_bias)
 
-        return fused_experts(
+        out = fused_experts(
             x,
             layer.w13_weight,
             layer.w2_weight,
@@ -415,8 +422,10 @@ class QuarkW4A4MXFp4MoEMethod(QuarkMoEMethod):
             global_num_experts=global_num_experts,
             apply_router_weight_on_input=apply_router_weight_on_input,
             expert_map=expert_map,
-            w1_scale=None,
-            w2_scale=None,
+            w1_scale=layer.w13_weight_scale,
+            w2_scale=layer.w2_weight_scale,
             a1_scale=None,
             a2_scale=None,
-            block_shape=None)
+            block_shape=None,
+        )
+        return out

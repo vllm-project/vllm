@@ -18,12 +18,13 @@ from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     per_token_group_quant_fp8)
 from vllm.model_executor.layers.quantization.utils.int8_utils import (
     per_token_group_quant_int8, per_token_quant_int8)
-from vllm.model_executor.layers.quantization.utils.mxfp4_utils import per_token_group_quant_mxfp4
+from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
+    OCP_MX_BLOCK_SIZE, per_token_group_dequant_mxfp4,
+    per_token_group_quant_mxfp4)
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils import direct_register_custom_op
 
-from vllm.model_executor.layers.quantization.utils.mxfp4_utils import OCP_MX_BLOCK_SIZE
 from .rocm_aiter_fused_moe import is_rocm_aiter_moe_enabled
 
 logger = init_logger(__name__)
@@ -988,10 +989,10 @@ def inplace_fused_experts(hidden_states: torch.Tensor,
                           block_shape: Optional[List[int]] = None) -> None:
     fused_experts_impl(hidden_states, w1, w2, topk_weights, topk_ids, True,
                        activation, apply_router_weight_on_input, use_fp8_w8a8,
-                       use_int8_w8a8, use_int8_w8a16, use_int4_w4a16, use_mxfp4_w4a4,
-                       per_channel_quant, global_num_experts, expert_map,
-                       w1_scale, w2_scale, w1_zp, w2_zp, a1_scale, a2_scale,
-                       block_shape)
+                       use_int8_w8a8, use_int8_w8a16, use_int4_w4a16,
+                       use_mxfp4_w4a4, per_channel_quant, global_num_experts,
+                       expert_map, w1_scale, w2_scale, w1_zp, w2_zp, a1_scale,
+                       a2_scale, block_shape)
 
 
 def inplace_fused_experts_fake(
@@ -1055,10 +1056,10 @@ def outplace_fused_experts(
     return fused_experts_impl(hidden_states, w1, w2, topk_weights, topk_ids,
                               False, activation, apply_router_weight_on_input,
                               use_fp8_w8a8, use_int8_w8a8, use_int8_w8a16,
-                              use_int4_w4a16, use_mxfp4_w4a4, per_channel_quant,
-                              global_num_experts, expert_map, w1_scale,
-                              w2_scale, w1_zp, w2_zp, a1_scale, a2_scale,
-                              block_shape)
+                              use_int4_w4a16, use_mxfp4_w4a4,
+                              per_channel_quant, global_num_experts,
+                              expert_map, w1_scale, w2_scale, w1_zp, w2_zp,
+                              a1_scale, a2_scale, block_shape)
 
 
 def outplace_fused_experts_fake(
@@ -1230,10 +1231,11 @@ def moe_kernel_prepare_input(
         assert B_scale is not None
         assert block_shape is None or block_shape[0] == 0
     elif use_mxfp4_w4a4:
-        # We assume B (the weight) to be fake quantized - so only handling the activation here.
         assert block_shape is None
-        A, A_scale = per_token_group_quant_mxfp4(A, OCP_MX_BLOCK_SIZE)
-
+        if not current_platform.supports_mx():
+            A, A_scale = per_token_group_quant_mxfp4(A, OCP_MX_BLOCK_SIZE)
+        else:
+            raise NotImplementedError()
     else:
         assert A_scale is None
         assert B_scale is None
@@ -1268,6 +1270,15 @@ def fused_experts_impl(hidden_states: torch.Tensor,
     if use_int4_w4a16:
         assert hidden_states.shape[1] // 2 == w1.shape[
             2], "Hidden size mismatch"
+    elif use_mxfp4_w4a4:
+        if current_platform.supports_mx() or envs.VLLM_QUARK_EMU_MEM_OPT:
+            # 16bit activation and fp4x2 packed weight
+            assert hidden_states.shape[1] // 2 == w1.shape[
+                2], "hidden size mismatch"
+        else:
+            # 16bit activation and dequantized 16bit weight
+            assert hidden_states.shape[1] == w1.shape[
+                2], "hidden size mismatch"
     else:
         assert hidden_states.shape[1] == w1.shape[2], "Hidden size mismatch"
 
@@ -1332,6 +1343,16 @@ def fused_experts_impl(hidden_states: torch.Tensor,
     else:
         out_hidden_states = torch.empty_like(hidden_states)
 
+    if use_mxfp4_w4a4 and not current_platform.supports_mx(
+    ) and envs.VLLM_QUARK_EMU_MEM_OPT:
+        # Weight has to be dequantized for mxfp4 emulation.
+        w1 = per_token_group_dequant_mxfp4(w1, w1_scale, OCP_MX_BLOCK_SIZE,
+                                           hidden_states.dtype)
+        w1_scale = None
+        w2 = per_token_group_dequant_mxfp4(w2, w2_scale, OCP_MX_BLOCK_SIZE,
+                                           hidden_states.dtype)
+        w2_scale = None
+
     for chunk in range((num_tokens // CHUNK_SIZE) + 1):
         begin_chunk_idx, end_chunk_idx = (chunk * CHUNK_SIZE,
                                           min((chunk + 1) * CHUNK_SIZE,
@@ -1367,12 +1388,13 @@ def fused_experts_impl(hidden_states: torch.Tensor,
             use_int4_w4a16=use_int4_w4a16,
             use_mxfp4_w4a4=use_mxfp4_w4a4,
             per_channel_quant=per_channel_quant,
-            block_shape=block_shape)
+            block_shape=block_shape,
+        )
 
         sorted_token_ids, expert_ids, num_tokens_post_padded = (
             moe_align_block_size(curr_topk_ids, config['BLOCK_SIZE_M'],
                                  global_num_experts, expert_map))
-        
+
         invoke_fused_moe_kernel(qcurr_hidden_states,
                                 w1,
                                 intermediate_cache1,
@@ -1414,7 +1436,8 @@ def fused_experts_impl(hidden_states: torch.Tensor,
             use_int4_w4a16=use_int4_w4a16,
             use_mxfp4_w4a4=use_mxfp4_w4a4,
             per_channel_quant=per_channel_quant,
-            block_shape=block_shape)
+            block_shape=block_shape,
+        )
 
         invoke_fused_moe_kernel(qintermediate_cache2,
                                 w2,
