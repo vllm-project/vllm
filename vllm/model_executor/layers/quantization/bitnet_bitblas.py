@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 import enum
 from enum import Enum
 from typing import Any, Dict, List, Optional
@@ -102,8 +103,8 @@ class BITNETBitBLASConfig(QuantizationConfig):
     @classmethod
     def is_bitblas_compatible(cls, quant_config: Dict[str, Any]):
         # Extract data from quant config.
-        num_bits = quant_config.get("bits", None)
-        sym = quant_config.get("sym", None)
+        num_bits = quant_config.get("bits")
+        sym = quant_config.get("sym")
 
         # If we cannot find the info needed in the config, cannot convert.
         if num_bits is None or sym is None:

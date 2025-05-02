@@ -1,4 +1,4 @@
-# coding=utf-8
+# SPDX-License-Identifier: Apache-2.0
 # Adapted from
 # https://github.com/microsoft/BitBLAS/blob/main/integration/BitNet/modeling_bitnet.py
 # Copyright 2023 The vLLM team.
@@ -32,9 +32,8 @@ from transformers.configuration_utils import PretrainedConfig
 
 from vllm.attention import Attention, AttentionMetadata
 from vllm.config import CacheConfig, VllmConfig
-from vllm.distributed import (get_pp_group, get_tensor_model_parallel_rank,
-                              get_tensor_model_parallel_world_size)
-from vllm.logger import init_logger
+from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
+from vllm.logger import _print_warning_once, init_logger
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (MergedColumnParallelLinear,
@@ -44,14 +43,12 @@ from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
 from vllm.model_executor.layers.rotary_embedding import get_rope
-from vllm.model_executor.layers.sampler import Sampler
+from vllm.model_executor.layers.sampler import Sampler, SamplerOutput
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     DEFAULT_VOCAB_PADDING_SIZE, ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
-from vllm.model_executor.layers.sampler import SamplerOutput
-from vllm.logger import _print_warning_once
 
 from .utils import PPMissingLayer
 
@@ -210,8 +207,8 @@ class BitnetConfig(PretrainedConfig):
         if self.rope_scaling is None:
             return
 
-        if not isinstance(self.rope_scaling,
-                          dict) or len(self.rope_scaling) != 2:
+        if not isinstance(self.rope_scaling, dict) or len(
+                self.rope_scaling) != 2:
             raise ValueError(
                 "`rope_scaling` must be a dictionary with with two fields, `type` and `factor`, "
                 f"got {self.rope_scaling}")
@@ -557,8 +554,7 @@ class BitnetForCausalLM(nn.Module):
     }
     embedding_padding_modules = ["lm_head"]
 
-    def __init__(
-        self, *, vllm_config: VllmConfig, prefix: str = ""):
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         config = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
@@ -671,7 +667,8 @@ class BitnetForCausalLM(nn.Module):
                     remapped_kv_scale_name = name.replace(
                         ".kv_scale", ".attn.kv_scale")
                     if remapped_kv_scale_name not in params_dict:
-                        _print_warning_once(logger,
+                        _print_warning_once(
+                            logger,
                             f"Found kv scale in the checkpoint (e.g. {name}), "
                             "but not found the expected name in the model "
                             f"(e.g. {remapped_kv_scale_name}). kv-scale is "

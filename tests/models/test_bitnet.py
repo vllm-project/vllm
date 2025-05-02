@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Compare the outputs of a bitnet model to a bitblas model.
 Note: bitnet and bitblas do not have bitwise correctness.
 As a result, in this test, we just confirm that the top selected tokens of the
@@ -42,14 +43,14 @@ def test_models(
 ) -> None:
     with vllm_runner(model_pair.model_bitblas,
                      dtype=dtype,
-                     tokenizer_mode = "bitnet",
+                     tokenizer_mode="bitnet",
                      quantization="bitblas") as bitblas_model:
         bitblas_outputs = bitblas_model.generate_greedy_logprobs(
             example_prompts, max_tokens, num_logprobs)
 
     with vllm_runner(model_pair.model_bitnet,
                      dtype=dtype,
-                     tokenizer_mode = "bitnet",
+                     tokenizer_mode="bitnet",
                      quantization="bitnet") as bitnet_model:
         bitnet_outputs = bitnet_model.generate_greedy_logprobs(
             example_prompts, max_tokens, num_logprobs)

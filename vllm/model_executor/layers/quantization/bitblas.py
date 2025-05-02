@@ -92,7 +92,7 @@ class BitBLASConfig(QuantizationConfig):
 
         # Zeros type for the quantized weights.
         self.zeros_mode = self.ZEROS_MODE
-         # set input bits if bitnet
+        # set input bits if bitnet
         self.input_bits: Optional[int] = None
         if self.quant_method == "bitnet":
             self.input_bits = 8

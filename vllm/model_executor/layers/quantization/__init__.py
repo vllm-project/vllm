@@ -87,8 +87,8 @@ def get_quantization_config(quantization: str) -> Type[QuantizationConfig]:
     from .aqlm import AQLMConfig
     from .awq import AWQConfig
     from .awq_marlin import AWQMarlinConfig
-    from .bitnet_bitblas import BITNETBitBLASConfig
     from .bitblas import BitBLASConfig
+    from .bitnet_bitblas import BITNETBitBLASConfig
     from .bitsandbytes import BitsAndBytesConfig
     from .compressed_tensors.compressed_tensors import (  # noqa: E501
         CompressedTensorsConfig)
