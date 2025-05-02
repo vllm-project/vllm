@@ -559,11 +559,13 @@ class BitnetForCausalLM(nn.Module):
         config = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
         lora_config = vllm_config.lora_config
+        cache_config = vllm_config.cache_config
 
         self.config = config
         self.lora_config = lora_config
 
         self.quant_config = quant_config
+        self.cache_config = cache_config
 
         self.model = BitnetModel(config, cache_config, quant_config)
 
