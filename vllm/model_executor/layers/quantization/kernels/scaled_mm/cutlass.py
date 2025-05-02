@@ -111,7 +111,7 @@ class CutlassScaledMMLinearKernel(ScaledMMLinearKernel):
         # * dynamic, i_s is None and x_s computed from x.
         # * static, i_s is scalar and x_s is i_s.
         symmetric = azp_adj is None
-        x_q, x_s, x_zp = ops.scaled_int8_quant(x,
+        x_q, x_s, x_zp = ops.scaled_int8_quant(x.contiguous(),
                                                i_s,
                                                i_zp,
                                                symmetric=symmetric)
