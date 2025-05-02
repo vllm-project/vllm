@@ -150,7 +150,7 @@ def run_florence2(questions: list[str], modality: str) -> ModelRequestData:
 
     engine_args = EngineArgs(
         model="microsoft/Florence-2-large",
-        tokenizer="facebook/bart-large",
+        tokenizer="Isotr0py/Florence-2-tokenizer",
         max_model_len=4096,
         max_num_seqs=2,
         trust_remote_code=True,
@@ -376,9 +376,9 @@ def run_kimi_vl(questions: list[str], modality: str) -> ModelRequestData:
 
     engine_args = EngineArgs(
         model="moonshotai/Kimi-VL-A3B-Instruct",
-        max_model_len=4096,
-        disable_mm_preprocessor_cache=args.disable_mm_preprocessor_cache,
         trust_remote_code=True,
+        max_model_len=4096,
+        limit_mm_per_prompt={"image": 1},
     )
 
     return ModelRequestData(
@@ -725,6 +725,34 @@ def run_nvlm_d(questions: list[str], modality: str) -> ModelRequestData:
     )
 
 
+# Ovis2
+def run_ovis2(questions: list[str], modality: str) -> ModelRequestData:
+    assert modality == "image"
+
+    model_name = "AIDC-AI/Ovis2-1B"
+
+    engine_args = EngineArgs(
+        model=model_name,
+        max_model_len=4096,
+        max_num_seqs=2,
+        trust_remote_code=True,
+        dtype="half",
+        hf_overrides={"architectures": ["Ovis2ForConditionalGeneration"]},
+        limit_mm_per_prompt={"image": 1},
+    )
+
+    placeholder = "<image>\n"
+    prompts = [("<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n"
+                f"<|im_start|>user\n{placeholder}"
+                f"{question}<|im_end|>\n"
+                "<|im_start|>assistant\n") for question in questions]
+
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompts=prompts,
+    )
+
+
 # PaliGemma
 def run_paligemma(questions: list[str], modality: str) -> ModelRequestData:
     assert modality == "image"
@@ -814,10 +842,13 @@ def run_phi4mm(questions: list[str], modality: str) -> ModelRequestData:
     engine_args = EngineArgs(
         model=model_path,
         trust_remote_code=True,
-        max_model_len=4096,
+        max_model_len=5120,
         max_num_seqs=2,
+        max_num_batched_tokens=12800,
         enable_lora=True,
         max_lora_rank=320,
+        # Note - mm_processor_kwargs can also be passed to generate/chat calls
+        mm_processor_kwargs={"dynamic_hd": 16},
         limit_mm_per_prompt={"image": 1},
     )
 
@@ -941,6 +972,42 @@ def run_qwen2_5_vl(questions: list[str], modality: str) -> ModelRequestData:
     )
 
 
+# Qwen2.5-Omni
+def run_qwen2_5_omni(questions: list[str], modality: str):
+    model_name = "Qwen/Qwen2.5-Omni-7B"
+
+    engine_args = EngineArgs(
+        model=model_name,
+        max_model_len=4096,
+        max_num_seqs=5,
+        mm_processor_kwargs={
+            "min_pixels": 28 * 28,
+            "max_pixels": 1280 * 28 * 28,
+            "fps": [1],
+        },
+        limit_mm_per_prompt={"image": 1},
+    )
+
+    if modality == "image":
+        placeholder = "<|IMAGE|>"
+    elif modality == "video":
+        placeholder = "<|VIDEO|>"
+
+    default_system = (
+        "You are Qwen, a virtual human developed by the Qwen Team, Alibaba "
+        "Group, capable of perceiving auditory and visual inputs, as well as "
+        "generating text and speech.")
+
+    prompts = [(f"<|im_start|>system\n{default_system}<|im_end|>\n"
+                f"<|im_start|>user\n<|vision_bos|>{placeholder}<|vision_eos|>"
+                f"{question}<|im_end|>\n"
+                "<|im_start|>assistant\n") for question in questions]
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompts=prompts,
+    )
+
+
 # SkyworkR1V
 def run_skyworkr1v(questions: list[str], modality: str) -> ModelRequestData:
     assert modality == "image"
@@ -1002,6 +1069,7 @@ model_example_map = {
     "llama4": run_llama4,
     "molmo": run_molmo,
     "NVLM_D": run_nvlm_d,
+    "ovis2": run_ovis2,
     "paligemma": run_paligemma,
     "paligemma2": run_paligemma2,
     "phi3_v": run_phi3v,
@@ -1010,6 +1078,7 @@ model_example_map = {
     "qwen_vl": run_qwen_vl,
     "qwen2_vl": run_qwen2_vl,
     "qwen2_5_vl": run_qwen2_5_vl,
+    "qwen2_5_omni": run_qwen2_5_omni,
     "skywork_chat": run_skyworkr1v,
     "smolvlm": run_smolvlm,
 }
@@ -1040,7 +1109,7 @@ def get_multi_modal_input(args):
 
     if args.modality == "video":
         # Input video and question
-        video = VideoAsset(name="sample_demo_1.mp4",
+        video = VideoAsset(name="baby_reading",
                            num_frames=args.num_frames).np_ndarrays
         vid_questions = ["Why is this video funny?"]
 

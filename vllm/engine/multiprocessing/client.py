@@ -93,6 +93,7 @@ class MQLLMEngineClient(EngineClient):
         self._errored_with: Optional[BaseException] = None
 
         # Get the configs.
+        self.vllm_config = engine_config
         self.model_config = engine_config.model_config
         self.decoding_config = engine_config.decoding_config
 
@@ -100,7 +101,6 @@ class MQLLMEngineClient(EngineClient):
         self.tokenizer = init_tokenizer_from_configs(
             model_config=self.model_config,
             scheduler_config=engine_config.scheduler_config,
-            parallel_config=engine_config.parallel_config,
             lora_config=engine_config.lora_config)
         self.input_preprocessor = InputPreprocessor(self.model_config,
                                                     self.tokenizer)
@@ -377,6 +377,9 @@ class MQLLMEngineClient(EngineClient):
     async def get_tokenizer(self, lora_request: Optional[LoRARequest] = None):
         return await self.tokenizer.get_lora_tokenizer_async(lora_request)
 
+    async def get_vllm_config(self) -> VllmConfig:
+        return self.vllm_config
+
     async def get_decoding_config(self) -> DecodingConfig:
         return self.decoding_config
 
@@ -612,9 +615,9 @@ class MQLLMEngineClient(EngineClient):
                 build_guided_decoding_logits_processor_async(
                     sampling_params=params,
                     tokenizer=await self.get_tokenizer(lora_request),
-                    default_guided_backend=(self.decoding_config.guided_decoding_backend
+                    default_guided_backend=(self.decoding_config.backend
                         if self.decoding_config
-                        else DecodingConfig.guided_decoding_backend),
+                        else DecodingConfig.backend),
                     model_config=self.model_config,
                     reasoning_backend=self.decoding_config.reasoning_backend,
                 )

@@ -11,6 +11,10 @@ import torch.distributed as dist
 
 import vllm.envs as envs
 from vllm.config import VllmConfig
+from vllm.distributed.kv_transfer import (get_kv_transfer_group,
+                                          has_kv_transfer_group,
+                                          is_v1_kv_transfer_group)
+from vllm.distributed.kv_transfer.kv_connector.v1 import KVConnectorBase_V1
 from vllm.logger import init_logger
 
 if TYPE_CHECKING:
@@ -70,15 +74,13 @@ def set_forward_context(attn_metadata: Any,
     if vllm_config.parallel_config.data_parallel_size > 1:
         dp_size = vllm_config.parallel_config.data_parallel_size
         dp_rank = vllm_config.parallel_config.data_parallel_rank
-        if attn_metadata is not None:
-            if hasattr(attn_metadata, "num_prefill_tokens"):
-                # for v0 attention backends
-                batchsize = attn_metadata.num_prefill_tokens + \
-                    attn_metadata.num_decode_tokens
-            else:
-                # for v1 attention backends
-                batchsize = attn_metadata.num_input_tokens
+        if attn_metadata is not None and hasattr(attn_metadata,
+                                                 "num_prefill_tokens"):
+            # for v0 attention backends
+            batchsize = attn_metadata.num_prefill_tokens + \
+                attn_metadata.num_decode_tokens
         else:
+            # for v1 attention backends or no attn_metadata
             batchsize = num_tokens
         num_tokens_across_dp = [0] * dp_size
         num_tokens_across_dp[dp_rank] = batchsize
@@ -98,6 +100,17 @@ def set_forward_context(attn_metadata: Any,
         virtual_engine=virtual_engine,
         attn_metadata=attn_metadata,
         dp_metadata=dp_metadata)
+
+    # KVConnector: trigger (possibly async) load before forward.
+    # Each attn layer will block until the reading is complete.
+    trigger_kv_transfer = (attn_metadata is not None
+                           and has_kv_transfer_group()
+                           and is_v1_kv_transfer_group())
+    if trigger_kv_transfer:
+        kv_connector = get_kv_transfer_group()
+        assert isinstance(kv_connector, KVConnectorBase_V1)
+        kv_connector.start_load_kv(_forward_context)
+
     try:
         yield
     finally:
@@ -109,7 +122,7 @@ def set_forward_context(attn_metadata: Any,
                     attn_metadata.num_decode_tokens
             else:
                 # for v1 attention backends
-                batchsize = attn_metadata.num_input_tokens
+                batchsize = num_tokens
             # we use synchronous scheduling right now,
             # adding a sync point here should not affect
             # scheduling of the next batch
@@ -133,4 +146,12 @@ def set_forward_context(attn_metadata: Any,
                     logger.info(("Batchsize forward time stats "
                                  "(batchsize, count, median_time(ms)): %s"),
                                 forward_stats)
+
+        # KVConnector: each attn layer triggers (possibly async) save.
+        # Ensure all those operations complete before forward() is done.
+        if trigger_kv_transfer:
+            kv_connector = get_kv_transfer_group()
+            assert isinstance(kv_connector, KVConnectorBase_V1)
+            kv_connector.wait_for_save()
+
         _forward_context = prev_context

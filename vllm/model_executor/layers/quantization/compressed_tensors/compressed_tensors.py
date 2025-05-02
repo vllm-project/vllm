@@ -16,6 +16,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.linear import (LinearBase, LinearMethodBase,
                                                UnquantizedLinearMethod)
+from vllm.model_executor.layers.quantization import QuantizationMethods
 from vllm.model_executor.layers.quantization.base_config import (  # noqa: E501
     QuantizationConfig, QuantizeMethodBase)
 from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe import (  # noqa: E501
@@ -71,8 +72,8 @@ class CompressedTensorsConfig(QuantizationConfig):
     def get_min_capability(cls) -> int:
         return 70
 
-    def get_name(self) -> str:
-        return "compressed_tensors"
+    def get_name(self) -> QuantizationMethods:
+        return "compressed-tensors"
 
     def get_quant_method(
         self,
@@ -302,14 +303,12 @@ class CompressedTensorsConfig(QuantizationConfig):
     def _is_wNa16_group_channel(self, weight_quant: BaseModel,
                                 input_quant: BaseModel) -> bool:
         input_quant_none = input_quant is None
-        is_symmetric = weight_quant.symmetric
         is_channel_group = (
             weight_quant.strategy == QuantizationStrategy.CHANNEL.value
             or weight_quant.strategy == QuantizationStrategy.GROUP.value)
         is_static = not weight_quant.dynamic
 
-        return (is_channel_group and input_quant_none and is_symmetric
-                and is_static)
+        return (is_channel_group and input_quant_none and is_static)
 
     def _get_scheme_from_parts(
             self, weight_quant: BaseModel,
@@ -319,6 +318,7 @@ class CompressedTensorsConfig(QuantizationConfig):
         if self._is_wNa16_group_channel(weight_quant, input_quant):
             if (self.quant_format == CompressionFormat.marlin_24.value
                     and weight_quant.num_bits in W4A16SPARSE24_SUPPORTED_BITS):
+                assert weight_quant.symmetric
                 return CompressedTensorsW4A16Sparse24(
                     strategy=weight_quant.strategy,
                     num_bits=weight_quant.num_bits,
@@ -328,6 +328,7 @@ class CompressedTensorsConfig(QuantizationConfig):
                 return CompressedTensorsWNA16(
                     num_bits=weight_quant.num_bits,
                     strategy=weight_quant.strategy,
+                    symmetric=weight_quant.symmetric,
                     group_size=weight_quant.group_size,
                     actorder=weight_quant.actorder)
 
@@ -384,7 +385,7 @@ class CompressedTensorsConfig(QuantizationConfig):
 
         Detect whether a layer_name is found in any target and
         use the quantization scheme corresponding to the matched target
-        to select the CompressedTensorsScheme used for infernece.
+        to select the CompressedTensorsScheme used for inference.
         """
 
         # Find the "target" in the compressed-tensors config
