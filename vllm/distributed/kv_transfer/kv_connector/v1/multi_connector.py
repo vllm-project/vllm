@@ -41,6 +41,7 @@ class MultiConnector(KVConnectorBase_V1):
     # MultiKVConnectorMetadata.
     def bind_connector_metadata(
             self, connector_metadata: KVConnectorMetadata) -> None:
+        assert isinstance(connector_metadata, MultiKVConnectorMetadata)
         for c, cm in zip(self._connectors, connector_metadata):
             c.bind_connector_metadata(cm)
 
