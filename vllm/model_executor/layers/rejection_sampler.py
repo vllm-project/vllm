@@ -267,9 +267,10 @@ class RejectionSampler(SpecDecodeStochasticBaseSampler):
         same conditional probability according to the draft model, the token
         is accepted with probability:
 
-        .. math::
-            \min\left(1, \frac{q(\hat{x}_{n+1}|x_1, \dots, x_n)}
-                           {p(\hat{x}_{n+1}|x_1, \dots, x_n)}\right)
+        :::{math}
+        \min\left(1, \frac{q(\hat{x}_{n+1}|x_1, \dots, x_n)}
+                        {p(\hat{x}_{n+1}|x_1, \dots, x_n)}\right)
+        :::
 
         This implementation does not apply causality. When using the output,
         if a token is rejected, subsequent tokens should not be used.
@@ -317,13 +318,15 @@ class RejectionSampler(SpecDecodeStochasticBaseSampler):
         model and {math}`p(x|x_1, \dots, x_n)`, the same conditional probability
         according to the draft model:
 
-        .. math::
-            x_{n+1} \sim (q(x|x_1, \dots, x_n) - p(x|x_1, \dots, x_n))_+
+        :::{math}
+        x_{n+1} \sim (q(x|x_1, \dots, x_n) - p(x|x_1, \dots, x_n))_+
+        :::
 
         where {math}`(f(x))_+` is defined as:
 
-        .. math::
-            (f(x))_+ = \frac{\max(0, f(x))}{\sum_x \max(0, f(x))}
+        :::{math}
+        (f(x))_+ = \frac{\max(0, f(x))}{\sum_x \max(0, f(x))}
+        :::
 
         See https://github.com/vllm-project/vllm/pull/2336 for a visualization
         of the draft, target, and recovered probability distributions.

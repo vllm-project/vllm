@@ -1284,11 +1284,12 @@ class LLMEngine:
     def step(self) -> List[Union[RequestOutput, PoolingRequestOutput]]:
         """Performs one decoding iteration and returns newly generated results.
 
-        .. figure:: https://i.imgur.com/sv2HssD.png
-            :alt: Overview of the step function
-            :align: center
+        :::{figure} https://i.imgur.com/sv2HssD.png
+        :alt: Overview of the step function
+        :align: center
 
-            Overview of the step function.
+        Overview of the step function.
+        :::
 
         Details:
             - Step 1: Schedules the sequences to be executed in the next
