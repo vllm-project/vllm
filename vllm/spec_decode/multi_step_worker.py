@@ -282,7 +282,8 @@ class MultiStepWorker(ProposerWorkerBase, DelegateWorkerBase):
                 else:
                     count += 1
 
-                seq.append_token_id(token_id, token_logprob.logprob)
+                seq.append_token_id(token_id, token_logprob.logprob,
+                                    seq_output.output_embed)
                 seq.update_num_computed_tokens(1)
 
     @staticmethod
