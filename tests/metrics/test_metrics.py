@@ -15,14 +15,12 @@ from vllm.engine.metrics import RayPrometheusStatLogger
 from vllm.sampling_params import SamplingParams
 from vllm.test_utils import MODEL_WEIGHTS_S3_BUCKET
 
-
-@pytest.fixture(scope="function", autouse=True)
-def use_v0_only(monkeypatch):
-    """
-    This module tests V0 internals, so set VLLM_USE_V1=0.
-    """
-    monkeypatch.setenv('VLLM_USE_V1', '0')
-
+# @pytest.fixture(scope="function", autouse=True)
+# def use_v0_only(monkeypatch):
+#     """
+#     This module tests V0 internals, so set VLLM_USE_V1=0.
+#     """
+#     monkeypatch.setenv('VLLM_USE_V1', '0')
 
 MODELS = [
     "distilbert/distilgpt2",
@@ -30,7 +28,7 @@ MODELS = [
 
 
 @pytest.mark.parametrize("model", MODELS)
-@pytest.mark.parametrize("dtype", ["float"])
+@pytest.mark.parametrize("dtype", ["float16"])
 @pytest.mark.parametrize("max_tokens", [128])
 def test_metric_counter_prompt_tokens(
     vllm_runner,
@@ -42,7 +40,8 @@ def test_metric_counter_prompt_tokens(
     with vllm_runner(model,
                      dtype=dtype,
                      disable_log_stats=False,
-                     gpu_memory_utilization=0.4) as vllm_model:
+                     gpu_memory_utilization=0.4,
+                     enforce_eager=True) as vllm_model:
         tokenizer = vllm_model.model.get_tokenizer()
         prompt_token_counts = [
             len(tokenizer.encode(p)) for p in example_prompts
@@ -65,7 +64,7 @@ def test_metric_counter_prompt_tokens(
 
 
 @pytest.mark.parametrize("model", MODELS)
-@pytest.mark.parametrize("dtype", ["float"])
+@pytest.mark.parametrize("dtype", ["float16"])
 @pytest.mark.parametrize("max_tokens", [128])
 def test_metric_counter_generation_tokens(
     vllm_runner,
@@ -77,7 +76,8 @@ def test_metric_counter_generation_tokens(
     with vllm_runner(model,
                      dtype=dtype,
                      disable_log_stats=False,
-                     gpu_memory_utilization=0.4) as vllm_model:
+                     gpu_memory_utilization=0.4,
+                     enforce_eager=True) as vllm_model:
         vllm_outputs = vllm_model.generate_greedy(example_prompts, max_tokens)
         tokenizer = vllm_model.model.get_tokenizer()
         stat_logger = vllm_model.model.llm_engine.stat_loggers['prometheus']
@@ -113,6 +113,7 @@ def test_metric_counter_generation_tokens_multi_step(
             gpu_memory_utilization=0.4,
             num_scheduler_steps=num_scheduler_steps,
             disable_async_output_proc=disable_async_output_proc,
+            enforce_eager=True,
     ) as vllm_model:
         vllm_outputs = vllm_model.generate_greedy(example_prompts, max_tokens)
         tokenizer = vllm_model.model.get_tokenizer()
@@ -136,7 +137,7 @@ def test_metric_counter_generation_tokens_multi_step(
 
 
 @pytest.mark.parametrize("model", MODELS)
-@pytest.mark.parametrize("dtype", ["float"])
+@pytest.mark.parametrize("dtype", ["float16"])
 @pytest.mark.parametrize(
     "served_model_name",
     [None, [], ["ModelName0"], ["ModelName0", "ModelName1", "ModelName2"]])
@@ -146,7 +147,8 @@ def test_metric_set_tag_model_name(vllm_runner, model: str, dtype: str,
                      dtype=dtype,
                      disable_log_stats=False,
                      gpu_memory_utilization=0.3,
-                     served_model_name=served_model_name) as vllm_model:
+                     served_model_name=served_model_name,
+                     enforce_eager=True) as vllm_model:
         stat_logger = vllm_model.model.llm_engine.stat_loggers['prometheus']
         metrics_tag_content = stat_logger.labels["model_name"]
 
@@ -252,6 +254,7 @@ def test_metric_spec_decode(
                 "model": model,
                 "num_speculative_tokens": k,
             },
+            enforce_eager=True,
     ) as vllm_model:
 
         # Force log interval to be 0 to catch all metrics.
