@@ -546,6 +546,12 @@ class InputPreprocessor:
             raise ValueError("Embedding inputs are not supported for encoder-"
                              "decoder models")
 
+        # Needed for mypy
+        encoder_inputs = cast(Union[TokenInputs, MultiModalInputs],
+                              encoder_inputs)
+        decoder_inputs = cast(Optional[Union[TokenInputs, MultiModalInputs]],
+                              decoder_inputs)
+
         if decoder_inputs is None:
             if self.model_config.hf_config.model_type == "whisper":
                 # For Whisper models, the text prompt should go to the decoder.
@@ -557,14 +563,14 @@ class InputPreprocessor:
                 dec_token_ids = self._prepare_decoder_input_ids_for_generation(
                     None)
             decoder_inputs = token_inputs(dec_token_ids)
-        elif "prompt_token_ids" in decoder_inputs:
-            dec_token_ids = self._prepare_decoder_input_ids_for_generation(
-                decoder_inputs["prompt_token_ids"])
-            decoder_inputs["prompt_token_ids"] = dec_token_ids
-
+        else:
             if "multi_modal_data" in decoder_inputs:
                 raise ValueError("Multi-modal decoder inputs of encoder-"
                                  "decoder models are not supported yet")
+
+            dec_token_ids = self._prepare_decoder_input_ids_for_generation(
+                decoder_inputs["prompt_token_ids"])
+            decoder_inputs["prompt_token_ids"] = dec_token_ids
 
         return EncoderDecoderInputs(
             encoder=encoder_inputs,
@@ -584,6 +590,16 @@ class InputPreprocessor:
                 and decoder_inputs_to_override["type"] == "embeds"):
             raise ValueError("Embedding inputs are not supported for encoder-"
                              "decoder models")
+
+        # Needed for mypy
+        inputs = cast(
+            Union[TokenInputs, MultiModalInputs, MultiModalEncDecInputs],
+            inputs,
+        )
+        decoder_inputs_to_override = cast(
+            Optional[Union[TokenInputs, MultiModalInputs]],
+            decoder_inputs_to_override,
+        )
 
         encoder_inputs: SingletonInputs
         decoder_inputs: SingletonInputs
