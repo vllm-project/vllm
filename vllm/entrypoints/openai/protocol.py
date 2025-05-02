@@ -190,7 +190,9 @@ class ChatCompletionNamedToolChoiceParam(OpenAIBaseModel):
     type: Literal["function"] = "function"
 
 
-class LogitsProcessorConstructor(BaseModel):
+# extra="forbid" is a workaround, see
+# https://github.com/pydantic/pydantic/issues/3125
+class LogitsProcessorConstructor(BaseModel, extra="forbid"):
     qualname: str
     args: Optional[list[Any]] = None
     kwargs: Optional[dict[str, Any]] = None
@@ -249,7 +251,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
     presence_penalty: Optional[float] = 0.0
     response_format: Optional[AnyResponseFormat] = None
     seed: Optional[int] = Field(None, ge=_LONG_INFO.min, le=_LONG_INFO.max)
-    stop: Optional[Union[str, list[str]]] = Field(default_factory=list)
+    stop: Optional[Union[str, list[str]]] = Field(default_factory=lambda: [])
     stream: Optional[bool] = False
     stream_options: Optional[StreamOptions] = None
     temperature: Optional[float] = None
@@ -273,7 +275,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
     min_p: Optional[float] = None
     repetition_penalty: Optional[float] = None
     length_penalty: float = 1.0
-    stop_token_ids: Optional[list[int]] = Field(default_factory=list)
+    stop_token_ids: Optional[list[int]] = Field(default_factory=lambda: [])
     include_stop_str_in_output: bool = False
     ignore_eos: bool = False
     min_tokens: int = 0
@@ -765,7 +767,7 @@ class CompletionRequest(OpenAIBaseModel):
     n: int = 1
     presence_penalty: Optional[float] = 0.0
     seed: Optional[int] = Field(None, ge=_LONG_INFO.min, le=_LONG_INFO.max)
-    stop: Optional[Union[str, list[str]]] = Field(default_factory=list)
+    stop: Optional[Union[str, list[str]]] = Field(default_factory=lambda: [])
     stream: Optional[bool] = False
     stream_options: Optional[StreamOptions] = None
     suffix: Optional[str] = None
@@ -779,7 +781,7 @@ class CompletionRequest(OpenAIBaseModel):
     min_p: Optional[float] = None
     repetition_penalty: Optional[float] = None
     length_penalty: float = 1.0
-    stop_token_ids: Optional[list[int]] = Field(default_factory=list)
+    stop_token_ids: Optional[list[int]] = Field(default_factory=lambda: [])
     include_stop_str_in_output: bool = False
     ignore_eos: bool = False
     min_tokens: int = 0
