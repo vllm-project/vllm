@@ -50,11 +50,6 @@ class KVConnectorMetadata:
     pass
 
 
-class MultiKVConnectorMetadata(tuple[KVConnectorMetadata, ...],
-                               KVConnectorMetadata):
-    pass
-
-
 class KVConnectorBase_V1(ABC):
 
     def __init__(self, vllm_config: "VllmConfig", role: KVConnectorRole):
