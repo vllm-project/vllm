@@ -2,6 +2,7 @@
 from collections.abc import Iterable
 from typing import TYPE_CHECKING, Any, Generic, Literal, Optional, Union, cast
 
+import torch
 from typing_extensions import NotRequired, TypedDict, TypeVar
 
 if TYPE_CHECKING:
@@ -28,6 +29,11 @@ class TextPrompt(TypedDict):
     to pass the mm_processor_kwargs to each of them.
     """
 
+    cache_salt: NotRequired[str]
+    """
+    Optional cache salt to be used for prefix caching.
+    """
+
 
 class TokensPrompt(TypedDict):
     """Schema for a tokenized prompt."""
@@ -52,13 +58,31 @@ class TokensPrompt(TypedDict):
     to pass the mm_processor_kwargs to each of them.
     """
 
+    cache_salt: NotRequired[str]
+    """
+    Optional cache salt to be used for prefix caching.
+    """
 
-SingletonPrompt = Union[str, TextPrompt, TokensPrompt]
+
+class EmbedsPrompt(TypedDict):
+    """Schema for a prompt provided via token embeddings."""
+
+    prompt_embeds: torch.Tensor
+    """The embeddings of the prompt."""
+
+    cache_salt: NotRequired[str]
+    """
+    Optional cache salt to be used for prefix caching.
+    """
+
+
+SingletonPrompt = Union[str, TextPrompt, TokensPrompt, EmbedsPrompt]
 """
 Set of possible schemas for a single prompt:
 
 - A text prompt (:class:`str` or :class:`TextPrompt`)
 - A tokenized prompt (:class:`TokensPrompt`)
+- An embeddings prompt (:class:`EmbedsPrompt`)
 
 Note that "singleton" is as opposed to a data structure
 which encapsulates multiple prompts, i.e. of the sort
@@ -119,6 +143,7 @@ both decoder-only and encoder/decoder input types:
 
 - A text prompt (:class:`str` or :class:`TextPrompt`)
 - A tokenized prompt (:class:`TokensPrompt`)
+- An embeddings prompt (:class:`EmbedsPrompt`)
 - A single data structure containing both an encoder and a decoder prompt
   (:class:`ExplicitEncoderDecoderPrompt`)
 """
@@ -141,11 +166,17 @@ class TokenInputs(TypedDict):
     The original prompt text corresponding to the token IDs, if available.
     """
 
+    cache_salt: NotRequired[str]
+    """
+    Optional cache salt to be used for prefix caching.
+    """
+
 
 def token_inputs(
     prompt_token_ids: list[int],
     token_type_ids: Optional[list[int]] = None,
     prompt: Optional[str] = None,
+    cache_salt: Optional[str] = None,
 ) -> TokenInputs:
     """Construct :class:`TokenInputs` from optional values."""
     inputs = TokenInputs(type="token", prompt_token_ids=prompt_token_ids)
@@ -154,11 +185,41 @@ def token_inputs(
         inputs["prompt"] = prompt
     if token_type_ids is not None:
         inputs["token_type_ids"] = token_type_ids
+    if cache_salt is not None:
+        inputs["cache_salt"] = cache_salt
 
     return inputs
 
 
-DecoderOnlyInputs = Union[TokenInputs, "MultiModalInputs"]
+class EmbedsInputs(TypedDict):
+    """Represents embeddings-based inputs."""
+
+    type: Literal["embeds"]
+    """The type of inputs."""
+
+    prompt_embeds: torch.Tensor
+    """The embeddings of the prompt."""
+
+    cache_salt: NotRequired[str]
+    """
+    Optional cache salt to be used for prefix caching.
+    """
+
+
+def embeds_inputs(
+    prompt_embeds: torch.Tensor,
+    cache_salt: Optional[str] = None,
+) -> EmbedsInputs:
+    """Construct :class:`EmbedsInputs` from optional values."""
+    inputs = EmbedsInputs(type="embeds", prompt_embeds=prompt_embeds)
+
+    if cache_salt is not None:
+        inputs["cache_salt"] = cache_salt
+
+    return inputs
+
+
+DecoderOnlyInputs = Union[TokenInputs, EmbedsInputs, "MultiModalInputs"]
 """
 The inputs in :class:`~vllm.LLMEngine` before they are
 passed to the model executor.
@@ -180,7 +241,7 @@ class EncoderDecoderInputs(TypedDict):
     """The inputs for the decoder portion."""
 
 
-SingletonInputs = Union[TokenInputs, "MultiModalInputs"]
+SingletonInputs = Union[TokenInputs, EmbedsInputs, "MultiModalInputs"]
 """
 A processed :class:`SingletonPrompt` which can be passed to
 :class:`vllm.sequence.Sequence`.
@@ -217,7 +278,7 @@ def zip_enc_dec_prompts(
     """
     Zip encoder and decoder prompts together into a list of
     :class:`ExplicitEncoderDecoderPrompt` instances.
-    
+
     ``mm_processor_kwargs`` may also be provided; if a dict is passed, the same
     dictionary will be used for every encoder/decoder prompt. If an iterable is
     provided, it will be zipped with the encoder/decoder prompts.

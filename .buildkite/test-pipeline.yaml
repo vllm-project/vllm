@@ -293,6 +293,7 @@ steps:
   parallelism: 4
 
 - label: PyTorch Compilation Unit Tests
+  torch_nightly: true
   source_file_dependencies:
     - vllm/
     - tests/compile
@@ -302,6 +303,7 @@ steps:
     - pytest -v -s compile/test_sequence_parallelism.py
 
 - label: PyTorch Fullgraph Smoke Test # 9min
+  torch_nightly: true
   source_file_dependencies:
   - vllm/
   - tests/compile
@@ -312,6 +314,7 @@ steps:
   - pytest -v -s compile/piecewise/test_toy_llama.py
 
 - label: PyTorch Fullgraph Test # 18min
+  torch_nightly: true
   source_file_dependencies:
   - vllm/
   - tests/compile
@@ -319,6 +322,7 @@ steps:
   - pytest -v -s compile/test_full_graph.py
 
 - label: Kernels Core Operation Test
+  mirror_hardwares: [amd]
   source_file_dependencies:
   - csrc/
   - tests/kernels/core
@@ -326,6 +330,7 @@ steps:
     - pytest -v -s kernels/core
 
 - label: Kernels Attention Test %N
+  mirror_hardwares: [amd]
   source_file_dependencies:
   - csrc/attention/
   - vllm/attention
@@ -336,6 +341,7 @@ steps:
   parallelism: 2
 
 - label: Kernels Quantization Test %N
+  mirror_hardwares: [amd]
   source_file_dependencies:
   - csrc/quantization/
   - vllm/model_executor/layers/quantization
@@ -345,6 +351,7 @@ steps:
   parallelism: 2
 
 - label: Kernels MoE Test
+  #mirror_hardwares: [amd]
   source_file_dependencies:
   - csrc/moe/
   - tests/kernels/moe
@@ -353,6 +360,7 @@ steps:
     - pytest -v -s kernels/moe
 
 - label: Kernels Mamba Test
+  #mirror_hardwares: [amd]
   source_file_dependencies:
   - csrc/mamba/
   - tests/kernels/mamba
@@ -385,12 +393,13 @@ steps:
   commands:
   - pytest -v -s benchmarks/
 
-- label: Quantization Test # 33min
+- label: Quantization Test
   source_file_dependencies:
   - csrc/
   - vllm/model_executor/layers/quantization
   - tests/quantization
-  command: VLLM_TEST_FORCE_LOAD_FORMAT=auto pytest -v -s quantization
+  commands:
+  - VLLM_TEST_FORCE_LOAD_FORMAT=auto pytest -v -s quantization
 
 - label: LM Eval Small Models # 53min
   working_dir: "/vllm-workspace/.buildkite/lm-eval-harness"
@@ -430,88 +439,85 @@ steps:
 #####  models test  #####
 
 - label: Basic Models Test # 24min
+  torch_nightly: true
   source_file_dependencies:
   - vllm/
   - tests/models
   commands:
     - pytest -v -s models/test_transformers.py
     - pytest -v -s models/test_registry.py
+    - pytest -v -s models/test_utils.py
+    - pytest -v -s models/test_vision.py
     # V1 Test: https://github.com/vllm-project/vllm/issues/14531
     - VLLM_USE_V1=0 pytest -v -s models/test_initialization.py -k 'not llama4 and not plamo2'
     - VLLM_USE_V1=0 pytest -v -s models/test_initialization.py -k 'llama4'
     - VLLM_USE_V1=0 pytest -v -s models/test_initialization.py -k 'plamo2'
 
-- label: Language Models Test (Standard) # 32min
+- label: Language Models Test (Standard)
   #mirror_hardwares: [amd]
   source_file_dependencies:
   - vllm/
-  - tests/models/decoder_only/language
-  - tests/models/embedding/language
-  - tests/models/encoder_decoder/language
+  - tests/models/language
   commands:
     # Install causal-conv1d for plamo2 models here, as it is not compatible with pip-compile.
-    - pip install causal-conv1d
-    - pytest -v -s models/decoder_only/language -m 'core_model or quant_model'
-    - pytest -v -s models/embedding/language -m core_model
+    - pip install 'git+https://github.com/Dao-AILab/causal-conv1d@v1.5.0.post8'
+    - pytest -v -s models/language -m core_model
 
-- label: Language Models Test (Extended) # 1h10min
+- label: Language Models Test (Extended)
   optional: true
   source_file_dependencies:
   - vllm/
-  - tests/models/decoder_only/language
-  - tests/models/embedding/language
-  - tests/models/encoder_decoder/language
+  - tests/models/language
   commands:
     # Install causal-conv1d for plamo2 models here, as it is not compatible with pip-compile.
-    - pip install causal-conv1d
-    - pytest -v -s models/decoder_only/language -m 'not core_model and not quant_model'
-    - pytest -v -s models/embedding/language -m 'not core_model'
+    - pip install 'git+https://github.com/Dao-AILab/causal-conv1d@v1.5.0.post8'
+    - pytest -v -s models/language -m 'not core_model'
 
-- label: Multi-Modal Models Test (Standard) # 40min
+- label: Multi-Modal Models Test (Standard)
   #mirror_hardwares: [amd]
   source_file_dependencies:
   - vllm/
-  - tests/models/decoder_only/audio_language
-  - tests/models/decoder_only/vision_language
-  - tests/models/embedding/vision_language
-  - tests/models/encoder_decoder/audio_language
-  - tests/models/encoder_decoder/vision_language
+  - tests/models/multimodal
   commands:
     - pip install git+https://github.com/TIGER-AI-Lab/Mantis.git
-    - pytest -v -s models/multimodal
-    - pytest -v -s models/decoder_only/audio_language -m 'core_model or quant_model'
-    - pytest -v -s models/decoder_only/vision_language -m 'core_model or quant_model'
-    - pytest -v -s models/embedding/vision_language -m core_model
-    - pytest -v -s models/encoder_decoder/audio_language -m core_model
-    - pytest -v -s models/encoder_decoder/language -m core_model
-    - pytest -v -s models/encoder_decoder/vision_language -m core_model
-    - pytest -v -s models/decoder_only/vision_language/test_interleaved.py
+    - pytest -v -s models/multimodal/processing
+    - pytest -v -s --ignore models/multimodal/generation/test_whisper.py models/multimodal -m core_model
+    - cd .. && pytest -v -s tests/models/multimodal/generation/test_whisper.py -m core_model  # Otherwise, mp_method="spawn" doesn't work
 
-- label: Multi-Modal Models Test (Extended) 1 # 48m
+- label: Multi-Modal Models Test (Extended) 1
   optional: true
   source_file_dependencies:
   - vllm/
-  - tests/models/decoder_only/audio_language
-  - tests/models/decoder_only/vision_language
-  - tests/models/embedding/vision_language
-  - tests/models/encoder_decoder/vision_language
+  - tests/models/multimodal
   commands:
     - pip install git+https://github.com/TIGER-AI-Lab/Mantis.git
-    - pytest -v -s models/decoder_only/audio_language -m 'not core_model and not quant_model'
-    - pytest -v -s models/decoder_only/vision_language/test_models.py -m 'split(group=0) and not core_model and not quant_model'
-    - pytest -v -s --ignore models/decoder_only/vision_language/test_models.py models/decoder_only/vision_language -m 'not core_model and not quant_model'
-    - pytest -v -s models/embedding/vision_language -m 'not core_model'
-    - pytest -v -s models/encoder_decoder/language -m 'not core_model'
-    - pytest -v -s models/encoder_decoder/vision_language -m 'not core_model'
+    - pytest -v -s --ignore models/multimodal/generation/test_common.py --ignore models/multimodal/processing models/multimodal -m 'not core_model'
 
-- label: Multi-Modal Models Test (Extended) 2 # 38m
+- label: Multi-Modal Models Test (Extended) 2
   optional: true
   source_file_dependencies:
   - vllm/
-  - tests/models/decoder_only/vision_language
+  - tests/models/multimodal
   commands:
     - pip install git+https://github.com/TIGER-AI-Lab/Mantis.git
-    - pytest -v -s models/decoder_only/vision_language/test_models.py -m 'split(group=1) and not core_model and not quant_model'
+    - pytest -v -s models/multimodal/generation/test_common.py -m 'split(group=0) and not core_model'
+
+- label: Multi-Modal Models Test (Extended) 3
+  optional: true
+  source_file_dependencies:
+  - vllm/
+  - tests/models/multimodal
+  commands:
+    - pip install git+https://github.com/TIGER-AI-Lab/Mantis.git
+    - pytest -v -s models/multimodal/generation/test_common.py -m 'split(group=1) and not core_model'
+
+- label: Quantized Models Test
+  #mirror_hardwares: [amd]
+  source_file_dependencies:
+  - vllm/model_executor/layers/quantization
+  - tests/models/quantization
+  commands:
+    - pytest -v -s models/quantization
 
 # This test is used only in PR development phase to test individual models and should never run on main
 - label: Custom Models Test
@@ -581,9 +587,8 @@ steps:
   - TARGET_TEST_SUITE=L4 pytest basic_correctness/ -v -s -m 'distributed(num_gpus=2)'
   # Avoid importing model tests that cause CUDA reinitialization error
   - pytest models/test_transformers.py -v -s -m 'distributed(num_gpus=2)'
-  - pytest models/encoder_decoder/language/test_bart.py -v -s -m 'distributed(num_gpus=2)'
-  - pytest models/encoder_decoder/vision_language/test_broadcast.py -v -s -m 'distributed(num_gpus=2)'
-  - pytest models/decoder_only/vision_language/test_models.py -v -s -m 'distributed(num_gpus=2)'
+  - pytest models/language -v -s -m 'distributed(num_gpus=2)'
+  - pytest models/multimodal -v -s -m 'distributed(num_gpus=2)'
   # test sequence parallel
   - pytest -v -s distributed/test_sequence_parallel.py
   # this test fails consistently.
