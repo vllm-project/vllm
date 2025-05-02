@@ -3552,9 +3552,8 @@ class CompilationConfig:
         static shapes. However, we find the general shape compilation is
         sufficient for most cases. It might be beneficial to compile for
         certain small batchsizes, where inductor is good at optimizing.
-    """ # noqa
+    """
     # Top-level Compilation control
-
     level: int = 0
     """The level of compilation:
 
@@ -3738,9 +3737,12 @@ class CompilationConfig:
             "pass_config",
             "traced_files",
         }
-        return TypeAdapter(CompilationConfig).dump_json(self,
-                                                        exclude=exclude,
-                                                        exclude_unset=True)
+        exclude |= {
+            f.name
+            for f in fields(self) if getattr(self, f.name) is PrivateAttr
+        }
+        return TypeAdapter(CompilationConfig).dump_json(
+            self, exclude=exclude, exclude_defaults=True).decode()
 
     __str__ = __repr__
 
@@ -3749,12 +3751,9 @@ class CompilationConfig:
         """Parse the CLI value for the compilation config."""
         if cli_value in ["0", "1", "2", "3"]:
             return cls(level=int(cli_value))
-        # do not use `eval`, it is dangerous and can execute arbitrary code
-        dict_value = ast.literal_eval(cli_value)
-        return TypeAdapter(CompilationConfig).validate_python(dict_value)
+        return TypeAdapter(CompilationConfig).validate_json(cli_value)
 
-    def model_post_init(self, __context: Any) -> None:
-
+    def __post_init__(self) -> None:
         count_none = self.custom_ops.count("none")
         count_all = self.custom_ops.count("all")
         assert count_none + count_all <= 1, "Can only specify 'none' or 'all'"
