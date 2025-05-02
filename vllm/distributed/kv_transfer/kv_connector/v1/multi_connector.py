@@ -38,7 +38,7 @@ class MultiConnector(KVConnectorBase_V1):
             temp_config.kv_transfer_config = KVTransferConfig(**ktc)
             self._connectors.append(
                 KVConnectorFactory.create_connector_v1(temp_config, role))
-        
+
         # A mapping from request id to the connector that is assigned to it.
         self._requests_to_connector: dict[str, KVConnectorBase_V1] = {}
 
@@ -93,14 +93,13 @@ class MultiConnector(KVConnectorBase_V1):
                 return toks
         return 0
 
-
     def update_state_after_alloc(self, request: "Request",
                                  num_external_tokens: int):
         # If the request is not assigned to any connector, we do nothing.
         if request.req_id not in self._requests_to_connector:
             return
         # We assume that the request is assigned to only one connector.
-        c = self._requests_to_connector[request.req_id]
+        c = self._requests_to_connector.pop(request.req_id)
         c.update_state_after_alloc(request, num_external_tokens)
 
     def build_connector_meta(
