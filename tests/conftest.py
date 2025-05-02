@@ -97,11 +97,16 @@ class _VideoAssets(_VideoAssetsBase):
 
     def __init__(self) -> None:
         super().__init__([
-            VideoAsset("sample_demo_1.mp4"),
+            VideoAsset("sample_demo_1"),
         ])
 
     def prompts(self, prompts: _VideoAssetPrompts) -> list[str]:
         return [prompts["sample_demo_1"]]
+
+
+class _AudioAssetPrompts(TypedDict):
+    mary_had_lamb: str
+    winning_call: str
 
 
 class _AudioAssetsBase(UserList[AudioAsset]):
@@ -115,6 +120,9 @@ class _AudioAssets(_AudioAssetsBase):
             AudioAsset("mary_had_lamb"),
             AudioAsset("winning_call"),
         ])
+
+    def prompts(self, prompts: _AudioAssetPrompts) -> list[str]:
+        return [prompts["mary_had_lamb"], prompts["winning_call"]]
 
 
 IMAGE_ASSETS = _ImageAssets()
