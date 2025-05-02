@@ -177,6 +177,13 @@ COPY requirements/dev.txt requirements/dev.txt
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip install --system -r requirements/dev.txt \
     --extra-index-url https://download.pytorch.org/whl/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.')
+
+# mteb installed a library named docs for python.
+# This will conflict with vllm docs
+# Let's delete it
+RUN python -c 'import shutil;import site;' \
+    'shutil.rmtree(site.getsitepackages()[0] + "/docs", ignore_errors=True)'
+
 #################### DEV IMAGE ####################
 
 #################### vLLM installation IMAGE ####################

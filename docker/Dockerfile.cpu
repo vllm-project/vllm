@@ -114,6 +114,12 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=bind,src=requirements/test.txt,target=requirements/test.txt \
     uv pip install -r requirements/test.txt
 
+# mteb installed a library named docs for python.
+# This will conflict with vllm docs
+# Let's delete it
+RUN python -c 'import shutil;import site;' \
+    'shutil.rmtree(site.getsitepackages()[0] + "/docs", ignore_errors=True)'
+
 RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=bind,from=vllm-build,src=/workspace/vllm/dist,target=dist \
     uv pip install dist/*.whl
