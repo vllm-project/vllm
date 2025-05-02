@@ -300,7 +300,7 @@ steps:
   parallelism: 4
 
 - label: PyTorch Compilation Unit Tests
-  mirror_hardwares: [amdexperimenta, amdproduction]
+  mirror_hardwares: [amdexperimental, amdproduction]
   source_file_dependencies:
     - vllm/
     - tests/compile
