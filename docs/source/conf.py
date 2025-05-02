@@ -12,6 +12,7 @@
 # add these directories to sys.path here. If the directory is relative to the
 # documentation root, use os.path.abspath to make it absolute, like shown here.
 
+import ast
 import datetime
 import logging
 import os
@@ -22,8 +23,8 @@ from pathlib import Path
 import requests
 
 logger = logging.getLogger(__name__)
-VLLM_ROOT = Path(__file__).resolve().parent.parent.parent
-sys.path.append(os.path.abspath(VLLM_ROOT))
+REPO_ROOT = Path(__file__).resolve().parent.parent.parent
+sys.path.append(os.path.abspath(REPO_ROOT))
 
 # -- Project information -----------------------------------------------------
 
@@ -59,12 +60,26 @@ autodoc2_packages = [
 ]
 autodoc2_output_dir = "api"
 autodoc2_render_plugin = "myst"
-autodoc2_module_all_regexes = ["^vllm$"]
+autodoc2_module_all_regexes = []
 autodoc2_hidden_objects = ["undoc", "dunder", "private", "inherited"]
 autodoc2_docstring_parser_regexes = [
     (".*", "docs.source.autodoc2_docstring_parser"),
 ]
 autodoc2_index_template = None
+
+for path in REPO_ROOT.rglob("vllm/**/__init__.py"):
+    with open(path) as f:
+        content = f.read()
+    # Parse the file content to find the __all__ variable
+    tree = ast.parse(content)
+    for node in tree.body:
+        if isinstance(node, ast.Assign):
+            for target in node.targets:
+                # Check if the target is __all__
+                if isinstance(target, ast.Name) and target.id == "__all__":
+                    all_module_path = path.relative_to(REPO_ROOT).parent
+                    all_module = f"^{all_module_path}$".replace("/", ".")
+                    autodoc2_module_all_regexes.append(all_module)
 
 # Add any paths that contain templates here, relative to this directory.
 templates_path = ['_templates']
@@ -191,9 +206,9 @@ def linkcode_resolve(domain, info):
 
     # Get path from module name
     file = Path(f"{info['module'].replace('.', '/')}.py")
-    path = VLLM_ROOT / file
+    path = REPO_ROOT / file
     if not path.exists():
-        path = VLLM_ROOT / file.with_suffix("") / "__init__.py"
+        path = REPO_ROOT / file.with_suffix("") / "__init__.py"
     if not path.exists():
         return None
 
@@ -213,10 +228,10 @@ def linkcode_resolve(domain, info):
         return None
 
     # If the line number is found, create the URL
-    filename = path.relative_to(VLLM_ROOT)
+    filename = path.relative_to(REPO_ROOT)
     if "checkouts" in path.parts:
         # a PR build on readthedocs
-        pr_number = VLLM_ROOT.name
+        pr_number = REPO_ROOT.name
         base, branch = get_repo_base_and_branch(pr_number)
         if base and branch:
             return f"https://github.com/{base}/blob/{branch}/{filename}#L{lineno}"
