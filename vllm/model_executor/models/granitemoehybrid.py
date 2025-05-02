@@ -232,8 +232,7 @@ class GraniteMoeHybridAttention(nn.Module):
                                        quant_config=quant_config,
                                        prefix=f"{prefix}.o_proj")
 
-        self.position_embedding_type = config.position_embedding_type
-        if self.position_embedding_type == "rope":
+        if config.position_embedding_type == "rope":
             self.rotary_emb = get_rope(
                 self.head_dim,
                 rotary_dim=self.head_dim,
@@ -244,6 +243,8 @@ class GraniteMoeHybridAttention(nn.Module):
                     and config.rope_scaling is not None else None,
                 is_neox_style=True,
             )
+        else:
+            self.rotary_emb = None
 
         self.attn = Attention(self.num_heads,
                               self.head_dim,
@@ -263,7 +264,7 @@ class GraniteMoeHybridAttention(nn.Module):
         key = self.k_proj(hidden_states)[0]
         value = self.v_proj(hidden_states)[0]
 
-        if self.position_embedding_type == "rope":
+        if self.rotary_emb is not None:
             query, key = self.rotary_emb(positions, query, key)
 
         hidden_states = self.attn(query, key, value)
@@ -349,11 +350,11 @@ class GraniteMoeHybridModel(nn.Module):
                 hidden_states = hidden_states * self.embedding_multiplier
             residual = None
         else:
-            assert intermediate_tensors is not None
+            if intermediate_tensors is None:
+                raise RuntimeError('Intermediate tensors may not be None!')
             hidden_states = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
 
-        residual = None
         num_attn = 0
         for i in range(len(self.layers)):
             layer = self.layers[i]
@@ -463,18 +464,19 @@ class GraniteMoeHybridForCausalLM(nn.Module, HasInnerState, SupportsLoRA,
     embedding_padding_modules = ["lm_head"]
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
+        super().__init__()
+
         config = vllm_config.model_config.hf_config
         self.vllm_config = vllm_config
         self.model_config = vllm_config.model_config
         cache_config = vllm_config.cache_config
         lora_config = vllm_config.lora_config
         scheduler_config = vllm_config.scheduler_config
-        assert not cache_config.enable_prefix_caching, \
-            "GraniteMoeHybrid currently does not support prefix caching"
+        if cache_config.enable_prefix_caching:
+            raise RuntimeError(
+                "GraniteMoeHybrid currently does not support prefix caching")
 
         self.quant_config = vllm_config.quant_config
-
-        super().__init__()
         self.config = config
         self.scheduler_config = scheduler_config
         self.model = GraniteMoeHybridModel(vllm_config=vllm_config,

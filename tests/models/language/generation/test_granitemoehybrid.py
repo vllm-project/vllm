@@ -23,7 +23,7 @@ def test_model_equivalence_to_hf_greedy(
     dtype: str,
     max_tokens: int,
     num_logprobs: int,
-):  
+):
     with vllm_runner(model, dtype=dtype) as vllm_model:
         vllm_outputs = vllm_model.generate_greedy_logprobs(
             example_prompts, max_tokens, num_logprobs)
