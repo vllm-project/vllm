@@ -633,7 +633,7 @@ class InputPreprocessor:
             encoder_inputs = token_inputs(prompt="", prompt_token_ids=[])
             decoder_inputs = decoder_inputs_to_override or inputs
         else:
-            assert_never(inputs)
+            assert_never(inputs)  # type: ignore[arg-type]
 
         return encoder_inputs, decoder_inputs
 
