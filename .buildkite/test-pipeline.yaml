@@ -321,7 +321,7 @@ steps:
   - pytest -v -s compile/piecewise/test_toy_llama.py
 
 - label: PyTorch Fullgraph Test # 18min
-  mirror_hardwares: [amdexperimental]
+  mirror_hardwares: [amdexperimental, amdproduction]
   source_file_dependencies:
   - vllm/
   - tests/compile
@@ -657,7 +657,7 @@ steps:
   - pytest -v -s multi_step/test_correctness_llm.py
 
 - label: Pipeline Parallelism Test # 45min
-  mirror_hardwares: [amdexperimental]
+  mirror_hardwares: [amdexperimental, amdproduction]
   working_dir: "/vllm-workspace/tests"
   num_gpus: 4
   source_file_dependencies:
@@ -671,7 +671,7 @@ steps:
   - pytest -v -s distributed/test_pipeline_parallel.py
 
 - label: LoRA TP Test (Distributed)
-  mirror_hardwares: [amdexperimental]
+  mirror_hardwares: [amdexperimental, amdproduction]
   num_gpus: 4
   source_file_dependencies:
   - vllm/lora
