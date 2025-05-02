@@ -30,6 +30,7 @@ from vllm import LLM
 model = LLM("facebook/opt-125m", quantization="fp8")
 # INFO 06-10 17:55:42 model_runner.py:157] Loading model weights took 0.1550 GB
 result = model.generate("Hello, my name is")
+print(result[0].outputs[0].text)
 ```
 
 :::{warning}
@@ -106,6 +107,7 @@ Load and run the model in `vllm`:
 from vllm import LLM
 model = LLM("./Meta-Llama-3-8B-Instruct-FP8-Dynamic")
 model.generate("Hello my name is")
+print(result[0].outputs[0].text)
 ```
 
 Evaluate accuracy with `lm_eval` (for example on 250 samples of `gsm8k`):
@@ -188,4 +190,5 @@ from vllm import LLM
 model = LLM(model="Meta-Llama-3-8B-Instruct-FP8/")
 # INFO 06-10 21:15:41 model_runner.py:159] Loading model weights took 8.4596 GB
 result = model.generate("Hello, my name is")
+print(result[0].outputs[0].text)
 ```
