@@ -83,6 +83,9 @@ class EngineClient(ABC):
         else:
             processed_inputs = preprocessor._prompt_to_llm_inputs(prompt)
 
+        if processed_inputs["type"] == "embeds":
+            raise NotImplementedError
+
         prompt_token_ids = processed_inputs["prompt_token_ids"]
         prompt_text = processed_inputs.get("prompt")
         multi_modal_data = processed_inputs.get("multi_modal_data")
