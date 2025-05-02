@@ -365,8 +365,8 @@ class MPClient(EngineCoreClient):
     ):
         self.vllm_config = vllm_config
         # Serialization setup.
-        self.encoder = MsgpackEncoder()
-        self.decoder = MsgpackDecoder(EngineCoreOutputs)
+        self.encoder = MsgpackEncoder(allow_pickle=True)
+        self.decoder = MsgpackDecoder(EngineCoreOutputs, allow_pickle=True)
 
         # ZMQ setup.
         sync_ctx = zmq.Context(io_threads=2)

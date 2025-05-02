@@ -49,7 +49,7 @@ class MsgpackEncoder:
 
     def __init__(self,
                  size_threshold: Optional[int] = None,
-                 allow_pickle: bool = True):
+                 allow_pickle: bool = False):
         if size_threshold is None:
             size_threshold = envs.VLLM_MSGPACK_ZERO_COPY_THRESHOLD
         self.encoder = msgpack.Encoder(enc_hook=self.enc_hook)
@@ -185,7 +185,7 @@ class MsgpackDecoder:
     not thread-safe when encoding tensors / numpy arrays.
     """
 
-    def __init__(self, t: Optional[Any] = None, allow_pickle: bool = True):
+    def __init__(self, t: Optional[Any] = None, allow_pickle: bool = False):
         args = () if t is None else (t, )
         self.decoder = msgpack.Decoder(*args,
                                        ext_hook=self.ext_hook,

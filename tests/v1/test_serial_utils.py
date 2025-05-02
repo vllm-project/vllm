@@ -63,8 +63,8 @@ def test_encode_decode():
         empty_tensor=torch.empty(0),
     )
 
-    encoder = MsgpackEncoder(size_threshold=256)
-    decoder = MsgpackDecoder(MyType)
+    encoder = MsgpackEncoder(size_threshold=256, allow_pickle=True)
+    decoder = MsgpackDecoder(MyType, allow_pickle=True)
 
     encoded = encoder.encode(obj)
 

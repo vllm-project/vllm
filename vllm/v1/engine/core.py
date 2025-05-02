@@ -501,8 +501,9 @@ class EngineCoreProc(EngineCore):
         """Input socket IO thread."""
 
         # Msgpack serialization decoding.
-        add_request_decoder = MsgpackDecoder(EngineCoreRequest)
-        generic_decoder = MsgpackDecoder()
+        add_request_decoder = MsgpackDecoder(EngineCoreRequest,
+                                             allow_pickle=True)
+        generic_decoder = MsgpackDecoder(allow_pickle=True)
         identity = engine_index.to_bytes(length=2, byteorder="little")
 
         with zmq_socket_ctx(input_path,
@@ -536,7 +537,7 @@ class EngineCoreProc(EngineCore):
         """Output socket IO thread."""
 
         # Msgpack serialization encoding.
-        encoder = MsgpackEncoder()
+        encoder = MsgpackEncoder(allow_pickle=True)
         # Send buffers to reuse.
         reuse_buffers: list[bytearray] = []
         # Keep references to outputs and buffers until zmq is finished
