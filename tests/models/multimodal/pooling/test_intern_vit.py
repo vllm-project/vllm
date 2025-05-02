@@ -7,7 +7,7 @@ from transformers import AutoConfig, AutoModel, CLIPImageProcessor
 
 from vllm.distributed import cleanup_dist_env_and_memory
 
-from ....conftest import _ImageAssets
+from ....conftest import ImageTestAssets
 
 # we use snapshot_download to prevent conflicts between
 # dynamic_module and trust_remote_code for hf_runner
@@ -15,7 +15,7 @@ DOWNLOAD_PATTERN = ["*.json", "*.py", "*.safetensors", "*.txt", "*.model"]
 
 
 def run_intern_vit_test(
-    image_assets: _ImageAssets,
+    image_assets: ImageTestAssets,
     model_id: str,
     *,
     dtype: str,
