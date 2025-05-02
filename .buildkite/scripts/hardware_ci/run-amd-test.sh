@@ -3,9 +3,6 @@
 # This script runs test inside the corresponding ROCm docker container.
 set -o pipefail
 
-# Export Python path
-export PYTHONPATH=".."
-
 # Print ROCm version
 echo "--- Confirming Clean Initial State"
 while true; do
@@ -164,6 +161,8 @@ fi
 
 
 PARALLEL_JOB_COUNT=8
+MYPYTHONPATH=".."
+
 # check if the command contains shard flag, we will run all shards in parallel because the host have 8 GPUs. 
 if [[ $commands == *"--shard-id="* ]]; then
   # assign job count as the number of shards used   
@@ -184,6 +183,7 @@ if [[ $commands == *"--shard-id="* ]]; then
         -e AWS_SECRET_ACCESS_KEY \
         -v "${HF_CACHE}:${HF_MOUNT}" \
         -e "HF_HOME=${HF_MOUNT}" \
+        -e "PYTHONPATH=${MYPYTHONPATH}" \
         --name "${container_name}_${GPU}" \
         "${image_name}" \
         /bin/bash -c "${commands_gpu}" \
@@ -214,6 +214,7 @@ else
           -e AWS_SECRET_ACCESS_KEY \
           -v "${HF_CACHE}:${HF_MOUNT}" \
           -e "HF_HOME=${HF_MOUNT}" \
+          -e "PYTHONPATH=${MYPYTHONPATH}" \
           --name "${container_name}" \
           "${image_name}" \
           /bin/bash -c "${commands}"
