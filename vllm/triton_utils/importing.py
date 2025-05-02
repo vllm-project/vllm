@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 
-import sys
 import types
 from importlib.util import find_spec
 
@@ -45,9 +44,4 @@ if not HAS_TRITON:
             super().__init__("triton.language")
             self.constexpr = None
             self.dtype = None
-
-    sys.modules['triton'] = TritonPlaceholder()
-    sys.modules['triton.language'] = TritonLanguagePlaceholder()
-
-if 'triton' in sys.modules:
-    logger.info("Triton module has been replaced with a placeholder.")
+            self.int64 = None
