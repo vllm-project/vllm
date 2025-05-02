@@ -61,7 +61,10 @@ if TYPE_CHECKING:
 else:
     from pydantic.dataclasses import dataclass
 
+    PlacementGroup = None
+    ExecutorBase = None
     QuantizationConfig = None
+    BaseModelLoader = None
     ConfigType = type
 
 logger = init_logger(__name__)
