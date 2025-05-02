@@ -665,7 +665,7 @@ class Scheduler(SchedulerInterface):
         decoded_output_ids = list(parent_request.output_token_ids)
 
         # probe msg  
-        custom_text = "Oh, I suddenly got the answer to the whole program, **Final Answer**:\n\n\\[\\boxed{]"
+        custom_text = "... Oh, I suddenly got the answer to the whole problem, **Final Answer**\n\n\\[ \\boxed{"
         
         custom_token_ids = list(self.tokenizer.encode(custom_text, add_special_tokens=False))
 
@@ -713,13 +713,15 @@ class Scheduler(SchedulerInterface):
         # expensive operations inside the loop.
         for request in self.running:
             if self.enable_dynasor_abort and request.request_id in self.probe_answers:
+                
                 answers = self.probe_answers[request.request_id]
+                print("List Probe Answers:",answers)
                 if len(answers) >= 2:
                     # Window size of 2
                     if answers[-1] == answers[-2]:
                         # Abort the request
-                        logger_myown.info(f"[Dynasor-Abort] Confident answer detected. Aborting {request.request_id}.")
-            if len(request.output_token_ids) in [32, 64, 128, 256]:
+                        print(f"[Dynasor-Abort] Confident answer detected. Aborting {request.request_id}.")
+            if len(request.output_token_ids) in [20, 40]:
 
                 if "probe" not in request.request_id:
                     
@@ -897,11 +899,17 @@ class Scheduler(SchedulerInterface):
         if "probe" in request.request_id:
             key = request.request_id.split("_")[0]
             print("CHECK OUT:",key)
+
+
+            decoded_text = self.tokenizer.decode(request.output_token_ids, skip_special_tokens=True)
+            current_answer = extract_final_answer(decoded_text)
+            print("DECODE TEXT :",decoded_text)
             if key not in self.probe_answers:
-                print("CHECKOUT :",request.output_token_ids)
-                self.probe_answers[key] = [request.output_token_ids]
+                print("Current Answer :",current_answer)
+                self.probe_answers[key] = [current_answer]
             else:
-                self.probe_answers[key].append(request.output_token_ids)
+                print("Second Answer :",current_answer)
+                self.probe_answers[key].append(current_answer)
         self.kv_cache_manager.free(request)
         self.kv_cache_manager.free_block_hashes(request)
         self.encoder_cache_manager.free(request)
@@ -952,4 +960,27 @@ class Scheduler(SchedulerInterface):
     def shutdown(self) -> None:
         if self.kv_event_publisher:
             self.kv_event_publisher.shutdown()
+
+import re
+
+import re
+from typing import Optional
+
+def extract_final_answer(text: str) -> Optional[str]:
+    # First, try the \boxed{...} pattern
+    match = re.search(r"\\boxed{(.*?)}", text)
+    if match:
+        return match.group(1).strip()
+
+    # Then try "Final Answer: ..." style
+    match = re.search(r"Final Answer\s*[:\-]?\s*(.*)", text, re.IGNORECASE)
+    if match:
+        return match.group(1).strip()
+
+    # Fallback: look for a number or expression ending in } \]
+    match = re.search(r"([^\s{}\\]+)}\s*\\\]", text)
+    if match:
+        return match.group(1).strip()
+
+    return None
 

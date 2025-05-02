@@ -10,7 +10,7 @@ llm = LLM(
 )
 # Load a few GSM8K examples
 ds = load_dataset("openai/gsm8k", "main", split="test")
-ds = ds.select(range(2))  # select first 2 for testing
+different_questions = ds.select(range(2))  # Select a few examples for testing
 
 # Sampling parameters
 sampling_params = SamplingParams(
