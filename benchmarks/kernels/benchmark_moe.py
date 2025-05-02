@@ -115,8 +115,8 @@ def benchmark_config(config: BenchmarkConfig,
         from vllm.model_executor.layers.fused_moe import override_config
         with override_config(config):
             if use_deep_gemm:
-                topk_weights, topk_ids = fused_topk(x, input_gating, topk,
-                                                    False)
+                topk_weights, topk_ids, token_expert_indices = fused_topk(
+                    x, input_gating, topk, False)
                 return fused_experts(
                     x,
                     w1,
