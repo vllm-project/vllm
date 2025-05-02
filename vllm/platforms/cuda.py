@@ -151,7 +151,7 @@ class CudaPlatformBase(Platform):
                 logger.info(
                     "Forcing kv cache block size to 64 for FlashMLA backend.")
 
-        if (parallel_config.data_parallel_size > 1
+        if (False and parallel_config.data_parallel_size > 1
                 and compilation_config.use_cudagraph):
             logger.info(
                 "Data Parallel: Forcing enforce eager to be True since DP is "

@@ -31,6 +31,7 @@ import os
 from time import sleep
 
 from vllm import LLM, SamplingParams
+from vllm.config import CompilationConfig
 from vllm.utils import get_open_port
 
 
@@ -65,11 +66,14 @@ def parse_args():
                         type=int,
                         default=0,
                         help="Master node port")
+    parser.add_argument("--enforce-eager",
+                        action='store_true',
+                        help="Enforce eager mode execution.")
     return parser.parse_args()
 
 
 def main(model, dp_size, local_dp_rank, global_dp_rank, dp_master_ip,
-         dp_master_port, GPUs_per_dp_rank):
+         dp_master_port, GPUs_per_dp_rank, enforce_eager):
     os.environ["VLLM_DP_RANK"] = str(global_dp_rank)
     os.environ["VLLM_DP_RANK_LOCAL"] = str(local_dp_rank)
     os.environ["VLLM_DP_SIZE"] = str(dp_size)
@@ -109,10 +113,14 @@ def main(model, dp_size, local_dp_rank, global_dp_rank, dp_master_ip,
                                      max_tokens=[16, 20][global_dp_rank % 2])
 
     # Create an LLM.
+    cconfig = CompilationConfig(
+        level=0,
+    )
     llm = LLM(model=model,
               tensor_parallel_size=GPUs_per_dp_rank,
-              enforce_eager=True,
-              enable_expert_parallel=True)
+              enforce_eager=enforce_eager,
+              enable_expert_parallel=True,
+              compilation_config=cconfig)
     outputs = llm.generate(prompts, sampling_params)
     # Print the outputs.
     for i, output in enumerate(outputs):
@@ -155,7 +163,7 @@ if __name__ == "__main__":
         proc = Process(target=main,
                        args=(args.model, dp_size, local_dp_rank,
                              global_dp_rank, dp_master_ip, dp_master_port,
-                             tp_size))
+                             tp_size, args.enforce_eager))
         proc.start()
         procs.append(proc)
     exit_code = 0

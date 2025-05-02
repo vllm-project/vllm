@@ -1641,6 +1641,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self.drafter.dummy_run(num_tokens)
 
         logit_indices = np.cumsum(num_scheduled_tokens) - 1
+        #logit_indices = torch.from_numpy(logit_indices).to(hidden_states.device)
         return hidden_states[logit_indices]
 
     @torch.inference_mode()

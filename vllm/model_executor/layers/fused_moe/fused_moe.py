@@ -870,7 +870,8 @@ def fused_topk(
     gating_output: torch.Tensor,
     topk: int,
     renormalize: bool,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    indices_type: torch.dtype = torch.int32,
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     assert hidden_states.shape[0] == gating_output.shape[0], (
         "Number of tokens mismatch")
 
@@ -882,7 +883,7 @@ def fused_topk(
                                device=hidden_states.device)
     topk_ids = torch.empty(M,
                            topk,
-                           dtype=torch.int32,
+                           dtype=indices_type,
                            device=hidden_states.device)
     token_expert_indicies = torch.empty(M,
                                         topk,
