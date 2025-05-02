@@ -281,8 +281,7 @@ class CPUMLAImpl(MLACommonImpl[CPUMLAMetadata]):
         # remove padding
         output = output.view(-1, self.num_heads,
                              q.shape[-1])[..., :v.shape[-1]]
-        output = output.reshape(-1, self.num_heads * v.shape[-1])
-        return self.o_proj(output)[0]
+        return output.reshape(-1, self.num_heads * v.shape[-1])
 
     def _forward_decode(
             self,
@@ -303,4 +302,4 @@ class CPUMLAImpl(MLACommonImpl[CPUMLAMetadata]):
         ops.mla_decode_kvcache_cpu(o, q, kv_c_and_k_pe_cache, self.scale,
                                    decode_meta.block_tables,
                                    decode_meta.seq_lens_tensor)
-        return self._v_up_proj_and_o_proj(o)
+        return self._v_up_proj(o)

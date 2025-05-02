@@ -1564,6 +1564,16 @@ class LoadConfig:
     use_tqdm_on_load: bool = True
     """Whether to enable tqdm for showing progress bar when loading model
     weights."""
+    pt_load_map_location: Union[str, dict[str, str]] = "cpu"
+    """
+    pt_load_map_location: the map location for loading pytorch checkpoint, to
+    support loading checkpoints can only be loaded on certain devices like
+    "cuda", this is equivalent to {"": "cuda"}. Another supported format is
+    mapping from different devices like from GPU 1 to GPU 0:
+    {"cuda:1": "cuda:0"}. Note that when passed from command line, the strings
+    in dictionary needs to be double quoted for json parsing. For more details,
+    see original doc for `map_location` in https://pytorch.org/docs/stable/generated/torch.load.html
+    """
 
     def compute_hash(self) -> str:
         """
@@ -1898,6 +1908,13 @@ class SchedulerConfig:
 
     NOTE: This will be replaced by speculative config in the future; it is
     present to enable correctness tests until then."""
+
+    cuda_graph_sizes: list[int] = field(default_factory=lambda: [512])
+    """Cuda graph capture sizes, default is 512.
+    1. if one value is provided, then the capture list would follow the pattern:
+        [1, 2, 4] + [i for i in range(8, cuda_graph_sizes + 1, 8)]
+    2. more than one value (e.g. 1 2 128) is provided,
+        then the capture list will follow the provided list."""
 
     delay_factor: float = 0.0
     """Apply a delay (of delay factor multiplied by previous
@@ -4297,13 +4314,19 @@ class VllmConfig:
             batch_size_capture_list = []
             if self.model_config is not None and \
                 not self.model_config.enforce_eager:
-                batch_size_capture_list = [1, 2, 4
-                                           ] + [i for i in range(8, 513, 8)]
+                cuda_graph_sizes = self.scheduler_config.cuda_graph_sizes
+                if len(cuda_graph_sizes) == 1:
+                    batch_size_capture_list = [1, 2, 4] + [
+                        i for i in range(8, cuda_graph_sizes[0] + 1, 8)
+                    ]
+                elif len(cuda_graph_sizes) > 1:
+                    batch_size_capture_list = sorted(cuda_graph_sizes)
+                else:
+                    raise TypeError(f"Invalid value for {cuda_graph_sizes=}.")
                 if self.parallel_config.tensor_parallel_size > 1 and \
                     self.compilation_config.pass_config.enable_sequence_parallelism:
                     batch_size_capture_list = \
                         self.update_sizes_for_sequence_parallelism(batch_size_capture_list)
-
                 max_num_tokens = self.scheduler_config.max_num_batched_tokens
                 batch_size_capture_list = [
                     size for size in batch_size_capture_list

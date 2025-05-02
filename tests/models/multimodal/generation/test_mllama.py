@@ -14,8 +14,8 @@ from vllm.model_executor.models.mllama import MllamaForConditionalGeneration
 from vllm.multimodal.image import rescale_image_size
 from vllm.sequence import SampleLogprobs
 
-from ....conftest import (IMAGE_ASSETS, HfRunner, PromptImageInput, VllmRunner,
-                          _ImageAssets)
+from ....conftest import (IMAGE_ASSETS, HfRunner, ImageTestAssets,
+                          PromptImageInput, VllmRunner)
 from ....quantization.utils import is_quant_method_supported
 from ....utils import (create_new_process_for_each_test, large_gpu_test,
                        multi_gpu_test)
@@ -90,7 +90,7 @@ def vllm_to_hf_output(vllm_output: tuple[list[int], str,
 
 
 def _get_inputs(
-    image_assets: _ImageAssets,
+    image_assets: ImageTestAssets,
     *,
     size_factors: Optional[list[float]] = None,
     sizes: Optional[list[tuple[int, int]]] = None,
@@ -126,7 +126,7 @@ def _get_inputs(
 def run_test(
     hf_runner: type[HfRunner],
     vllm_runner: type[VllmRunner],
-    image_assets: _ImageAssets,
+    image_assets: ImageTestAssets,
     model: str,
     *,
     size_factors: list[float],
@@ -143,7 +143,7 @@ def run_test(
 def run_test(
     hf_runner: type[HfRunner],
     vllm_runner: type[VllmRunner],
-    image_assets: _ImageAssets,
+    image_assets: ImageTestAssets,
     model: str,
     *,
     sizes: list[tuple[int, int]],
@@ -159,7 +159,7 @@ def run_test(
 def run_test(
     hf_runner: type[HfRunner],
     vllm_runner: type[VllmRunner],
-    image_assets: _ImageAssets,
+    image_assets: ImageTestAssets,
     model: str,
     *,
     size_factors: Optional[list[float]] = None,
@@ -433,7 +433,7 @@ def test_models_distributed(
 @pytest.mark.skipif(not is_quant_method_supported("bitsandbytes"),
                     reason='bitsandbytes is not supported on this GPU type.')
 def test_bnb_regression(
-    image_assets: _ImageAssets,
+    image_assets: ImageTestAssets,
     model: str,
     dtype: str,
     max_tokens: int,
@@ -473,7 +473,7 @@ def test_bnb_regression(
 @pytest.mark.parametrize("dtype", ["bfloat16"])
 @pytest.mark.parametrize("max_tokens", [32])
 def test_explicit_implicit_prompt(
-    image_assets: _ImageAssets,
+    image_assets: ImageTestAssets,
     model: str,
     dtype: str,
     max_tokens: int,
