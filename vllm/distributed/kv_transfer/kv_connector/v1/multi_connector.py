@@ -89,18 +89,19 @@ class MultiConnector(KVConnectorBase_V1):
             # The first connector that has new matched tokens will be assigned
             # to this request.
             if toks > 0:
-                self._requests_to_connector[request.req_id] = c
+                self._requests_to_connector[request.request_id] = c
                 return toks
         return 0
 
     def update_state_after_alloc(self, request: "Request",
+                                 block_ids: list[int],
                                  num_external_tokens: int):
         # If the request is not assigned to any connector, we do nothing.
-        if request.req_id not in self._requests_to_connector:
+        if request.request_id not in self._requests_to_connector:
             return
         # We assume that the request is assigned to only one connector.
-        c = self._requests_to_connector.pop(request.req_id)
-        c.update_state_after_alloc(request, num_external_tokens)
+        c = self._requests_to_connector.pop(request.request_id)
+        c.update_state_after_alloc(request, block_ids, num_external_tokens)
 
     def build_connector_meta(
             self,
