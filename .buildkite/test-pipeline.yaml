@@ -202,6 +202,7 @@ steps:
     - tests/v1
   commands:
     # split the test to avoid interference
+    - pip install mteb
     - pytest -v -s v1/core
     - pytest -v -s v1/engine
     - pytest -v -s v1/entrypoints
@@ -456,6 +457,7 @@ steps:
   - vllm/
   - tests/models/language
   commands:
+    - pip install mteb
     # Install causal-conv1d for plamo2 models here, as it is not compatible with pip-compile.
     - pip install 'git+https://github.com/Dao-AILab/causal-conv1d@v1.5.0.post8'
     - pytest -v -s models/language -m core_model
@@ -576,6 +578,7 @@ steps:
   - tests/v1/test_async_llm_dp.py
   - vllm/v1/engine/
   commands:
+  - pip install mteb
   - TP_SIZE=1 DP_SIZE=2 pytest -v -s v1/test_async_llm_dp.py
   - pytest -v -s entrypoints/llm/test_collective_rpc.py
   - pytest -v -s ./compile/test_basic_correctness.py
