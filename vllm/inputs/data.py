@@ -2,6 +2,7 @@
 from collections.abc import Iterable
 from typing import TYPE_CHECKING, Any, Generic, Literal, Optional, Union, cast
 
+import torch
 from typing_extensions import NotRequired, TypedDict, TypeVar
 
 if TYPE_CHECKING:
@@ -63,12 +64,20 @@ class TokensPrompt(TypedDict):
     """
 
 
-SingletonPrompt = Union[str, TextPrompt, TokensPrompt]
+class EmbedsPrompt(TypedDict):
+    """Schema for a prompt provided via token embeddings."""
+
+    prompt_embeds: torch.Tensor
+    """The embeddings of the prompt."""
+
+
+SingletonPrompt = Union[str, TextPrompt, TokensPrompt, EmbedsPrompt]
 """
 Set of possible schemas for a single prompt:
 
 - A text prompt (:class:`str` or :class:`TextPrompt`)
 - A tokenized prompt (:class:`TokensPrompt`)
+- An embeddings prompt (:class:`EmbedsPrompt`)
 
 Note that "singleton" is as opposed to a data structure
 which encapsulates multiple prompts, i.e. of the sort
@@ -129,6 +138,7 @@ both decoder-only and encoder/decoder input types:
 
 - A text prompt (:class:`str` or :class:`TextPrompt`)
 - A tokenized prompt (:class:`TokensPrompt`)
+- An embeddings prompt (:class:`EmbedsPrompt`)
 - A single data structure containing both an encoder and a decoder prompt
   (:class:`ExplicitEncoderDecoderPrompt`)
 """
@@ -176,7 +186,27 @@ def token_inputs(
     return inputs
 
 
-DecoderOnlyInputs = Union[TokenInputs, "MultiModalInputs"]
+class EmbedsInputs(TypedDict):
+    """Represents embeddings-based inputs."""
+
+    type: Literal["embeds"]
+    """The type of inputs."""
+
+    prompt_embeds: torch.Tensor
+    """The embeddings of the prompt."""
+
+
+def embeds_inputs(prompt_embeds: torch.Tensor) -> EmbedsInputs:
+    """Construct :class:`EmbedsInputs` from optional values."""
+    inputs = EmbedsInputs(
+        type="embeds",
+        prompt_embeds=prompt_embeds,
+    )
+
+    return inputs
+
+
+DecoderOnlyInputs = Union[TokenInputs, EmbedsInputs, "MultiModalInputs"]
 """
 The inputs in :class:`~vllm.LLMEngine` before they are
 passed to the model executor.
@@ -198,7 +228,7 @@ class EncoderDecoderInputs(TypedDict):
     """The inputs for the decoder portion."""
 
 
-SingletonInputs = Union[TokenInputs, "MultiModalInputs"]
+SingletonInputs = Union[TokenInputs, EmbedsInputs, "MultiModalInputs"]
 """
 A processed :class:`SingletonPrompt` which can be passed to
 :class:`vllm.sequence.Sequence`.
