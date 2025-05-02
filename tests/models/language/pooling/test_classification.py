@@ -1,8 +1,4 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Compare the classification outputs of HF and vLLM models.
-
-Run `pytest tests/models/test_cls_models.py`.
-"""
 import pytest
 import torch
 from transformers import AutoModelForSequenceClassification
@@ -19,7 +15,7 @@ from vllm.platforms import current_platform
 )
 @pytest.mark.parametrize("dtype",
                          ["half"] if current_platform.is_rocm() else ["float"])
-def test_classification_models(
+def test_models(
     hf_runner,
     vllm_runner,
     example_prompts,
