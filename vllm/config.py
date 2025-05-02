@@ -268,7 +268,7 @@ class ModelConfig:
     It can be a branch name, a tag name, or a commit id. If unspecified, will
     use the default version."""
     rope_scaling: dict[str, Any] = field(default_factory=dict)
-    """RoPE scaling configuration in JSON format. For example,
+    """RoPE scaling configuration. For example,
     `{"rope_type":"dynamic","factor":2.0}`."""
     rope_theta: Optional[float] = None
     """RoPE theta. Use with `rope_scaling`. In some cases, changing the RoPE
@@ -346,14 +346,13 @@ class ModelConfig:
     (stored in `~/.huggingface`)."""
     hf_overrides: HfOverrides = field(default_factory=dict)
     """If a dictionary, contains arguments to be forwarded to the Hugging Face
-    config. If a callable, it is called to update the HuggingFace config. When
-    specified via CLI, the argument must be a valid JSON string."""
+    config. If a callable, it is called to update the HuggingFace config."""
     mm_processor_kwargs: Optional[dict[str, Any]] = None
     """Arguments to be forwarded to the model's processor for multi-modal data,
     e.g., image processor. Overrides for the multi-modal processor obtained
     from `AutoProcessor.from_pretrained`. The available overrides depend on the
     model that is being run. For example, for Phi-3-Vision: `{"num_crops": 4}`.
-    When specified via CLI, the argument must be a valid JSON string."""
+    """
     disable_mm_preprocessor_cache: bool = False
     """If `True`, disable caching of the multi-modal preprocessor/mapper (not
     recommended)."""
@@ -361,15 +360,14 @@ class ModelConfig:
     """Initialize non-default neuron config or override default neuron config
     that are specific to Neuron devices, this argument will be used to
     configure the neuron config that can not be gathered from the vllm
-    arguments. e.g. `{"cast_logits_dtype": "bloat16"}`. When specified via CLI,
-    the argument must be a valid JSON string."""
+    arguments. e.g. `{"cast_logits_dtype": "bloat16"}`."""
     pooler_config: Optional["PoolerConfig"] = field(init=False)
     """Pooler config which controls the behaviour of output pooling in pooling
     models."""
     override_pooler_config: Optional[Union[dict, "PoolerConfig"]] = None
     """Initialize non-default pooling config or override default pooling config
     for the pooling model. e.g. `{"pooling_type": "mean", "normalize": false}`.
-    When specified via CLI, the argument must be a valid JSON string."""
+    """
     logits_processor_pattern: Optional[str] = None
     """Optional regex pattern specifying valid logits processor qualified names
     that can be passed with the `logits_processors` extra completion argument.
@@ -385,8 +383,7 @@ class ModelConfig:
     """Overrides or sets generation config. e.g. `{"temperature": 0.5}`. If
     used with `--generation-config auto`, the override parameters will be
     merged with the default config from the model. If used with
-    `--generation-config vllm`, only the override parameters are used.
-    When specified via CLI, the argument must be a valid JSON string."""
+    `--generation-config vllm`, only the override parameters are used."""
     enable_sleep_mode: bool = False
     """Enable sleep mode for the engine (only cuda platform is supported)."""
     model_impl: Union[str, ModelImpl] = ModelImpl.AUTO.value
@@ -1556,8 +1553,7 @@ class LoadConfig:
     cache directory of Hugging Face."""
     model_loader_extra_config: dict = field(default_factory=dict)
     """Extra config for model loader. This will be passed to the model loader
-    corresponding to the chosen load_format. This should be a JSON string that
-    will be parsed into a dictionary."""
+    corresponding to the chosen load_format."""
     ignore_patterns: Optional[Union[list[str], str]] = None
     """The list of patterns to ignore when loading the model. Default to
     "original/**/*" to avoid repeated loading of llama's checkpoints."""
@@ -2826,7 +2822,6 @@ class MultiModalConfig:
                                                  "limit_mm_per_prompt")
     """
     The maximum number of input items allowed per prompt for each modality.
-    This should be a JSON string that will be parsed into a dictionary.
     Defaults to 1 (V0) or 999 (V1) for each modality.
 
     For example, to allow up to 16 images and 2 videos per prompt:
