@@ -1458,14 +1458,14 @@ class EngineArgs:
         if current_platform.is_tpu():
             default_max_num_batched_tokens_tpu = {
                 UsageContext.LLM_CLASS: {
-                    'v6e': 2048,
-                    'v5e': 1024,
-                    'v5p': 512,
+                    'V6E': 2048,
+                    'V5E': 1024,
+                    'V5P': 512,
                 },
                 UsageContext.OPENAI_API_SERVER: {
-                    'v6e': 1024,
-                    'v5e': 512,
-                    'v5p': 256,
+                    'V6E': 1024,
+                    'V5E': 512,
+                    'V5P': 256,
                 }
             }
 
@@ -1473,14 +1473,15 @@ class EngineArgs:
         if (self.max_num_batched_tokens is None
                 and usage_context in default_max_num_batched_tokens):
             if current_platform.is_tpu():
-                from tpu_info import device
-                try:
-                    chip_type, _ = device.get_local_chips()
-                    self.max_num_batched_tokens = default_max_num_batched_tokens_tpu[
-                        usage_context][chip_type.name.lower()]
-                except Exception:
-                    self.max_num_batched_tokens = default_max_num_batched_tokens[
-                        usage_context]
+                chip_name = current_platform.get_device_name()
+                if chip_name in default_max_num_batched_tokens_tpu[
+                        usage_context]:
+                    self.max_num_batched_tokens = \
+                        default_max_num_batched_tokens_tpu[
+                            usage_context][chip_name]
+                else:
+                    self.max_num_batched_tokens = \
+                        default_max_num_batched_tokens[usage_context]
             else:
                 self.max_num_batched_tokens = default_max_num_batched_tokens[
                     usage_context]
