@@ -44,8 +44,8 @@ The main script generates several log files:
 
 ## 2. CPU Offload Examples
 
-- `cpu_offload_lmcache_v0.py` - CPU offloading implementation for vLLM v0
-- `cpu_offload_lmcache_v1.py` - CPU offloading implementation for vLLM v1
+- `python cpu_offload_lmcache.py -v v0` - CPU offloading implementation for vLLM v0
+- `python cpu_offload_lmcache.py -v v1` - CPU offloading implementation for vLLM v1
 
 ## 3. KV Cache Sharing
 

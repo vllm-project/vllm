@@ -106,11 +106,14 @@ def use_rocm_custom_paged_attention(qtype: torch.dtype, head_size: int,
                                     max_seq_len: int,
                                     sliding_window: int) -> bool:
 
+    GPU_ARCH = torch.cuda.get_device_properties("cuda").gcnArchName
+    ON_GFX9 = any(arch in GPU_ARCH for arch in ["gfx90a", "gfx942", "gfx950"])
+
     # rocm custom page attention not support on gfx1*
     # custom paged attn always supported on V0. On V1, requires sliding window
     # disabled due to observed numerical discrepancy.
-    return (on_mi250_mi300() and (not envs.VLLM_USE_V1 or sliding_window == 0
-                                  or sliding_window == (-1, -1))
+    return (ON_GFX9 and (not envs.VLLM_USE_V1 or sliding_window == 0
+                         or sliding_window == (-1, -1))
             and (qtype == torch.half or qtype == torch.bfloat16)
             and (head_size == 64 or head_size == 128)
             and (block_size == 16 or block_size == 32)
@@ -337,7 +340,7 @@ class RocmPlatform(Platform):
     def use_custom_allreduce(cls) -> bool:
         # We only enable custom allreduce for MI300 series
         gcn_arch = torch.cuda.get_device_properties(0).gcnArchName
-        supported_archs = ['gfx94']
+        supported_archs = ['gfx94', 'gfx95']
         return any(gfx in gcn_arch for gfx in supported_archs)
 
     @classmethod

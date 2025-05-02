@@ -439,11 +439,9 @@ def load_nvlm_d(question: str, image_urls: list[str]) -> ModelRequestData:
 # Ovis2
 def load_ovis2(question: str, image_urls: list[str]) -> ModelRequestData:
     model_name = "AIDC-AI/Ovis2-1B"
-    tokenizer = "Isotr0py/Ovis2-tokenizer"
 
     engine_args = EngineArgs(
         model=model_name,
-        tokenizer=tokenizer,
         max_model_len=8192,
         max_num_seqs=2,
         trust_remote_code=True,

@@ -68,18 +68,25 @@ class FixFunctionalizationPass(VllmInductorPass):
                 self.defunctionalize(graph, node, mutated_args)
             elif at_target in [
                     torch.ops._C.rms_norm.default,
-                    torch.ops._C.rms_norm_static_fp8_quant.default
+                    torch.ops._C.rms_norm_static_fp8_quant.default,
             ]:
                 mutated_args = {1: 'result'}
                 self.defunctionalize(graph, node, mutated_args)
-
+            # For some reason we need to specify the args for both
+            # silu_and_mul and silu_and_mul_quant. The kwargs
+            # pathway gets the wrong answer.
             elif at_target == torch.ops._C.silu_and_mul.default:
-                mutated_args = {1: 'out'}
-                # Because we have an 'out', need to specify args directly
+                mutated_args = {1: 'result'}
                 self.defunctionalize(graph,
                                      node,
                                      mutated_args,
-                                     args=('out', 'input'))
+                                     args=('result', 'input'))
+            elif at_target == torch.ops._C.silu_and_mul_quant.default:
+                mutated_args = {1: 'result'}
+                self.defunctionalize(graph,
+                                     node,
+                                     mutated_args,
+                                     args=('result', 'input', 'scale'))
             else:
                 continue  # skip the count
 

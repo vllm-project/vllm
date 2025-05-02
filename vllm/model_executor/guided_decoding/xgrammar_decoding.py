@@ -346,7 +346,7 @@ class XGrammarLogitsProcessor:
                  scores: torch.Tensor) -> torch.Tensor:
 
         # Skip the structured logits processing if reasoning is not finished.
-        # reasoner is not None only when `--enable-reasoning` is set.
+        # reasoner is not None only when `--reasoning-parser` is set.
         if self.reasoner is not None and \
         not self.reasoner.is_reasoning_end(
                 input_ids):
