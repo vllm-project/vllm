@@ -37,11 +37,11 @@ steps:
   no_gpu: True
   commands:
   - pip install -r ../../requirements/docs.txt
-    # mteb installed a library named docs for python.
-    # This will conflict with vllm docs
-    # Let's delete it
-  - python -c 'import shutil;import site;' \
-    'shutil.rmtree(site.getsitepackages()[0] + "/docs", ignore_errors=True)'
+  # mteb installed a library named docs for python.
+  # This will conflict with vllm docs
+  # Let's delete it
+  - python -c 'import shutil;import site; \
+      shutil.rmtree(site.getsitepackages()[0] + "/docs", ignore_errors=True)'
   - SPHINXOPTS=\"-W\" make html
   # Check API reference (if it fails, you may have missing mock imports)
   - grep \"sig sig-object py\" build/html/api/inference_params.html
