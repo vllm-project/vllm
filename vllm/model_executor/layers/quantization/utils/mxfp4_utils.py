@@ -7,6 +7,7 @@ import vllm.envs as envs
 
 OCP_MX_BLOCK_SIZE = 32
 
+
 def per_token_group_dequant_mxfp4(x: torch.Tensor, scale: torch.Tensor,
                                   block_k: int,
                                   float_dtype: torch.dtype) -> torch.Tensor:
