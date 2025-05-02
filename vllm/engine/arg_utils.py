@@ -179,7 +179,7 @@ def get_kwargs(cls: ConfigType) -> dict[str, Any]:
             if hasattr(dataclass_hint, "from_cli"):
                 kwargs[name]["type"] = dataclass_hint.from_cli
             kwargs[name]["help"] += json_tip
-        if contains_type(type_hints, bool):
+        elif contains_type(type_hints, bool):
             # Creates --no-<name> and --<name> flags
             kwargs[name]["action"] = argparse.BooleanOptionalAction
         elif contains_type(type_hints, Literal):
