@@ -423,5 +423,4 @@ def test_load_config_pt_load_map_location(pt_load_map_location):
     load_config = LoadConfig(pt_load_map_location=pt_load_map_location)
     config = VllmConfig(load_config=load_config)
 
-    print(config.load_config.pt_load_map_location)
     assert config.load_config.pt_load_map_location == pt_load_map_location
