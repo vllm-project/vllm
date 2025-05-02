@@ -15,7 +15,7 @@ from vllm.config import TaskOption
 from vllm.sequence import SampleLogprobs
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 
-from .....conftest import IMAGE_ASSETS, HfRunner, ImageAsset, _ImageAssets
+from .....conftest import IMAGE_ASSETS, HfRunner, ImageAsset, ImageTestAssets
 from ....utils import check_logprobs_close
 
 # meta image tag; will be replaced by the appropriate tag for the model
@@ -85,7 +85,7 @@ class VLMTestInfo(NamedTuple):
 
     # Function for converting ImageAssets to image embeddings;
     # We need to define this explicitly for embedding tests
-    convert_assets_to_embeddings: Optional[Callable[[_ImageAssets],
+    convert_assets_to_embeddings: Optional[Callable[[ImageTestAssets],
                                                     torch.Tensor]] = None
 
     # Exposed options for vLLM runner; we change these in a several tests,
@@ -141,7 +141,7 @@ class VLMTestInfo(NamedTuple):
     # for Qwen-VL, which requires encoding the image path / url into the prompt
     # for HF runner
     prompt_path_encoder: Optional[
-        Callable[[PosixPath, str, Union[list[ImageAsset], _ImageAssets]],
+        Callable[[PosixPath, str, Union[list[ImageAsset], ImageTestAssets]],
                  str]] = None  # noqa: E501
 
     # Allows configuring a test to run with custom inputs

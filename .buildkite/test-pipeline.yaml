@@ -293,6 +293,7 @@ steps:
   parallelism: 4
 
 - label: PyTorch Compilation Unit Tests
+  torch_nightly: true
   source_file_dependencies:
     - vllm/
     - tests/compile
@@ -302,6 +303,7 @@ steps:
     - pytest -v -s compile/test_sequence_parallelism.py
 
 - label: PyTorch Fullgraph Smoke Test # 9min
+  torch_nightly: true
   source_file_dependencies:
   - vllm/
   - tests/compile
@@ -312,6 +314,7 @@ steps:
   - pytest -v -s compile/piecewise/test_toy_llama.py
 
 - label: PyTorch Fullgraph Test # 18min
+  torch_nightly: true
   source_file_dependencies:
   - vllm/
   - tests/compile
@@ -436,6 +439,7 @@ steps:
 #####  models test  #####
 
 - label: Basic Models Test # 24min
+  torch_nightly: true
   source_file_dependencies:
   - vllm/
   - tests/models
