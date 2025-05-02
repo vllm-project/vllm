@@ -201,7 +201,7 @@ def linkcode_resolve(domain, info):
     with open(path) as f:
         lines = f.readlines()
     name = info['fullname'].split(".")[-1]
-    pattern = f"^( {4})*((def|class) )?{name}.*"
+    pattern = fr"^( {{4}})*((def|class) )?{name}\b.*"
     for lineno, line in enumerate(lines, 1):
         if not line or line.startswith("#"):
             continue
