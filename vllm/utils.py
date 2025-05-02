@@ -1339,10 +1339,7 @@ class _FlexibleArgumentGroup(_ArgumentGroup):
             object.__setattr__(action, 'deprecated', deprecated)
             if deprecated and action.dest not in \
                     self._parser.__class__._deprecated:
-                self._parser._warning(
-                    _gettext("argument '%(argument_name)s' is deprecated") %
-                    {'argument_name': action.dest})
-                self._parser._deprecated.add(action.dest)
+                self._parser._deprecated.add(action)
             return action
 
         # python>3.13
@@ -1352,7 +1349,8 @@ class _FlexibleArgumentGroup(_ArgumentGroup):
 class FlexibleArgumentParser(ArgumentParser):
     """ArgumentParser that allows both underscore and dash in names."""
 
-    _deprecated: set[str] = set()
+    _deprecated: set[Action] = set()
+    _seen: set[str] = set()
 
     def __init__(self, *args, **kwargs):
         # Set the default 'formatter_class' to SortedHelpFormatter
@@ -1360,38 +1358,37 @@ class FlexibleArgumentParser(ArgumentParser):
             kwargs['formatter_class'] = SortedHelpFormatter
         super().__init__(*args, **kwargs)
 
-    def add_argument(self, *args: Any, **kwargs: Any):
-        # add a deprecated=True with optional deprecated_reason to signify
-        # reasons for deprecating this args
-        if sys.version_info < (3, 13):
+    if sys.version_info < (3, 13):
+        def parse_known_args(  # type: ignore[override]
+            self,
+            args: Sequence[str] | None = None,
+            namespace: Namespace | None = None,
+        ) -> tuple[Namespace | None, list[str]]:
+            namespace, args = super().parse_known_args(args, namespace)
+            for action in FlexibleArgumentParser._deprecated:
+                if action.dest not in FlexibleArgumentParser._seen and getattr(namespace, action.dest, None) != action.default:
+                    self._warning(
+                        _gettext("argument '%(argument_name)s' is deprecated") %
+                        {'argument_name': action.dest})
+                    FlexibleArgumentParser._seen.add(action.dest)
+            return namespace, args
+
+        def add_argument(self, *args: Any, **kwargs: Any):
+            # add a deprecated=True compatibility
+            # for python < 3.13
             deprecated = kwargs.pop('deprecated', False)
             action = super().add_argument(*args, **kwargs)
             object.__setattr__(action, 'deprecated', deprecated)
             if deprecated and \
-                action.dest not in FlexibleArgumentParser._deprecated:
-                self._warning(
-                    _gettext("argument '%(argument_name)s' is deprecated") %
-                    {'argument_name': action.dest})
-                self._deprecated.add(action.dest)
+                action not in FlexibleArgumentParser._deprecated:
+                self._deprecated.add(action)
 
             return action
 
-        # python>3.13
-        return super().add_argument(*args, **kwargs)
-
-    def _warning(self, message: str):
-        self._print_message(
-            _gettext('warning: %(message)s\n') % {'message': message},
-            sys.stderr)
-
-    def parse_known_args(
-        self,
-        args: list[str],
-        namespace: Namespace,
-    ) -> tuple[Namespace, list[str]]:
-        namespace, args = super().parse_known_args(args, namespace)
-        print(namespace)
-        return namespace, args
+        def _warning(self, message: str):
+            self._print_message(
+                _gettext('warning: %(message)s\n') % {'message': message},
+                sys.stderr)
 
     def parse_args(  # type: ignore[override]
         self,
