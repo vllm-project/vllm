@@ -177,7 +177,7 @@ steps:
 #####  1 GPU test  #####
 
 - label: Regression Test # 5min
-  mirror_hardwares: [amdexperimental]
+  mirror_hardwares: [amdexperimental, amdproduction]
   source_file_dependencies:
   - vllm/
   - tests/test_regression
@@ -300,7 +300,7 @@ steps:
   parallelism: 4
 
 - label: PyTorch Compilation Unit Tests
-  mirror_hardwares: [amdexperimental]
+  mirror_hardwares: [amdexperimenta, amdproduction]
   source_file_dependencies:
     - vllm/
     - tests/compile
@@ -394,7 +394,7 @@ steps:
   - bash scripts/run-benchmarks.sh
 
 - label: Benchmarks CLI Test # 10min
-  mirror_hardwares: [amdexperimental]
+  mirror_hardwares: [amdexperimental, amdproduction]
   source_file_dependencies:
   - vllm/
   - tests/benchmarks/
