@@ -33,7 +33,7 @@ import uuid
 import warnings
 import weakref
 from argparse import (Action, ArgumentDefaultsHelpFormatter, ArgumentParser,
-                      ArgumentTypeError)
+                      ArgumentTypeError, _ArgumentGroup)
 from asyncio import FIRST_COMPLETED, AbstractEventLoop, Task
 from collections import UserDict, defaultdict
 from collections.abc import (AsyncGenerator, Awaitable, Generator, Hashable,
@@ -1326,15 +1326,39 @@ class SortedHelpFormatter(ArgumentDefaultsHelpFormatter):
         super().add_arguments(actions)
 
 
+class _FlexibleArgumentGroup(_ArgumentGroup):
+
+    def __init__(self, parser: FlexibleArgumentParser, *args, **kwargs):
+        self._parser = parser
+        super().__init__(*args, **kwargs)
+
+    def add_argument(self, *args: Any, **kwargs: Any):
+        if sys.version_info < (3, 13):
+            deprecated = kwargs.pop('deprecated', False)
+            action = super().add_argument(*args, **kwargs)
+            object.__setattr__(action, 'deprecated', deprecated)
+            if deprecated and action.dest not in \
+                    self._parser.__class__._deprecated:
+                self._parser._warning(
+                    _gettext("argument '%(argument_name)s' is deprecated") %
+                    {'argument_name': action.dest})
+                self._parser._deprecated.add(action.dest)
+            return action
+
+        # python>3.13
+        return super().add_argument(*args, **kwargs)
+
+
 class FlexibleArgumentParser(ArgumentParser):
     """ArgumentParser that allows both underscore and dash in names."""
+
+    _deprecated: set[str] = set()
 
     def __init__(self, *args, **kwargs):
         # Set the default 'formatter_class' to SortedHelpFormatter
         if 'formatter_class' not in kwargs:
             kwargs['formatter_class'] = SortedHelpFormatter
         super().__init__(*args, **kwargs)
-        self._deprecated = set()
 
     def add_argument(self, *args: Any, **kwargs: Any):
         # add a deprecated=True with optional deprecated_reason to signify
@@ -1342,7 +1366,9 @@ class FlexibleArgumentParser(ArgumentParser):
         if sys.version_info < (3, 13):
             deprecated = kwargs.pop('deprecated', False)
             action = super().add_argument(*args, **kwargs)
-            if deprecated and action.dest not in self._deprecated:
+            object.__setattr__(action, 'deprecated', deprecated)
+            if deprecated and \
+                action.dest not in FlexibleArgumentParser._deprecated:
                 self._warning(
                     _gettext("argument '%(argument_name)s' is deprecated") %
                     {'argument_name': action.dest})
@@ -1354,9 +1380,9 @@ class FlexibleArgumentParser(ArgumentParser):
         return super().add_argument(*args, **kwargs)
 
     def _warning(self, message: str):
-        args = {'prog': self.prog, 'message': message}
         self._print_message(
-            _gettext('%(prog)s: warning: %(message)s\n') % args, sys.stderr)
+            _gettext('warning: %(message)s\n') % {'message': message},
+            sys.stderr)
 
     def parse_args(  # type: ignore[override]
         self,
@@ -1532,6 +1558,12 @@ class FlexibleArgumentParser(ArgumentParser):
                 processed_args.append(str(value))
 
         return processed_args
+
+    def add_argument_group(self, *args: Any,
+                           **kwargs: Any) -> _FlexibleArgumentGroup:
+        group = _FlexibleArgumentGroup(self, self, *args, **kwargs)
+        self._action_groups.append(group)
+        return group
 
 
 async def _run_task_with_lock(task: Callable, lock: asyncio.Lock, *args,

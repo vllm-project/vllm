@@ -515,6 +515,7 @@ class EngineArgs:
             description=DecodingConfig.__doc__,
         )
         guided_decoding_group.add_argument("--guided-decoding-backend",
+                                           deprecated=True,
                                            **guided_decoding_kwargs["backend"])
         guided_decoding_group.add_argument(
             "--guided-decoding-disable-fallback",
