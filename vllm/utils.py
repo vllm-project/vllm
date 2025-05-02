@@ -1814,8 +1814,9 @@ class _PlaceholderBase:
     We need to explicitly override each dunder method because
     {meth}`__getattr__` is not called when they are accessed.
 
-    See also:
-        [Special method lookup](https://docs.python.org/3/reference/datamodel.html#special-lookup)
+    :::{seealso}
+    [Special method lookup](https://docs.python.org/3/reference/datamodel.html#special-lookup)
+    :::
     """
 
     def __getattr__(self, key: str) -> Never:

@@ -11,8 +11,9 @@ MULTIMODAL_REGISTRY = MultiModalRegistry()
 The global {class}`~MultiModalRegistry` is used by model runners to
 dispatch data processing according to the target model.
 
-See also:
-    {ref}`mm-processing`
+:::{seealso}
+{ref}`mm-processing`
+:::
 """
 
 __all__ = [
