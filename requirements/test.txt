@@ -99,7 +99,6 @@ datasets==2.21.0
     # via
     #   evaluate
     #   lm-eval
-    #   mteb
 decorator==5.1.1
     # via librosa
 dill==0.3.8
@@ -125,8 +124,6 @@ email-validator==2.2.0
     # via pydantic
 encodec==0.1.1
     # via vocos
-eval-type-backport==0.2.2
-    # via mteb
 evaluate==0.4.3
     # via lm-eval
 fastparquet==2024.11.0
@@ -294,8 +291,6 @@ msgpack==1.1.0
     # via
     #   librosa
     #   ray
-mteb==1.38.3
-    # via -r requirements/test.in
 multidict==6.1.0
     # via
     #   aiohttp
@@ -336,7 +331,6 @@ numpy==1.26.4
     #   librosa
     #   matplotlib
     #   mistral-common
-    #   mteb
     #   numba
     #   numexpr
     #   opencv-python-headless
@@ -449,8 +443,6 @@ plotly==5.24.1
     # via genai-perf
 pluggy==1.5.0
     # via pytest
-polars==1.29.0
-    # via mteb
 pooch==1.8.2
     # via librosa
 portalocker==2.10.1
@@ -484,7 +476,6 @@ pydantic==2.9.2
     # via
     #   datamodel-code-generator
     #   mistral-common
-    #   mteb
 pydantic-core==2.23.4
     # via pydantic
 pygments==2.18.0
@@ -531,8 +522,6 @@ python-dateutil==2.9.0.post0
     #   typepy
 python-rapidjson==1.20
     # via tritonclient
-pytrec-eval-terrier==0.5.7
-    # via mteb
 pytz==2024.2
     # via
     #   pandas
@@ -575,7 +564,6 @@ requests==2.32.3
     #   huggingface-hub
     #   lm-eval
     #   mistral-common
-    #   mteb
     #   pooch
     #   ray
     #   responses
@@ -592,7 +580,6 @@ rfc3987==1.3.8
 rich==13.9.4
     # via
     #   genai-perf
-    #   mteb
     #   typer
 rouge-score==0.1.2
     # via lm-eval
@@ -620,20 +607,16 @@ scikit-learn==1.5.2
     # via
     #   librosa
     #   lm-eval
-    #   mteb
     #   sentence-transformers
 scipy==1.13.1
     # via
     #   librosa
-    #   mteb
     #   scikit-learn
     #   sentence-transformers
     #   statsmodels
     #   vocos
 sentence-transformers==3.2.1
-    # via
-    #   -r requirements/test.in
-    #   mteb
+    # via -r requirements/test.in
 sentencepiece==0.2.0
     # via mistral-common
 setuptools==77.0.3
@@ -713,7 +696,6 @@ torch==2.7.0
     #   fastsafetensors
     #   lm-eval
     #   mamba-ssm
-    #   mteb
     #   peft
     #   runai-model-streamer
     #   sentence-transformers
@@ -738,7 +720,6 @@ tqdm==4.66.6
     #   evaluate
     #   huggingface-hub
     #   lm-eval
-    #   mteb
     #   nltk
     #   peft
     #   pqdm
@@ -778,7 +759,6 @@ typing-extensions==4.12.2
     #   huggingface-hub
     #   librosa
     #   mistral-common
-    #   mteb
     #   pqdm
     #   pydantic
     #   pydantic-core

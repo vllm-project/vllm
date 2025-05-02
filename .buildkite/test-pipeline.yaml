@@ -37,11 +37,6 @@ steps:
   no_gpu: True
   commands:
   - pip install -r ../../requirements/docs.txt
-  # mteb installed a library named docs for python.
-  # This will conflict with vllm docs
-  # Let's delete it
-  - python -c 'import shutil;import site; \
-      shutil.rmtree(site.getsitepackages()[0] + "/docs", ignore_errors=True)'
   - SPHINXOPTS=\"-W\" make html
   # Check API reference (if it fails, you may have missing mock imports)
   - grep \"sig sig-object py\" build/html/api/inference_params.html
@@ -418,6 +413,7 @@ steps:
   - vllm/entrypoints/openai/
   - vllm/model_executor/models/whisper.py
   commands: # LMEval+Transcription WER check
+  - pip install mteb
   - pytest -s entrypoints/openai/correctness/
 
 - label: Encoder Decoder tests # 5min
