@@ -47,12 +47,9 @@ TypeHint = Union[type[Any], object]
 TypeHintT = Union[type[T], object]
 
 
-def optional_type(
-        return_type: Callable[[str], T]) -> Callable[[str], Optional[T]]:
+def parse_type(return_type: Callable[[str], T]) -> Callable[[str], T]:
 
-    def _optional_type(val: str) -> Optional[T]:
-        if val == "" or val == "None":
-            return None
+    def _parse_type(val: str) -> T:
         try:
             if return_type is json.loads and not re.match("^{.*}$", val):
                 return cast(T, nullable_kvs(val))
@@ -61,14 +58,24 @@ def optional_type(
             raise argparse.ArgumentTypeError(
                 f"Value {val} cannot be converted to {return_type}.") from e
 
+    return _parse_type
+
+
+def optional_type(
+        return_type: Callable[[str], T]) -> Callable[[str], Optional[T]]:
+
+    def _optional_type(val: str) -> Optional[T]:
+        if val == "" or val == "None":
+            return None
+        return parse_type(return_type)(val)
+
     return _optional_type
 
 
 def union_dict_and_str(val: str) -> Optional[Union[str, dict[str, str]]]:
     if not re.match("^{.*}$", val):
         return str(val)
-    else:
-        return optional_type(json.loads)(val)
+    return optional_type(json.loads)(val)
 
 
 @deprecated(
@@ -195,13 +202,12 @@ def get_kwargs(cls: ConfigType) -> dict[str, Any]:
                 kwargs[name]["type"] = human_readable_int
         elif contains_type(type_hints, float):
             kwargs[name]["type"] = float
-        elif contains_type(type_hints,
-                           dict) and (contains_type(type_hints, str) or any(
-                               is_not_builtin(th) for th in type_hints)):
+        elif (contains_type(type_hints, dict)
+              and (contains_type(type_hints, str)
+                   or any(is_not_builtin(th) for th in type_hints))):
             kwargs[name]["type"] = union_dict_and_str
         elif contains_type(type_hints, dict):
-            # Dict arguments will always be optional
-            kwargs[name]["type"] = optional_type(json.loads)
+            kwargs[name]["type"] = parse_type(json.loads)
             kwargs[name]["help"] += json_tip
         elif (contains_type(type_hints, str)
               or any(is_not_builtin(th) for th in type_hints)):
@@ -379,7 +385,8 @@ class EngineArgs:
 
     calculate_kv_scales: bool = CacheConfig.calculate_kv_scales
 
-    additional_config: Optional[Dict[str, Any]] = None
+    additional_config: dict[str, Any] = \
+        get_field(VllmConfig, "additional_config")
     enable_reasoning: Optional[bool] = None  # DEPRECATED
     reasoning_parser: str = DecodingConfig.reasoning_backend
 
@@ -808,7 +815,7 @@ class EngineArgs:
         vllm_group.add_argument(
             "--additional-config",
             type=json.loads,
-            default=None,
+            default=dict(),
             help="Additional config for specified platform in JSON format. "
             "Different platforms may support different configs. Make sure the "
             "configs are valid for the platform you are using. The input format"

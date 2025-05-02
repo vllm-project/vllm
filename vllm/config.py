@@ -12,8 +12,7 @@ import textwrap
 import warnings
 from collections import Counter
 from contextlib import contextmanager
-from dataclasses import (MISSING, dataclass, field, fields, is_dataclass,
-                         replace)
+from dataclasses import MISSING, Field, field, fields, is_dataclass, replace
 from functools import cached_property
 from importlib.util import find_spec
 from pathlib import Path
@@ -21,7 +20,9 @@ from typing import (TYPE_CHECKING, Any, Callable, ClassVar, Literal, Optional,
                     Protocol, TypeVar, Union, cast, get_args, get_origin)
 
 import torch
-from pydantic import BaseModel, Field, PrivateAttr
+from pydantic import (BaseModel, ConfigDict, SkipValidation, TypeAdapter,
+                      model_validator)
+from pydantic.dataclasses import dataclass
 from torch.distributed import ProcessGroup, ReduceOp
 from transformers import PretrainedConfig
 from typing_extensions import deprecated
@@ -58,7 +59,10 @@ if TYPE_CHECKING:
 
     ConfigType = type[DataclassInstance]
 else:
-    QuantizationConfig = None
+    PlacementGroup = Any
+    ExecutorBase = Any
+    QuantizationConfig = Any
+    BaseModelLoader = Any
     ConfigType = type
 
 logger = init_logger(__name__)
@@ -217,7 +221,7 @@ ModelDType = Literal["auto", "half", "float16", "bfloat16", "float", "float32"]
 
 
 @config
-@dataclass
+@dataclass(config=ConfigDict(arbitrary_types_allowed=True))
 class ModelConfig:
     """Configuration for the model."""
 
@@ -277,7 +281,7 @@ class ModelConfig:
     """The specific revision to use for the tokenizer on the Hugging Face Hub.
     It can be a branch name, a tag name, or a commit id. If unspecified, will
     use the default version."""
-    max_model_len: int = None  # type: ignore
+    max_model_len: SkipValidation[int] = None  # type: ignore
     """Model context length (prompt and output). If unspecified, will be
     automatically derived from the model config.
 
@@ -568,6 +572,13 @@ class ModelConfig:
         self._verify_quantization()
         self._verify_cuda_graph()
         self._verify_bnb_config()
+
+    @model_validator(mode="after")
+    def validate(self: "ModelConfig") -> "ModelConfig":
+        if not isinstance(self.max_model_len, int):
+            raise ValueError(
+                "max_model_len must be an integer after __post_init__.")
+        return self
 
     @property
     def registry(self):
@@ -1329,7 +1340,7 @@ PrefixCachingHashAlgo = Literal["builtin", "sha256"]
 class CacheConfig:
     """Configuration for the KV cache."""
 
-    block_size: BlockSize = None  # type: ignore
+    block_size: SkipValidation[BlockSize] = None  # type: ignore
     """Size of a contiguous cache block in number of tokens. This is ignored on
     neuron devices and set to `--max-model-len`. On CUDA devices, only block
     sizes up to 32 are supported. On HPU devices, block size defaults to 128.
@@ -2130,7 +2141,7 @@ Device = Literal["auto", "cuda", "neuron", "cpu", "tpu", "xpu", "hpu"]
 
 
 @config
-@dataclass
+@dataclass(config=ConfigDict(arbitrary_types_allowed=True))
 class DeviceConfig:
     """Configuration for the device to use for vLLM execution."""
 
@@ -2665,7 +2676,7 @@ LoRADType = Literal["auto", "float16", "bfloat16"]
 
 
 @config
-@dataclass
+@dataclass(config=ConfigDict(arbitrary_types_allowed=True))
 class LoRAConfig:
     """Configuration for LoRA."""
 
@@ -2761,7 +2772,7 @@ class LoRAConfig:
 
 
 @config
-@dataclass
+@dataclass(config=ConfigDict(arbitrary_types_allowed=True))
 class PromptAdapterConfig:
     """Configuration for PromptAdapters."""
 
@@ -2818,8 +2829,8 @@ class PromptAdapterConfig:
 class MultiModalConfig:
     """Controls the behavior of multimodal models."""
 
-    limit_per_prompt: dict[str, int] = get_field(ModelConfig,
-                                                 "limit_mm_per_prompt")
+    limit_per_prompt: dict[str, int] = \
+        cast(dict[str, int], get_field(ModelConfig, "limit_mm_per_prompt"))
     """
     The maximum number of input items allowed per prompt for each modality.
     Defaults to 1 (V0) or 999 (V1) for each modality.
@@ -3533,7 +3544,8 @@ class CompilationLevel:
     PIECEWISE = 3
 
 
-class CompilationConfig(BaseModel):
+@dataclass
+class CompilationConfig:
     """
     Configuration for compilation.
     It has three parts:
@@ -3618,13 +3630,13 @@ class CompilationConfig(BaseModel):
     debug_dump_path: str = ""
     cache_dir: str = ""
     backend: str = ""
-    custom_ops: list[str] = Field(default_factory=list)
-    splitting_ops: list[str] = Field(default=None)  # type: ignore
+    custom_ops: list[str] = field(default_factory=list)
+    splitting_ops: list[str] = field(default_factory=list)
 
     use_inductor: bool = True
-    compile_sizes: Optional[list[Union[int, str]]] = Field(default=None)
-    inductor_compile_config: dict = Field(default_factory=dict)
-    inductor_passes: dict[str, str] = Field(default_factory=dict)
+    compile_sizes: Optional[list[Union[int, str]]] = None
+    inductor_compile_config: dict = field(default_factory=dict)
+    inductor_passes: dict[str, str] = field(default_factory=dict)
 
     use_cudagraph: bool = False
     cudagraph_num_of_warmups: int = 0
@@ -3645,8 +3657,8 @@ class CompilationConfig(BaseModel):
             TODO(luka) better pass enabling system.
         - enable_sequence_parallelism: whether to enable sequence parallelism.
         """
-        dump_graph_stages: list[str] = Field(default_factory=list)
-        dump_graph_dir: Path = Field(default=Path("."))
+        dump_graph_stages: list[str] = field(default_factory=list)
+        dump_graph_dir: Path = Path(".")
         enable_fusion: bool = True
         enable_noop: bool = True
         enable_sequence_parallelism: bool = False
@@ -3668,27 +3680,28 @@ class CompilationConfig(BaseModel):
                     "Fusion enabled but reshape elimination disabled. "
                     "RMSNorm + quant (fp8) fusion might not work")
 
-    pass_config: PassConfig = Field(default_factory=PassConfig)
+    pass_config: PassConfig = field(default_factory=PassConfig)
 
     # not configurable, computed after init
-    max_capture_size: int = PrivateAttr
-    local_cache_dir: str = PrivateAttr  # local cache dir for each rank
+    max_capture_size: int = None  # type: ignore
+    # local cache dir for each rank
+    local_cache_dir: str = None  # type: ignore
     # optimization:
     # Intuitively, bs_to_padded_graph_size should be dict[int, int].
     # since we know all keys are in a range [0, max_capture_size],
     # we can optimize it to list[int] for better lookup performance.
-    bs_to_padded_graph_size: list[int] = PrivateAttr
+    bs_to_padded_graph_size: list[int] = None  # type: ignore
 
     # keep track of enabled and disabled custom ops
-    enabled_custom_ops: Counter[str] = PrivateAttr
-    disabled_custom_ops: Counter[str] = PrivateAttr
-    traced_files: set[str] = PrivateAttr
-    compilation_time: float = PrivateAttr
+    enabled_custom_ops: Counter[str] = field(default_factory=Counter)
+    disabled_custom_ops: Counter[str] = field(default_factory=Counter)
+    traced_files: set[str] = field(default_factory=set)
+    compilation_time: float = 0.0
 
     # Per-model forward context
     # Map from layer name to layer objects that need to be accessed outside
     # model code, e.g., Attention, FusedMOE when dp_size>1.
-    static_forward_context: dict[str, Any] = PrivateAttr
+    static_forward_context: dict[str, Any] = field(default_factory=dict)
 
     def compute_hash(self) -> str:
         """
@@ -3723,7 +3736,8 @@ class CompilationConfig(BaseModel):
             "pass_config",
             "traced_files",
         }
-        return self.model_dump_json(exclude=exclude, exclude_unset=True)
+        return TypeAdapter(CompilationConfig).dump_json(
+            self, exclude=exclude, exclude_unset=True).decode()
 
     __str__ = __repr__
 
@@ -3732,11 +3746,9 @@ class CompilationConfig(BaseModel):
         """Parse the CLI value for the compilation config."""
         if cli_value in ["0", "1", "2", "3"]:
             return cls(level=int(cli_value))
-        # do not use `eval`, it is dangerous and can execute arbitrary code
-        dict_value = ast.literal_eval(cli_value)
-        return CompilationConfig.model_validate(dict_value)
+        return TypeAdapter(CompilationConfig).validate_json(cli_value)
 
-    def model_post_init(self, __context: Any) -> None:
+    def __post_init__(self) -> None:
 
         count_none = self.custom_ops.count("none")
         count_all = self.custom_ops.count("all")
@@ -3755,9 +3767,6 @@ class CompilationConfig(BaseModel):
             if KEY not in self.inductor_compile_config:
                 self.inductor_compile_config[KEY] = False
 
-        if self.splitting_ops is None:
-            self.splitting_ops = []
-
         for k, v in self.inductor_passes.items():
             if not isinstance(v, str):
                 assert callable(v), (
@@ -3773,12 +3782,6 @@ class CompilationConfig(BaseModel):
             func = __import__(module).__dict__[func_name]
             self.inductor_compile_config[k] = func if isinstance(
                 func, InductorPass) else CallableInductorPass(func)
-
-        self.enabled_custom_ops = Counter()
-        self.disabled_custom_ops = Counter()
-        self.traced_files = set()
-        self.static_forward_context = {}
-        self.compilation_time = 0.0
 
     def init_backend(self, vllm_config: "VllmConfig") -> Union[str, Callable]:
         if self.level == CompilationLevel.NO_COMPILATION:
@@ -3877,22 +3880,19 @@ class VllmConfig:
                                         init=True)  # type: ignore
     load_config: LoadConfig = field(default=None, init=True)  # type: ignore
     lora_config: Optional[LoRAConfig] = None
-    speculative_config: SpeculativeConfig = field(default=None,
-                                                  init=True)  # type: ignore
+    speculative_config: Optional[SpeculativeConfig] = None
     decoding_config: Optional[DecodingConfig] = None
     observability_config: Optional[ObservabilityConfig] = None
     prompt_adapter_config: Optional[PromptAdapterConfig] = None
     quant_config: Optional[QuantizationConfig] = None
     compilation_config: CompilationConfig = field(default=None,
                                                   init=True)  # type: ignore
-    kv_transfer_config: KVTransferConfig = field(default=None,
-                                                 init=True)  # type: ignore
+    kv_transfer_config: Optional[KVTransferConfig] = None
     kv_events_config: Optional[KVEventsConfig] = None
     # some opaque config, only used to provide additional information
     # for the hash computation, mainly used for testing, debugging or out of
     # tree config registration.
-    additional_config: SupportsHash = field(default=None,
-                                            init=True)  # type: ignore
+    additional_config: dict[str, Any] = field(default_factory=dict)
     instance_id: str = ""
 
     def compute_hash(self) -> str:
@@ -3974,7 +3974,8 @@ class VllmConfig:
         else:
             vllm_factors.append("None")
         if self.additional_config:
-            vllm_factors.append(self.additional_config.compute_hash())
+            vllm_factors.append(hash(frozenset(
+                self.additional_config.items())))
         else:
             vllm_factors.append("None")
         factors.append(vllm_factors)
