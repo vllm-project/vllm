@@ -57,9 +57,9 @@ def run_vllm(
         sampling_params.append(
             SamplingParams(
                 n=n,
-                temperature=1.0,
+                temperature=0,
                 top_p=1.0,
-                ignore_eos=True,
+                ignore_eos=False,
                 max_tokens=request.expected_output_len,
                 detokenize=not disable_detokenize,
             ))
@@ -123,9 +123,9 @@ def run_vllm_chat(
         sampling_params.append(
             SamplingParams(
                 n=n,
-                temperature=1.0,
+                temperature=0,
                 top_p=1.0,
-                ignore_eos=True,
+                ignore_eos=False,
                 max_tokens=request.expected_output_len,
                 detokenize=not disable_detokenize,
             ))
@@ -167,9 +167,9 @@ async def run_vllm_async(
             sampling_params.append(
                 SamplingParams(
                     n=n,
-                    temperature=1.0,
+                    temperature=0,
                     top_p=1.0,
-                    ignore_eos=True,
+                    ignore_eos=False,
                     max_tokens=request.expected_output_len,
                     detokenize=not disable_detokenize,
                 ))

@@ -99,6 +99,8 @@ class ModelRunnerOutput:
     # [prompt_len, num_prompt_logprobs]
     # [prompt_len]
     prompt_logprobs_dict: dict[str, Optional[LogprobsTensors]]
+    
+    acceptance_stats: Optional[dict[str, list]] = None
 
 
 EMPTY_MODEL_RUNNER_OUTPUT = ModelRunnerOutput(

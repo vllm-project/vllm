@@ -49,6 +49,7 @@ from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
 
 from .utils import (gather_mm_placeholders, sanity_check_mm_encoder_outputs,
                     scatter_mm_placeholders)
+import json
 
 if TYPE_CHECKING:
     import xgrammar as xgr
@@ -281,6 +282,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                                         device="cpu",
                                         pin_memory=self.pin_memory)
         self.seq_lens_np = self.seq_lens_cpu.numpy()
+        
+        self.acceptance_stats = {}
 
     def _update_states(self, scheduler_output: "SchedulerOutput") -> None:
         """Update the cached states and the persistent batch with the scheduler
@@ -1004,7 +1007,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self,
         scheduler_output: "SchedulerOutput",
         intermediate_tensors: Optional[IntermediateTensors] = None,
-    ) -> Union[ModelRunnerOutput, torch.Tensor]:
+    ) -> Union[ModelRunnerOutput, torch.Tensor]:        
         # Update KVConnector with the KVConnector metadata forward().
         if has_kv_transfer_group():
             get_kv_transfer_group().bind_connector_metadata(
@@ -1187,6 +1190,15 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 sampled_token_ids,
                 self.input_batch.vocab_size,
             )
+        for i, token_ids in enumerate(valid_sampled_token_ids):
+            req_id = self.input_batch.req_ids[i]
+            if req_id not in self.acceptance_stats:
+                self.acceptance_stats[req_id] = []
+            self.acceptance_stats[req_id].append(len(token_ids))
+        # Force 1 generated token per request.
+        for i, token_ids in enumerate(valid_sampled_token_ids):
+            valid_sampled_token_ids[i] = token_ids[:1]
+            
         # Mask out the sampled tokens that should not be sampled.
         for i in discard_sampled_tokens_req_indices:
             valid_sampled_token_ids[i].clear()
@@ -1285,6 +1297,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             spec_token_ids=spec_token_ids,
             logprobs=logprobs_lists,
             prompt_logprobs_dict=prompt_logprobs_dict,
+            acceptance_stats=self.acceptance_stats,
         )
 
     def generate_draft_token_ids(

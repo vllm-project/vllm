@@ -189,6 +189,9 @@ class BenchmarkDataset(ABC):
         """
         if len(requests) < num_requests:
             random.seed(self.random_seed)
+            logger.info("Current number of requests: %d", len(requests))
+            logger.info("Oversampled requests to reach %d total samples.",
+                        num_requests)
             additional = random.choices(requests,
                                         k=num_requests - len(requests))
             requests.extend(additional)
@@ -793,7 +796,7 @@ class AIMODataset(HuggingFaceDataset):
         sampled_requests = []
         dynamic_output = output_len is None
 
-        for item in self.data:
+        for i, item in enumerate(self.data):
             if len(sampled_requests) >= num_requests:
                 break
             prompt, completion = item['problem'], item["solution"]
