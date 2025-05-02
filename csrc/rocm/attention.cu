@@ -3465,6 +3465,10 @@ void paged_attention_custom_launcher_navi(
       break;                                                    \
   }
 
+bool is_navi_gpu(const std::string& arch) {
+  return arch.find("gfx11") == 0 || arch.find("gfx12") == 0;
+}
+
 // clang-format off
 void paged_attention(
     torch::Tensor& out,         // [num_seqs, num_heads, head_size]
@@ -3482,8 +3486,12 @@ void paged_attention(
     int64_t block_size, int64_t max_context_len,
     const std::optional<torch::Tensor>& alibi_slopes,
     const std::string& kv_cache_dtype, torch::Tensor& k_scale,
-    torch::Tensor& v_scale, bool is_navi) {
+    torch::Tensor& v_scale) {
   // clang-format on
+  hipDeviceProp_t deviceProp;
+  hipGetDeviceProperties(&deviceProp, 0);
+  bool is_navi = is_navi_gpu(deviceProp.gcnArchName);
+
   const int head_size = query.size(2);
   if (kv_cache_dtype == "auto") {
     if (query.dtype() == at::ScalarType::Half) {
