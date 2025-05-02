@@ -21,12 +21,13 @@ def main():
     # Set `enforce_eager=True` to avoid ahead-of-time compilation.
     # In real workloads, `enforace_eager` should be `False`.
     llm = LLM(
-        model="Qwen/Qwen2-1.5B-Instruct",
-        # llm = LLM(model="meta-llama/Llama-3.1-8B-Instruct",
+        # model="Qwen/Qwen2-1.5B-Instruct",
+        model="meta-llama/Llama-3.1-8B-Instruct",
         max_num_batched_tokens=64,
         max_num_seqs=4,
         gpu_memory_utilization=0.95,
         max_model_len=512,
+        tensor_parallel_size=8,
         enforce_eager=False)
     outputs = llm.generate(prompts, sampling_params)
     print("-" * 50)

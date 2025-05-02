@@ -37,6 +37,9 @@ class TPUWorker:
         distributed_init_method: str,
         is_driver_worker: bool = False,
     ):
+        import traceback
+        logger.info("TPUWorker init")
+        logger.info("TPUWorker init stack trace: %s", traceback.print_stack())
         self.is_driver_worker = is_driver_worker
         self.vllm_config = vllm_config
         self.model_config = vllm_config.model_config
@@ -93,7 +96,7 @@ class TPUWorker:
         torch.set_grad_enabled(False)
         torch.set_default_dtype(self.model_config.dtype)
 
-        use_spmd = True
+        use_spmd = envs.VLLM_USE_SINGLE_WORKER
         # Initialize the distributed environment.
         init_tpu_worker_distributed_environment(self.parallel_config,
                                                 self.rank,
@@ -133,9 +136,7 @@ class TPUWorker:
             xr.initialize_cache(per_rank_path, readonly=False)
 
         # Init ModelRunner here, so that we have access to self.device.
-        self.model_runner = TPUModelRunner(self.vllm_config,
-                                           self.device,
-                                           use_spmd=use_spmd)
+        self.model_runner = TPUModelRunner(self.vllm_config, self.device)
 
     def determine_available_memory(self) -> int:
         kv_caches: dict[str, torch.Tensor] = {}
@@ -248,7 +249,7 @@ def init_tpu_worker_distributed_environment(
     use_spmd: bool = False,
 ) -> None:
     """Initialize the distributed environment."""
-    use_spmd = True
+    use_spmd = envs.VLLM_USE_SINGLE_WORKER
     if use_spmd:
         xr.use_spmd()
     # NOTE(woosuk): This is just to initialize the TP group and broadcast

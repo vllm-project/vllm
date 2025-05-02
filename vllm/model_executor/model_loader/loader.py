@@ -26,6 +26,7 @@ from torch import nn
 from transformers import AutoModelForCausalLM
 from transformers.utils import SAFE_WEIGHTS_INDEX_NAME
 
+import vllm.envs as envs
 from vllm.attention import Attention
 from vllm.config import (LoadConfig, LoadFormat, ModelConfig, ParallelConfig,
                          VllmConfig, set_current_vllm_config)
@@ -450,7 +451,7 @@ class DefaultModelLoader(BaseModelLoader):
         model_config = vllm_config.model_config
         target_device = torch.device(device_config.device)
         # TODO read use_spmd from a env var.
-        use_spmd = True
+        use_spmd = envs.VLLM_USE_SINGLE_WORKER
         if use_spmd:
             target_device = torch.device("cpu")
         with set_default_torch_dtype(model_config.dtype):

@@ -96,7 +96,6 @@ class TPUModelRunner:
         self,
         vllm_config: VllmConfig,
         device: torch.device,
-        use_spmd: bool,
     ):
         self.vllm_config = vllm_config
         self.model_config = vllm_config.model_config
@@ -118,8 +117,8 @@ class TPUModelRunner:
         self.check_recompilation = envs.VLLM_XLA_CHECK_RECOMPILATION
 
         # SPMD Related
-        self.use_spmd = use_spmd
-        if use_spmd:
+        self.use_spmd = envs.VLLM_USE_SINGLE_WORKER
+        if self.use_spmd:
             num_devices = xr.global_runtime_device_count()
             mesh_shape = (num_devices, 1)
             device_ids = np.array(range(num_devices))
@@ -853,9 +852,10 @@ class TPUModelRunner:
         xm.mark_step()
         xm.wait_device_ops()
 
-        shard_model(model, self.mesh)
-        # torch compile after model sharding are done
-        model.model = torch.compile(model.model, backend="openxla")
+        if self.use_spmd:
+            shard_model(model, self.mesh)
+            # torch compile after model sharding are done
+            model.model = torch.compile(model.model, backend="openxla")
 
         self.model = model
         self.sampler = TPUSampler()
