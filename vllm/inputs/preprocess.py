@@ -337,6 +337,7 @@ class InputPreprocessor:
         prompt_token_ids = parsed_content["prompt_token_ids"]
         token_type_ids = parsed_content.get("token_type_ids")
 
+        inputs: Union[TokenInputs, MultiModalInputs]
         if multi_modal_data := parsed_content.get("multi_modal_data"):
             inputs = self._process_multimodal(
                 prompt_token_ids,
@@ -365,6 +366,7 @@ class InputPreprocessor:
         prompt_token_ids = parsed_content["prompt_token_ids"]
         token_type_ids = parsed_content.get("token_type_ids")
 
+        inputs: Union[TokenInputs, MultiModalInputs]
         if multi_modal_data := parsed_content.get("multi_modal_data"):
             inputs = await self._process_multimodal_async(
                 prompt_token_ids,
@@ -393,6 +395,7 @@ class InputPreprocessor:
     ) -> Union[TokenInputs, MultiModalInputs]:
         prompt_text = parsed_content["prompt"]
 
+        inputs: Union[TokenInputs, MultiModalInputs]
         if multi_modal_data := parsed_content.get("multi_modal_data"):
             inputs = self._process_multimodal(
                 prompt_text,
@@ -426,6 +429,7 @@ class InputPreprocessor:
     ) -> Union[TokenInputs, MultiModalInputs]:
         prompt_text = parsed_content["prompt"]
 
+        inputs: Union[TokenInputs, MultiModalInputs]
         if multi_modal_data := parsed_content.get("multi_modal_data"):
             inputs = await self._process_multimodal_async(
                 prompt_text,
@@ -590,6 +594,7 @@ class InputPreprocessor:
                 raise RuntimeError("You should register an encoder-decoder "
                                    "multi-modal processor for encoder-decoder "
                                    "models.")
+            inputs = cast(MultiModalEncDecInputs, inputs)
 
             encoder_inputs = token_inputs(
                 prompt=inputs["encoder_prompt"],
@@ -738,6 +743,8 @@ class InputPreprocessor:
         prompt_adapter_request: Optional[PromptAdapterRequest],
     ) -> DecoderOnlyInputs:
         if "prompt_token_ids" in prompt_inputs:
+            prompt_inputs = cast(Union[TokenInputs, MultiModalInputs],
+                                 prompt_inputs)  # Needed for mypy
             prompt_inputs["prompt_token_ids"] = self._apply_prompt_adapter(
                 prompt_inputs["prompt_token_ids"],
                 prompt_adapter_request=prompt_adapter_request,

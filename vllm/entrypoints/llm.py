@@ -568,6 +568,7 @@ class LLM:
                     "mm_processor_kwargs"]
 
             if "prompt_token_ids" in prompt:
+                prompt = cast(TokensPrompt, prompt)  # Needed for mypy
                 prompt_tokens = prompt["prompt_token_ids"]
             else:
                 prompt_tokens = tokenizer.encode(prompt["prompt"])
