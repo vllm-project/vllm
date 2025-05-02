@@ -27,8 +27,14 @@ class WorkerExtension:
     By defining an extension class, the code can work no matter what is
     the underlying worker class. This way, the code can be compatible
     with both vLLM V0 and V1.
+
     NOTE: we define this class in a separate module, and the main module
     should pass the full qualified name as `worker_extension_cls` argument.
+
+    The `master_address` parameter should be an address on a secure network that
+    is ideally completely isolated. Services used on this network are insecure
+    and will make the system vulnerable to remote code execution if exposed to
+    malicious parties.
     """
 
     def init_weight_update_group(
