@@ -237,8 +237,8 @@ class InputPreprocessor:
         self,
         lora_request: Optional[LoRARequest],
     ) -> AnyTokenizer:
-        # At the moment on model (PrithviGeoSpatialMAE) requires to be
-        # initialized without a tokenizer while using also multi-modal input
+        # PrithviGeoSpatialMAE needs to be initialized without a tokenizer
+        # while using also multi-modal input
         if not self.tokenizer:
             return cast(AnyTokenizer, object())  # Dummy
 
@@ -249,8 +249,8 @@ class InputPreprocessor:
         self,
         lora_request: Optional[LoRARequest],
     ) -> AnyTokenizer:
-        # At the moment on model (PrithviGeoSpatialMAE) requires to be
-        # initialized without a tokenizer while using also multi-modal input
+        # PrithviGeoSpatialMAE needs to be initialized without a tokenizer
+        # while using also multi-modal input
         if not self.tokenizer:
             return cast(AnyTokenizer, object())  # Dummy
 
