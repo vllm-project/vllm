@@ -208,10 +208,10 @@ class InputBatch:
             LogitBiasLogitsProcessor(pin_memory=pin_memory, device=device),
         ]
         self.min_p_logitsproc = MinPLogitsProcessor(
-                pin_memory=pin_memory,
-                device=device,
-                # +1 for temporary swap space
-                max_num_reqs=max_num_reqs + 1)
+            pin_memory=pin_memory,
+            device=device,
+            # +1 for temporary swap space
+            max_num_reqs=max_num_reqs + 1)
         self.nongreedy_logits_procs: list[LogitsProcessor] = [
             self.min_p_logitsproc
         ]
@@ -632,7 +632,6 @@ class InputBatch:
         assert req_id in self.req_id_to_index
         return self.min_p_logitsproc.get_min_p_by_index(
             self.req_id_to_index[req_id])
-
 
     @property
     def num_reqs(self) -> int:

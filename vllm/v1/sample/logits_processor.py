@@ -61,8 +61,8 @@ class MinPLogitsProcessor(LogitsProcessor):
         self.min_p_cpu = self.min_p_cpu_tensor.numpy()
         # Pre-allocated device tensor
         self.min_p_device: torch.Tensor = torch.empty((max_num_reqs, ),
-                                                   dtype=torch.float32,
-                                                   device=device)
+                                                      dtype=torch.float32,
+                                                      device=device)
         # Current slice of the device tensor
         self.min_p: torch.Tensor = self.min_p_device[:0]
 
