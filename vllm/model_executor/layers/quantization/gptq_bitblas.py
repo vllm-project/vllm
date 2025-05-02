@@ -7,6 +7,7 @@ from torch.nn.parameter import Parameter
 from vllm.logger import init_logger
 from vllm.model_executor.layers.linear import (LinearBase, LinearMethodBase,
                                                set_weight_attrs)
+from vllm.model_executor.layers.quantization import QuantizationMethods
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
 from vllm.model_executor.layers.quantization.kernels.mixed_precision import (
@@ -24,6 +25,7 @@ from vllm.model_executor.parameter import (ChannelQuantScaleParameter,
                                            PackedColumnParameter,
                                            PackedvLLMParameter,
                                            RowvLLMParameter)
+from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
 
 logger = init_logger(__name__)
@@ -123,7 +125,7 @@ class GPTQBitBLASConfig(QuantizationConfig):
                 f"quant_method={self.quant_method})")
 
     @classmethod
-    def get_name(cls) -> str:
+    def get_name(cls) -> QuantizationMethods:
         return "gptq_bitblas"
 
     @classmethod
@@ -132,7 +134,7 @@ class GPTQBitBLASConfig(QuantizationConfig):
 
     @classmethod
     def get_min_capability(cls) -> int:
-        return 70
+        return 80
 
     @classmethod
     def get_config_filenames(cls) -> List[str]:
@@ -151,8 +153,8 @@ class GPTQBitBLASConfig(QuantizationConfig):
                    lm_head_quantized)
 
     @classmethod
-    def override_quantization_method(cls, hf_quant_cfg,
-                                     user_quant) -> Optional[str]:
+    def override_quantization_method(
+            cls, hf_quant_cfg, user_quant) -> Optional[QuantizationMethods]:
         can_convert = cls.is_gptq_bitblas_compatible(hf_quant_cfg)
 
         is_valid_user_quant = (user_quant is None or user_quant == "bitblas"
@@ -189,6 +191,10 @@ class GPTQBitBLASConfig(QuantizationConfig):
         group_size = quant_config.get("group_size")
         sym = quant_config.get("sym")
         desc_act = quant_config.get("desc_act")
+
+        # temporarily disable on ROCm platform
+        if not current_platform.is_cuda():
+            return False
 
         # If we cannot find the info needed in the config, cannot convert.
         if (num_bits is None or group_size is None or sym is None

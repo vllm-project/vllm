@@ -1,10 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
+import json
 import os
 import queue
 import signal
 import sys
 import threading
 import time
+from collections import deque
 from concurrent.futures import Future
 from inspect import isclass, signature
 from logging import DEBUG
@@ -115,6 +117,7 @@ class EngineCore:
             logger.info("Batch queue is enabled with size %d",
                         self.batch_queue_size)
             self.batch_queue = queue.Queue(self.batch_queue_size)
+        self.vllm_config = vllm_config
 
     def _initialize_kv_caches(
             self, vllm_config: VllmConfig) -> tuple[int, int, KVCacheConfig]:
@@ -256,6 +259,8 @@ class EngineCore:
         self.structured_output_manager.clear_backend()
         if self.model_executor:
             self.model_executor.shutdown()
+        if self.scheduler:
+            self.scheduler.shutdown()
 
     def profile(self, is_start: bool = True):
         self.model_executor.profile(is_start)
@@ -506,7 +511,12 @@ class EngineCoreProc(EngineCore):
                             bind=False) as socket:
 
             # Send ready message to front-end once input socket is connected.
-            socket.send(b'READY')
+            message_dict = {
+                'type': 'READY',
+                'num_gpu_blocks': self.vllm_config.cache_config.num_gpu_blocks,
+            }
+            message = json.dumps(message_dict).encode('utf-8')
+            socket.send(message)
 
             while True:
                 # (RequestType, RequestData)
@@ -527,8 +537,12 @@ class EngineCoreProc(EngineCore):
 
         # Msgpack serialization encoding.
         encoder = MsgpackEncoder()
-        # Reuse send buffer.
-        buffer = bytearray()
+        # Send buffers to reuse.
+        reuse_buffers: list[bytearray] = []
+        # Keep references to outputs and buffers until zmq is finished
+        # with them (outputs may contain tensors/np arrays whose
+        # backing buffers were extracted for zero-copy send).
+        pending = deque[tuple[zmq.MessageTracker, Any, bytearray]]()
 
         # We must set linger to ensure the ENGINE_CORE_DEAD
         # message is sent prior to closing the socket.
@@ -541,8 +555,22 @@ class EngineCoreProc(EngineCore):
                     break
                 assert not isinstance(outputs, bytes)
                 outputs.engine_index = engine_index
+
+                # Reclaim buffers that zmq is finished with.
+                while pending and pending[-1][0].done:
+                    reuse_buffers.append(pending.pop()[2])
+
+                buffer = reuse_buffers.pop() if reuse_buffers else bytearray()
                 buffers = encoder.encode_into(outputs, buffer)
-                socket.send_multipart(buffers, copy=False)
+                tracker = socket.send_multipart(buffers,
+                                                copy=False,
+                                                track=True)
+                if not tracker.done:
+                    ref = outputs if len(buffers) > 1 else None
+                    pending.appendleft((tracker, ref, buffer))
+                elif len(reuse_buffers) < 2:
+                    # Keep at most 2 buffers to reuse.
+                    reuse_buffers.append(buffer)
 
 
 class DPEngineCoreProc(EngineCoreProc):
