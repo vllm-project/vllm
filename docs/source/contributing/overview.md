@@ -58,6 +58,12 @@ Therefore, we recommend developing with Python 3.12 to minimise the chance of yo
 Currently, the repository is not fully checked by `mypy`.
 :::
 
+:::{note}
+Currently, not all unit tests pass when run on CPU platforms. If you don't have access to a GPU
+platform to run unit tests locally, rely on the continuous integration system to run the tests for
+now.
+:::
+
 ## Issues
 
 If you encounter a bug or have a feature request, please [search existing issues](https://github.com/vllm-project/vllm/issues?q=is%3Aissue) first to see if it has already been reported. If not, please [file a new issue](https://github.com/vllm-project/vllm/issues/new/choose), providing as much relevant information as possible.
