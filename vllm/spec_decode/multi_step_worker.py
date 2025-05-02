@@ -51,9 +51,14 @@ class MultiStepWorker(ProposerWorkerBase, DelegateWorkerBase):
     def set_include_gpu_probs_tensor(self) -> None:
         # Need include_gpu_probs_tensor for MultiStepWorker
         self.model_runner.sampler.include_gpu_probs_tensor = True
+        if hasattr(self.model_runner.model, "sampler"):
+            (self.model_runner.model.sampler.include_gpu_probs_tensor) = True
 
     def set_should_modify_greedy_probs_inplace(self) -> None:
         self.model_runner.sampler.should_modify_greedy_probs_inplace = True
+        if hasattr(self.model_runner.model, "sampler"):
+            (self.model_runner.model.sampler.should_modify_greedy_probs_inplace
+             ) = True
 
     @torch.inference_mode()
     def sampler_output(
@@ -277,7 +282,8 @@ class MultiStepWorker(ProposerWorkerBase, DelegateWorkerBase):
                 else:
                     count += 1
 
-                seq.append_token_id(token_id, token_logprob.logprob)
+                seq.append_token_id(token_id, token_logprob.logprob,
+                                    seq_output.output_embed)
                 seq.update_num_computed_tokens(1)
 
     @staticmethod
