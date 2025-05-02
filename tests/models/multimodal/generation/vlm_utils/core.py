@@ -1,9 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 """Core test implementation to be shared across modalities."""
-from typing import Any, Callable, Optional, Union
+from typing import Any, Callable, Optional
 
 import torch
-from PIL.Image import Image
 from transformers.models.auto.auto_factory import _BaseAutoModelClass
 
 from vllm.config import TaskOption
@@ -11,14 +10,14 @@ from vllm.transformers_utils.tokenizer import AnyTokenizer
 
 from .....conftest import HfRunner, VllmRunner
 from ....registry import HF_EXAMPLE_MODELS
-from .types import RunnerOutput
+from .types import RunnerInput, RunnerOutput
 
 
 def run_test(
     *,
     hf_runner: type[HfRunner],
     vllm_runner: type[VllmRunner],
-    inputs: list[tuple[list[str], list[Union[list[Image], Image]]]],
+    inputs: RunnerInput,
     model: str,
     dtype: str,
     max_tokens: int,
@@ -94,10 +93,16 @@ def run_test(
         if stop_str:
             vllm_kwargs["stop"] = stop_str
 
-        for prompts, media in vllm_inputs:
-            vllm_kwargs[runner_mm_key] = media
+        for prompts, vision_data, audio_data in vllm_inputs:
+            vllm_kwargs_with_media = dict(**vllm_kwargs)
+            vllm_kwargs_with_media[runner_mm_key] = vision_data
+            if audio_data is not None:
+                vllm_kwargs_with_media["audios"] = audio_data
             vllm_output = vllm_model.generate_greedy_logprobs(
-                prompts, max_tokens, num_logprobs=num_logprobs, **vllm_kwargs)
+                prompts,
+                max_tokens,
+                num_logprobs=num_logprobs,
+                **vllm_kwargs_with_media)
             vllm_outputs_per_mm.append(vllm_output)
 
     hf_model = hf_runner(model,
@@ -122,14 +127,17 @@ def run_test(
         if stop_str:
             hf_kwargs["stop_strings"] = stop_str
 
-        for prompts, media in inputs:
-            hf_kwargs[runner_mm_key] = media
+        for prompts, vision_data, audio_data in inputs:
+            hf_kwargs_with_media = dict(**hf_kwargs)
+            hf_kwargs_with_media[runner_mm_key] = vision_data
+            if audio_data is not None:
+                hf_kwargs_with_media["audios"] = audio_data
             hf_output = hf_model.generate_greedy_logprobs_limit(
                 prompts,
                 max_tokens,
                 num_logprobs=num_logprobs,
                 tokenizer=tokenizer,
-                **hf_kwargs)
+                **hf_kwargs_with_media)
             hf_outputs_per_mm.append(hf_output)
 
     # Apply output processing / sanitation to the vLLM and HF runner results

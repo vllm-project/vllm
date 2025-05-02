@@ -140,7 +140,7 @@ VLM_TEST_SETTINGS = {
         marks=[pytest.mark.core_model, pytest.mark.cpu_model],
     ),
     "qwen2_5_omni": VLMTestInfo(
-        models=["Qwen/Qwen2.5-Omni-7B"],
+        models=["Qwen/Qwen2.5-Omni-3B"],
         test_type=(
             VLMTestType.IMAGE,
             VLMTestType.MULTI_IMAGE,
@@ -619,6 +619,18 @@ VLM_TEST_SETTINGS = {
                 formatter=lambda vid_prompt: f"<|im_start|>user\n{vid_prompt}<|im_end|>\n<|im_start|>assistant\n",  # noqa: E501
             ),
             limit_mm_per_prompt={"image": 4},
+        )],
+    ),
+    "qwen2_5_omni_mixed_modalities": VLMTestInfo(
+        models=["Qwen/Qwen2.5-Omni-3B"],
+        test_type=VLMTestType.CUSTOM_INPUTS,
+        max_model_len=4096,
+        max_num_seqs=2,
+        auto_cls=AutoModelForVision2Seq,
+        vllm_output_post_proc=model_utils.qwen2_vllm_to_hf_output,
+        custom_test_opts=[CustomTestOptions(
+            inputs=custom_inputs.windows_attention_image_qwen2_5_vl(),
+            limit_mm_per_prompt={"image": 1},
         )],
     ),
     # regression test for https://github.com/vllm-project/vllm/issues/15122

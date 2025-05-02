@@ -5,6 +5,7 @@ from enum import Enum
 from pathlib import PosixPath
 from typing import Any, Callable, NamedTuple, Optional, Union
 
+import numpy.typing as npt
 import torch
 from PIL.Image import Image
 from pytest import MarkDecorator
@@ -36,6 +37,10 @@ IMAGE_SIZE_FACTORS = [(), (1.0, ), (1.0, 1.0, 1.0), (0.25, 0.5, 1.0)]
 EMBEDDING_SIZE_FACTORS = [(), (1.0, ), (1.0, 1.0, 1.0)]
 RunnerOutput = tuple[list[int], str, Optional[SampleLogprobs]]
 # yapf: enable
+VisionInput = list[Union[list[Image], Image]]
+Audio = tuple[npt.NDArray, float]
+AudioInput = list[Optional[Union[list[Audio], Audio]]]
+RunnerInput = list[tuple[list[str], VisionInput, AudioInput]]
 
 
 class VLMTestType(Enum):
@@ -52,7 +57,7 @@ class SizeType(Enum):
 
 
 class CustomTestOptions(NamedTuple):
-    inputs: list[tuple[list[str], list[Union[list[Image], Image]]]]
+    inputs: RunnerInput
     limit_mm_per_prompt: dict[str, int]
     # kwarg to pass multimodal data in as to vllm/hf runner instances.
     runner_mm_key: str = "images"

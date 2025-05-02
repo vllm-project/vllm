@@ -120,3 +120,17 @@ def windows_attention_image_qwen2_5_vl():
 
     wrapped_sf = ImageSizeWrapper(type=SizeType.SIZE_FACTOR, data=[0.5])
     return build_single_image_inputs([image], [prompt], wrapped_sf)
+
+
+def mixed_modality_qwen2_5_omni():
+    # image from regression issue: https://github.com/vllm-project/vllm/issues/15122
+    image_url = "https://aomediacodec.github.io/av1-avif/testFiles/Link-U/hato.jpg"
+    image = Image.open(BytesIO(requests.get(image_url).content))
+
+    question = "Describe the image."
+    img_prompt = "<|vision_start|><|image_pad|><|vision_end|>"
+    prompt = (f"<|im_start|>User\n{img_prompt}{question}<|im_end|>\n"
+              "<|im_start|>assistant\n")
+
+    wrapped_sf = ImageSizeWrapper(type=SizeType.SIZE_FACTOR, data=[0.5])
+    return build_single_image_inputs([image], [prompt], wrapped_sf)
