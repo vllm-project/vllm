@@ -2,7 +2,7 @@
 
 from .mistral import (MistralTokenizer, maybe_serialize_tool_calls,
                       truncate_tool_call_ids, validate_request_params)
-from vllm.transformers_utils.tokenizers.bitnet import BitnetTokenizer
+from .bitnet import BitnetTokenizer
 
 __all__ = [
     "MistralTokenizer", "maybe_serialize_tool_calls", "truncate_tool_call_ids",

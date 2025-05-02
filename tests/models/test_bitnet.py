@@ -26,8 +26,8 @@ model_pairs = [
 ]
 
 
-@pytest.mark.flaky(reruns=2)
-@pytest.mark.skipif(True, reason="BitBLAS takes too much time for tuning.")
+# @pytest.mark.flaky(reruns=2)
+# @pytest.mark.skipif(True, reason="BitBLAS takes too much time for tuning.")
 @pytest.mark.parametrize("model_pair", model_pairs)
 @pytest.mark.parametrize("dtype", ["half"])
 @pytest.mark.parametrize("max_tokens", [32])
@@ -42,12 +42,14 @@ def test_models(
 ) -> None:
     with vllm_runner(model_pair.model_bitblas,
                      dtype=dtype,
+                     tokenizer_mode = "bitnet",
                      quantization="bitblas") as bitblas_model:
         bitblas_outputs = bitblas_model.generate_greedy_logprobs(
             example_prompts, max_tokens, num_logprobs)
 
     with vllm_runner(model_pair.model_bitnet,
                      dtype=dtype,
+                     tokenizer_mode = "bitnet",
                      quantization="bitnet") as bitnet_model:
         bitnet_outputs = bitnet_model.generate_greedy_logprobs(
             example_prompts, max_tokens, num_logprobs)

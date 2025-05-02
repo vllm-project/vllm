@@ -31,7 +31,7 @@ from torch import nn
 from transformers.configuration_utils import PretrainedConfig
 
 from vllm.attention import Attention, AttentionMetadata
-from vllm.config import CacheConfig
+from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import (get_pp_group, get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size)
 from vllm.logger import init_logger
@@ -47,11 +47,11 @@ from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     DEFAULT_VOCAB_PADDING_SIZE, ParallelLMHead, VocabParallelEmbedding)
-from vllm.model_executor.model_loader.weight_utils import (
-    default_weight_loader, kv_cache_scales_loader)
+from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
-from vllm.sequence import IntermediateTensors, SamplerOutput
-from vllm.utils import is_hip, print_warning_once
+from vllm.sequence import IntermediateTensors
+from vllm.model_executor.layers.sampler import SamplerOutput
+from vllm.logger import _print_warning_once
 
 from .utils import PPMissingLayer
 
@@ -558,14 +558,16 @@ class BitnetForCausalLM(nn.Module):
     embedding_padding_modules = ["lm_head"]
 
     def __init__(
-        self,
-        config: BitnetConfig,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
-    ) -> None:
+        self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
+        config = vllm_config.model_config.hf_config
+        quant_config = vllm_config.quant_config
+        lora_config = vllm_config.lora_config
 
         self.config = config
+        self.lora_config = lora_config
+
+        self.quant_config = quant_config
 
         self.model = BitnetModel(config, cache_config, quant_config)
 
@@ -669,7 +671,7 @@ class BitnetForCausalLM(nn.Module):
                     remapped_kv_scale_name = name.replace(
                         ".kv_scale", ".attn.kv_scale")
                     if remapped_kv_scale_name not in params_dict:
-                        print_warning_once(
+                        _print_warning_once(logger,
                             f"Found kv scale in the checkpoint (e.g. {name}), "
                             "but not found the expected name in the model "
                             f"(e.g. {remapped_kv_scale_name}). kv-scale is "
@@ -684,30 +686,3 @@ class BitnetForCausalLM(nn.Module):
                 if sum(param.data.shape) == 0 or sum(loaded_weight.shape) == 0:
                     loaded_weight = loaded_weight.view(param.data.shape)
                 weight_loader(param, loaded_weight)
-
-    # If this function is called, it should always initialize KV cache scale
-    # factors (or else raise an exception). Thus, handled exceptions should
-    # make sure to leave KV cache scale factors in a known good (dummy) state
-    def load_kv_cache_scales(self, quantization_param_path: str) -> None:
-        tp_size = get_tensor_model_parallel_world_size()
-        tp_rank = get_tensor_model_parallel_rank()
-        for layer_idx, scaling_factor in kv_cache_scales_loader(
-                quantization_param_path,
-                tp_rank,
-                tp_size,
-                self.config.num_hidden_layers,
-                self.config.__class__.model_type,
-        ):
-            layer_self_attn = self.model.layers[layer_idx].self_attn
-
-            if is_hip():
-                # The scaling factor convention we are assuming is
-                # quantized_value * scaling_factor ~= true_value
-                # which is consistent with the practice of setting
-                # scaling_factor = tensor_amax / FPtype_max
-                scaling_factor *= 2
-            if hasattr(layer_self_attn, "kv_scale"):
-                layer_self_attn.attn._kv_scale = scaling_factor
-            else:
-                raise RuntimeError("Self attention has no KV cache scaling "
-                                   "factor attribute!")
