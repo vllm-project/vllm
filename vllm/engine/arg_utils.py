@@ -150,12 +150,12 @@ def get_kwargs(cls: ConfigType) -> dict[str, Any]:
         dataclass_hint = next(generator, None)
 
         # Get the default value of the field
-        if dataclass_hint is not None:
-            default = {}
-        elif field.default is not MISSING:
+        if field.default is not MISSING:
             default = field.default
         elif field.default_factory is not MISSING:
             default = field.default_factory()
+        elif dataclass_hint is not None:
+            default = {}
 
         # Get the help text for the field
         name = field.name
