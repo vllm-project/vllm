@@ -1240,4 +1240,5 @@ def test_memory_leak():
         model_runner_output = make_output(scheduler)
         scheduler.update_from_output(scheduler_output, model_runner_output)
 
+    # Confirm no memory leak.
     assert_scheduler_empty(scheduler)
