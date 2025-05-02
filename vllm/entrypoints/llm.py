@@ -27,7 +27,7 @@ from vllm.entrypoints.score_utils import (_cosine_similarity,
                                           _validate_score_input_lens)
 from vllm.entrypoints.utils import _validate_truncation_size
 from vllm.inputs import PromptType, SingletonPrompt, TextPrompt, TokensPrompt
-from vllm.inputs.parse import is_token_prompt, parse_and_batch_prompt
+from vllm.inputs.parse import parse_and_batch_prompt
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.model_executor.guided_decoding.guided_fields import (
@@ -567,10 +567,12 @@ class LLM:
                 mm_kwargs["mm_processor_kwargs"] = prompt[
                     "mm_processor_kwargs"]
 
-            if is_token_prompt(prompt):
+            if "prompt_token_ids" in prompt:
+                prompt = cast(TokensPrompt, prompt)  # Needed for mypy
                 prompt_tokens = prompt["prompt_token_ids"]
             else:
                 prompt_tokens = tokenizer.encode(prompt["prompt"])
+
             instances.append(
                 BeamSearchInstance(prompt_tokens, logprobs=None, **mm_kwargs))
 

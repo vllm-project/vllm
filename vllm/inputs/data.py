@@ -70,6 +70,11 @@ class EmbedsPrompt(TypedDict):
     prompt_embeds: torch.Tensor
     """The embeddings of the prompt."""
 
+    cache_salt: NotRequired[str]
+    """
+    Optional cache salt to be used for prefix caching.
+    """
+
 
 SingletonPrompt = Union[str, TextPrompt, TokensPrompt, EmbedsPrompt]
 """
@@ -195,13 +200,21 @@ class EmbedsInputs(TypedDict):
     prompt_embeds: torch.Tensor
     """The embeddings of the prompt."""
 
+    cache_salt: NotRequired[str]
+    """
+    Optional cache salt to be used for prefix caching.
+    """
 
-def embeds_inputs(prompt_embeds: torch.Tensor) -> EmbedsInputs:
+
+def embeds_inputs(
+    prompt_embeds: torch.Tensor,
+    cache_salt: Optional[str] = None,
+) -> EmbedsInputs:
     """Construct :class:`EmbedsInputs` from optional values."""
-    inputs = EmbedsInputs(
-        type="embeds",
-        prompt_embeds=prompt_embeds,
-    )
+    inputs = EmbedsInputs(type="embeds", prompt_embeds=prompt_embeds)
+
+    if cache_salt is not None:
+        inputs["cache_salt"] = cache_salt
 
     return inputs
 
