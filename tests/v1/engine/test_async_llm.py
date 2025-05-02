@@ -8,6 +8,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from vllm import SamplingParams
+from vllm.streaming_params import StreamingParams
 from vllm.assets.image import ImageAsset
 from vllm.config import VllmConfig
 from vllm.engine.arg_utils import AsyncEngineArgs
@@ -62,9 +63,13 @@ async def generate(engine: AsyncLLM,
                                      seed=33,
                                      n=n,
                                      prompt_logprobs=prompt_logprobs)
+    
+    streaming_params = StreamingParams(stream_n=3)
+
     async for out in engine.generate(request_id=request_id,
                                      prompt=prompt,
-                                     sampling_params=sampling_params):
+                                     sampling_params=sampling_params,
+                                     streaming_params=streaming_params):
 
         num_tokens = sum(len(output.token_ids) for output in out.outputs)
         if output_kind == RequestOutputKind.DELTA:
@@ -209,11 +214,15 @@ async def test_finished_flag(monkeypatch: pytest.MonkeyPatch, n: int,
                                          temperature=1.0,
                                          seed=33,
                                          n=n)
+
+        streaming_params = StreamingParams(stream_n=3)
+
         outputs = [
             out
             async for out in engine.generate(request_id="request-33",
                                              prompt=prompt,
-                                             sampling_params=sampling_params)
+                                             sampling_params=sampling_params,
+                                             streaming_params=streaming_params)
         ]
 
         # Assert only the last output has the finished flag set
