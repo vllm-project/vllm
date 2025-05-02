@@ -3,12 +3,10 @@
 from dataclasses import dataclass
 from typing import Dict, List, Optional, TypedDict, Union
 
-from pydantic import BaseModel
-
 
 # These classes are deprecated, see SamplingParams
 class LLMGuidedOptions(TypedDict, total=False):
-    guided_json: Union[Dict, BaseModel, str]
+    guided_json: Union[Dict, str]
     guided_regex: str
     guided_choice: List[str]
     guided_grammar: str
@@ -20,7 +18,7 @@ class LLMGuidedOptions(TypedDict, total=False):
 @dataclass
 class GuidedDecodingRequest:
     """One of the fields will be used to retrieve the logit processor."""
-    guided_json: Optional[Union[Dict, BaseModel, str]] = None
+    guided_json: Optional[Union[Dict, str]] = None
     guided_regex: Optional[str] = None
     guided_choice: Optional[List[str]] = None
     guided_grammar: Optional[str] = None

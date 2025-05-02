@@ -206,7 +206,7 @@ def get_field(cls: ConfigType, name: str) -> Field:
     cls_fields = {f.name: f for f in fields(cls)}
     if name not in cls_fields:
         raise ValueError(f"Field '{name}' not found in {cls.__name__}.")
-    named_field: Field = cls_fields.get(name)
+    named_field: Field = cls_fields[name]
     if (default_factory := named_field.default_factory) is not MISSING:
         return field(default_factory=default_factory)
     if (default := named_field.default) is not MISSING:
@@ -2808,8 +2808,8 @@ class PromptAdapterConfig:
 class MultiModalConfig:
     """Controls the behavior of multimodal models."""
 
-    limit_per_prompt: dict[str, int] = get_field(ModelConfig,
-                                                 "limit_mm_per_prompt")
+    limit_per_prompt: dict[str, int] = \
+        cast(dict[str,int], get_field(ModelConfig, "limit_mm_per_prompt"))
     """
     The maximum number of input items allowed per prompt for each modality.
     Defaults to 1 (V0) or 999 (V1) for each modality.
@@ -3517,6 +3517,7 @@ class CompilationLevel:
     PIECEWISE = 3
 
 
+@config
 @dataclass
 class CompilationConfig:
     """Configuration for compilation. It has three parts:
@@ -3577,7 +3578,7 @@ class CompilationConfig:
     used for the compilation directly (it sees the whole graph). When the
     compilation level is 3, the backend is used for the piecewise compilation
     (it sees a part of the graph)."""
-    custom_ops: list[str] = Field(default_factory=list)
+    custom_ops: list[str] = field(default_factory=list)
     """Fine-grained control over which custom ops to enable/disable. Use 'all'
     to enable all, 'none' to disable all. Also specify a list of custom op
     names to enable (prefixed with a '+'), or disable (prefixed with a '-').
@@ -3588,7 +3589,7 @@ class CompilationConfig:
 
     By default, all custom ops are enabled when running without Inductor and
     disabled when running with Inductor (compile_level >= Inductor)."""
-    splitting_ops: list[str] = Field(default=None)  # type: ignore
+    splitting_ops: list[str] = field(default=None)  # type: ignore
     """A list of ops to split the full graph into subgraphs, used in piecewise
     compilation."""
 
@@ -3600,14 +3601,14 @@ class CompilationConfig:
     - True: inductor compilation is used. one graph for symbolic shape
         is compiled. In addition, compile for compile_sizes,
         using configurations in inductor_compile_config."""
-    compile_sizes: Optional[list[Union[int, str]]] = Field(default=None)
+    compile_sizes: Optional[list[Union[int, str]]] = field(default=None)
     """Sizes to compile for inductor. In addition
     to integers, it also supports "cudagraph_capture_sizes" to
     specify the sizes for cudagraph capture."""
-    inductor_compile_config: dict = Field(default_factory=dict)
+    inductor_compile_config: dict = field(default_factory=dict)
     """Additional configurations for inductor.
     - None: use default configurations."""
-    inductor_passes: dict[str, str] = Field(default_factory=dict)
+    inductor_passes: dict[str, str] = field(default_factory=dict)
     """Additional passes for inductor. It is a dictionary
     from pass name to pass function qualified name. We use function
     name because the config uses JSON format. If we pass the config
@@ -3655,8 +3656,8 @@ class CompilationConfig:
             TODO(luka) better pass enabling system.
         - enable_sequence_parallelism: whether to enable sequence parallelism.
         """
-        dump_graph_stages: list[str] = Field(default_factory=list)
-        dump_graph_dir: Path = Field(default=Path("."))
+        dump_graph_stages: list[str] = field(default_factory=list)
+        dump_graph_dir: Path = field(default=Path("."))
         enable_fusion: bool = True
         enable_noop: bool = True
         enable_sequence_parallelism: bool = False
@@ -3681,25 +3682,30 @@ class CompilationConfig:
     pass_config: PassConfig = field(default_factory=PassConfig)
     """Custom inductor passes, see PassConfig for more details"""
 
-    # not configurable, computed after init
-    max_capture_size: int = PrivateAttr
-    local_cache_dir: str = PrivateAttr  # local cache dir for each rank
-    # optimization:
-    # Intuitively, bs_to_padded_graph_size should be dict[int, int].
-    # since we know all keys are in a range [0, max_capture_size],
-    # we can optimize it to list[int] for better lookup performance.
-    bs_to_padded_graph_size: list[int] = PrivateAttr
+    max_capture_size: int = field(init=False)
+    """not configurable, computed after init"""
+    local_cache_dir: str = field(init=False)
+    """local cache dir for each rank"""
+    bs_to_padded_graph_size: list[int] = field(init=False)
+    """optimization:
+    Intuitively, bs_to_padded_graph_size should be dict[int, int].
+    since we know all keys are in a range [0, max_capture_size],
+    we can optimize it to list[int] for better lookup performance."""
 
     # keep track of enabled and disabled custom ops
-    enabled_custom_ops: Counter[str] = PrivateAttr
-    disabled_custom_ops: Counter[str] = PrivateAttr
-    traced_files: set[str] = PrivateAttr
-    compilation_time: float = PrivateAttr
+    enabled_custom_ops: Counter[str] = field(init=False)
+    """custom ops that are enabled"""
+    disabled_custom_ops: Counter[str] = field(init=False)
+    """custom ops that are disabled"""
+    traced_files: set[str] = field(init=False)
+    """files that are traced for compilation"""
+    compilation_time: float = field(init=False)
+    """time taken for compilation"""
 
-    # Per-model forward context
-    # Map from layer name to layer objects that need to be accessed outside
-    # model code, e.g., Attention, FusedMOE when dp_size>1.
-    static_forward_context: dict[str, Any] = PrivateAttr
+    static_forward_context: dict[str, Any] = field(init=False)
+    """Per-model forward context
+    Map from layer name to layer objects that need to be accessed outside
+    model code, e.g., Attention, FusedMOE when dp_size>1."""
 
     def compute_hash(self) -> str:
         """
@@ -3881,21 +3887,22 @@ class VllmConfig:
     simplifies passing around the distinct configurations in the codebase.
     """
 
-    model_config: ModelConfig = None  # type: ignore
+    model_config: ModelConfig = field(default_factory=ModelConfig)
     """Model configuration."""
-    cache_config: CacheConfig = None  # type: ignore
+    cache_config: CacheConfig = field(default_factory=CacheConfig)
     """Cache configuration."""
     parallel_config: ParallelConfig = field(default_factory=ParallelConfig)
     """Parallel configuration."""
     scheduler_config: SchedulerConfig = field(default_factory=SchedulerConfig)
     """Scheduler configuration."""
-    device_config: DeviceConfig = None  # type: ignore
+    device_config: DeviceConfig = field(default_factory=DeviceConfig)
     """Device configuration."""
-    load_config: LoadConfig = None  # type: ignore
+    load_config: LoadConfig = field(default_factory=LoadConfig)
     """Load configuration."""
     lora_config: Optional[LoRAConfig] = None
     """LoRA configuration."""
-    speculative_config: SpeculativeConfig = None  # type: ignore
+    speculative_config: SpeculativeConfig = field(
+        default_factory=SpeculativeConfig)
     """Speculative decoding configuration."""
     decoding_config: Optional[DecodingConfig] = None
     """Decoding configuration."""
@@ -3905,7 +3912,8 @@ class VllmConfig:
     """Prompt adapter configuration."""
     quant_config: Optional[QuantizationConfig] = None
     """Quantization configuration."""
-    compilation_config: CompilationConfig = None  # type: ignore
+    compilation_config: CompilationConfig = field(
+        default_factory=CompilationConfig)
     """`torch.compile` configuration for the model.
 
     When it is a number (0, 1, 2, 3), it will be interpreted as the
@@ -3921,7 +3929,8 @@ class VllmConfig:
     You can specify the full compilation config like so:
     `{"level": 3, "cudagraph_capture_sizes": [1, 2, 4, 8]}`
     """
-    kv_transfer_config: KVTransferConfig = None  # type: ignore
+    kv_transfer_config: KVTransferConfig = field(
+        default_factory=KVTransferConfig)
     """The configurations for distributed KV cache transfer."""
     kv_events_config: Optional[KVEventsConfig] = None
     """The configurations for event publishing."""

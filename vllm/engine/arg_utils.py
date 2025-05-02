@@ -212,7 +212,7 @@ def get_kwargs(cls: ConfigType) -> dict[str, Any]:
             # Dict arguments will always be optional
             kwargs[name]["type"] = optional_type(json.loads)
             kwargs[name]["help"] += json_tip
-        elif (contains_type(type_hints, str)
+        elif (contains_type(type_hints, str) or contains_type(type_hints, Any)
               or any(is_not_builtin(th) for th in type_hints)):
             kwargs[name]["type"] = str
         else:
