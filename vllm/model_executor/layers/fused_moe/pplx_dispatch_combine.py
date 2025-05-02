@@ -105,10 +105,11 @@ class PplxDispatchCombine(mk.FusedMoEQuantizeDispatchCombine):
             )
 
         # This argument is optional, defaults to indices.shape[0]
-        bound_m = torch.tensor([num_tokens], dtype=torch.uint32, device=device)
+        #bound_m = torch.tensor([num_tokens], dtype=torch.uint32, device=device)
+        bound_m = None
 
         # TODO: optimize this?
-        indices = rank_topk_ids.to(dtype=torch.uint32)
+        #indices = rank_topk_ids.to(dtype=torch.uint32)
 
         self.a2a.dispatch(
             out_expert_num_tokens=expert_num_tokens,
@@ -116,7 +117,7 @@ class PplxDispatchCombine(mk.FusedMoEQuantizeDispatchCombine):
             out_expert_x_scale=expert_x_scale,
             dp_x=a1q,
             dp_x_scale=a1q_scale,
-            indices=indices,
+            indices=rank_topk_ids,
             bound_m=bound_m,
         )
         return expert_x, expert_x_scale, expert_num_tokens
@@ -131,9 +132,10 @@ class PplxDispatchCombine(mk.FusedMoEQuantizeDispatchCombine):
     ) -> None:
         # This argument is optional
         num_tokens = output.shape[0]  # M
-        bound_m = torch.tensor([num_tokens],
-                               dtype=torch.uint32,
-                               device=fused_expert_output.device)
+        #bound_m = torch.tensor([num_tokens],
+        #                       dtype=torch.uint32,
+        #                       device=fused_expert_output.device)
+        bound_m = None
 
         assert topk_ids.shape[0] <= num_tokens
         assert output.shape[0] <= self.max_num_tokens, \
@@ -145,7 +147,7 @@ class PplxDispatchCombine(mk.FusedMoEQuantizeDispatchCombine):
             topk_weights = torch.ones_like(topk_weights)
 
         self.a2a.combine(out_tokens=output,
-                         indices=topk_ids.to(torch.uint32),
+                         indices=topk_ids, #.to(torch.uint32),
                          weights=topk_weights,
                          expert_y=fused_expert_output,
                          bound_m=bound_m)

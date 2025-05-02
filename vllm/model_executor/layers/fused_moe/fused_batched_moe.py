@@ -577,11 +577,11 @@ class BatchedExperts(mk.FusedMoEPermuteExpertsUnpermute):
         topk: int,
         num_experts: int,
     ) -> Tuple[int, int, torch.dtype]:
+        assert a.dim() == 2
         max_num_tokens = a.shape[
-            1] if self.max_num_tokens is None else self.max_num_tokens
-        # TODO: *2 is a hack
-        workspace13 = num_experts * max_num_tokens * K * topk * 2
-        workspace2 = max_num_tokens * N
+            0] if self.max_num_tokens is None else self.max_num_tokens
+        workspace13 = num_experts * max_num_tokens * max(K, N)
+        workspace2 = max_num_tokens * (N // 2)
         return (workspace13, workspace2, a.dtype)
 
     def apply(
@@ -605,6 +605,7 @@ class BatchedExperts(mk.FusedMoEPermuteExpertsUnpermute):
     ) -> torch.Tensor:
         assert hidden_states.dim() == 3
         assert expert_num_tokens is not None
+        hidden_dim = hidden_states.shape[-1]
 
         if self.max_num_tokens is None:
             max_num_tokens = hidden_states.shape[1]
@@ -613,13 +614,13 @@ class BatchedExperts(mk.FusedMoEPermuteExpertsUnpermute):
 
         num_experts = global_num_experts
         out = _resize_cache(workspace13,
-                            (num_experts, max_num_tokens, w2.shape[1]))
+                            (num_experts, max_num_tokens, hidden_dim))
         num_local_experts = expert_num_tokens.numel()
 
         for expert in range(num_local_experts):
             num = expert_num_tokens[expert]
-            assert num <= max_num_tokens, f"{num}, {max_num_tokens}"
-            if num > 0:
+            #assert num <= max_num_tokens, f"{num}, {max_num_tokens}"
+            if True or num > 0:  # CUDAGRAPH unfriendly?
                 tmp = _resize_cache(workspace2, (num, w1.shape[1] // 2))
                 self.activation(
                     activation, tmp,
@@ -660,8 +661,9 @@ class BatchedTritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
         topk: int,
         num_experts: int,
     ) -> Tuple[int, int, torch.dtype]:
+        assert a.dim() == 2
         max_num_tokens = a.shape[
-            1] if self.max_num_tokens is None else self.max_num_tokens
+            0] if self.max_num_tokens is None else self.max_num_tokens
         workspace13 = num_experts * max_num_tokens * max(K, N)
         workspace2 = num_experts * max_num_tokens * (N // 2)
         return (workspace13, workspace2, a.dtype)
@@ -685,9 +687,6 @@ class BatchedTritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
         workspace2: torch.Tensor,
         expert_num_tokens: Optional[torch.Tensor],
     ) -> torch.Tensor:
-
-        num_tokens = topk_ids.size(0)
-
         # Check constraints.
         if self.use_int4_w4a16:
             assert hidden_states.shape[-1] // 2 == w1.shape[
@@ -705,6 +704,7 @@ class BatchedTritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
             torch.float32, torch.float16, torch.bfloat16, torch.float8_e4m3fn
         ]
 
+        # TODO: num_tokens -> max_num_tokens?
         E, num_tokens, N, K, top_k_num = mk._moe_problem_size(
             hidden_states, w1, w2, topk_ids)
 

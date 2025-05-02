@@ -31,7 +31,10 @@ has_pplx = importlib.util.find_spec("pplx_kernels") is not None
 
 if current_platform.is_cuda_alike():
     from .dispatch_combine import StandardDispatchCombine
-    from .fused_batched_moe import BatchedDispatchCombine, BatchedTritonExperts
+    from .fused_batched_moe import (
+        BatchedDispatchCombine,
+        BatchedTritonExperts,
+        BatchedExperts)
     from .fused_moe import TritonExperts, fused_experts
     from .modular_kernel import (FusedMoEModularKernel,
                                  FusedMoEPermuteExpertsUnpermute,
@@ -257,6 +260,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
                       (BatchedDispatchCombine, PplxDispatchCombine)):
             logger.debug("BatchedTritonExperts %s", self.moe)
             experts = BatchedTritonExperts(
+                max_num_tokens=MOE_DP_CHUNK_SIZE,
                 use_fp8_w8a8=False,
                 use_int8_w8a8=False,
                 use_int8_w8a16=False,
@@ -624,11 +628,11 @@ class FusedMoE(torch.nn.Module):
 
         dispatch_combine = self._construct_dispatch_combine(moe, quant_config)
 
-        success = self.quant_method.set_dispatch_combine(dispatch_combine)
-
-        if not success:
-            logger.warning("DP+EP not supported for %s.",
-                           type(self.quant_method))
+        if dispatch_combine is not None:
+            success = self.quant_method.set_dispatch_combine(dispatch_combine)
+            if not success:
+                logger.warning("DP+EP not supported for %s.",
+                               type(self.quant_method))
 
         self.apply_router_weight_on_input = apply_router_weight_on_input
         moe_quant_params = {
@@ -653,7 +657,7 @@ class FusedMoE(torch.nn.Module):
         self,
         moe: MoEConfig,
         quant_config: Optional[QuantizationConfig],
-    ) -> FusedMoEQuantizeDispatchCombine:
+    ) -> Optional[FusedMoEQuantizeDispatchCombine]:
         if self.dp_size > 1 and has_pplx:
             logger.debug("using pplx dispatch")
             max_num_tokens = MOE_DP_CHUNK_SIZE
@@ -685,7 +689,9 @@ class FusedMoE(torch.nn.Module):
                 rank,
                 moe.in_dtype,
             )
-        elif True:
+        elif False:
+            return None
+        elif False:
             logger.debug("using standard dispatch")
             return StandardDispatchCombine(
                 moe.in_dtype,
@@ -694,9 +700,11 @@ class FusedMoE(torch.nn.Module):
             )
         else:
             logger.debug("using batched dispatch")
+            dp_size = moe.ep_size // moe.dp_size  # dp_size actually means TP.
+            rank = moe.ep_rank
             return BatchedDispatchCombine(
-                moe.ep_size,
-                moe.ep_rank,
+                dp_size,
+                rank,
             )
 
     def _load_per_tensor_weight_scale(self, shard_id: str,
@@ -984,11 +992,13 @@ class FusedMoE(torch.nn.Module):
                 scoring_func=scoring_func,
                 e_score_correction_bias=e_score_correction_bias)
         elif custom_routing_function is None:
-            topk_weights, topk_ids, token_expert_indices = fused_topk(
-                hidden_states=hidden_states,
-                gating_output=router_logits,
-                topk=top_k,
-                renormalize=renormalize)
+            topk_weights, topk_ids, token_expert_indices = fused_topk(hidden_states=hidden_states,
+                                                gating_output=router_logits,
+                                                topk=top_k,
+                                                renormalize=renormalize,
+                                                # XXXXX how to do this?
+                                                indices_type=torch.uint32,
+                                                )
         else:
             topk_weights, topk_ids = custom_routing_function(
                 hidden_states=hidden_states,
