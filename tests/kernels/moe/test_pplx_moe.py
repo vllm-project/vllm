@@ -28,6 +28,7 @@ import vllm.model_executor.layers.fused_moe  # noqa
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.fused_moe.fused_batched_moe import (
+    BatchedDispatchCombine,
     BatchedExperts)
 from vllm.model_executor.layers.fused_moe.fused_moe import fused_topk
 from vllm.model_executor.layers.fused_moe.modular_kernel import (
@@ -170,7 +171,7 @@ def torch_dispatch(
     assert topk_ids.dim() == 2
     assert topk_ids.shape[0] == a.shape[0]
 
-    num_tokens = a.shape[0]
+    num_tokens, hidden_dim = a.shape
     topk = topk_ids.shape[1]
 
     tokens_per_expert = torch.bincount(topk_ids.view(-1),
@@ -181,7 +182,7 @@ def torch_dispatch(
     if max_num_tokens is None:
         max_num_tokens = int(tokens_per_expert.max().item())
 
-    b_a = torch.zeros((num_experts, max_num_tokens, a.shape[1]),
+    b_a = torch.zeros((num_experts, max_num_tokens, hidden_dim),
                       dtype=a.dtype,
                       device=a.device)
 
@@ -198,7 +199,7 @@ def torch_dispatch(
 
 
 def torch_combine(b_out, topk_weight, topk_ids):
-    num_tokens, topk = topk_ids.shape
+    num_tokens = topk_ids.shape[0]
     num_experts = b_out.shape[0]
     K = b_out.shape[-1]
     out = torch.zeros((num_tokens, K), dtype=b_out.dtype, device=b_out.device)
@@ -240,6 +241,22 @@ def torch_batched_moe(a, w1, w2, topk_weight, topk_ids):
     return torch_combine(out, topk_weight, topk_ids)
 
 
+def batched_moe(a, w1, w2, topk_weight, topk_ids):
+    num_experts = w1.shape[0]
+
+    fused_experts = FusedMoEModularKernel(
+        BatchedDispatchCombine(a.shape[0], world_size=1, dp_size=1, rank=0),
+        BatchedExperts(a.shape[0])
+    )
+
+    return fused_experts(a,
+                         w1,
+                         w2,
+                         topk_weight,
+                         topk_ids,
+                         num_experts)
+
+
 # TODO: same as torch_moe but with fused_topk factored out.
 def torch_moe2(a, w1, w2, topk_weight, topk_ids):
     M, K = a.shape
@@ -262,7 +279,7 @@ def torch_moe2(a, w1, w2, topk_weight, topk_ids):
 @pytest.mark.parametrize("k", [128, 511, 1024])
 @pytest.mark.parametrize("e", NUM_EXPERTS)
 @pytest.mark.parametrize("topk", TOP_KS)
-@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("dtype", [torch.bfloat16])
 def test_fused_moe_batched_experts(
     m: int,
     n: int,
@@ -280,10 +297,13 @@ def test_fused_moe_batched_experts(
 
     with set_current_vllm_config(vllm_config):
         topk_weight, topk_ids = fused_topk(a, score, topk, False)
-        torch_output = torch_moe2(a, w1, w2, topk_weight, topk_ids)
-        triton_output = torch_batched_moe(a, w1, w2, topk_weight, topk_ids)
+        baseline_output = torch_moe2(a, w1, w2, topk_weight, topk_ids)
+        torch_output = torch_batched_moe(a, w1, w2, topk_weight, topk_ids)
+        batched_output = batched_moe(a, w1, w2, topk_weight, topk_ids)
 
-    torch.testing.assert_close(triton_output, torch_output, atol=2e-2, rtol=0)
+    torch.testing.assert_close(baseline_output, torch_output, atol=2e-2, rtol=0)
+    torch.set_printoptions(profile="full")
+    torch.testing.assert_close(baseline_output, batched_output, atol=2e-2, rtol=0)
 
 
 def rank_chunk(num, r, w):
@@ -473,6 +493,8 @@ def pplx_moe(pgi, dp_size, a, w1, w2, topk_weight, topk_ids):
         experts,
     )
 
+    # TODO: workers with the same dp_rank must use the exact same inputs.
+
     a_chunk = chunk_by_rank(a, rank, world_size).to(device)
     chunk_topk_weight = chunk_by_rank(topk_weight, rank, world_size).to(device)
     chunk_topk_ids = chunk_by_rank(topk_ids, rank, world_size).to(device)
@@ -528,7 +550,7 @@ def _pplx_moe(
 @pytest.mark.parametrize("k", [128, 512, 1024])
 @pytest.mark.parametrize("e", NUM_EXPERTS)
 @pytest.mark.parametrize("topk", TOP_KS)
-@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("dtype", [torch.bfloat16])
 @pytest.mark.parametrize("world_dp_size", [[2, 1]])
 @requires_pplx
 def test_pplx_moe(

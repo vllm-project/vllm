@@ -67,7 +67,7 @@ def _moe_problem_size(
         M = a1.shape[0]
     else:
         assert a1.dim() == 3
-        assert a1.shape[0] == E
+        assert a1.shape[0] == E, f"{a1.shape[0]} == {E}"
         M = a1.shape[1]  # This is max_num_tokens
 
     assert topk_ids.dim() == 2
@@ -338,24 +338,27 @@ class FusedMoEModularKernel(torch.nn.Module):
             a1, a1_scale, a2_scale, topk_weights, topk_ids, global_num_experts,
             expert_map, apply_router_weight_on_input)
 
-        fused_out = self.fused_experts.apply(
-            a1q,
-            w1,
-            w2,
-            topk_ids,
-            activation=activation,
-            global_num_experts=global_num_experts,
-            expert_map=expert_map,
-            w1_scale=w1_scale,
-            w2_scale=w2_scale,
-            w1_zp=w1_zp,
-            w2_zp=w2_zp,
-            a1q_scale=a1q_scale,
-            a2_scale=a2_scale,
-            workspace13=workspace13,
-            workspace2=workspace2,
-            expert_num_tokens=expert_num_tokens,
-        )
+        if True:
+            fused_out = self.fused_experts.apply(
+                a1q,
+                w1,
+                w2,
+                topk_ids,
+                activation=activation,
+                global_num_experts=global_num_experts,
+                expert_map=expert_map,
+                w1_scale=w1_scale,
+                w2_scale=w2_scale,
+                w1_zp=w1_zp,
+                w2_zp=w2_zp,
+                a1q_scale=a1q_scale,
+                a2_scale=a2_scale,
+                workspace13=workspace13,
+                workspace2=workspace2,
+                expert_num_tokens=expert_num_tokens,
+            )
+        else:
+            fused_out = torch.empty_like(a1q)
 
         self.dispatch_combine.combine(output, fused_out, topk_weights,
                                       topk_ids, apply_router_weight_on_input)

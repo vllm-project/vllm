@@ -684,10 +684,11 @@ class FusedMoE(torch.nn.Module):
         moe: MoEConfig,
         quant_config: Optional[QuantizationConfig],
     ) -> Optional[FusedMoEQuantizeDispatchCombine]:
-        if self.dp_size > 1 and has_pplx:
+        max_num_tokens = MOE_DP_CHUNK_SIZE
+        world_size = moe.ep_size
+
+        if False and self.dp_size > 1 and has_pplx:
             logger.debug("using pplx dispatch")
-            max_num_tokens = MOE_DP_CHUNK_SIZE
-            world_size = moe.ep_size
             dp_size = moe.ep_size // moe.dp_size  # dp_size actually means TP.
             rank = moe.ep_rank
 
@@ -717,20 +718,22 @@ class FusedMoE(torch.nn.Module):
             )
         elif False:
             return None
-        elif False:
+        elif self.dp_size > 1:
+            logger.debug("using batched dispatch")
+            dp_size = moe.ep_size // moe.dp_size  # dp_size actually means TP.
+            rank = moe.ep_rank
+            return BatchedDispatchCombine(
+                max_num_tokens=max_num_tokens,
+                world_size=world_size,
+                dp_size=dp_size,
+                rank=rank,
+            )
+        else:
             logger.debug("using standard dispatch")
             return StandardDispatchCombine(
                 moe.in_dtype,
                 quant_config.weight_block_size
                 if quant_config is not None else None,
-            )
-        else:
-            logger.debug("using batched dispatch")
-            dp_size = moe.ep_size // moe.dp_size  # dp_size actually means TP.
-            rank = moe.ep_rank
-            return BatchedDispatchCombine(
-                dp_size,
-                rank,
             )
 
     def _load_per_tensor_weight_scale(self, shard_id: str,
@@ -1039,7 +1042,7 @@ class FusedMoE(torch.nn.Module):
                                                 topk=top_k,
                                                 renormalize=renormalize,
                                                 # XXXXX how to do this?
-                                                indices_type=torch.uint32,
+                                                #indices_type=torch.uint32,
                                                 )
         else:
             topk_weights, topk_ids = custom_routing_function(

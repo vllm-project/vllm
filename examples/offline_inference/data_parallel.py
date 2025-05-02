@@ -115,12 +115,15 @@ def main(model, dp_size, local_dp_rank, global_dp_rank, dp_master_ip,
     # Create an LLM.
     cconfig = CompilationConfig(
         level=0,
+        #cudagraph_capture_sizes=[512,504,496,488,480,472,464,456,448,440,432,424,416,408,400,392,384,376,368,360,352,344,336,328,320,312,304,296,288,280,272,264,256,248,240,232,224,216,208],
+        #cudagraph_capture_sizes=[512,256,1],
     )
     llm = LLM(model=model,
               tensor_parallel_size=GPUs_per_dp_rank,
               enforce_eager=enforce_eager,
               enable_expert_parallel=True,
-              compilation_config=cconfig)
+              compilation_config=cconfig,
+              )
     outputs = llm.generate(prompts, sampling_params)
     # Print the outputs.
     for i, output in enumerate(outputs):
