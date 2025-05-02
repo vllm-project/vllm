@@ -14,32 +14,28 @@ prompts = [
 
 sampling_params = SamplingParams(temperature=0, top_p=0.95, max_tokens=1)
 
-kv_transfer_config = KVTransferConfig(kv_connector="MultiConnector",
-                                      kv_role="kv_both",
-                                      kv_connector_extra_config={
-                                          "connectors": [
-                                              {
-                                                  "kv_connector":
-                                                  "SharedStorageConnector",
-                                                  "kv_role": "kv_both",
-                                                  "kv_connector_extra_config":
-                                                  {
-                                                      "shared_storage_path":
-                                                      "local_storage"
-                                                  }
-                                              },
-                                              {
-                                                  "kv_connector":
-                                                  "SharedStorageConnector",
-                                                  "kv_role": "kv_both",
-                                                  "kv_connector_extra_config":
-                                                  {
-                                                      "shared_storage_path":
-                                                      "external_storage"
-                                                  }
-                                              },
-                                          ]
-                                      })
+kv_transfer_config = KVTransferConfig(
+    kv_connector="MultiConnector",
+    kv_role="kv_both",
+    kv_connector_extra_config={
+        "connectors": [
+            {
+                "kv_connector": "SharedStorageConnector",
+                "kv_role": "kv_both",
+                "kv_connector_extra_config": {
+                    "shared_storage_path": "local_storage"
+                }
+            },
+            {
+                "kv_connector": "SharedStorageConnector",
+                "kv_role": "kv_both",
+                "kv_connector_extra_config": {
+                    "shared_storage_path": "external_storage"
+                }
+            },
+        ]
+    },
+)
 
 llm = LLM(model="meta-llama/Llama-3.2-1B-Instruct",
           enforce_eager=True,
