@@ -5,7 +5,7 @@ from __future__ import annotations
 import time
 from collections import defaultdict, deque
 from collections.abc import Iterable
-from typing import Optional, Union
+from typing import TYPE_CHECKING, Optional, Union
 
 from vllm.config import VllmConfig
 from vllm.distributed.kv_events import EventPublisherFactory, KVEventBatch
@@ -701,6 +701,30 @@ class Scheduler(SchedulerInterface):
             new_logprobs = None
             new_token_ids = generated_token_ids
 
+            # NOTE: We will need to first advance the FSM
+            # given that we apply bitmask in first pass
+            # and we only perform jump-forward posteriori.
+            first_pass = True
+            if new_token_ids and request.use_structured_output:
+                so_request = request.structured_output_request
+                if TYPE_CHECKING:
+                    assert so_request is not None
+                    assert so_request.grammar is not None
+                so_request.grammar.accept_tokens(
+                    request.request_id,
+                    new_token_ids,
+                )
+                first_pass = False
+
+            # NOTE: We are performing retokenization to handle
+            # tokenizer boundary. There will be some
+            # overhead here.
+            if first_pass and new_token_ids and request.use_structured_output and (  # noqa: E501
+                    jump_tokens :=
+                    self.structured_output_manager.jump_forward_tokens(request)
+            ):
+                new_token_ids += jump_tokens
+
             # Append generated tokens and check for stop. Note that if
             # a request is still being prefilled, we expect the model runner
             # to return empty token ids for the request.
@@ -720,13 +744,6 @@ class Scheduler(SchedulerInterface):
                 # NOTE: once we support N tokens per step (spec decode),
                 # the outer lists can be of length > 1.
                 new_logprobs = logprobs.slice(req_index, req_index + 1)
-
-            if new_token_ids and request.use_structured_output:
-                # NOTE: structured_output_request
-                # should not be None if use_structured_output, we have
-                # check above, so safe to ignore type warning
-                request.structured_output_request.grammar.accept_tokens(  # type: ignore[union-attr]
-                    req_id, new_token_ids)
 
             # Add newly generated spec token ids to the request.
             if spec_token_ids is not None:

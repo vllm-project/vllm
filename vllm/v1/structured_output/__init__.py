@@ -1,15 +1,19 @@
 # SPDX-License-Identifier: Apache-2.0
 from __future__ import annotations
 
+import itertools
 import multiprocessing
 from concurrent.futures import ThreadPoolExecutor
 from typing import TYPE_CHECKING, Optional
 
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
+from vllm.transformers_utils.tokenizer_group import init_tokenizer_from_configs
+from vllm.utils import LazyLoader
 from vllm.v1.structured_output.backend_guidance import GuidanceBackend
 from vllm.v1.structured_output.backend_types import (StructuredOutputBackend,
                                                      StructuredOutputGrammar)
+from vllm.v1.structured_output.backend_xgrammar import XgrammarBackend
 
 if TYPE_CHECKING:
     import numpy as np
@@ -17,6 +21,8 @@ if TYPE_CHECKING:
     import torch
 
     from vllm.v1.request import Request
+else:
+    torch = LazyLoader('torch', globals(), 'torch')
 
 logger = init_logger(__name__)
 
@@ -36,6 +42,11 @@ class StructuredOutputManager:
         # compilation, so we set it to half the number of CPUs.
         max_workers = max(1, (multiprocessing.cpu_count() + 1) // 2)
         self.executor = ThreadPoolExecutor(max_workers=max_workers)
+        self.tokenizer = init_tokenizer_from_configs(
+            model_config=self.vllm_config.model_config,
+            scheduler_config=self.vllm_config.scheduler_config,
+            lora_config=self.vllm_config.lora_config,
+        ).get_lora_tokenizer(None)
 
     def grammar_init(self, request: Request) -> None:
         if request.structured_output_request is None:
@@ -47,13 +58,19 @@ class StructuredOutputManager:
         # backends on a per-request basis in V1 (for now, anyway...).
         if self.backend is None:
             backend = request.sampling_params.guided_decoding.backend
+            vocab_size = self.vllm_config.model_config.get_vocab_size()
             if backend == "xgrammar":
-                from vllm.v1.structured_output.backend_xgrammar import (
-                    XgrammarBackend)
-
-                self.backend = XgrammarBackend(self.vllm_config)
+                self.backend = XgrammarBackend(
+                    self.vllm_config,
+                    tokenizer=self.tokenizer,
+                    vocab_size=vocab_size,
+                )
             elif backend == "guidance":
-                self.backend = GuidanceBackend(self.vllm_config)
+                self.backend = GuidanceBackend(
+                    self.vllm_config,
+                    tokenizer=self.tokenizer,
+                    vocab_size=vocab_size,
+                )
             else:
                 raise ValueError(
                     f"Unsupported structured output backend: {backend}")
@@ -140,6 +157,76 @@ class StructuredOutputManager:
         # np.ndarray, because that is much more efficient for serialization
         # and deserialization when sending this to the GPU workers.
         return bitmask_tensor.numpy()
+
+    def jump_forward_tokens(self, request: Request) -> list[int] | None:
+        """
+        For structured output requests, we will perform
+        jump_and_retokenize possible divergence based on grammar state
+        """
+        so_request = request.structured_output_request
+        if TYPE_CHECKING:
+            assert so_request is not None
+            assert so_request.grammar is not None
+            assert self.backend is not None
+
+        jf_string = so_request.grammar.find_jump_string()
+        if not jf_string:
+            return None
+
+        # NOTE: max_rollback_window determines the size
+        # of the tokenes from all_token_ids to be used for retokenization.
+        # Note that we don't need to whole token_ids
+        # for performance reason (tokenizer is blocking)
+        max_rollback_window = 10
+
+        rollback_text_str = self.tokenizer.decode(
+            request.all_token_ids[-max_rollback_window:])
+        retokenized_output_ids = self.tokenizer.encode(
+            rollback_text_str + jf_string,
+            add_special_tokens=False,
+        )
+        if request.prompt_token_ids[-1] in retokenized_output_ids:
+            prompt_boundary = retokenized_output_ids.index(
+                request.prompt_token_ids[-1]) + 1
+            retokenized_output_ids = retokenized_output_ids[prompt_boundary:]
+
+        original_output_ids = request.output_token_ids[
+            max(0,
+                len(request.output_token_ids) - len(retokenized_output_ids)):]
+
+        # Find the prefix match length
+        k = sum(1 for _ in itertools.takewhile(
+            lambda pair: pair[0] == pair[1],
+            zip(original_output_ids, retokenized_output_ids),
+        ))
+        retokenized_suffix = retokenized_output_ids[k:]
+        if k < len(original_output_ids):
+            so_request.grammar.rollback(len(original_output_ids) - k)
+
+        # Validate tokens one by one
+        accepted_tokens: list[int] = []
+        num_validated_in_suffix = 0
+        validation_ok = True
+        for token in retokenized_suffix:
+            if so_request.grammar.accept_tokens(request.request_id, [token]):
+                accepted_tokens.append(token)
+                num_validated_in_suffix += 1
+            else:
+                if num_validated_in_suffix > 0:
+                    so_request.grammar.rollback(num_validated_in_suffix)
+                validation_ok = False
+                break
+
+        if validation_ok:
+            return accepted_tokens
+
+        original_suffix_tokens = original_output_ids[num_validated_in_suffix:]
+        if original_suffix_tokens and not so_request.grammar.accept_tokens(
+                request.request_id,
+                original_suffix_tokens,
+        ):
+            so_request.grammar.rollback(len(original_suffix_tokens))
+        return None
 
     def clear_backend(self) -> None:
         if self.backend is not None:
