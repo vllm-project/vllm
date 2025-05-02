@@ -6,6 +6,8 @@ from typing import Callable
 import requests
 from PIL import Image
 
+from vllm.assets.audio import AudioAsset
+from vllm.assets.image import ImageAsset
 from vllm.multimodal.image import rescale_image_size
 from vllm.multimodal.video import (rescale_video_size, resize_video,
                                    sample_frames_from_video)
@@ -123,14 +125,17 @@ def windows_attention_image_qwen2_5_vl():
 
 
 def mixed_modality_qwen2_5_omni():
-    # image from regression issue: https://github.com/vllm-project/vllm/issues/15122
-    image_url = "https://aomediacodec.github.io/av1-avif/testFiles/Link-U/hato.jpg"
-    image = Image.open(BytesIO(requests.get(image_url).content))
-
-    question = "Describe the image."
-    img_prompt = "<|vision_start|><|image_pad|><|vision_end|>"
-    prompt = (f"<|im_start|>User\n{img_prompt}{question}<|im_end|>\n"
-              "<|im_start|>assistant\n")
-
-    wrapped_sf = ImageSizeWrapper(type=SizeType.SIZE_FACTOR, data=[0.5])
-    return build_single_image_inputs([image], [prompt], wrapped_sf)
+    default_system = (
+        "You are Qwen, a virtual human developed by the Qwen Team, Alibaba "
+        "Group, capable of perceiving auditory and visual inputs, as well as "
+        "generating text and speech.")
+    question = ("What is recited in the audio? "
+                "What is the content of this image?")
+    prompt = (f"<|im_start|>system\n{default_system}<|im_end|>\n"
+              "<|im_start|>user\n<|audio_bos|><|AUDIO|><|audio_eos|>"
+              "<|vision_bos|><|IMAGE|><|vision_eos|>"
+              f"{question}<|im_end|>\n"
+              f"<|im_start|>assistant\n")
+    audio = AudioAsset("mary_had_lamb").audio_and_sample_rate,
+    image = ImageAsset("cherry_blossom").pil_image.convert("RGB"),
+    return [([prompt], [image], [audio])]

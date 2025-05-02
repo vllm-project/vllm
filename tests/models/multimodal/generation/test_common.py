@@ -629,8 +629,7 @@ VLM_TEST_SETTINGS = {
         auto_cls=AutoModelForVision2Seq,
         vllm_output_post_proc=model_utils.qwen2_vllm_to_hf_output,
         custom_test_opts=[CustomTestOptions(
-            inputs=custom_inputs.windows_attention_image_qwen2_5_vl(),
-            limit_mm_per_prompt={"image": 1},
+            inputs=custom_inputs.mixed_modality_qwen2_5_omni(),
         )],
     ),
     # regression test for https://github.com/vllm-project/vllm/issues/15122
