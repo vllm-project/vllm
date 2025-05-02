@@ -200,16 +200,20 @@ class InputBatch:
         # To accumulate prompt logprobs tensor chunks across prefill steps.
         self.in_progress_prompt_logprobs_cpu: dict[str, LogprobsTensors] = {}
 
+        # Define logits processors
+        # TODO(andy): logits processor list should be extensible via engine
+        # constructor argument; for now the list is fixed.
         self.logit_procs: list[LogitsProcessor] = [
             MinTokensLogitsProcessor(pin_memory=pin_memory, device=device),
             LogitBiasLogitsProcessor(pin_memory=pin_memory, device=device),
         ]
-        self.nongreedy_logits_procs: list[LogitsProcessor] = [
-            MinPLogitsProcessor(
+        self.min_p_logitsproc = MinPLogitsProcessor(
                 pin_memory=pin_memory,
                 device=device,
                 # +1 for temporary swap space
                 max_num_reqs=max_num_reqs + 1)
+        self.nongreedy_logits_procs: list[LogitsProcessor] = [
+            self.min_p_logitsproc
         ]
 
         # TODO convert this to LogitsProcessor
@@ -623,6 +627,12 @@ class InputBatch:
             self.lora_id_to_lora_request.values())
 
         return prompt_lora_mapping, token_lora_mapping, active_lora_requests
+
+    def get_min_p_by_req_id(self, req_id: str) -> float:
+        assert req_id in self.req_id_to_index
+        return self.min_p_logitsproc.get_min_p_by_index(
+            self.req_id_to_index[req_id])
+
 
     @property
     def num_reqs(self) -> int:

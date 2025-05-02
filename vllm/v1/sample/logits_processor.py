@@ -66,6 +66,9 @@ class MinPLogitsProcessor(LogitsProcessor):
         # Current slice of the device tensor
         self.min_p: torch.Tensor = self.min_p_device[:0]
 
+    def get_min_p_by_index(self, index: int) -> float:
+        return float(self.min_p_cpu[index])
+
     def update_states(self, batch_update: Optional[BatchUpdate] = None):
         if not batch_update:
             return
