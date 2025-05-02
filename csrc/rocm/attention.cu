@@ -25,8 +25,9 @@
 #include "../attention/dtype_fp8.cuh"
 #include "../quantization/fp8/amd/quant_utils.cuh"
 
-#if defined(__HIPCC__) && (defined(__gfx90a__) || defined(__gfx942__))
-  #define __HIP__MI300_MI250__
+#if defined(__HIPCC__) && \
+    (defined(__gfx90a__) || defined(__gfx942__) || defined(__gfx950__))
+  #define __HIP__GFX9__
 #endif
 
 #if defined(__HIPCC__) && (defined(__gfx1100__) || defined(__gfx1101__))
@@ -50,7 +51,7 @@
 #define MIN(a, b) ((a) < (b) ? (a) : (b))
 #define DIVIDE_ROUND_UP(a, b) (((a) + (b) - 1) / (b))
 
-#if defined(__HIP__MI300_MI250__)  // TODO: Add NAVI support
+#if defined(__HIP__GFX9__)
 
   #define GCN_MFMA_INSTR1 __builtin_amdgcn_mfma_f32_16x16x4f32
   #define GCN_MFMA_INSTR __builtin_amdgcn_mfma_f32_4x4x4f16

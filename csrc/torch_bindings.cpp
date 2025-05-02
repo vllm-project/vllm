@@ -81,8 +81,12 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
 
   // Activation ops
   // Activation function used in SwiGLU.
-  ops.def("silu_and_mul(Tensor! out, Tensor input) -> ()");
+  ops.def("silu_and_mul(Tensor! result, Tensor input) -> ()");
   ops.impl("silu_and_mul", torch::kCUDA, &silu_and_mul);
+
+  ops.def(
+      "silu_and_mul_quant(Tensor! result, Tensor input, Tensor scale) -> ()");
+  ops.impl("silu_and_mul_quant", torch::kCUDA, &silu_and_mul_quant);
 
   ops.def("mul_and_silu(Tensor! out, Tensor input) -> ()");
   ops.impl("mul_and_silu", torch::kCUDA, &mul_and_silu);
@@ -129,13 +133,6 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "    Tensor! block_table_bounds"
       ") -> ()");
   ops.impl("advance_step_flashinfer", torch::kCUDA, &advance_step_flashinfer);
-
-  // Compute MLA decode using cutlass.
-  ops.def(
-      "cutlass_mla_decode(Tensor! out, Tensor q_nope, Tensor q_pe,"
-      "                   Tensor kv_c_and_k_pe_cache, Tensor seq_lens,"
-      "                   Tensor page_table, float scale) -> ()");
-  ops.impl("cutlass_mla_decode", torch::kCUDA, &cutlass_mla_decode);
 
   // Layernorm
   // Apply Root Mean Square (RMS) Normalization to the input tensor.
@@ -449,6 +446,13 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   // CUTLASS sparse matrix compressor
   ops.def("cutlass_sparse_compress(Tensor a) -> Tensor[]");
   ops.impl("cutlass_sparse_compress", &cutlass_sparse_compress);
+
+  // CUTLASS MLA decode
+  ops.def(
+      "cutlass_mla_decode(Tensor! out, Tensor q_nope, Tensor q_pe,"
+      "                   Tensor kv_c_and_k_pe_cache, Tensor seq_lens,"
+      "                   Tensor page_table, float scale) -> ()");
+  ops.impl("cutlass_mla_decode", torch::kCUDA, &cutlass_mla_decode);
 
   // Mamba selective scan kernel
   ops.def(
