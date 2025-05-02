@@ -31,11 +31,11 @@
 #endif
 
 #if defined(__HIPCC__) && (defined(__gfx1100__) || defined(__gfx1101__))
-  #define __HIP__NAVI3__
+  #define __HIP__GFX11__
 #endif
 
 #if defined(__HIPCC__) && (defined(__gfx1200__) || defined(__gfx1201__))
-  #define __HIP__NAVI4__
+  #define __HIP__GFX12__
 #endif
 
 #if defined(NDEBUG)
@@ -1488,7 +1488,7 @@ __launch_bounds__(NUM_THREADS) void paged_attention_ll4mi_reduce_kernel(
   }
 }
 
-#elif defined(__HIP__NAVI3__)
+#elif defined(__HIP__GFX11__)
 
 using floatx8 = __attribute__((__vector_size__(8 * sizeof(float)))) float;
 
@@ -2251,7 +2251,7 @@ __launch_bounds__(NUM_THREADS) void paged_attention_ll4mi_reduce_kernel(
   out_ptr[threadIdx.x] = from_float<scalar_t>(acc);
 }
 
-#elif defined(__HIP__NAVI4__)
+#elif defined(__HIP__GFX12__)
 
 using floatx8 = __attribute__((__vector_size__(8 * sizeof(float)))) float;
 

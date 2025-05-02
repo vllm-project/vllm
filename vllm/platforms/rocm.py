@@ -100,11 +100,6 @@ def on_mi250_mi300() -> bool:
     return any(arch in GPU_ARCH for arch in ["gfx90a", "gfx942"])
 
 
-def on_navi3_navi4() -> bool:
-    GPU_ARCH = torch.cuda.get_device_properties("cuda").gcnArchName
-    return any(arch in GPU_ARCH for arch in ["gfx11", "gfx12"])
-
-
 @cache
 def use_rocm_custom_paged_attention(
         qtype: torch.dtype,
@@ -118,6 +113,7 @@ def use_rocm_custom_paged_attention(
 
     GPU_ARCH = torch.cuda.get_device_properties("cuda").gcnArchName
     ON_GFX9 = any(arch in GPU_ARCH for arch in ["gfx90a", "gfx942", "gfx950"])
+    ON_GFX11_GFX12 = any(arch in GPU_ARCH for arch in ["gfx11", "gfx12"])
 
     # custom paged attn always supported on V0. On V1, requires sliding window
     # disabled due to observed numerical discrepancy.
@@ -133,9 +129,8 @@ def use_rocm_custom_paged_attention(
                          and envs.VLLM_ROCM_USE_AITER))
 
     else:
-        return (on_navi3_navi4()
-                and (not envs.VLLM_USE_V1 or sliding_window == 0
-                     or sliding_window == (-1, -1))
+        return (ON_GFX11_GFX12 and (not envs.VLLM_USE_V1 or sliding_window == 0
+                                    or sliding_window == (-1, -1))
                 and (qtype == torch.half or qtype == torch.bfloat16)
                 and head_size == 128 and block_size == 16
                 and (gqa_ratio >= 3 and gqa_ratio <= 16)
