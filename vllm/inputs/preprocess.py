@@ -312,7 +312,7 @@ class InputPreprocessor:
         # passes in a batch of size 1, i.e. (1, seq_len, hidden_size),
         # we can unambiguously process the intent by squeezing the batch
         # dimension.
-        if prompt_embeds.ndim == 3 and prompt_embeds.shape[0] == 1:
+        if prompt_embeds.ndim == 3:
             prompt_embeds = prompt_embeds.squeeze(dim=0)
 
         if prompt_embeds.ndim != 2:
