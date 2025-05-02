@@ -489,9 +489,13 @@ class _AsyncLLMEngine(LLMEngine):
         if arrival_time is None:
             arrival_time = time.time()
 
-        if self.tokenizer is not None:
-            tokenizer = await self.get_tokenizer_async(lora_request)
-            self._validate_token_prompt(prompt, tokenizer=tokenizer)
+        if (isinstance(prompt, dict)
+                and prompt.get("prompt_embeds", None) is not None
+                and not prompt.get("prompt_token_ids", None)):
+            # We use the -2 dimension (instead of 0) in case a batched input
+            # of batch size 1 is passed in.
+            prompt["prompt_token_ids"] = [0
+                                          ] * prompt["prompt_embeds"].shape[-2]
 
         processed_inputs = await self.input_preprocessor.preprocess_async(
             prompt,

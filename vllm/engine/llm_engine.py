@@ -30,7 +30,7 @@ from vllm.entrypoints.openai.logits_processors import (
     get_logits_processors as get_openai_logits_processors)
 from vllm.executor.executor_base import ExecutorBase
 from vllm.inputs import ProcessorInputs, PromptType, SingletonInputs
-from vllm.inputs.parse import is_token_prompt, split_enc_dec_inputs
+from vllm.inputs.parse import split_enc_dec_inputs
 from vllm.inputs.preprocess import InputPreprocessor
 from vllm.logger import init_logger
 from vllm.logits_process import get_bad_words_logits_processors
@@ -753,10 +753,11 @@ class LLMEngine:
         if arrival_time is None:
             arrival_time = time.time()
 
-        if self.tokenizer is not None:
-            self._validate_token_prompt(
-                prompt,
-                tokenizer=self.get_tokenizer(lora_request=lora_request))
+        if (isinstance(prompt, dict)
+                and prompt.get("prompt_embeds", None) is not None
+                and not prompt.get("prompt_token_ids", None)):
+            seq_len = prompt["prompt_embeds"].shape[0]
+            prompt["prompt_token_ids"] = [0] * seq_len
 
         processed_inputs = self.input_preprocessor.preprocess(
             prompt,
@@ -775,27 +776,6 @@ class LLMEngine:
             trace_headers=trace_headers,
             priority=priority,
         )
-
-    def _validate_token_prompt(self, prompt: PromptType,
-                               tokenizer: AnyTokenizer):
-        # Guard against out-of-vocab tokens.
-        # For some tokenizers, tokenizer.decode will happily return empty text
-        # for token ids that are out of vocab, and we don't detect token ids
-        # that are greater than the max token id before running the model.
-        # However, these token ids will later crash a cuda kernel at runtime
-        # with an index out of bounds error. This will crash the entire engine.
-        # This needs to happen before multimodal input pre-processing, which
-        # may add dummy <image> tokens that aren't part of the tokenizer's
-        # vocabulary.
-        if is_token_prompt(prompt):
-            prompt_ids = prompt["prompt_token_ids"]
-            if len(prompt_ids) == 0:
-                # Empty prompt check is handled later
-                return
-            max_input_id = max(prompt_ids)
-            if max_input_id > tokenizer.max_token_id:
-                raise ValueError(
-                    "Token id {} is out of vocabulary".format(max_input_id))
 
     def _create_sequence_group_with_sampling(
         self,
@@ -1267,11 +1247,13 @@ class LLMEngine:
                 if self.scheduler_config.is_multi_step:
                     is_prefill_append = seq.data.get_num_uncomputed_tokens(
                     ) == 0
-                    seq.append_token_id(sample.output_token, sample.logprobs)
+                    seq.append_token_id(sample.output_token, sample.logprobs,
+                                        sample.output_embed)
                     if not is_prefill_append:
                         seq_group.update_num_computed_tokens(1)
                 else:
-                    seq.append_token_id(sample.output_token, sample.logprobs)
+                    seq.append_token_id(sample.output_token, sample.logprobs,
+                                        sample.output_embed)
 
     def step(self) -> List[Union[RequestOutput, PoolingRequestOutput]]:
         """Performs one decoding iteration and returns newly generated results.
@@ -2032,12 +2014,20 @@ class LLMEngine:
         tokenizer = (None if self.tokenizer is None else
                      self.tokenizer.get_lora_tokenizer(lora_request))
 
-        prompt_ids = prompt_inputs["prompt_token_ids"]
+        prompt_ids = prompt_inputs.get("prompt_token_ids", [])
         if not prompt_ids:
             if prompt_type == "encoder" and model_config.is_multimodal_model:
                 pass  # Mllama may have empty encoder inputs for text-only data
+            if prompt_inputs["type"] == "embeds":
+                pass
             else:
                 raise ValueError(f"The {prompt_type} prompt cannot be empty")
+
+        if tokenizer is not None:
+            max_input_id = max(prompt_ids, default=0)
+            if max_input_id > tokenizer.max_token_id:
+                raise ValueError(
+                    f"Token id {max_input_id} is out of vocabulary")
 
         max_prompt_len = self.model_config.max_model_len
         if len(prompt_ids) > max_prompt_len:
