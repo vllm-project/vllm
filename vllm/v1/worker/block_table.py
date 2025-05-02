@@ -3,6 +3,7 @@
 import numpy as np
 import torch
 
+import vllm.envs as envs
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
@@ -36,6 +37,9 @@ class BlockTable:
         self.block_table_np = self.block_table_cpu.numpy()
         self.num_blocks_per_row = np.zeros(max_num_reqs, dtype=np.int32)
 
+        self.prev_num_reqs = 0
+        self.is_updated = True
+
     def append_row(
         self,
         block_ids: list[int],
@@ -48,15 +52,21 @@ class BlockTable:
         self.num_blocks_per_row[row_idx] += num_blocks
         self.block_table_np[row_idx, start:start + num_blocks] = block_ids
 
+        self.is_updated = True
+
     def add_row(self, block_ids: list[int], row_idx: int) -> None:
         self.num_blocks_per_row[row_idx] = 0
         self.append_row(block_ids, row_idx)
+
+        self.is_updated = True
 
     def move_row(self, src: int, tgt: int) -> None:
         num_blocks = self.num_blocks_per_row[src]
         self.block_table_np[tgt, :num_blocks] = self.block_table_np[
             src, :num_blocks]
         self.num_blocks_per_row[tgt] = num_blocks
+
+        self.is_updated = True
 
     def swap_row(self, src: int, tgt: int) -> None:
         num_blocks_src = self.num_blocks_per_row[src]
@@ -66,13 +76,27 @@ class BlockTable:
 
         self.block_table_np[[src, tgt]] = self.block_table_np[[tgt, src]]
 
+        self.is_updated = True
+
     def commit(self, num_reqs: int) -> None:
-        self.block_table[:num_reqs].copy_(self.block_table_cpu[:num_reqs],
-                                          non_blocking=True)
+        if envs.VLLM_ENABLE_V1_ADVANCE_STEP:
+            # Incremental copy
+            if self.prev_num_reqs != num_reqs or self.is_updated:
+                self.block_table[:num_reqs].copy_(
+                    self.block_table_cpu[:num_reqs], non_blocking=True)
+
+                self.prev_num_reqs = num_reqs
+                self.is_updated = False
+        else:
+            # Always copy
+            self.block_table[:num_reqs].copy_(self.block_table_cpu[:num_reqs],
+                                              non_blocking=True)
 
     def clear(self) -> None:
         self.block_table.fill_(0)
         self.block_table_cpu.fill_(0)
+
+        self.is_updated = True
 
     def get_device_tensor(self) -> torch.Tensor:
         """Ruturns the device tensor of the block table."""

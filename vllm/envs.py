@@ -85,6 +85,7 @@ if TYPE_CHECKING:
     VLLM_ROCM_MOE_PADDING: bool = True
     VLLM_ROCM_CUSTOM_PAGED_ATTN: bool = True
     VLLM_ENABLE_V1_MULTIPROCESSING: bool = True
+    VLLM_ENABLE_V1_ADVANCE_STEP: bool = False
     VLLM_LOG_BATCHSIZE_INTERVAL: float = -1
     VLLM_DISABLE_COMPILE_CACHE: bool = False
     Q_SCALE_CONSTANT: int = 200
@@ -600,6 +601,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
     lambda: float(os.getenv("VLLM_LOG_BATCHSIZE_INTERVAL", "-1")),
     "VLLM_DISABLE_COMPILE_CACHE":
     lambda: bool(int(os.getenv("VLLM_DISABLE_COMPILE_CACHE", "0"))),
+    "VLLM_ENABLE_V1_ADVANCE_STEP":
+    lambda: bool(int(os.getenv("VLLM_ENABLE_V1_ADVANCE_STEP", "0"))),
 
     # If set, vllm will run in development mode, which will enable
     # some additional endpoints for developing and debugging,
