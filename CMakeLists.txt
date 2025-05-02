@@ -15,7 +15,6 @@ project(vllm_extensions LANGUAGES CXX)
 
 # CUDA by default, can be overridden by using -DVLLM_TARGET_DEVICE=... (used by setup.py)
 set(VLLM_TARGET_DEVICE "cuda" CACHE STRING "Target device backend for vLLM")
-
 message(STATUS "Build type: ${CMAKE_BUILD_TYPE}")
 message(STATUS "Target device: ${VLLM_TARGET_DEVICE}")
 
@@ -241,6 +240,7 @@ set(VLLM_EXT_SRC
   "csrc/quantization/fp8/common.cu"
   "csrc/quantization/fused_kernels/fused_layernorm_dynamic_per_token_quant.cu"
   "csrc/quantization/gguf/gguf_kernel.cu"
+  "csrc/quantization/activation_kernels.cu"
   "csrc/cuda_utils_kernels.cu"
   "csrc/prepare_inputs/advance_step.cu"
   "csrc/custom_all_reduce.cu"
@@ -725,6 +725,17 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
   endif()
 endif()
 
+if(VLLM_GPU_LANG STREQUAL "CUDA")
+  set(MOE_PERMUTE_SRC
+      "csrc/moe/permute_unpermute_kernels/moe_permute_unpermute_kernel.cu"
+      "csrc/moe/moe_permute_unpermute_op.cu")
+
+  set_gencode_flags_for_srcs(
+    SRCS "${MARLIN_PERMUTE_SRC}"
+    CUDA_ARCHS "${MOE_PERMUTE_ARCHS}")
+
+  list(APPEND VLLM_MOE_EXT_SRC "${MOE_PERMUTE_SRC}")
+endif()
 message(STATUS "Enabling moe extension.")
 define_gpu_extension_target(
   _moe_C
@@ -733,6 +744,8 @@ define_gpu_extension_target(
   SOURCES ${VLLM_MOE_EXT_SRC}
   COMPILE_FLAGS ${VLLM_GPU_FLAGS}
   ARCHITECTURES ${VLLM_GPU_ARCHES}
+  INCLUDE_DIRECTORIES ${CUTLASS_INCLUDE_DIR}
+  INCLUDE_DIRECTORIES ${CUTLASS_TOOLS_UTIL_INCLUDE_DIR}
   USE_SABI 3
   WITH_SOABI)
 
