@@ -150,7 +150,7 @@ def get_kwargs(cls: ConfigType) -> dict[str, Any]:
 
         # Get the help text for the field
         name = field.name
-        help = cls_docs[name]
+        help = cls_docs[name].strip()
         # Escape % for argparse
         help = help.replace("%", "%%")
 
