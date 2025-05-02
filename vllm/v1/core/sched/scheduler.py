@@ -88,7 +88,6 @@ class Scheduler(SchedulerInterface):
         self._waiting_tokens = 0
         # Track total tokens in preempted requests
         self._preempted_tokens = 0
-
         # req_id -> Request
         self.requests: dict[str, Request] = {}
         # Priority queues for requests.
@@ -162,7 +161,6 @@ class Scheduler(SchedulerInterface):
         return prompt_tokens + max_new_tokens
 
     def schedule(self) -> SchedulerOutput:
-
         # NOTE(woosuk) on the scheduling algorithm:
         # There's no "decoding phase" nor "prefill phase" in the scheduler.
         # Each request just has the num_computed_tokens and
@@ -250,17 +248,14 @@ class Scheduler(SchedulerInterface):
                     # The request cannot be scheduled.
                     # Preempt the lowest-priority request.
                     preempted_req = self.running.pop()
+                    preempted_tokens = preempted_req.num_computed_tokens
+                    self._preempted_tokens += preempted_tokens
                     self.kv_cache_manager.free(preempted_req)
                     preempted_req.status = RequestStatus.PREEMPTED
                     preempted_req.num_computed_tokens = 0
                     if self.log_stats:
                         preempted_req.record_event(
                             EngineCoreEventType.PREEMPTED, scheduled_timestamp)
-
-                    # Count tokens from preempted request
-                    preempted_tokens = self._get_request_total_tokens(
-                        preempted_req)
-                    self._preempted_tokens += preempted_tokens
 
                     self.waiting.appendleft(preempted_req)
                     preempted_reqs.append(preempted_req)
