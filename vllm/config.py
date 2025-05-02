@@ -12,7 +12,7 @@ import textwrap
 import warnings
 from collections import Counter
 from contextlib import contextmanager
-from dataclasses import MISSING, field, fields, is_dataclass, replace
+from dataclasses import MISSING, Field, field, fields, is_dataclass, replace
 from functools import cached_property
 from importlib.util import find_spec
 from pathlib import Path
@@ -20,7 +20,8 @@ from typing import (TYPE_CHECKING, Any, Callable, ClassVar, Literal, Optional,
                     Protocol, TypeVar, Union, cast, get_args, get_origin)
 
 import torch
-from pydantic import BaseModel, Field, PrivateAttr, SkipValidation, TypeAdapter
+from pydantic import BaseModel, PrivateAttr, SkipValidation, TypeAdapter
+from pydantic.dataclasses import dataclass
 from torch.distributed import ProcessGroup, ReduceOp
 from transformers import PretrainedConfig
 from typing_extensions import deprecated
@@ -47,8 +48,6 @@ from vllm.utils import (GiB_bytes, LayerBlockType, cuda_device_count_stateless,
                         random_uuid, resolve_obj_by_qualname)
 
 if TYPE_CHECKING:
-    from dataclasses import dataclass
-
     from _typeshed import DataclassInstance
     from ray.util.placement_group import PlacementGroup
 
@@ -59,12 +58,10 @@ if TYPE_CHECKING:
 
     ConfigType = type[DataclassInstance]
 else:
-    from pydantic.dataclasses import dataclass
-
-    PlacementGroup = None
-    ExecutorBase = None
-    QuantizationConfig = None
-    BaseModelLoader = None
+    PlacementGroup = Any
+    ExecutorBase = Any
+    QuantizationConfig = Any
+    BaseModelLoader = Any
     ConfigType = type
 
 logger = init_logger(__name__)
