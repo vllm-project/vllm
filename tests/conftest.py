@@ -21,6 +21,7 @@ from transformers.models.auto.auto_factory import _BaseAutoModelClass
 from tests.models.utils import (TokensTextLogprobs,
                                 TokensTextLogprobsPromptLogprobs)
 from vllm import LLM, SamplingParams
+from vllm.assets.audio import AudioAsset
 from vllm.assets.image import ImageAsset
 from vllm.assets.video import VideoAsset
 from vllm.config import TaskOption, _get_and_verify_dtype
@@ -96,17 +97,40 @@ class _VideoAssets(_VideoAssetsBase):
 
     def __init__(self) -> None:
         super().__init__([
-            VideoAsset("sample_demo_1.mp4"),
+            VideoAsset("sample_demo_1"),
         ])
 
     def prompts(self, prompts: _VideoAssetPrompts) -> list[str]:
         return [prompts["sample_demo_1"]]
 
 
+class _AudioAssetPrompts(TypedDict):
+    mary_had_lamb: str
+    winning_call: str
+
+
+class _AudioAssetsBase(UserList[AudioAsset]):
+    pass
+
+
+class _AudioAssets(_AudioAssetsBase):
+
+    def __init__(self) -> None:
+        super().__init__([
+            AudioAsset("mary_had_lamb"),
+            AudioAsset("winning_call"),
+        ])
+
+    def prompts(self, prompts: _AudioAssetPrompts) -> list[str]:
+        return [prompts["mary_had_lamb"], prompts["winning_call"]]
+
+
 IMAGE_ASSETS = _ImageAssets()
 """Singleton instance of :class:`_ImageAssets`."""
 VIDEO_ASSETS = _VideoAssets()
 """Singleton instance of :class:`_VideoAssets`."""
+AUDIO_ASSETS = _AudioAssets()
+"""Singleton instance of :class:`_AudioAssets`."""
 
 
 @pytest.fixture(scope="function", autouse=True)
@@ -263,6 +287,11 @@ def video_assets() -> _VideoAssets:
     return VIDEO_ASSETS
 
 
+@pytest.fixture(scope="session")
+def audio_assets() -> _AudioAssets:
+    return AUDIO_ASSETS
+
+
 _T = TypeVar("_T", nn.Module, torch.Tensor, BatchEncoding, BatchFeature, dict)
 _R = TypeVar("_R")
 
@@ -272,7 +301,8 @@ class HfRunner:
     def get_default_device(self):
         from vllm.platforms import current_platform
 
-        return ("cpu" if current_platform.is_cpu() else "cuda")
+        return ("cpu"
+                if current_platform.is_cpu() else current_platform.device_type)
 
     def wrap_device(self, x: _T, device: Optional[str] = None) -> _T:
         if x is None or isinstance(x, (bool, )):
@@ -390,10 +420,15 @@ class HfRunner:
                 processor_kwargs["images"] = image
             if videos is not None and (video := videos[i]) is not None:
                 processor_kwargs["videos"] = video
-            if audios is not None and (audio_tuple := audios[i]) is not None:
-                audio, sr = audio_tuple
-                processor_kwargs["audio"] = audio
-                processor_kwargs["sampling_rate"] = sr
+            if audios is not None and (audio_inputs := audios[i]) is not None:
+                # HACK - not all processors take sampling_rate; we should
+                # clean this up in the future.
+                if len(audio_inputs) == 2:
+                    audio, sr = audio_inputs
+                    processor_kwargs["audio"] = audio
+                    processor_kwargs["sampling_rate"] = sr
+                else:
+                    processor_kwargs["audio"] = audio_inputs
 
             inputs = self.processor(**processor_kwargs)
             if isinstance(inputs, BatchFeature):
@@ -711,7 +746,7 @@ class VllmRunner:
     - `block_size`: Set to `16` instead of `None` to reduce memory usage.
     - `enable_chunked_prefill`: Set to `False` instead of `None` for
       test reproducibility.
-    - `enforce_eager`: Set to `False` instead of `None` to test CUDA graph.
+    - `enforce_eager`: Set to `False` to test CUDA graph.
     """
 
     def __init__(
@@ -752,7 +787,7 @@ class VllmRunner:
 
     def get_inputs(
         self,
-        prompts: list[str],
+        prompts: Union[list[str], list[torch.Tensor]],
         images: Optional[PromptImageInput] = None,
         videos: Optional[PromptVideoInput] = None,
         audios: Optional[PromptAudioInput] = None,
@@ -774,16 +809,18 @@ class VllmRunner:
             if audios is not None and (audio := audios[i]) is not None:
                 multi_modal_data["audio"] = audio
 
-            inputs.append(
-                TextPrompt(prompt=prompt,
-                           multi_modal_data=multi_modal_data
-                           if multi_modal_data else None))
+            text_prompt_kwargs = {
+                ("prompt" if isinstance(prompt, str) else "prompt_embeds"):
+                prompt,
+                "multi_modal_data": multi_modal_data or None
+            }
+            inputs.append(TextPrompt(**text_prompt_kwargs))
 
         return inputs
 
     def generate(
         self,
-        prompts: list[str],
+        prompts: Union[list[str], list[torch.Tensor]],
         sampling_params: SamplingParams,
         images: Optional[PromptImageInput] = None,
         videos: Optional[PromptVideoInput] = None,
@@ -809,7 +846,7 @@ class VllmRunner:
                 output_str = sample.text
                 output_ids = list(sample.token_ids)
                 req_sample_output_ids.append(prompt_ids + output_ids)
-                req_sample_output_strs.append(prompt_str + output_str)
+                req_sample_output_strs.append((prompt_str or "") + output_str)
             outputs.append((req_sample_output_ids, req_sample_output_strs))
         return outputs
 
@@ -876,7 +913,7 @@ class VllmRunner:
 
     def generate_greedy(
         self,
-        prompts: list[str],
+        prompts: Union[list[str], list[torch.Tensor]],
         max_tokens: int,
         images: Optional[PromptImageInput] = None,
         videos: Optional[PromptVideoInput] = None,

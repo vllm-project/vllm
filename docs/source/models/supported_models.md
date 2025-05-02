@@ -542,8 +542,8 @@ See [this page](#generative-models) for more information on how to use generativ
   * ✅︎
 - * `Qwen3MoeForCausalLM`
   * Qwen3MoE
-  * `Qwen/Qwen3-MoE-15B-A2B`, etc.
-  * ✅︎
+  * `Qwen/Qwen3-30B-A3B`, etc.
+  *
   * ✅︎
 - * `StableLmForCausalLM`
   * StableLM
@@ -793,6 +793,8 @@ or `--limit-mm-per-prompt` (online serving). For example, to enable passing up t
 Offline inference:
 
 ```python
+from vllm import LLM
+
 llm = LLM(
     model="Qwen/Qwen2-VL-7B-Instruct",
     limit_mm_per_prompt={"image": 4},
@@ -893,6 +895,13 @@ See [this page](#generative-models) for more information on how to use generativ
   * ✅︎
   * ✅︎
   * ✅︎
+- * `GraniteSpeechForConditionalGeneration`
+  * Granite Speech
+  * T + A
+  * `ibm-granite/granite-speech-3.3-8b`
+  * ✅︎
+  * ✅︎
+  * ✅︎
 - * `H2OVLChatModel`
   * H2OVL
   * T + I<sup>E+</sup>
@@ -970,11 +979,18 @@ See [this page](#generative-models) for more information on how to use generativ
   * ✅︎
   * ✅︎
   * ✅︎
+- * `MiniMaxVL01ForConditionalGeneration`
+  * MiniMax-VL
+  * T + I<sup>E+</sup>
+  * `MiniMaxAI/MiniMax-VL-01`, etc.
+  *
+  * ✅︎
+  * ✅︎
 - * `Mistral3ForConditionalGeneration`
   * Mistral3
   * T + I<sup>+</sup>
   * `mistralai/Mistral-Small-3.1-24B-Instruct-2503`, etc.
-  *
+  * ✅︎
   * ✅︎
   * ✅︎
 - * `MllamaForConditionalGeneration`
@@ -997,6 +1013,13 @@ See [this page](#generative-models) for more information on how to use generativ
   * `nvidia/NVLM-D-72B`, etc.
   *
   * ✅︎
+  * ✅︎
+- * `Ovis2ForConditionalGeneration`<sup>^</sup>
+  * Ovis2
+  * T + I<sup>+</sup>
+  * `AIDC-AI/Ovis2-1B`, `AIDC-AI/Ovis2-2B`, etc.
+  *
+  *
   * ✅︎
 - * `PaliGemmaForConditionalGeneration`
   * PaliGemma, PaliGemma 2
