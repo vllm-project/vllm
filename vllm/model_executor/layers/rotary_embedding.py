@@ -211,7 +211,8 @@ class RotaryEmbedding(CustomOp):
         # are in-place operations that update the query and key tensors.
         if key is None:
             # XPU kernel doesn't support key=None so fall back to native impl
-            # TODO ipex.llm.functional.rotary_embedding_batched support key=None
+            # TODO(sarckk): add support for optional key in
+            # ipex.llm.functional.rotary_embedding_batched
             return self.forward_native(positions, query, key, offsets)
         else:
             if offsets is not None:
