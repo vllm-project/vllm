@@ -10,6 +10,7 @@ import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.model_executor.layers.fused_moe.fused_moe import (
     get_config_dtype_str, try_get_optimal_moe_config)
 from vllm.model_executor.layers.fused_moe.utils import _resize_cache
+from vllm.utils import direct_register_custom_op
 
 
 @triton.jit
@@ -467,10 +468,12 @@ def invoke_batched_silu_and_mul(
 
 class BatchedDispatchCombine(mk.FusedMoEQuantizeDispatchCombine):
 
-    def __init__(self, world_size: int, rank: int):
+    def __init__(self, max_num_tokens: Optional[int], world_size: int, dp_size: int, rank: int):
         super().__init__()
         self.world_size = world_size
+        self.dp_size = dp_size
         self.rank = rank
+        self.max_num_tokens = max_num_tokens
 
     def dispatch(
         self,
@@ -493,26 +496,29 @@ class BatchedDispatchCombine(mk.FusedMoEQuantizeDispatchCombine):
                 "apply_router_weight_on_input is only implemented for topk=1"
             a1.mul_(topk_weights.to(a1.dtype))
 
-        num_tokens = a1.shape[0]
+        num_tokens, hidden_dim = a1.shape
         topk = topk_ids.shape[1]
 
         tokens_per_expert = torch.bincount(topk_ids.view(-1),
                                            minlength=num_experts)
-        max_num_tokens = tokens_per_expert.max()
-        expert_counts = torch.zeros(num_experts,
-                                    dtype=torch.int,
-                                    device=a1.device)
 
-        b_a1 = torch.zeros((num_experts, max_num_tokens, a1.shape[1]),
+        if self.max_num_tokens is None:
+            self.max_num_tokens = int(tokens_per_expert.max().item())
+
+        b_a1 = torch.zeros((num_experts, self.max_num_tokens, hidden_dim),
                            dtype=a1.dtype,
                            device=a1.device)
+
+        token_counts = torch.zeros(num_experts,
+                                   dtype=torch.int,
+                                   device=a1.device)
 
         for token in range(num_tokens):
             for j in range(topk):
                 expert_id = topk_ids[token, j]
-                idx = expert_counts[expert_id]
+                idx = token_counts[expert_id]
                 b_a1[expert_id, idx:idx + 1, :] = a1[token, :]
-                expert_counts[expert_id] = expert_counts[expert_id] + 1
+                token_counts[expert_id] = token_counts[expert_id] + 1
 
         return b_a1, a1_scale, tokens_per_expert
 
@@ -526,25 +532,26 @@ class BatchedDispatchCombine(mk.FusedMoEQuantizeDispatchCombine):
     ) -> None:
         num_tokens = topk_ids.shape[0]
         num_experts = fused_expert_output.shape[0]
-        expert_counts = torch.zeros(num_experts,
-                                    dtype=torch.int,
-                                    device=fused_expert_output.device)
+        K = fused_expert_output.shape[-1]
+        assert output.shape[0] == num_tokens and output.shape[1] == K
+        expert_counts = torch.zeros(
+            num_experts,
+            dtype=torch.int,
+            device=fused_expert_output.device)
+
+        output.fill_(0)
+
         for token in range(num_tokens):
             expert_ids = topk_ids[token]
-            for i in range(topk_ids.shape[1]):
+            for i in range(expert_ids.numel()):
                 expert_id = expert_ids[i]
-                if expert_id < num_experts:
-                    idx = expert_counts[expert_id]
-                    if apply_router_weight_on_input:
-                        output[token, :] = output[
-                            token, :] + fused_expert_output[expert_id,
-                                                            idx:idx + 1, :]
-                    else:
-                        output[
-                            token, :] = output[token, :] + fused_expert_output[
-                                expert_id,
-                                idx:idx + 1, :] * topk_weights[token, i]
-                    expert_counts[expert_id] = expert_counts[expert_id] + 1
+                assert expert_id < num_experts
+                idx = expert_counts[expert_id]
+                accum = fused_expert_output[expert_id, idx:idx + 1, :]
+                if not apply_router_weight_on_input:
+                    accum = accum * topk_weights[token, i]
+                output[token, :] = output[token, :] + accum
+                expert_counts[expert_id] = expert_counts[expert_id] + 1
 
 
 class BatchedExperts(mk.FusedMoEPermuteExpertsUnpermute):
@@ -580,8 +587,8 @@ class BatchedExperts(mk.FusedMoEPermuteExpertsUnpermute):
         assert a.dim() == 2
         max_num_tokens = a.shape[
             0] if self.max_num_tokens is None else self.max_num_tokens
-        workspace13 = num_experts * max_num_tokens * max(K, N)
-        workspace2 = max_num_tokens * (N // 2)
+        workspace13 = num_experts * max_num_tokens * K
+        workspace2 = max_num_tokens * N
         return (workspace13, workspace2, a.dtype)
 
     def apply(
@@ -616,19 +623,181 @@ class BatchedExperts(mk.FusedMoEPermuteExpertsUnpermute):
         out = _resize_cache(workspace13,
                             (num_experts, max_num_tokens, hidden_dim))
         num_local_experts = expert_num_tokens.numel()
+        assert num_local_experts == w1.shape[0]
+
+        N = w1.shape[1] // 2
 
         for expert in range(num_local_experts):
-            num = expert_num_tokens[expert]
-            #assert num <= max_num_tokens, f"{num}, {max_num_tokens}"
-            if True or num > 0:  # CUDAGRAPH unfriendly?
-                tmp = _resize_cache(workspace2, (num, w1.shape[1] // 2))
-                self.activation(
-                    activation, tmp,
-                    hidden_states[expert, :num, :] @ w1[expert].transpose(
-                        0, 1))
+            num = expert_num_tokens[expert].item()
+            assert num <= max_num_tokens, f"{num} <= {max_num_tokens}"
+            if num > 0:  # CUDAGRAPH unfriendly
+                tmp = _resize_cache(workspace2, (num, N))
+                input = hidden_states[expert, :num, :] @ w1[expert].transpose(0, 1)
+                assert input.shape[1] == N * 2
+                self.activation(activation, tmp, input)
                 out[expert, :num, :] = tmp @ w2[expert].transpose(0, 1)
 
         return out
+
+
+def _apply(
+    hidden_states: torch.Tensor,
+    w1: torch.Tensor,
+    w2: torch.Tensor,
+    topk_ids: torch.Tensor,
+    activation: str,
+    global_num_experts: int,
+    expert_map: Optional[torch.Tensor],
+    w1_scale: Optional[torch.Tensor],
+    w2_scale: Optional[torch.Tensor],
+    w1_zp: Optional[torch.Tensor],
+    w2_zp: Optional[torch.Tensor],
+    a1q_scale: Optional[torch.Tensor],
+    a2_scale: Optional[torch.Tensor],
+    workspace13: torch.Tensor,
+    workspace2: torch.Tensor,
+    expert_num_tokens: Optional[torch.Tensor],
+    use_fp8_w8a8: bool,
+    use_int8_w8a16: bool,
+    use_int4_w4a16: bool,
+    block_shape: Optional[List[int]],
+) -> torch.Tensor:
+    # Check constraints.
+    if use_int4_w4a16:
+        assert hidden_states.shape[-1] // 2 == w1.shape[
+            2], "Hidden size mismatch"
+    else:
+        assert hidden_states.shape[-1] == w1.shape[2], \
+            (f"Hidden size mismatch {hidden_states.shape[-1]} "
+             f"!= {w1.shape[2]}")
+
+    assert hidden_states.is_contiguous(
+    ), "Hidden_states must be contiguous"
+    assert w1.stride(-1) == 1, "Stride of last dimension must be 1"
+    assert w2.stride(-1) == 1, "Stride of last dimension must be 1"
+    assert hidden_states.dtype in [
+        torch.float32, torch.float16, torch.bfloat16, torch.float8_e4m3fn
+    ]
+
+    # TODO: num_tokens -> max_num_tokens?
+    E, num_tokens, N, K, top_k_num = mk._moe_problem_size(
+        hidden_states, w1, w2, topk_ids)
+
+    assert w1.shape[0] == E
+    assert w2.shape[0] == E
+
+    config_dtype = get_config_dtype_str(use_fp8_w8a8=use_fp8_w8a8,
+                                        use_int8_w8a16=use_int8_w8a16,
+                                        use_int4_w4a16=use_int4_w4a16,
+                                        dtype=hidden_states.dtype)
+
+    config = try_get_optimal_moe_config(
+        w1.shape,
+        w2.shape,
+        top_k_num,
+        config_dtype,
+        num_tokens,
+        block_shape=block_shape,
+    )
+
+    if hidden_states.dtype == torch.bfloat16:
+        compute_type = tl.bfloat16
+    elif hidden_states.dtype == torch.float16:
+        compute_type = tl.float16
+    elif hidden_states.dtype == torch.float32:
+        compute_type = tl.float32
+    elif hidden_states.dtype == torch.float8_e4m3fn:
+        compute_type = tl.bfloat16
+    else:
+        raise ValueError(
+            f"Unsupported compute_type: {hidden_states.dtype}")
+
+    #print(f"shape: E={E}, M={num_tokens}, N={N}, K={K}, top_k={top_k_num}")
+    # We can reuse the memory between these because by the time we need
+    # cache3, we're done with cache1
+    intermediate_cache1 = _resize_cache(workspace13, (E, num_tokens, N))
+    intermediate_cache2 = _resize_cache(workspace2,
+                                        (E, num_tokens, N // 2))
+    intermediate_cache3 = _resize_cache(workspace13, (E, num_tokens, K))
+
+    # MM1
+    invoke_moe_batched_triton_kernel(A=hidden_states,
+                                     B=w1,
+                                     C=intermediate_cache1,
+                                     expert_num_tokens=expert_num_tokens,
+                                     compute_type=compute_type,
+                                     A_scale=a1q_scale,
+                                     B_scale=w1_scale,
+                                     B_zp=w1_zp,
+                                     use_fp8_w8a8=use_fp8_w8a8,
+                                     use_int8_w8a16=use_int8_w8a16,
+                                     use_int4_w4a16=use_int4_w4a16,
+                                     config=config,
+                                     block_shape=block_shape)
+
+    # Fix activations
+    assert activation == "silu"
+    invoke_batched_silu_and_mul(output=intermediate_cache2,
+                                input=intermediate_cache1,
+                                expert_num_tokens=expert_num_tokens)
+
+    #qintermediate_cache2 = intermediate_cache2
+    a2q_scale = a2_scale
+    # TODO (varun) : support w8a8
+    assert not use_fp8_w8a8
+    #if self.use_fp8_w8a8:
+    #    qintermediate_cache2, a2q_scale = _fp8_quantize(
+    #        intermediate_cache2, a2_scale, self.block_shape)
+
+    invoke_moe_batched_triton_kernel(A=intermediate_cache2,
+                                     B=w2,
+                                     C=intermediate_cache3,
+                                     expert_num_tokens=expert_num_tokens,
+                                     compute_type=compute_type,
+                                     A_scale=a2q_scale,
+                                     B_scale=w2_scale,
+                                     B_zp=w2_zp,
+                                     use_fp8_w8a8=use_fp8_w8a8,
+                                     use_int8_w8a16=use_int8_w8a16,
+                                     use_int4_w4a16=use_int4_w4a16,
+                                     config=config,
+                                     block_shape=block_shape)
+
+    return intermediate_cache3
+
+
+def _apply_fake(
+    hidden_states: torch.Tensor,
+    w1: torch.Tensor,
+    w2: torch.Tensor,
+    topk_ids: torch.Tensor,
+    activation: str,
+    global_num_experts: int,
+    expert_map: Optional[torch.Tensor],
+    w1_scale: Optional[torch.Tensor],
+    w2_scale: Optional[torch.Tensor],
+    w1_zp: Optional[torch.Tensor],
+    w2_zp: Optional[torch.Tensor],
+    a1q_scale: Optional[torch.Tensor],
+    a2_scale: Optional[torch.Tensor],
+    workspace13: torch.Tensor,
+    workspace2: torch.Tensor,
+    expert_num_tokens: Optional[torch.Tensor],
+    use_fp8_w8a8: bool,
+    use_int8_w8a16: bool,
+    use_int4_w4a16: bool,
+    block_shape: Optional[List[int]],
+) -> torch.Tensor:
+    return torch.empty_like(hidden_states)
+
+
+direct_register_custom_op(
+    op_name="_apply",
+    op_func=_apply,
+    mutates_args=[],
+    fake_impl=_apply_fake,
+    tags=(torch.Tag.needs_fixed_stride_order, ),
+)
 
 
 class BatchedTritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
@@ -687,6 +856,29 @@ class BatchedTritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
         workspace2: torch.Tensor,
         expert_num_tokens: Optional[torch.Tensor],
     ) -> torch.Tensor:
+        return torch.ops.vllm._apply(
+            hidden_states,
+            w1,
+            w2,
+            topk_ids,
+            activation,
+            global_num_experts,
+            expert_map,
+            w1_scale,
+            w2_scale,
+            w1_zp,
+            w2_zp,
+            a1q_scale,
+            a2_scale,
+            workspace13,
+            workspace2,
+            expert_num_tokens,
+            self.use_fp8_w8a8,
+            self.use_int8_w8a16,
+            self.use_int4_w4a16,
+            self.block_shape,
+        )
+
         # Check constraints.
         if self.use_int4_w4a16:
             assert hidden_states.shape[-1] // 2 == w1.shape[
