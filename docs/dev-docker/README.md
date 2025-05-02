@@ -11,7 +11,7 @@ This documentation includes information for running the popular Llama 3.1 series
 The pre-built image includes:
 
 - ROCm™ 6.3.1
-- HipblasLT 0.13
+- HipblasLT 0.15
 - vLLM 0.8.3
 - PyTorch 2.7dev (nightly)
 
