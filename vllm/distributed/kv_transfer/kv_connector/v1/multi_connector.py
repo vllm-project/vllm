@@ -34,9 +34,8 @@ class MultiConnector(KVConnectorBase_V1):
             "connectors")
         assert ktcs is not None
         for ktc in ktcs:
-            ktc = KVTransferConfig(**ktc)
             temp_config = copy.copy(vllm_config)
-            temp_config.kv_transfer_config = ktc
+            temp_config.kv_transfer_config = KVTransferConfig(**ktc)
             self._connectors.append(
                 KVConnectorFactory.create_connector_v1(temp_config, role))
 
@@ -95,6 +94,4 @@ class MultiConnector(KVConnectorBase_V1):
             self,
             scheduler_output: SchedulerOutput) -> MultiKVConnectorMetadata:
         return MultiKVConnectorMetadata(
-            tuple(
-                c.build_connector_meta(scheduler_output)
-                for c in self._connectors))
+            c.build_connector_meta(scheduler_output) for c in self._connectors)

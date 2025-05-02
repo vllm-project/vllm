@@ -132,8 +132,7 @@ class SharedStorageConnector(KVConnectorBase_V1):
                 dst_kv_cache_layer.reshape(dst_kv_cache_layer_shape)
 
         # Get the metadata
-        metadata: KVConnectorMetadata = \
-            self._get_connector_metadata()
+        metadata: KVConnectorMetadata = self._get_connector_metadata()
         assert isinstance(metadata, SharedStorageConnectorMetadata)
 
         if metadata is None:
