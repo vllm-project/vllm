@@ -203,7 +203,7 @@ def get_field(cls: ConfigType, name: str) -> Field:
     cls_fields = {f.name: f for f in fields(cls)}
     if name not in cls_fields:
         raise ValueError(f"Field '{name}' not found in {cls.__name__}.")
-    named_field: Field = cls_fields.get(name)
+    named_field: Field = cls_fields[name]
     if (default_factory := named_field.default_factory) is not MISSING:
         return field(default_factory=default_factory)
     if (default := named_field.default) is not MISSING:
@@ -230,7 +230,7 @@ class ModelConfig:
     task, even if the same model can be used for multiple tasks. When the model
     only supports one task, "auto" can be used to select it; otherwise, you
     must specify explicitly which task to use."""
-    tokenizer: str = None  # type: ignore
+    tokenizer: Optional[str] = None
     """Name or path of the Hugging Face tokenizer to use. If unspecified, model
     name or path will be used."""
     tokenizer_mode: TokenizerMode = "auto"
