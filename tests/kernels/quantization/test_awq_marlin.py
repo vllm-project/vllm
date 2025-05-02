@@ -84,7 +84,8 @@ def test_fused_marlin_moe_awq(
 
     score = torch.randn((m, e), device="cuda", dtype=dtype)
 
-    topk_weights, topk_ids = fused_topk(a, score, topk, False)
+    topk_weights, topk_ids, token_expert_indices = fused_topk(
+        a, score, topk, False)
     marlin_output = torch.ops.vllm.fused_marlin_moe(
         a,
         qweight1,
