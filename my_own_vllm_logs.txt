@@ -1,27 +1,51 @@
-2025-05-01 21:18:59,193 - INFO - Normal request 0 added to the queue.
-2025-05-01 21:22:36,969 - INFO - Normal request 0 added to the queue.
-2025-05-01 21:30:07,111 - INFO - Normal request 0 added to the queue.
-2025-05-01 21:30:07,150 - INFO - Request 0 reached 10 decoded tokens!
-2025-05-01 21:30:07,150 - INFO - Request 0 has 25 computed tokens
-2025-05-01 21:30:07,152 - INFO - Probe request 0_probe_after_10_token added to the front of the queue.
-2025-05-01 21:34:53,271 - INFO - Normal request 0 added to the queue.
-2025-05-01 21:34:53,308 - INFO - Request 0 reached 10 decoded tokens!
-2025-05-01 21:34:53,308 - INFO - Request 0 has 25 computed tokens
-2025-05-01 21:34:53,310 - INFO - Probe request 0_probe_after_10_token added to the front of the queue.
-2025-05-01 21:38:13,635 - INFO - Normal request 0 added to the queue.
-2025-05-01 21:38:13,672 - INFO - Request 0 reached 10 decoded tokens!
-2025-05-01 21:38:13,672 - INFO - Request 0 has 25 computed tokens
-2025-05-01 21:38:13,674 - INFO - Probe request 0_probe_after_10_token added to the front of the queue.
-2025-05-01 21:41:22,452 - INFO - Normal request 0 added to the queue.
-2025-05-01 21:41:22,489 - INFO - Request 0 reached 10 decoded tokens!
-2025-05-01 21:41:22,489 - INFO - Request 0 has 25 computed tokens
-2025-05-01 21:41:22,491 - INFO - Probe request 0_probe_after_10_token added to the front of the queue.
-2025-05-01 21:47:15,822 - INFO - Normal request 0 added to the queue.
-2025-05-01 21:47:15,861 - INFO - Request 0 reached 10 decoded tokens!
-2025-05-01 21:47:15,861 - INFO - Request 0 has 25 computed tokens
-2025-05-01 21:47:15,863 - INFO - Probe request 0_probe_after_10_token added to the front of the queue.
-2025-05-01 21:50:28,828 - INFO - Normal request 0 added to the queue.
-2025-05-01 21:50:28,865 - INFO - Request 0 reached 10 decoded tokens!
-2025-05-01 21:50:28,865 - INFO - Request 0 has 25 computed tokens
-2025-05-01 21:50:28,867 - INFO - Probe request 0_probe_after_10_token added to the front of the queue.
-2025-05-01 21:50:29,047 - INFO - Normal request 1 added to the queue.
+2025-05-02 18:34:15,605 - INFO - Normal request 0 added to the queue.
+2025-05-02 18:34:15,731 - INFO - Normal request 1 added to the queue.
+2025-05-02 18:40:42,781 - INFO - Normal request 0 added to the queue.
+2025-05-02 18:40:42,987 - INFO - Request 0 reached 32 decoded tokens!
+2025-05-02 18:40:42,988 - INFO - Request 0 has 46 computed tokens
+2025-05-02 18:40:42,990 - INFO - Probe request 0_probe_after_32_token added to the front of the queue.
+2025-05-02 18:40:43,197 - INFO - Request 0 reached 64 decoded tokens!
+2025-05-02 18:40:43,197 - INFO - Request 0 has 78 computed tokens
+2025-05-02 18:40:43,197 - INFO - Probe request 0_probe_after_64_token added to the front of the queue.
+2025-05-02 18:40:43,612 - INFO - Request 0 reached 128 decoded tokens!
+2025-05-02 18:40:43,612 - INFO - Request 0 has 142 computed tokens
+2025-05-02 18:40:43,612 - INFO - Probe request 0_probe_after_128_token added to the front of the queue.
+2025-05-02 18:40:43,951 - INFO - Normal request 1 added to the queue.
+2025-05-02 18:40:44,150 - INFO - Request 1 reached 32 decoded tokens!
+2025-05-02 18:40:44,150 - INFO - Request 1 has 47 computed tokens
+2025-05-02 18:40:44,150 - INFO - Probe request 1_probe_after_32_token added to the front of the queue.
+2025-05-02 18:40:44,355 - INFO - Request 1 reached 64 decoded tokens!
+2025-05-02 18:40:44,356 - INFO - Request 1 has 79 computed tokens
+2025-05-02 18:40:44,356 - INFO - Probe request 1_probe_after_64_token added to the front of the queue.
+2025-05-02 18:40:44,777 - INFO - Request 1 reached 128 decoded tokens!
+2025-05-02 18:40:44,777 - INFO - Request 1 has 143 computed tokens
+2025-05-02 18:40:44,778 - INFO - Probe request 1_probe_after_128_token added to the front of the queue.
+2025-05-02 18:40:45,627 - INFO - Request 1 reached 256 decoded tokens!
+2025-05-02 18:40:45,627 - INFO - Request 1 has 271 computed tokens
+2025-05-02 18:40:45,627 - INFO - Probe request 1_probe_after_256_token added to the front of the queue.
+2025-05-02 18:47:16,507 - INFO - Normal request 0 added to the queue.
+2025-05-02 18:47:16,715 - INFO - Request 0 reached 32 decoded tokens!
+2025-05-02 18:47:16,716 - INFO - Request 0 has 120 computed tokens
+2025-05-02 18:47:16,718 - INFO - Probe request 0_probe_after_32_token added to the front of the queue.
+2025-05-02 18:47:16,927 - INFO - Request 0 reached 64 decoded tokens!
+2025-05-02 18:47:16,927 - INFO - Request 0 has 152 computed tokens
+2025-05-02 18:47:16,928 - INFO - Probe request 0_probe_after_64_token added to the front of the queue.
+2025-05-02 18:47:17,352 - INFO - Request 0 reached 128 decoded tokens!
+2025-05-02 18:47:17,352 - INFO - Request 0 has 216 computed tokens
+2025-05-02 18:47:17,353 - INFO - Probe request 0_probe_after_128_token added to the front of the queue.
+2025-05-02 18:47:18,204 - INFO - Request 0 reached 256 decoded tokens!
+2025-05-02 18:47:18,204 - INFO - Request 0 has 344 computed tokens
+2025-05-02 18:47:18,205 - INFO - Probe request 0_probe_after_256_token added to the front of the queue.
+2025-05-02 18:47:23,454 - INFO - Normal request 1 added to the queue.
+2025-05-02 18:47:23,684 - INFO - Request 1 reached 32 decoded tokens!
+2025-05-02 18:47:23,684 - INFO - Request 1 has 82 computed tokens
+2025-05-02 18:47:23,684 - INFO - Probe request 1_probe_after_32_token added to the front of the queue.
+2025-05-02 18:47:23,905 - INFO - Request 1 reached 64 decoded tokens!
+2025-05-02 18:47:23,905 - INFO - Request 1 has 114 computed tokens
+2025-05-02 18:47:23,906 - INFO - Probe request 1_probe_after_64_token added to the front of the queue.
+2025-05-02 18:47:24,341 - INFO - Request 1 reached 128 decoded tokens!
+2025-05-02 18:47:24,341 - INFO - Request 1 has 178 computed tokens
+2025-05-02 18:47:24,341 - INFO - Probe request 1_probe_after_128_token added to the front of the queue.
+2025-05-02 18:47:25,208 - INFO - Request 1 reached 256 decoded tokens!
+2025-05-02 18:47:25,208 - INFO - Request 1 has 306 computed tokens
+2025-05-02 18:47:25,209 - INFO - Probe request 1_probe_after_256_token added to the front of the queue.

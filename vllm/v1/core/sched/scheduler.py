@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from __future__ import annotations
-from .evaluator import eqaul_group, count_not_empty
 import time
 from collections import defaultdict, deque
 from collections.abc import Iterable
@@ -514,7 +513,7 @@ class Scheduler(SchedulerInterface):
             structured_output_request_ids=structured_output_request_ids,
             grammar_bitmask=grammar_bitmask,
         )
-
+        
         # NOTE(Kuntai): this function is designed for multiple purposes:
         # 1. Plan the KV cache store
         # 2. Wrap up all the KV cache load / save ops into an opaque object
@@ -694,16 +693,6 @@ class Scheduler(SchedulerInterface):
             self.add_request(new_request)
             print(f"[Scheduler] Created new request {new_request_id} from {parent_request.request_id}")
 
-    def obtain_answer(self,s):
-        stack = []
-        for i, c in enumerate(s):
-            if c == "{":
-                stack.append(c)
-            elif c == "}":
-                if not stack:
-                    return s[:i]
-                stack.pop()
-        return ""
     def update_from_output(
         self,
         scheduler_output: SchedulerOutput,
@@ -723,13 +712,19 @@ class Scheduler(SchedulerInterface):
         # loop can be a performance bottleneck. We should do our best to avoid
         # expensive operations inside the loop.
         for request in self.running:
-            if len(request.output_token_ids) == 10:
-                print(f"Request {request.request_id} reached 10 decoded tokens!")
+            if self.enable_dynasor_abort and request.request_id in self.probe_answers:
+                answers = self.probe_answers[request.request_id]
+                if len(answers) >= 2:
+                    # Window size of 2
+                    if answers[-1] == answers[-2]:
+                        # Abort the request
+                        logger_myown.info(f"[Dynasor-Abort] Confident answer detected. Aborting {request.request_id}.")
+            if len(request.output_token_ids) in [32, 64, 128, 256]:
 
                 if "probe" not in request.request_id:
                     
                     logger_myown.info(
-                        f"Request {request.request_id} reached 10 decoded tokens!")
+                        f"Request {request.request_id} reached {len(request.output_token_ids)} decoded tokens!")
                     self._create_and_add_new_request(request,len(request.output_token_ids))
             req_id = request.request_id
             num_tokens_scheduled = num_scheduled_tokens.get(req_id, 0)
@@ -786,6 +781,7 @@ class Scheduler(SchedulerInterface):
                 # This must be called before we make the EngineCoreOutput.
                 stopped = check_stop(request, self.max_model_len)
                 if stopped:
+
                     self._free_request(request)
                     del new_token_ids[num_new:]  # Trim new tokens if needed.
                     break
@@ -834,34 +830,7 @@ class Scheduler(SchedulerInterface):
             if not stopped:
                 new_running.append(request)
 
-            if self.enable_dynasor_abort and "probe" in request.request_id:
-                    self.dynasor_threshold=3
-                    uncertain_words = ["wait", "hold", "but", "okay", "no", "hmm"]
-                    new_text = self.tokenizer.decode(new_token_ids)
-                
-                    if req_id not in self.probe_responses:
-                        self.probe_responses[req_id] = [new_text]
-                    else:
-                        self.probe_responses[req_id].append(new_text)
-
-                    answer = self.obtain_answer(new_text)
-                    print(f"Answer : {answer}")
-                    self.probe_answers[req_id].append(answer)
-
-                    recent_responses = self.probe_responses[req_id][-self.dynasor_threshold:]
-                    probe_certain_count = [
-                        not any(word in res.lower() for word in uncertain_words)
-                        for res in recent_responses
-                    ]
-
-                    if (
-                        eqaul_group(self.probe_answers[req_id][-self.dynasor_threshold:])
-                        and count_not_empty(self.probe_answers[req_id][-self.dynasor_threshold:]) == self.dynasor_threshold
-                        and sum(probe_certain_count) == self.dynasor_threshold
-                    ):
-                        logger_myown.info(f"[Dynasor-Abort] Confident answer detected. Aborting {req_id}.")
-                        self.finish_requests(req_id, RequestStatus.FINISHED_ABORTED)
-                        continue
+            
         # Return the cached request data to the queue so they can be reused.
         for req_data in scheduler_output.scheduled_cached_reqs:
             # NOTE(rob): since we free stopped reqs above, adding stopped reqs
@@ -925,15 +894,20 @@ class Scheduler(SchedulerInterface):
 
     def _free_request(self, request: Request) -> None:
         assert request.is_finished()
+        if "probe" in request.request_id:
+            key = request.request_id.split("_")[0]
+            print("CHECK OUT:",key)
+            if key not in self.probe_answers:
+                print("CHECKOUT :",request.output_token_ids)
+                self.probe_answers[key] = [request.output_token_ids]
+            else:
+                self.probe_answers[key].append(request.output_token_ids)
         self.kv_cache_manager.free(request)
         self.kv_cache_manager.free_block_hashes(request)
         self.encoder_cache_manager.free(request)
         self._cached_reqs_data.pop(request.request_id, None)
         del self.requests[request.request_id]
         self.finished_req_ids.add(request.request_id)
-        # COT
-        self.probe_answers.pop(request.request_id, None)
-        self.probe_responses.pop(request.request_id, None)
 
     def get_num_unfinished_requests(self) -> int:
         return len(self.waiting) + len(self.running)
@@ -978,3 +952,4 @@ class Scheduler(SchedulerInterface):
     def shutdown(self) -> None:
         if self.kv_event_publisher:
             self.kv_event_publisher.shutdown()
+
