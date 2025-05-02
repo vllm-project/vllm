@@ -1,9 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
-
 import json
 import os
 import tempfile
-from collections import UserList
 from enum import Enum
 from typing import Any, Callable, Optional, TypedDict, TypeVar, Union
 
@@ -58,16 +56,12 @@ def _read_prompts(filename: str) -> list[str]:
         return prompts
 
 
-class _ImageAssetPrompts(TypedDict):
+class ImageAssetPrompts(TypedDict):
     stop_sign: str
     cherry_blossom: str
 
 
-class _ImageAssetsBase(UserList[ImageAsset]):
-    pass
-
-
-class _ImageAssets(_ImageAssetsBase):
+class ImageTestAssets(list[ImageAsset]):
 
     def __init__(self) -> None:
         super().__init__([
@@ -75,7 +69,7 @@ class _ImageAssets(_ImageAssetsBase):
             ImageAsset("cherry_blossom"),
         ])
 
-    def prompts(self, prompts: _ImageAssetPrompts) -> list[str]:
+    def prompts(self, prompts: ImageAssetPrompts) -> list[str]:
         """
         Convenience method to define the prompt for each test image.
 
@@ -85,35 +79,27 @@ class _ImageAssets(_ImageAssetsBase):
         return [prompts["stop_sign"], prompts["cherry_blossom"]]
 
 
-class _VideoAssetPrompts(TypedDict):
-    sample_demo_1: str
+class VideoAssetPrompts(TypedDict):
+    baby_reading: str
 
 
-class _VideoAssetsBase(UserList[VideoAsset]):
-    pass
-
-
-class _VideoAssets(_VideoAssetsBase):
+class VideoTestAssets(list[VideoAsset]):
 
     def __init__(self) -> None:
         super().__init__([
-            VideoAsset("sample_demo_1"),
+            VideoAsset("baby_reading"),
         ])
 
-    def prompts(self, prompts: _VideoAssetPrompts) -> list[str]:
-        return [prompts["sample_demo_1"]]
+    def prompts(self, prompts: VideoAssetPrompts) -> list[str]:
+        return [prompts["baby_reading"]]
 
 
-class _AudioAssetPrompts(TypedDict):
+class AudioAssetPrompts(TypedDict):
     mary_had_lamb: str
     winning_call: str
 
 
-class _AudioAssetsBase(UserList[AudioAsset]):
-    pass
-
-
-class _AudioAssets(_AudioAssetsBase):
+class AudioTestAssets(list[AudioAsset]):
 
     def __init__(self) -> None:
         super().__init__([
@@ -121,16 +107,16 @@ class _AudioAssets(_AudioAssetsBase):
             AudioAsset("winning_call"),
         ])
 
-    def prompts(self, prompts: _AudioAssetPrompts) -> list[str]:
+    def prompts(self, prompts: AudioAssetPrompts) -> list[str]:
         return [prompts["mary_had_lamb"], prompts["winning_call"]]
 
 
-IMAGE_ASSETS = _ImageAssets()
-"""Singleton instance of :class:`_ImageAssets`."""
-VIDEO_ASSETS = _VideoAssets()
-"""Singleton instance of :class:`_VideoAssets`."""
-AUDIO_ASSETS = _AudioAssets()
-"""Singleton instance of :class:`_AudioAssets`."""
+IMAGE_ASSETS = ImageTestAssets()
+"""Singleton instance of :class:`ImageTestAssets`."""
+VIDEO_ASSETS = VideoTestAssets()
+"""Singleton instance of :class:`VideoTestAssets`."""
+AUDIO_ASSETS = AudioTestAssets()
+"""Singleton instance of :class:`AudioTestAssets`."""
 
 
 @pytest.fixture(scope="function", autouse=True)
@@ -278,17 +264,17 @@ def example_long_prompts() -> list[str]:
 
 
 @pytest.fixture(scope="session")
-def image_assets() -> _ImageAssets:
+def image_assets() -> ImageTestAssets:
     return IMAGE_ASSETS
 
 
 @pytest.fixture(scope="session")
-def video_assets() -> _VideoAssets:
+def video_assets() -> VideoTestAssets:
     return VIDEO_ASSETS
 
 
 @pytest.fixture(scope="session")
-def audio_assets() -> _AudioAssets:
+def audio_assets() -> AudioTestAssets:
     return AUDIO_ASSETS
 
 

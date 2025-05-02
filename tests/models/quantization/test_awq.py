@@ -7,7 +7,7 @@ import torch
 
 from vllm.multimodal.image import rescale_image_size
 
-from ...conftest import IMAGE_ASSETS, VllmRunner, _ImageAssets
+from ...conftest import IMAGE_ASSETS, ImageTestAssets, VllmRunner
 from ..utils import check_logprobs_close
 
 HF_IMAGE_PROMPTS = IMAGE_ASSETS.prompts({
@@ -20,7 +20,7 @@ HF_IMAGE_PROMPTS = IMAGE_ASSETS.prompts({
 
 def run_awq_test(
     vllm_runner: type[VllmRunner],
-    image_assets: _ImageAssets,
+    image_assets: ImageTestAssets,
     source_model: str,
     quant_model: str,
     *,

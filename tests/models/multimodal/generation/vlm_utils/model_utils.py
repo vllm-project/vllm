@@ -16,7 +16,7 @@ from transformers import (AutoConfig, AutoTokenizer, BatchFeature,
 from vllm.sequence import SampleLogprobs
 from vllm.transformers_utils.tokenizer import patch_padding_side
 
-from .....conftest import HfRunner, ImageAsset, _ImageAssets
+from .....conftest import HfRunner, ImageAsset, ImageTestAssets
 from .types import RunnerOutput
 
 
@@ -238,14 +238,14 @@ def minimax_vl_01_hf_output(hf_output: RunnerOutput,
 
 
 ####### Functions for converting image assets to embeddings
-def get_llava_embeddings(image_assets: _ImageAssets):
+def get_llava_embeddings(image_assets: ImageTestAssets):
     return [asset.image_embeds for asset in image_assets]
 
 
 ####### Prompt path encoders for models that need models on disk
 def qwen_prompt_path_encoder(
-        tmp_path: PosixPath, prompt: str, assets: Union[list[ImageAsset],
-                                                        _ImageAssets]) -> str:
+        tmp_path: PosixPath, prompt: str,
+        assets: Union[list[ImageAsset], ImageTestAssets]) -> str:
     """Given a temporary dir path, export one or more image assets into the
     tempdir & replace its contents with the local path to the string so that
     the HF version of Qwen-VL can resolve the path and load the image in its

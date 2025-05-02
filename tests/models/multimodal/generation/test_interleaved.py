@@ -29,7 +29,7 @@ def test_models(vllm_runner, model, dtype: str, max_tokens: int) -> None:
     image_cherry = ImageAsset("cherry_blossom").pil_image.convert("RGB")
     image_stop = ImageAsset("stop_sign").pil_image.convert("RGB")
     images = [image_cherry, image_stop]
-    video = VideoAsset(name="sample_demo_1", num_frames=16).np_ndarrays
+    video = VideoAsset(name="baby_reading", num_frames=16).np_ndarrays
 
     inputs = [
         (

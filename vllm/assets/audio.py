@@ -18,19 +18,25 @@ except ImportError:
 
 ASSET_DIR = "multimodal_asset"
 
+AudioAssetName = Literal["winning_call", "mary_had_lamb"]
+
 
 @dataclass(frozen=True)
 class AudioAsset:
-    name: Literal["winning_call", "mary_had_lamb"]
+    name: AudioAssetName
+
+    @property
+    def filename(self) -> str:
+        return f"{self.name}.ogg"
 
     @property
     def audio_and_sample_rate(self) -> tuple[npt.NDArray, float]:
-        audio_path = get_vllm_public_assets(filename=f"{self.name}.ogg",
+        audio_path = get_vllm_public_assets(filename=self.filename,
                                             s3_prefix=ASSET_DIR)
         return librosa.load(audio_path, sr=None)
 
     def get_local_path(self) -> Path:
-        return get_vllm_public_assets(filename=f"{self.name}.ogg",
+        return get_vllm_public_assets(filename=self.filename,
                                       s3_prefix=ASSET_DIR)
 
     @property

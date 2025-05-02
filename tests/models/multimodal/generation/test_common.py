@@ -13,8 +13,8 @@ from transformers import AutoModelForImageTextToText, AutoModelForVision2Seq
 from vllm.platforms import current_platform
 from vllm.utils import identity
 
-from ....conftest import (IMAGE_ASSETS, HfRunner, VllmRunner, _ImageAssets,
-                          _VideoAssets)
+from ....conftest import (IMAGE_ASSETS, HfRunner, ImageTestAssets,
+                          VideoTestAssets, VllmRunner)
 from ....utils import (create_new_process_for_each_test, large_gpu_mark,
                        multi_gpu_marks)
 from ...utils import check_outputs_equal
@@ -691,7 +691,7 @@ def test_single_image_models(tmp_path: PosixPath, model_type: str,
                              test_case: ExpandableVLMTestArgs,
                              hf_runner: type[HfRunner],
                              vllm_runner: type[VllmRunner],
-                             image_assets: _ImageAssets, monkeypatch):
+                             image_assets: ImageTestAssets, monkeypatch):
     if model_type in REQUIRES_V0_MODELS:
         monkeypatch.setenv("VLLM_USE_V1", "0")
     model_test_info = VLM_TEST_SETTINGS[model_type]
@@ -716,7 +716,7 @@ def test_multi_image_models(tmp_path: PosixPath, model_type: str,
                             test_case: ExpandableVLMTestArgs,
                             hf_runner: type[HfRunner],
                             vllm_runner: type[VllmRunner],
-                            image_assets: _ImageAssets, monkeypatch):
+                            image_assets: ImageTestAssets, monkeypatch):
     if model_type in REQUIRES_V0_MODELS:
         monkeypatch.setenv("VLLM_USE_V1", "0")
     model_test_info = VLM_TEST_SETTINGS[model_type]
@@ -741,7 +741,7 @@ def test_image_embedding_models(model_type: str,
                                 test_case: ExpandableVLMTestArgs,
                                 hf_runner: type[HfRunner],
                                 vllm_runner: type[VllmRunner],
-                                image_assets: _ImageAssets, monkeypatch):
+                                image_assets: ImageTestAssets, monkeypatch):
     if model_type in REQUIRES_V0_MODELS:
         monkeypatch.setenv("VLLM_USE_V1", "0")
     model_test_info = VLM_TEST_SETTINGS[model_type]
@@ -763,7 +763,7 @@ def test_image_embedding_models(model_type: str,
     ))
 def test_video_models(model_type: str, test_case: ExpandableVLMTestArgs,
                       hf_runner: type[HfRunner], vllm_runner: type[VllmRunner],
-                      video_assets: _VideoAssets, monkeypatch):
+                      video_assets: VideoTestAssets, monkeypatch):
     if model_type in REQUIRES_V0_MODELS:
         monkeypatch.setenv("VLLM_USE_V1", "0")
     model_test_info = VLM_TEST_SETTINGS[model_type]
@@ -814,7 +814,7 @@ def test_single_image_models_heavy(tmp_path: PosixPath, model_type: str,
                                    test_case: ExpandableVLMTestArgs,
                                    hf_runner: type[HfRunner],
                                    vllm_runner: type[VllmRunner],
-                                   image_assets: _ImageAssets, monkeypatch):
+                                   image_assets: ImageTestAssets, monkeypatch):
     if model_type in REQUIRES_V0_MODELS:
         monkeypatch.setenv("VLLM_USE_V1", "0")
     model_test_info = VLM_TEST_SETTINGS[model_type]
@@ -840,7 +840,7 @@ def test_multi_image_models_heavy(tmp_path: PosixPath, model_type: str,
                                   test_case: ExpandableVLMTestArgs,
                                   hf_runner: type[HfRunner],
                                   vllm_runner: type[VllmRunner],
-                                  image_assets: _ImageAssets, monkeypatch):
+                                  image_assets: ImageTestAssets, monkeypatch):
     if model_type in REQUIRES_V0_MODELS:
         monkeypatch.setenv("VLLM_USE_V1", "0")
     model_test_info = VLM_TEST_SETTINGS[model_type]
@@ -866,7 +866,8 @@ def test_image_embedding_models_heavy(model_type: str,
                                       test_case: ExpandableVLMTestArgs,
                                       hf_runner: type[HfRunner],
                                       vllm_runner: type[VllmRunner],
-                                      image_assets: _ImageAssets, monkeypatch):
+                                      image_assets: ImageTestAssets,
+                                      monkeypatch):
     if model_type in REQUIRES_V0_MODELS:
         monkeypatch.setenv("VLLM_USE_V1", "0")
     model_test_info = VLM_TEST_SETTINGS[model_type]
@@ -889,7 +890,7 @@ def test_image_embedding_models_heavy(model_type: str,
 def test_video_models_heavy(model_type: str, test_case: ExpandableVLMTestArgs,
                             hf_runner: type[HfRunner],
                             vllm_runner: type[VllmRunner],
-                            video_assets: _VideoAssets, monkeypatch):
+                            video_assets: VideoTestAssets, monkeypatch):
     if model_type in REQUIRES_V0_MODELS:
         monkeypatch.setenv("VLLM_USE_V1", "0")
     model_test_info = VLM_TEST_SETTINGS[model_type]
