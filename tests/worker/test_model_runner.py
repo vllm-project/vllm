@@ -308,9 +308,9 @@ def test_empty_seq_group():
     model_input = model_runner._prepare_model_input_tensors(
         seq_group_metadata_list)
 
-    input_tokens = model_input.input_tokens,
-    input_positions = model_input.input_positions,
-    attn_metadata = model_input.attn_metadata,
+    input_tokens = model_input.input_tokens
+    input_positions = model_input.input_positions
+    attn_metadata = model_input.attn_metadata
 
     assert input_tokens is None
     assert input_positions is None
