@@ -448,7 +448,8 @@ class BenchmarkWorker:
             if visible_device != f"{self.device_id}":
                 need_device_guard = True
 
-        with torch.cuda.device(self.device_id) if need_device_guard else nullcontext():
+        with torch.cuda.device(
+                self.device_id) if need_device_guard else nullcontext():
             for config in tqdm(search_space):
                 try:
                     kernel_time = benchmark_config(
@@ -587,8 +588,7 @@ def main(args: argparse.Namespace):
         # Ray will set ROCR_VISIBLE_DEVICES for device visibility
         logger.warning(
             "Ray uses ROCR_VISIBLE_DEVICES to control device accessibility."
-            "Replacing HIP_VISIBLE_DEVICES with ROCR_VISIBLE_DEVICES."
-        )
+            "Replacing HIP_VISIBLE_DEVICES with ROCR_VISIBLE_DEVICES.")
         val = os.environ["HIP_VISIBLE_DEVICES"]
         os.environ["ROCR_VISIBLE_DEVICES"] = val
         del os.environ["HIP_VISIBLE_DEVICES"]

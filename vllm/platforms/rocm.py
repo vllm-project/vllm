@@ -61,9 +61,9 @@ _ROCM_PARTIALLY_SUPPORTED_MODELS: Dict[str, str] = {
 _ROCM_DEVICE_ID_NAME_MAP: Dict[str, str] = {
     "0x74a0": "AMD_Instinct_MI300A",
     "0x74a1": "AMD_Instinct_MI300X",
-    "0x74b5": "AMD_Instinct_MI300X", # MI300X VF
+    "0x74b5": "AMD_Instinct_MI300X",  # MI300X VF
     "0x74a5": "AMD_Instinct_MI325X",
-    "0x74b9": "AMD_Instinct_MI325X", # MI325X VF
+    "0x74b9": "AMD_Instinct_MI325X",  # MI325X VF
     "0x74a9": "AMD_Instinct_MI300X_HF",
     "0x74bd": "AMD_Instinct_MI300X_HF",
 }
