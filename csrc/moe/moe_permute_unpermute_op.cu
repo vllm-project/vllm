@@ -113,9 +113,6 @@ void moe_unpermute(
   TORCH_CHECK(
       permuted_hidden_states.scalar_type() == hidden_states.scalar_type(),
       "topk_ids dtype must be same as src_row_id2dst_row_id_map");
-  // TORCH_CHECK(permuted_hidden_states.size(0) == hidden_states.size(0) * topk,
-  //             "permuted_hidden_states must be [n_token * topk, n_hidden],"
-  //             "hidden_states must be [n_token, n_hidden]");
   auto n_token = hidden_states.size(0);
   auto n_hidden = hidden_states.size(1);
   auto stream = at::cuda::getCurrentCUDAStream().stream();

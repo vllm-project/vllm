@@ -112,7 +112,7 @@ void sortAndScanExpert(int* expert_for_source_row, const int* source_rows,
                        int num_experts, int num_experts_per_node, int k,
                        CubKeyValueSorter& sorter, void* sorter_ws,
                        cudaStream_t stream) {
-  int64_t const expanded_num_rows = k * num_rows;
+  int64_t const expanded_num_rows = static_cast<int64_t>(k) * num_rows;
   // We need to use the full num_experts because that is the sentinel value used
   // by topk for disabled experts
   sorter.updateNumExperts(num_experts);
