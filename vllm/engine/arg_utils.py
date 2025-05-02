@@ -8,8 +8,8 @@ import re
 import threading
 from dataclasses import MISSING, dataclass, fields
 from itertools import permutations
-from typing import (Any, Callable, Dict, List, Literal, Optional, Type,
-                    TypeVar, Union, cast, get_args, get_origin)
+from typing import (Annotated, Any, Callable, Dict, List, Literal, Optional,
+                    Type, TypeVar, Union, cast, get_args, get_origin)
 
 import torch
 from pydantic import TypeAdapter
@@ -140,7 +140,7 @@ def get_kwargs(cls: ConfigType) -> dict[str, Any]:
     for field in fields(cls):
         # Get the set of possible types for the field
         type_hints: set[TypeHint] = set()
-        if get_origin(field.type) is Union:
+        if get_origin(field.type) in {Union, Annotated}:
             type_hints.update(get_args(field.type))
         else:
             type_hints.add(field.type)
@@ -152,10 +152,10 @@ def get_kwargs(cls: ConfigType) -> dict[str, Any]:
         # Get the default value of the field
         if field.default is not MISSING:
             default = field.default
-        elif field.default_factory is not MISSING:
-            default = field.default_factory()
         elif dataclass_hint is not None:
             default = {}
+        elif field.default_factory is not MISSING:
+            default = field.default_factory()
 
         # Get the help text for the field
         name = field.name
