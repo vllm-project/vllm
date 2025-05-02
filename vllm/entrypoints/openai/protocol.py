@@ -6,8 +6,7 @@ import json
 import re
 import time
 from argparse import Namespace
-from typing import (Annotated, Any, ClassVar, Literal, Optional, Protocol,
-                    Union, runtime_checkable)
+from typing import Annotated, Any, ClassVar, Literal, Optional, Union
 
 import torch
 from fastapi import UploadFile
@@ -191,8 +190,9 @@ class ChatCompletionNamedToolChoiceParam(OpenAIBaseModel):
     type: Literal["function"] = "function"
 
 
-@runtime_checkable
-class LogitsProcessorConstructor(Protocol):
+# extra="forbid" is a workaround, see
+# https://github.com/pydantic/pydantic/issues/3125
+class LogitsProcessorConstructor(BaseModel, extra="forbid"):
     qualname: str
     args: Optional[list[Any]] = None
     kwargs: Optional[dict[str, Any]] = None
