@@ -159,10 +159,10 @@ class RocmPlatform(Platform):
                 or selected_backend == _Backend.ROCM_AITER_MLA_VLLM_V1:
                 if block_size == 1:
                     if use_v1:
-                        logger.info("Using AITER MLA backend.")
+                        logger.info("Using AITER MLA backend on V1 engine.")
                         return "vllm.v1.attention.backends.mla.rocm_aiter_mla.AiterMLABackend"  # noqa: E501
                     else:
-                        logger.info("Using AITER MLA backend on V1 engine.")
+                        logger.info("Using AITER MLA backend")
                         return "vllm.attention.backends.rocm_aiter_mla.AiterMLABackend"  # noqa: E501
                 else:
                     raise ValueError(
