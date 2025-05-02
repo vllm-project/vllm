@@ -1109,7 +1109,7 @@ def get_multi_modal_input(args):
 
     if args.modality == "video":
         # Input video and question
-        video = VideoAsset(name="sample_demo_1.mp4",
+        video = VideoAsset(name="sample_demo_1",
                            num_frames=args.num_frames).np_ndarrays
         vid_questions = ["Why is this video funny?"]
 
