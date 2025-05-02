@@ -11,7 +11,7 @@ from vllm.multimodal.image import rescale_image_size
 from vllm.multimodal.video import (rescale_video_size, resize_video,
                                    sample_frames_from_video)
 
-from .....conftest import _ImageAssets, _VideoAssets
+from .....conftest import ImageTestAssets, VideoTestAssets
 from .types import (SINGLE_IMAGE_BASE_PROMPTS, TEST_IMG_PLACEHOLDER,
                     TEST_VIDEO_PLACEHOLDER, VIDEO_BASE_PROMPT,
                     ImageSizeWrapper, SizeType, VLMTestInfo)
@@ -69,7 +69,7 @@ def get_model_prompts(base_prompts: Iterable[str],
 
 def build_single_image_inputs_from_test_info(
         test_info: VLMTestInfo,
-        image_assets: _ImageAssets,
+        image_assets: ImageTestAssets,
         size_wrapper: ImageSizeWrapper,
         tmp_path: Optional[PosixPath] = None):
     if test_info.prompt_formatter is None:
@@ -116,7 +116,7 @@ def build_single_image_inputs(images, model_prompts,
 
 def build_multi_image_inputs_from_test_info(
         test_info: VLMTestInfo,
-        image_assets: _ImageAssets,
+        image_assets: ImageTestAssets,
         size_wrapper: ImageSizeWrapper,
         tmp_path: Optional[PosixPath] = None):
     if test_info.prompt_formatter is None:
@@ -159,7 +159,7 @@ def build_multi_image_inputs(image_lists, model_prompts,
 
 def build_embedding_inputs_from_test_info(
     test_info: VLMTestInfo,
-    image_assets: _ImageAssets,
+    image_assets: ImageTestAssets,
     size_wrapper: ImageSizeWrapper,
 ):
     # These conditions will always be true if invoked through filtering,
@@ -192,7 +192,7 @@ def build_embedding_inputs_from_test_info(
 
 def build_video_inputs_from_test_info(
     test_info: VLMTestInfo,
-    video_assets: _VideoAssets,
+    video_assets: VideoTestAssets,
     size_wrapper: ImageSizeWrapper,
     num_frames: int,
 ):
