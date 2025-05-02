@@ -41,6 +41,7 @@ from collections.abc import (AsyncGenerator, Awaitable, Generator, Hashable,
 from concurrent.futures.process import ProcessPoolExecutor
 from dataclasses import dataclass, field
 from functools import cache, lru_cache, partial, wraps
+from gettext import gettext as _gettext
 from types import MappingProxyType
 from typing import (TYPE_CHECKING, Any, Callable, Generic, Literal, NamedTuple,
                     Optional, Sequence, Tuple, Type, TypeVar, Union, cast,
@@ -70,6 +71,8 @@ import vllm.triton_utils  # noqa: F401
 from vllm.logger import enable_trace_function_call, init_logger
 
 if TYPE_CHECKING:
+    from argparse import Namespace
+
     from vllm.config import ModelConfig, VllmConfig
 
 logger = init_logger(__name__)
@@ -1331,24 +1334,35 @@ class FlexibleArgumentParser(ArgumentParser):
         if 'formatter_class' not in kwargs:
             kwargs['formatter_class'] = SortedHelpFormatter
         super().__init__(*args, **kwargs)
+        self._deprecated = set()
 
     def add_argument(self, *args: Any, **kwargs: Any):
         # add a deprecated=True with optional deprecated_reason to signify
         # reasons for deprecating this args
-        if kwargs.pop("deprecated", False):
-            deprecated_message = kwargs.pop("deprecated_reason", None)
-            if 'help' in kwargs:
-                kwargs['help'] = (
-                    f"[DEPRECATED]{(' ' + deprecated_message) or ''}.\n{kwargs['help']}"  # noqa: E501
-                )
-            else:
-                kwargs['help'] = (
-                    f"[DEPRECATED]{(' ' + deprecated_message) or ''}"  # noqa: E501
-                )
+        if sys.version_info < (3, 13):
+            deprecated = kwargs.pop('deprecated', False)
+            action = super().add_argument(*args, **kwargs)
+            if deprecated and action.dest not in self._deprecated:
+                self._warning(
+                    _gettext("argument '%(argument_name)s' is deprecated") %
+                    {'argument_name': action.dest})
+                self._deprecated.add(action.dest)
 
-        super().add_argument(*args, **kwargs)
+            return action
 
-    def parse_args(self, args=None, namespace=None):
+        # python>3.13
+        return super().add_argument(*args, **kwargs)
+
+    def _warning(self, message: str):
+        args = {'prog': self.prog, 'message': message}
+        self._print_message(
+            _gettext('%(prog)s: warning: %(message)s\n') % args, sys.stderr)
+
+    def parse_args(  # type: ignore[override]
+        self,
+        args: Sequence[str] | None = None,
+        namespace: Namespace | None = None,
+    ):
         if args is None:
             args = sys.argv[1:]
 
