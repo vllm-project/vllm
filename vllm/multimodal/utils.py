@@ -365,7 +365,7 @@ def group_mm_inputs_by_modality(
         mm_inputs: List of MultiModalKwargs.
 
     Returns:
-        list[list[MultiModalKwargs]]: List of list of MultiModalKwargs, each 
+        list[list[vllm.multimodal.MultiModalKwargs]]: List of list of MultiModalKwargs, each 
         inner list contains consecutive MultiModalKwargs with same modality.
     """
     if not mm_inputs:
