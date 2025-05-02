@@ -202,7 +202,6 @@ steps:
     - tests/v1
   commands:
     # split the test to avoid interference
-    - pip install mteb
     - pytest -v -s v1/core
     - pytest -v -s v1/engine
     - pytest -v -s v1/entrypoints
