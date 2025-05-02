@@ -97,11 +97,16 @@ class _VideoAssets(_VideoAssetsBase):
 
     def __init__(self) -> None:
         super().__init__([
-            VideoAsset("sample_demo_1.mp4"),
+            VideoAsset("sample_demo_1"),
         ])
 
     def prompts(self, prompts: _VideoAssetPrompts) -> list[str]:
         return [prompts["sample_demo_1"]]
+
+
+class _AudioAssetPrompts(TypedDict):
+    mary_had_lamb: str
+    winning_call: str
 
 
 class _AudioAssetsBase(UserList[AudioAsset]):
@@ -115,6 +120,9 @@ class _AudioAssets(_AudioAssetsBase):
             AudioAsset("mary_had_lamb"),
             AudioAsset("winning_call"),
         ])
+
+    def prompts(self, prompts: _AudioAssetPrompts) -> list[str]:
+        return [prompts["mary_had_lamb"], prompts["winning_call"]]
 
 
 IMAGE_ASSETS = _ImageAssets()
@@ -779,7 +787,7 @@ class VllmRunner:
 
     def get_inputs(
         self,
-        prompts: list[str],
+        prompts: Union[list[str], list[torch.Tensor]],
         images: Optional[PromptImageInput] = None,
         videos: Optional[PromptVideoInput] = None,
         audios: Optional[PromptAudioInput] = None,
@@ -801,16 +809,18 @@ class VllmRunner:
             if audios is not None and (audio := audios[i]) is not None:
                 multi_modal_data["audio"] = audio
 
-            inputs.append(
-                TextPrompt(prompt=prompt,
-                           multi_modal_data=multi_modal_data
-                           if multi_modal_data else None))
+            text_prompt_kwargs = {
+                ("prompt" if isinstance(prompt, str) else "prompt_embeds"):
+                prompt,
+                "multi_modal_data": multi_modal_data or None
+            }
+            inputs.append(TextPrompt(**text_prompt_kwargs))
 
         return inputs
 
     def generate(
         self,
-        prompts: list[str],
+        prompts: Union[list[str], list[torch.Tensor]],
         sampling_params: SamplingParams,
         images: Optional[PromptImageInput] = None,
         videos: Optional[PromptVideoInput] = None,
@@ -836,7 +846,7 @@ class VllmRunner:
                 output_str = sample.text
                 output_ids = list(sample.token_ids)
                 req_sample_output_ids.append(prompt_ids + output_ids)
-                req_sample_output_strs.append(prompt_str + output_str)
+                req_sample_output_strs.append((prompt_str or "") + output_str)
             outputs.append((req_sample_output_ids, req_sample_output_strs))
         return outputs
 
@@ -903,7 +913,7 @@ class VllmRunner:
 
     def generate_greedy(
         self,
-        prompts: list[str],
+        prompts: Union[list[str], list[torch.Tensor]],
         max_tokens: int,
         images: Optional[PromptImageInput] = None,
         videos: Optional[PromptVideoInput] = None,

@@ -1,12 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
-
-from typing import Optional
-
 import pytest
 import torch
 import torch.nn as nn
 from huggingface_hub import snapshot_download
 from transformers import AutoConfig, AutoModel, CLIPImageProcessor
+
+from vllm.distributed import cleanup_dist_env_and_memory
 
 from ....conftest import _ImageAssets
 
@@ -20,7 +19,6 @@ def run_intern_vit_test(
     model_id: str,
     *,
     dtype: str,
-    distributed_executor_backend: Optional[str] = None,
 ):
     model = snapshot_download(model_id, allow_patterns=DOWNLOAD_PATTERN)
 
@@ -43,7 +41,6 @@ def run_intern_vit_test(
         for pixel_value in pixel_values
     ]
 
-    from vllm.distributed import cleanup_dist_env_and_memory
     from vllm.model_executor.models.intern_vit import InternVisionModel
     vllm_model = InternVisionModel(config)
     vllm_model.load_weights(hf_model.state_dict().items())
@@ -71,7 +68,7 @@ def run_intern_vit_test(
 ])
 @pytest.mark.parametrize("dtype", [torch.half])
 @torch.inference_mode()
-def test_models(dist_init, image_assets, model_id, dtype: str) -> None:
+def test_models(image_assets, model_id, dtype: str) -> None:
     run_intern_vit_test(
         image_assets,
         model_id,
