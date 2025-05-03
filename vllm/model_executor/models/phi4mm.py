@@ -838,11 +838,10 @@ class Phi4MMMultiModalProcessor(BaseMultiModalProcessor[Phi4MMProcessingInfo]):
             processed_outputs["num_img_tokens"] = num_img_tokens
 
         if (audio_data := mm_data.get("audios", [])):
-            sr = self.info.get_feature_extractor().sampling_rate
             audio_features = processed_outputs['input_audio_embeds']
             feature_sizes = [
                 self.info.get_audio_num_frames(len(audio), sr)
-                for audio in audio_data
+                for audio, sr in audio_data
             ]
             processed_outputs['input_audio_embeds'] = [
                 audio_features[idx, :size]
