@@ -32,6 +32,9 @@ from transformers import PretrainedConfig
 from vllm.model_executor.custom_op import CustomOp
 from vllm.platforms import current_platform
 
+if current_platform.is_cuda():
+    from vllm.vllm_flash_attn.layers.rotary import apply_rotary_emb
+
 
 def _rotate_neox(x: torch.Tensor) -> torch.Tensor:
     x1 = x[..., :x.shape[-1] // 2]
@@ -77,8 +80,7 @@ def _apply_rotary_emb(x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor,
         is_neox_style: Whether to use the Neox-style or GPT-J-style rotary
             positional embeddings.
     """
-    if current_platform.is_cuda_alike():
-        from vllm.vllm_flash_attn.layers.rotary import apply_rotary_emb
+    if current_platform.is_cuda():
         return apply_rotary_emb(x.unsqueeze(0), cos, sin,
                                 not is_neox_style).squeeze(0)
     else:
@@ -1496,7 +1498,7 @@ def get_rope(
     if key in _ROPE_DICT:
         return _ROPE_DICT[key]
 
-    if rope_scaling is None:
+    if not rope_scaling:
         rotary_emb = RotaryEmbedding(head_size, rotary_dim, max_position, base,
                                      is_neox_style, dtype)
     else:

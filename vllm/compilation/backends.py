@@ -45,6 +45,7 @@ class CompilerManager:
         self.cache: Dict[Tuple[Optional[int], int, str], Any] = dict()
         cls = InductorAdaptor if use_inductor else EagerAdaptor
         self.compiler = cls()
+        self.is_cache_updated = False
 
     def compute_hash(self, vllm_config: VllmConfig) -> str:
         return self.compiler.compute_hash(vllm_config)
@@ -66,11 +67,11 @@ class CompilerManager:
                                        disable_cache=disable_cache)
 
     def save_to_file(self):
-        if self.disable_cache:
+        if self.disable_cache or not self.is_cache_updated:
             return
+        printer = pprint.PrettyPrinter(indent=4)
+        data = printer.pformat(self.cache)
         with open(self.cache_file_path, "w") as f:
-            printer = pprint.PrettyPrinter(indent=4)
-            data = printer.pformat(self.cache)
             f.write(data)
 
     def load(self,
@@ -131,6 +132,7 @@ class CompilerManager:
         if handle is not None:
             self.cache[(runtime_shape, graph_index,
                         self.compiler.name)] = handle
+            self.is_cache_updated = True
             if graph_index == 0:
                 # adds some info logging for the first graph
                 logger.info("Cache the graph of shape %s for later use",
@@ -347,8 +349,12 @@ class VllmBackend:
         PASS_KEY = "post_grad_custom_post_pass"
         if PASS_KEY in inductor_config:
             # Config should automatically wrap all inductor passes
-            assert isinstance(inductor_config[PASS_KEY], InductorPass)
-            self.post_grad_pass_manager.add(inductor_config[PASS_KEY])
+            if isinstance(inductor_config[PASS_KEY], PostGradPassManager):
+                assert (inductor_config[PASS_KEY].uuid() ==
+                        self.post_grad_pass_manager.uuid())
+            else:
+                assert isinstance(inductor_config[PASS_KEY], InductorPass)
+                self.post_grad_pass_manager.add(inductor_config[PASS_KEY])
         inductor_config[PASS_KEY] = self.post_grad_pass_manager
 
     def __call__(self, graph: fx.GraphModule, example_inputs) -> Callable:
@@ -408,8 +414,13 @@ class VllmBackend:
             )
             self.compilation_config.cache_dir = cache_dir
 
-        cache_dir = self.compilation_config.cache_dir
+        if compilation_counter.num_graphs_seen > 0:
+            cache_dir = self.compilation_config.cache_dir + \
+                f'-{compilation_counter.num_graphs_seen}'
+        else:
+            cache_dir = self.compilation_config.cache_dir
         os.makedirs(cache_dir, exist_ok=True)
+        self.compilation_config.cache_dir = cache_dir
         rank = vllm_config.parallel_config.rank
         dp_rank = vllm_config.parallel_config.data_parallel_rank
         local_cache_dir = os.path.join(cache_dir, f"rank_{rank}_{dp_rank}")

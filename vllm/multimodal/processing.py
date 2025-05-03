@@ -1670,15 +1670,17 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
             placeholders = mm_placeholders.get(modality, [])
 
             if len(placeholders) != item_count:
+                # NOTE: If you are a model developer, this can also arise from
+                # an inconsistency between `_call_hf_processor` and
+                # `_get_mm_fields_config` implementations
                 raise RuntimeError(
                     f"Expected there to be {item_count} prompt updates "
                     f"corresponding to {item_count} {modality} items, but "
                     f"instead found {len(placeholders)} prompt updates! "
-                    "Either the prompt text has missing/incorrect tokens for "
-                    "multi-modal inputs, or there is a problem with your "
-                    "implementation of merged multi-modal processor for this "
-                    "model (usually arising from an inconsistency between "
-                    "`_call_hf_processor` and `_get_prompt_updates`).")
+                    "This is likely because you forgot to include input "
+                    "placeholder tokens (e.g., `<image>`, `<|image_pad|>`) "
+                    "in the prompt. If the model has a chat template, make "
+                    "sure you have applied it before calling `LLM.generate`.")
 
     def _maybe_apply_prompt_updates(
         self,
@@ -1789,7 +1791,7 @@ class EncDecMultiModalProcessor(BaseMultiModalProcessor[_I]):
         mm_data: MultiModalDataDict,
     ) -> Union[str, list[int]]:
         """
-        Create input prompt for the encoder. HF processor will be applied on 
+        Create input prompt for the encoder. HF processor will be applied on
         this prompt during profiling and generation.
         """
         raise NotImplementedError

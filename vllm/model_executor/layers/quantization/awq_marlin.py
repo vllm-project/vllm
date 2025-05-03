@@ -13,6 +13,7 @@ from vllm.model_executor.layers.fused_moe.layer import (
 from vllm.model_executor.layers.linear import (LinearBase, LinearMethodBase,
                                                UnquantizedLinearMethod,
                                                set_weight_attrs)
+from vllm.model_executor.layers.quantization import QuantizationMethods
 from vllm.model_executor.layers.quantization.awq import (AWQConfig,
                                                          is_layer_skipped_awq)
 from vllm.model_executor.layers.quantization.base_config import (
@@ -73,7 +74,7 @@ class AWQMarlinConfig(QuantizationConfig):
                 f"modules_to_not_convert={self.modules_to_not_convert})")
 
     @classmethod
-    def get_name(cls) -> str:
+    def get_name(cls) -> QuantizationMethods:
         return "awq_marlin"
 
     @classmethod
@@ -101,8 +102,8 @@ class AWQMarlinConfig(QuantizationConfig):
                    modules_to_not_convert, config)
 
     @classmethod
-    def override_quantization_method(cls, hf_quant_cfg,
-                                     user_quant) -> Optional[str]:
+    def override_quantization_method(
+            cls, hf_quant_cfg, user_quant) -> Optional[QuantizationMethods]:
         can_convert = cls.is_awq_marlin_compatible(hf_quant_cfg)
         is_valid_user_quant = (user_quant is None or user_quant == "marlin"
                                or user_quant == "awq_marlin")
@@ -129,8 +130,9 @@ class AWQMarlinConfig(QuantizationConfig):
             # Check if the layer is supported by AWQMarlin.
             if not check_marlin_supports_layer(layer, self.group_size):
                 logger.warning_once(
-                    f"Layer '{prefix}' is not supported by AWQMarlin. "
-                    "Falling back to unoptimized AWQ kernels.")
+                    "Layer '%s' is not supported by AWQMarlin. Falling back to unoptimized AWQ kernels.",  # noqa: E501
+                    prefix,
+                )
                 return AWQConfig.from_config(
                     self.full_config).get_quant_method(layer, prefix)
             return AWQMarlinLinearMethod(self)
@@ -138,7 +140,7 @@ class AWQMarlinConfig(QuantizationConfig):
             from vllm.model_executor.layers.quantization.moe_wna16 import (
                 MoeWNA16Config)
             if not check_moe_marlin_supports_layer(layer, self.group_size):
-                logger.warning_one(
+                logger.warning_once(
                     f"Layer '{prefix}' is not supported by AWQMoeMarlin. "
                     "Falling back to Moe WNA16 kernels.")
                 return MoeWNA16Config.from_config(
