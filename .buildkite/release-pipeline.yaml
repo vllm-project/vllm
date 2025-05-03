@@ -57,6 +57,7 @@ steps:
     agents:
       queue: tpu_queue_postmerge
     commands:
+      - "yes | docker system prune -a"
       - "git fetch --all"
       - "DOCKER_BUILDKIT=1 docker build --build-arg max_jobs=16 --build-arg USE_SCCACHE=1 --build-arg GIT_REPO_CHECK=1 --tag vllm/vllm-tpu:nightly --tag vllm/vllm-tpu:$BUILDKITE_COMMIT --progress plain -f docker/Dockerfile.tpu ."
       - "docker push vllm/vllm-tpu:nightly"
