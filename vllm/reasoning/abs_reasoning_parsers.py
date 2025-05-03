@@ -34,7 +34,7 @@ class ReasoningParser:
 
     @abstractmethod
     def is_reasoning_end(self,
-                         input_ids: Optional[list[int]],
+                         input_ids: list[int],
                          previous_ids: Optional[list[int]] = None) -> bool:
         """
         Check if the reasoning content ends in the input_ids.
@@ -43,7 +43,7 @@ class ReasoningParser:
         reasoning content ends in the model output.
 
         Parameters:
-        input_ids: Optional[list[int]]
+        input_ids: list[int]
             The input_ids of the model output.
         previous_ids: Optional[list[int]]
             The previous_ids of the model output.

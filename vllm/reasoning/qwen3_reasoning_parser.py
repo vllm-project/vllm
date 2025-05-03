@@ -48,24 +48,20 @@ class Qwen3ReasoningParser(ReasoningParser):
                 "tokens in the tokenizer!")
 
     def is_reasoning_end(self,
-                         input_ids: Optional[list[int]],
-                         previous_ids: Optional[list[int]] = None) -> bool:
-        if previous_ids and input_ids:
-            # given both previous_ids and input_ids
-            if self.think_start_token_id in previous_ids:
-                return self.think_end_token_id in input_ids
-            else:
-                # thinking is disabled
-                return True
-        elif input_ids:
-            # given input_ids, previous_ids not given,
-            if self.think_start_token_id in input_ids:
-                # <think> in input_ids, find if </think> in input_ids
-                return self.think_end_token_id in input_ids
-            else:
-                # thinking is disabled
-                return True
+                        input_ids: list[int],
+                        previous_ids: Optional[list[int]] = None) -> bool:
+        # Check if <think>...</think> tokens are
+        # present in the input or previous IDs.
+        think_start_in_previous = previous_ids and \
+            self.think_start_token_id in previous_ids
+        think_start_in_input = self.think_start_token_id in input_ids
+        think_end_in_input = self.think_end_token_id in input_ids
+
+        if think_start_in_previous or think_start_in_input:
+            # If <think> is found, check for </think>.
+            return think_end_in_input
         else:
+            # If <think> is not found, reasoning is disabled.
             return True
 
     def extract_content_ids(self, input_ids: list[int]) -> list[int]:

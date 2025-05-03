@@ -44,7 +44,7 @@ class DeepSeekR1ReasoningParser(ReasoningParser):
                 "tokens in the tokenizer!")
 
     def is_reasoning_end(self,
-                         input_ids: Optional[list[int]],
+                         input_ids: list[int],
                          previous_ids: Optional[list[int]] = None) -> bool:
         return self.end_token_id in input_ids
 
