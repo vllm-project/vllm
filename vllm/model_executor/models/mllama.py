@@ -167,9 +167,48 @@ class MllamaMultiModalProcessor(EncDecMultiModalProcessor[MllamaProcessingInfo]
         hf_processor_mm_kwargs: Mapping[str, object],
         return_mm_hashes: bool = False,
     ) -> MultiModalEncDecInputs:
-        mm_inputs = super().apply(prompt, mm_data, hf_processor_mm_kwargs,
-                                  return_mm_hashes)
+        mm_inputs = super().apply(
+            prompt=prompt,
+            mm_data=mm_data,
+            hf_processor_mm_kwargs=hf_processor_mm_kwargs,
+            return_mm_hashes=return_mm_hashes,
+        )
 
+        return self._postprocess_inputs(
+            prompt=prompt,
+            mm_data=mm_data,
+            hf_processor_mm_kwargs=hf_processor_mm_kwargs,
+            mm_inputs=mm_inputs,
+        )
+
+    async def apply_async(
+        self,
+        prompt: Union[str, list[int]],
+        mm_data: MultiModalDataDict,
+        hf_processor_mm_kwargs: Mapping[str, object],
+        return_mm_hashes: bool = False,
+    ) -> MultiModalEncDecInputs:
+        mm_inputs = await super().apply_async(
+            prompt=prompt,
+            mm_data=mm_data,
+            hf_processor_mm_kwargs=hf_processor_mm_kwargs,
+            return_mm_hashes=return_mm_hashes,
+        )
+
+        return self._postprocess_inputs(
+            prompt=prompt,
+            mm_data=mm_data,
+            hf_processor_mm_kwargs=hf_processor_mm_kwargs,
+            mm_inputs=mm_inputs,
+        )
+
+    def _postprocess_inputs(
+        self,
+        prompt: Union[str, list[int]],
+        mm_data: MultiModalDataDict,
+        hf_processor_mm_kwargs: Mapping[str, object],
+        mm_inputs: MultiModalEncDecInputs,
+    ) -> MultiModalEncDecInputs:
         image_token_id = self.info.get_hf_config().image_token_index
         # Check that the number of image tokens in the decoder prompt matches
         # the number of images provided in mm_data
@@ -239,14 +278,63 @@ class MllamaMultiModalProcessor(EncDecMultiModalProcessor[MllamaProcessingInfo]
         mm_data: Mapping[str, object],
         mm_kwargs: Mapping[str, object],
     ) -> BatchFeature:
-        tokenizer = self.info.get_tokenizer()
+        if not mm_data:
+            tokenizer = self.info.get_tokenizer()
+            return tokenizer(prompt,
+                             add_special_tokens=False,
+                             return_tensors="pt")
+
+        processed_outputs = super()._call_hf_processor(
+            prompt=prompt,
+            mm_data=mm_data,
+            mm_kwargs=mm_kwargs,
+        )
+
+        return self._postprocess_hf(
+            prompt=prompt,
+            mm_data=mm_data,
+            mm_kwargs=mm_kwargs,
+            processed_outputs=processed_outputs,
+        )
+
+    async def _call_hf_processor_async(
+        self,
+        prompt: str,
+        mm_data: Mapping[str, object],
+        mm_kwargs: Mapping[str, object],
+    ) -> BatchFeature:
+        if not mm_data:
+            tokenizer = self.info.get_tokenizer()
+            return tokenizer(prompt,
+                             add_special_tokens=False,
+                             return_tensors="pt")
+
+        processed_outputs = await super()._call_hf_processor_async(
+            prompt=prompt,
+            mm_data=mm_data,
+            mm_kwargs=mm_kwargs,
+        )
+
+        return self._postprocess_hf(
+            prompt=prompt,
+            mm_data=mm_data,
+            mm_kwargs=mm_kwargs,
+            processed_outputs=processed_outputs,
+        )
+
+    def _postprocess_hf(
+        self,
+        prompt: str,
+        mm_data: Mapping[str, object],
+        mm_kwargs: Mapping[str, object],
+        processed_outputs: BatchFeature,
+    ) -> BatchFeature:
         if mm_data:
+            tokenizer = self.info.get_tokenizer()
             num_tiles = [
                 self.info.get_num_tiles_per_image(img.height, img.width)
                 for img in mm_data["images"]
             ]
-            processed_outputs = super()._call_hf_processor(
-                prompt, mm_data, mm_kwargs)
             processed_outputs["num_tiles"] = torch.tensor(num_tiles)
             for k in ('pixel_values', 'aspect_ratio_ids', "aspect_ratio_mask"):
                 processed_outputs[k] = processed_outputs[k].squeeze(0)
@@ -267,10 +355,7 @@ class MllamaMultiModalProcessor(EncDecMultiModalProcessor[MllamaProcessingInfo]
                 end_idx -= 1
             processed_outputs[
                 "input_ids"] = processed_token_ids[:, start_idx:end_idx]
-        else:
-            processed_outputs = tokenizer(prompt,
-                                          add_special_tokens=False,
-                                          return_tensors="pt")
+
         return processed_outputs
 
     def _get_mm_fields_config(

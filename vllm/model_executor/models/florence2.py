@@ -828,17 +828,39 @@ class Florence2MultiModalProcessor(
         mm_data: Mapping[str, object],
         mm_kwargs: Mapping[str, object],
     ) -> BatchFeature:
-        if mm_data:
-            processed_outputs = super()._call_hf_processor(
-                prompt, mm_data, mm_kwargs)
-        else:
+        if not mm_data:
             hf_processor = self.info.get_hf_processor()
             tokenizer = hf_processor.tokenizer
             prompt = hf_processor._construct_prompts([prompt])[0]
-            processed_outputs = tokenizer(prompt,
-                                          add_special_tokens=True,
-                                          return_tensors="pt")
-        return processed_outputs
+            return tokenizer(prompt,
+                             add_special_tokens=True,
+                             return_tensors="pt")
+
+        return super()._call_hf_processor(
+            prompt=prompt,
+            mm_data=mm_data,
+            mm_kwargs=mm_kwargs,
+        )
+
+    async def _call_hf_processor_async(
+        self,
+        prompt: str,
+        mm_data: Mapping[str, object],
+        mm_kwargs: Mapping[str, object],
+    ) -> BatchFeature:
+        if not mm_data:
+            hf_processor = self.info.get_hf_processor()
+            tokenizer = hf_processor.tokenizer
+            prompt = hf_processor._construct_prompts([prompt])[0]
+            return tokenizer(prompt,
+                             add_special_tokens=True,
+                             return_tensors="pt")
+
+        return await super()._call_hf_processor_async(
+            prompt=prompt,
+            mm_data=mm_data,
+            mm_kwargs=mm_kwargs,
+        )
 
     def _get_mm_fields_config(
         self,

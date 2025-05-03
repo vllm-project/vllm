@@ -249,26 +249,73 @@ class Qwen2_5OmniThinkerMultiModalProcessor(
         if audios:
             # NOTE: Qwen2.5-Omni processor accept "audio"
             mm_data["audio"] = audios
-            mm_kwargs = dict(**mm_kwargs, )
+            mm_kwargs = dict(**mm_kwargs)
 
-        hf_inputs = super()._call_hf_processor(
+        processed_outputs = super()._call_hf_processor(
             prompt=prompt,
             mm_data=mm_data,
             mm_kwargs=mm_kwargs,
         )
 
-        input_features = hf_inputs.pop('input_features', None)
-        feature_attention_mask = hf_inputs.get('feature_attention_mask', None)
-        if ('input_audio_features' not in hf_inputs
+        return self._postprocess_hf(
+            prompt=prompt,
+            mm_data=mm_data,
+            mm_kwargs=mm_kwargs,
+            processed_outputs=processed_outputs,
+        )
+
+    async def _call_hf_processor_async(
+        self,
+        prompt: str,
+        mm_data: Mapping[str, object],
+        mm_kwargs: Mapping[str, object],
+    ) -> BatchFeature:
+        mm_data = dict(mm_data)
+        audios = mm_data.pop("audios", [])
+
+        # NOTE: WhisperFeatureExtractor cannot handle empty list of audios
+        if audios:
+            # NOTE: Qwen2.5-Omni processor accept "audio"
+            mm_data["audio"] = audios
+            mm_kwargs = dict(**mm_kwargs)
+
+        processed_outputs = await super(
+        )._cal_call_hf_processor_asyncl_hf_processor(
+            prompt=prompt,
+            mm_data=mm_data,
+            mm_kwargs=mm_kwargs,
+        )
+
+        return self._postprocess_hf(
+            prompt=prompt,
+            mm_data=mm_data,
+            mm_kwargs=mm_kwargs,
+            processed_outputs=processed_outputs,
+        )
+
+    def _postprocess_hf(
+        self,
+        prompt: str,
+        mm_data: Mapping[str, object],
+        mm_kwargs: Mapping[str, object],
+        processed_outputs: BatchFeature,
+    ) -> BatchFeature:
+        input_features = processed_outputs.pop('input_features', None)
+        feature_attention_mask = processed_outputs.get(
+            'feature_attention_mask', None)
+
+        if ('input_audio_features' not in processed_outputs
                 and input_features is not None):
             if feature_attention_mask is not None:
                 input_features = input_features.permute(
                     0, 2, 1)[feature_attention_mask.bool()].permute(1, 0)
-            hf_inputs['input_audio_features'] = input_features
-        if ('audio_feature_lengths' not in hf_inputs
+            processed_outputs['input_audio_features'] = input_features
+        if ('audio_feature_lengths' not in processed_outputs
                 and feature_attention_mask is not None):
-            hf_inputs['audio_feature_lengths'] = feature_attention_mask.sum(-1)
-        return hf_inputs
+            processed_outputs['audio_feature_lengths'] = \
+                feature_attention_mask.sum(-1)
+
+        return processed_outputs
 
     def _get_mm_fields_config(
         self,
@@ -492,6 +539,27 @@ class Qwen2_5OmniThinkerMultiModalProcessor(
             mm_counts["audio"] -= mm_counts["video"]
 
         _, mm_kwargs, _ = self._apply_hf_processor_text_mm(
+            prompt_text=self.dummy_inputs.get_dummy_text(mm_counts),
+            mm_items=mm_items,
+            hf_processor_mm_kwargs=hf_processor_mm_kwargs,
+        )
+
+        return mm_kwargs
+
+    async def _apply_hf_processor_mm_only_async(
+        self,
+        mm_items: MultiModalDataItems,
+        hf_processor_mm_kwargs: Mapping[str, object],
+    ) -> MultiModalKwargs:
+        mm_counts = mm_items.get_all_counts()
+
+        use_audio_in_video = hf_processor_mm_kwargs.get(
+            "use_audio_in_video", False)
+        if use_audio_in_video and "video" in mm_counts:
+            assert "audio" in mm_counts
+            mm_counts["audio"] -= mm_counts["video"]
+
+        _, mm_kwargs, _ = await self._apply_hf_processor_text_mm_async(
             prompt_text=self.dummy_inputs.get_dummy_text(mm_counts),
             mm_items=mm_items,
             hf_processor_mm_kwargs=hf_processor_mm_kwargs,

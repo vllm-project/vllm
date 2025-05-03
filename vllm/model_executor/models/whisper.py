@@ -609,6 +609,28 @@ class WhisperMultiModalProcessor(
             processed_outputs["input_ids"] = processed_outputs.pop("labels")
         return processed_outputs
 
+    async def _call_hf_processor_async(
+        self,
+        prompt: str,
+        mm_data: Mapping[str, object],
+        mm_kwargs: Mapping[str, object],
+    ) -> BatchFeature:
+        if mm_data:
+            feature_extractor = self.info.get_feature_extractor(**mm_kwargs)
+            mm_data = dict(audio=mm_data.pop("audios"))
+            mm_kwargs = dict(
+                **mm_kwargs,
+                sampling_rate=feature_extractor.sampling_rate,
+            )
+        processed_outputs = await super()._call_hf_processor_async(
+            prompt=prompt,
+            mm_data=mm_data,
+            mm_kwargs=mm_kwargs,
+        )
+        if "labels" in processed_outputs:
+            processed_outputs["input_ids"] = processed_outputs.pop("labels")
+        return processed_outputs
+
     def _get_mm_fields_config(
         self,
         hf_inputs: BatchFeature,

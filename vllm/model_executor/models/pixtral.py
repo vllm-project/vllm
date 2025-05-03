@@ -275,8 +275,35 @@ class PixtralMultiModalProcessor(BaseMultiModalProcessor[PixtralProcessingInfo]
         *,
         return_mm_hashes: bool,
     ) -> tuple[list[int], MultiModalKwargs, Optional[MultiModalHashes], bool]:
-        prompt_ids, mm_kwargs, mm_hashes, _ = super(
-        )._cached_apply_hf_processor(
+        (
+            prompt_ids,
+            mm_kwargs,
+            mm_hashes,
+            _,
+        ) = super()._cached_apply_hf_processor(
+            prompt=prompt,
+            mm_data_items=mm_data_items,
+            hf_processor_mm_kwargs=hf_processor_mm_kwargs,
+            return_mm_hashes=return_mm_hashes,
+        )
+
+        # NOTE: The tokens are already inserted by the chat template
+        return prompt_ids, mm_kwargs, mm_hashes, True
+
+    async def _cached_apply_hf_processor_async(
+        self,
+        prompt: Union[str, list[int]],
+        mm_data_items: MultiModalDataItems,
+        hf_processor_mm_kwargs: Mapping[str, object],
+        *,
+        return_mm_hashes: bool,
+    ) -> tuple[list[int], MultiModalKwargs, Optional[MultiModalHashes], bool]:
+        (
+            prompt_ids,
+            mm_kwargs,
+            mm_hashes,
+            _,
+        ) = await super()._cached_apply_hf_processor_async(
             prompt=prompt,
             mm_data_items=mm_data_items,
             hf_processor_mm_kwargs=hf_processor_mm_kwargs,

@@ -601,6 +601,33 @@ class QwenVLMultiModalProcessor(BaseMultiModalProcessor[QwenVLProcessingInfo]):
             mm_kwargs=mm_kwargs,
         )
 
+    async def _call_hf_processor_async(
+        self,
+        prompt: str,
+        mm_data: Mapping[str, object],
+        mm_kwargs: Mapping[str, object],
+    ) -> BatchFeature:
+        # Drops anything between <img>/</img> tags; encoding with the tokenizer
+        # will automatically add the image pads for the context.
+        prompt, num_matched_images = re.subn(
+            r"(Picture \d*: <img>).*?(<\/img>\n)",
+            r"\1\2",
+            prompt,
+        )
+
+        image_data = mm_data.get("images")
+        if image_data is not None:
+            assert isinstance(image_data, list)
+
+            num_images = len(image_data)
+            assert num_matched_images == num_images
+
+        return await super()._call_hf_processor_async(
+            prompt=prompt,
+            mm_data=mm_data,
+            mm_kwargs=mm_kwargs,
+        )
+
     def _hf_processor_applies_updates(
         self,
         prompt_text: str,
