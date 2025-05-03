@@ -87,10 +87,10 @@ def _get_executor(
     if parallel_processor_backend == "uni":
         return None
     if parallel_processor_backend == "mp":
-        logger.info_once("Enabled multiprocessing for multi-modal data")
+        logger.info_once("Enabled multiprocessing for multi-modal data.")
         return ProcessPoolExecutor(mp_context=get_mp_context())
     if parallel_processor_backend == "mt":
-        logger.info_once("Enabled multithreading for multi-modal data")
+        logger.info_once("Enabled multithreading for multi-modal data.")
         return ThreadPoolExecutor()
 
     assert_never(parallel_processor_backend)
