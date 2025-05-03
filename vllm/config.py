@@ -3140,6 +3140,14 @@ def _get_and_verify_max_len(
     # derived length from the HF model config.
     if max_model_len is None:
         max_model_len = int(derived_max_model_len)
+        if current_platform.is_tpu():
+            logger.warning(
+                "--max-model-len is not specified, "
+                "it's currently using model's default length %s, "
+                "which might be too large."
+                "Please input with --max-model-len based on your "
+                "request input length and output length, to avoid "
+                "unnecessary degradation.", max_model_len)
     elif max_model_len > derived_max_model_len:
         # Some models might have a separate key for specifying model_max_length
         # that will be bigger than derived_max_model_len. We compare user input
