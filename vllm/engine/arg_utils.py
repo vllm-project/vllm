@@ -1237,6 +1237,12 @@ class EngineArgs:
                                recommend_to_remove=False)
             return False
 
+        # No text embedding inputs so far.
+        if self.enable_prompt_embeds:
+            _raise_or_fallback(feature_name="--enable-prompt-embeds",
+                               recommend_to_remove=False)
+            return False
+
         # Only Fp16 and Bf16 dtypes since we only support FA.
         V1_SUPPORTED_DTYPES = [torch.bfloat16, torch.float16]
         if model_config.dtype not in V1_SUPPORTED_DTYPES:
