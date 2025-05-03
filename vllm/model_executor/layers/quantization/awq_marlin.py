@@ -140,7 +140,7 @@ class AWQMarlinConfig(QuantizationConfig):
             from vllm.model_executor.layers.quantization.moe_wna16 import (
                 MoeWNA16Config)
             if not check_moe_marlin_supports_layer(layer, self.group_size):
-                logger.warning_one(
+                logger.warning_once(
                     f"Layer '{prefix}' is not supported by AWQMoeMarlin. "
                     "Falling back to Moe WNA16 kernels.")
                 return MoeWNA16Config.from_config(
