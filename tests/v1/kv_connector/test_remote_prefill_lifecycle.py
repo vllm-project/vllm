@@ -75,7 +75,7 @@ def test_basic_lifecycle():
     engine_core_outputs = scheduler.update_from_output(scheduler_output,
                                                        model_runner_output)
     assert len(scheduler.waiting) == 1
-    assert (request_id in scheduler.finished_recving_KV_req_ids)
+    assert (request_id in scheduler.finished_recving_kv_req_ids)
 
     # STEP (3):
     # (3a): schedule(): this should actually schedule.
