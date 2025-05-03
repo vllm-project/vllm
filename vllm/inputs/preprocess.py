@@ -303,8 +303,11 @@ class InputPreprocessor:
         self,
         parsed_content: EmbedsPrompt,
     ) -> EmbedsInputs:
+        if not self.model_config.enable_prompt_embeds:
+            raise ValueError("You must set `--enable-prompt-embeds` to input "
+                             "`prompt_embeds`.")
         if envs.VLLM_USE_V1:
-            raise ValueError("prompt_embeds is only available in V0.")
+            raise ValueError("`prompt_embeds` is only available in V0.")
 
         prompt_embeds = parsed_content["prompt_embeds"]
 

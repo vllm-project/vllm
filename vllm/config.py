@@ -321,6 +321,10 @@ class ModelConfig:
     """Skip initialization of tokenizer and detokenizer. Expects valid
     `prompt_token_ids` and `None` for prompt from the input. The generated
     output will contain token ids."""
+    enable_prompt_embeds: bool = False
+    """If `True`, enables passing text embeddings as inputs via the
+    `prompt_embeds` key. Note that enabling this will double the time required
+    for graph compilation."""
     served_model_name: Optional[Union[str, list[str]]] = None
     """The model name(s) used in the API. If multiple names are provided, the
     server will respond to any of the provided names. The model name in the
@@ -3140,6 +3144,14 @@ def _get_and_verify_max_len(
     # derived length from the HF model config.
     if max_model_len is None:
         max_model_len = int(derived_max_model_len)
+        if current_platform.is_tpu():
+            logger.warning(
+                "--max-model-len is not specified, "
+                "it's currently using model's default length %s, "
+                "which might be too large."
+                "Please input with --max-model-len based on your "
+                "request input length and output length, to avoid "
+                "unnecessary degradation.", max_model_len)
     elif max_model_len > derived_max_model_len:
         # Some models might have a separate key for specifying model_max_length
         # that will be bigger than derived_max_model_len. We compare user input
