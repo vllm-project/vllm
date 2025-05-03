@@ -92,6 +92,10 @@ html_theme_options = {
     'repository_url': 'https://github.com/vllm-project/vllm',
     'use_repository_button': True,
     'use_edit_page_button': True,
+    # Prevents the full API being added to the left sidebar of every page.
+    # Reduces build time by 2.5x and reduces build size from ~225MB to ~95MB.
+    'collapse_navbar': True,
+    # Makes API visible in the right sidebar on API reference pages.
     'show_toc_level': 3,
 }
 # Add any paths that contain custom static files (such as style sheets) here,
