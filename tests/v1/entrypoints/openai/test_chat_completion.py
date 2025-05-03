@@ -52,7 +52,7 @@ async def client(server):
 async def test_invalid_json_schema(
     client: openai.AsyncOpenAI, model_name: str
 ) -> None:
-    json_schema = {
+    invalid_json_schema = {
         "$defs": {
             "CarType": {
                 "enum": ["sedan", "SUV", "Truck", "Coupe"],
@@ -83,7 +83,7 @@ async def test_invalid_json_schema(
                     "content": prompt,
                 }
             ],
-            extra_body={"guided_json": json_schema},
+            extra_body={"guided_json": invalid_json_schema},
         )
 
 
