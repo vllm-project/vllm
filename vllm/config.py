@@ -9,6 +9,7 @@ import json
 import re
 import sys
 import textwrap
+import uuid
 import warnings
 from collections import Counter
 from contextlib import contextmanager
@@ -3400,6 +3401,11 @@ class KVTransferConfig(BaseModel):
     # The KV connector for vLLM to transmit KV caches between vLLM instances.
     kv_connector: Optional[str] = None
 
+    # Engine ID for the KV transfers.
+    # Note(tms): sticking this here so the engine_id is consistent between
+    # scheduler-side and worker-side of the KVConnector
+    engine_id: str = str(uuid.uuid4())
+
     # The device used by kv connector to buffer the KV cache.
     # Currently only support 'cuda'.
     kv_buffer_device: Optional[str] = "cuda"
@@ -3409,7 +3415,7 @@ class KVTransferConfig(BaseModel):
     kv_buffer_size: float = 1e9
 
     # Whether this vLLM instance produces, consumes KV cache, or both. Choices
-    # are 'kv_producer', 'kv_consumer', and 'both'.
+    # are 'kv_producer', 'kv_consumer', and 'kv_both'.
     kv_role: Optional[str] = None
 
     # The rank of this vLLM instance in the KV cache transfer. Typical value:

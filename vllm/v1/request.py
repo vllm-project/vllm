@@ -61,6 +61,15 @@ class Request:
         self.num_encoder_inputs = len(self.mm_inputs)
         self.has_encoder_inputs = self.num_encoder_inputs > 0
 
+        # Disaggregated serving related
+        self.do_remote_decode = (
+            sampling_params.kv_transfer_params is not None
+            and sampling_params.kv_transfer_params.do_remote_decode)
+        self.do_remote_prefill = (
+            sampling_params.kv_transfer_params is not None
+            and sampling_params.kv_transfer_params.do_remote_prefill)
+        self.kv_transfer_params = sampling_params.kv_transfer_params
+
         # Sanity check
         assert len(self.mm_inputs) == len(self.mm_positions)
         if self.mm_hashes:
@@ -150,6 +159,7 @@ class RequestStatus(enum.IntEnum):
     """Status of a request."""
     WAITING = enum.auto()
     WAITING_FOR_FSM = enum.auto()
+    WAITING_FOR_REMOTE_KVS = enum.auto()
     RUNNING = enum.auto()
     PREEMPTED = enum.auto()
     # Note: anything after PREEMPTED will be considered
@@ -158,6 +168,7 @@ class RequestStatus(enum.IntEnum):
     FINISHED_LENGTH_CAPPED = enum.auto()
     FINISHED_ABORTED = enum.auto()
     FINISHED_IGNORED = enum.auto()
+    FINISHED_REMOTE_DECODE = enum.auto()
 
     @staticmethod
     def is_finished(status: "RequestStatus") -> bool:
@@ -178,4 +189,5 @@ _FINISHED_REASON_MAP = {
     RequestStatus.FINISHED_LENGTH_CAPPED: FinishReason.LENGTH,
     RequestStatus.FINISHED_ABORTED: FinishReason.ABORT,
     RequestStatus.FINISHED_IGNORED: FinishReason.LENGTH,
+    RequestStatus.FINISHED_REMOTE_DECODE: FinishReason.REMOTE_DECODE
 }

@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
+import copy
 import gc
 import time
 import weakref
@@ -16,8 +17,9 @@ from vllm.config import (CompilationLevel, VllmConfig,
                          get_layers_from_vllm_config)
 from vllm.distributed.kv_transfer import (get_kv_transfer_group,
                                           has_kv_transfer_group)
+from vllm.distributed.kv_transfer.kv_connector.v1 import KVConnectorBase_V1
 from vllm.distributed.parallel_state import get_pp_group, graph_capture
-from vllm.forward_context import set_forward_context
+from vllm.forward_context import get_forward_context, set_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.layers.rotary_embedding import MRotaryEmbedding
 from vllm.model_executor.model_loader import get_model
@@ -1017,20 +1019,55 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         scheduler_output: "SchedulerOutput",
         intermediate_tensors: Optional[IntermediateTensors] = None,
     ) -> Union[ModelRunnerOutput, torch.Tensor]:
-        # Update KVConnector with the KVConnector metadata forward().
-        if has_kv_transfer_group():
-            get_kv_transfer_group().bind_connector_metadata(
-                scheduler_output.kv_connector_metadata)
+
+        def maybe_setup_kv_connector():
+            # Update KVConnector with the KVConnector metadata forward().
+            if has_kv_transfer_group():
+                kv_connector = get_kv_transfer_group()
+                assert isinstance(kv_connector, KVConnectorBase_V1)
+                assert scheduler_output.kv_connector_metadata is not None
+                kv_connector.bind_connector_metadata(
+                    scheduler_output.kv_connector_metadata)
+
+                # Background KV cache transfers happen here.
+                # These transfers are designed to be async and the requests
+                # involved may be disjoint from the running requests.
+                # Do this here to save a collective_rpc.
+                kv_connector.start_load_kv(get_forward_context())
+
+        def maybe_wait_for_save():
+            if has_kv_transfer_group():
+                kv_connector = get_kv_transfer_group()
+                kv_connector.wait_for_save()
+
+        def maybe_get_finished() -> tuple[set[str], set[str]]:
+            if has_kv_transfer_group():
+                kv_connector = get_kv_transfer_group()
+                return kv_connector.get_finished()
+            return set(), set()
 
         self._update_states(scheduler_output)
         if not scheduler_output.total_num_scheduled_tokens:
+            # KV send/recv even if no work to do.
+            with set_forward_context(None, self.vllm_config):
+                maybe_setup_kv_connector()
+                maybe_wait_for_save()
+                finished_sending, finished_recving = maybe_get_finished()
+
             # Return empty ModelRunnerOutput if there's no work to do.
-            return EMPTY_MODEL_RUNNER_OUTPUT
+            output = EMPTY_MODEL_RUNNER_OUTPUT
+
+            if len(finished_sending) > 0 or len(finished_recving) > 0:
+                output = copy.deepcopy(EMPTY_MODEL_RUNNER_OUTPUT)
+                output.finished_sending = finished_sending
+                output.finished_recving = finished_recving
+            return output
 
         # Prepare the decoder inputs.
+        num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
+
         attn_metadata, logits_indices, spec_decode_metadata = (
             self._prepare_inputs(scheduler_output))
-        num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         if (self.use_cuda_graph
                 and num_scheduled_tokens <= self.cudagraph_batch_sizes[-1]):
             # Use piecewise CUDA graphs.
@@ -1102,17 +1139,22 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         with set_forward_context(attn_metadata,
                                  self.vllm_config,
                                  num_tokens=num_input_tokens):
-            output = self.model(
+            maybe_setup_kv_connector()
+
+            model_output = self.model(
                 input_ids=input_ids,
                 positions=positions,
                 intermediate_tensors=intermediate_tensors,
                 inputs_embeds=inputs_embeds,
             )
 
+            maybe_wait_for_save()
+            finished_sending, finished_recving = maybe_get_finished()
+
         if self.use_aux_hidden_state_outputs:
-            hidden_states, aux_hidden_states = output
+            hidden_states, aux_hidden_states = model_output
         else:
-            hidden_states = output
+            hidden_states = model_output
 
         if not get_pp_group().is_last_rank:
             # For mid-pipeline stages, return the hidden states.
@@ -1291,6 +1333,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             spec_token_ids=spec_token_ids,
             logprobs=logprobs_lists,
             prompt_logprobs_dict=prompt_logprobs_dict,
+            finished_sending=finished_sending,
+            finished_recving=finished_recving,
         )
 
     def generate_draft_token_ids(
@@ -1742,6 +1786,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             kv_caches,
             self.vllm_config.compilation_config.static_forward_context,
             self.kv_caches)
+
+        if has_kv_transfer_group():
+            get_kv_transfer_group().register_kv_caches(kv_caches)
 
     def get_kv_cache_spec(self) -> dict[str, KVCacheSpec]:
         """

@@ -27,6 +27,38 @@ class SamplingType(IntEnum):
     RANDOM_SEED = 2
 
 
+# TODO(rob): make this per connector
+class KVTransferParams(
+        msgspec.Struct,
+        omit_defaults=True,  # type: ignore[call-arg]
+        # required for @cached_property.
+        dict=True):
+    # TODO(rob): we can handle xPyD and direct KV block Xfer
+    remote_engine_id: Optional[str] = None
+    remote_block_ids: Optional[list[int]] = None
+    do_remote_decode: bool = False
+    do_remote_prefill: bool = False
+
+    @staticmethod
+    def from_optional(
+        do_remote_decode: bool,
+        do_remote_prefill: bool,
+        remote_engine_id: Optional[str],
+        remote_block_ids: Optional[list[int]],
+    ) -> Optional["KVTransferParams"]:
+        if do_remote_decode and do_remote_prefill:
+            raise ValueError(
+                "Cannot do both remote prefill and remote decode.")
+        if do_remote_decode or do_remote_prefill:
+            return KVTransferParams(
+                do_remote_decode=do_remote_decode,
+                do_remote_prefill=do_remote_prefill,
+                remote_engine_id=remote_engine_id,
+                remote_block_ids=remote_block_ids,
+            )
+        return None
+
+
 # maybe make msgspec?
 @dataclass
 class GuidedDecodingParams:
@@ -248,6 +280,9 @@ class SamplingParams(
     bad_words: Optional[list[str]] = None
     _bad_words_token_ids: Optional[list[list[int]]] = None
 
+    # Fields used for KVTransfer in disaggregated serving.
+    kv_transfer_params: Optional[KVTransferParams] = None
+
     @staticmethod
     def from_optional(
         n: Optional[int] = 1,
@@ -279,6 +314,7 @@ class SamplingParams(
         guided_decoding: Optional[GuidedDecodingParams] = None,
         logit_bias: Optional[Union[dict[int, float], dict[str, float]]] = None,
         allowed_token_ids: Optional[list[int]] = None,
+        kv_transfer_params: Optional[KVTransferParams] = None,
         extra_args: Optional[dict[str, Any]] = None,
     ) -> "SamplingParams":
         if logit_bias is not None:
@@ -321,6 +357,7 @@ class SamplingParams(
             guided_decoding=guided_decoding,
             logit_bias=logit_bias,
             allowed_token_ids=allowed_token_ids,
+            kv_transfer_params=kv_transfer_params,
             extra_args=extra_args,
         )
 
