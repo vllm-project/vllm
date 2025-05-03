@@ -6,16 +6,17 @@ llm = LLM(
     model="deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B",
     tensor_parallel_size=1,
     enable_prefix_caching=True,
+    enable_chunked_prefill = True,
     trust_remote_code=True,  # Required for some HuggingFace models like Qwen
 )
 # Load a few GSM8K examples
 ds = load_dataset("openai/gsm8k", "main", split="test")
-different_questions = ds.select(range(2))  # Select a few examples for testing
+ds = ds.select(range(2))  # Select a few examples for testing
 
 # Sampling parameters
 sampling_params = SamplingParams(
-    temperature=0.0,
-    max_tokens=1024,
+    temperature=0.7,
+    max_tokens=2048,
     skip_special_tokens=True,
 )
 

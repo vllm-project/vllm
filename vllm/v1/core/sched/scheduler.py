@@ -202,6 +202,17 @@ class Scheduler(SchedulerInterface):
 
         # First, schedule the RUNNING requests.
         req_index = 0
+        # self.running.sort(key=lambda r: 0 if "probe" in r.request_id else 1)
+        # ✅ Pause decode of main requests while probe is active
+        # has_active_probe = any("probe" in r.request_id for r in self.running) \
+        #                 or any("probe" in r.request_id for r in self.waiting)
+
+        # if has_active_probe:
+        #     # Keep only probes in the running list; defer all main decoding
+        #     logger_myown.info("[Preempt] Pausing main decode due to active probe.")
+        #     self.running = [r for r in self.running if "probe" in r.request_id]
+
+
         while req_index < len(self.running) and token_budget > 0:
             request = self.running[req_index]
 
@@ -321,6 +332,9 @@ class Scheduler(SchedulerInterface):
 
         # Next, schedule the WAITING requests.
         if not preempted_reqs:
+            # Sort waiting queue to prioritize probes
+            self.waiting = deque(sorted(self.waiting, key=lambda r: 0 if "probe" in r.request_id else 1))
+
             while self.waiting and token_budget > 0:
                 if len(self.running) == self.max_num_running_reqs:
                     break
@@ -658,23 +672,15 @@ class Scheduler(SchedulerInterface):
 
     def _create_and_add_new_request(self, parent_request: Request,decode_count) -> None:
         """Create a new prefill Request using (original prompt + decoded outputs + custom string)."""
-        logger_myown.info(
-                f"Request {parent_request.request_id} has {parent_request.num_computed_tokens} computed tokens")
-
         original_prompt_ids = list(parent_request.prompt_token_ids)
-        decoded_output_ids = list(parent_request.output_token_ids)
-
+        decoded_output_ids = list(parent_request.output_token_ids[:decode_count])
         # probe msg  
         custom_text = "... Oh, I suddenly got the answer to the whole problem, **Final Answer**\n\n\\[ \\boxed{"
-        
         custom_token_ids = list(self.tokenizer.encode(custom_text, add_special_tokens=False))
-
         # new prefill
         new_prompt_token_ids = original_prompt_ids + decoded_output_ids + custom_token_ids
-
         # new unique request ID
         new_request_id = parent_request.request_id + "_probe_after_" + str(decode_count) + "_token"
-
         # new Request
         new_request = Request(
             request_id=new_request_id,
@@ -687,11 +693,9 @@ class Scheduler(SchedulerInterface):
             multi_modal_placeholders=getattr(parent_request, "multi_modal_placeholders", []),
             eos_token_id=getattr(parent_request, "eos_token_id", None),
         )
-
-        # Only if request is still running
         if parent_request.status == RequestStatus.RUNNING:
             self.add_request(new_request)
-            print(f"[Scheduler] Created new request {new_request_id} from {parent_request.request_id}")
+            # print(f"[Scheduler] Created new request {new_request_id} from {parent_request.request_id}")
 
     def update_from_output(
         self,
@@ -712,21 +716,22 @@ class Scheduler(SchedulerInterface):
         # loop can be a performance bottleneck. We should do our best to avoid
         # expensive operations inside the loop.
         for request in self.running:
-            if self.enable_dynasor_abort and request.request_id in self.probe_answers:
-                
-                answers = self.probe_answers[request.request_id]
-                print("List Probe Answers:",answers)
-                if len(answers) >= 2:
-                    # Window size of 2
-                    if answers[-1] == answers[-2]:
-                        # Abort the request
-                        print(f"[Dynasor-Abort] Confident answer detected. Aborting {request.request_id}.")
-            if len(request.output_token_ids) in [20, 40]:
-
-                if "probe" not in request.request_id:
-                    
-                    logger_myown.info(
-                        f"Request {request.request_id} reached {len(request.output_token_ids)} decoded tokens!")
+            if request.is_finished and "probe" in request.request_id:
+                main_id = request.request_id.split("_probe_after_")[0]
+                decoded_text = self.tokenizer.decode(request.output_token_ids, skip_special_tokens=True)
+                final_answer = extract_final_answer(decoded_text)
+                self.probe_answers.setdefault(main_id, []).append(final_answer)
+                print(f"[Probe] Probe request {request.request_id} finished with answer: {final_answer}")
+                print(self.probe_answers)
+                answers = self.probe_answers[main_id]
+                if len(answers) >= 2 and answers[-1] == answers[-2]:
+                    print(f"[Dynasor-Abort] Confident answer detected. Aborting {main_id}.")
+                    self.finish_requests(main_id, RequestStatus.FINISHED_ABORTED)
+                    self.probe_answers[main_id] = []  # Optional cleanup
+            
+            if len(request.output_token_ids) in [5, 15] and "probe" not in request.request_id:
+                    # logger_myown.info(
+                    #     f"Request {request.request_id} reached {len(request.output_token_ids)} decoded tokens!")
                     self._create_and_add_new_request(request,len(request.output_token_ids))
             req_id = request.request_id
             num_tokens_scheduled = num_scheduled_tokens.get(req_id, 0)
@@ -831,6 +836,9 @@ class Scheduler(SchedulerInterface):
 
             if not stopped:
                 new_running.append(request)
+            
+
+
 
             
         # Return the cached request data to the queue so they can be reused.
@@ -841,6 +849,10 @@ class Scheduler(SchedulerInterface):
                 self._cached_reqs_data[req_data.req_id].append(req_data)
 
         self.running = new_running
+
+        
+
+
         engine_core_outputs = EngineCoreOutputs(
             outputs=outputs,
             scheduler_stats=self.make_stats(spec_decoding_stats),
@@ -849,17 +861,17 @@ class Scheduler(SchedulerInterface):
             #TODO currently sending duplicates here, improve this
             engine_core_outputs.finished_requests = (
                 scheduler_output.finished_req_ids | self.finished_req_ids)
-
+        
         return engine_core_outputs
 
     def add_request(self, request: Request) -> None:
         if "probe" in request.request_id:
-            self.waiting.insert(0, request)  # COT
-            logger_myown.info(f"Probe request {request.request_id} added to the front of the queue.")
+            self.waiting.appendleft(request)  # COT
+            # logger_myown.info(f"Probe request {request.request_id} added to the front of the queue.")
     
         else:
             self.waiting.append(request)
-            logger_myown.info(f"Normal request {request.request_id} added to the queue.")
+            # logger_myown.info(f"Normal request {request.request_id} added to the queue.")
         
         self.requests[request.request_id] = request
         if self.log_stats:
@@ -896,20 +908,19 @@ class Scheduler(SchedulerInterface):
 
     def _free_request(self, request: Request) -> None:
         assert request.is_finished()
-        if "probe" in request.request_id:
-            key = request.request_id.split("_")[0]
-            print("CHECK OUT:",key)
-
-
-            decoded_text = self.tokenizer.decode(request.output_token_ids, skip_special_tokens=True)
-            current_answer = extract_final_answer(decoded_text)
-            print("DECODE TEXT :",decoded_text)
-            if key not in self.probe_answers:
-                print("Current Answer :",current_answer)
-                self.probe_answers[key] = [current_answer]
-            else:
-                print("Second Answer :",current_answer)
-                self.probe_answers[key].append(current_answer)
+        # if "probe" in request.request_id:
+        #     main_id = request.request_id.split("_probe_after_")[0]
+        #     decoded_text = self.tokenizer.decode(request.output_token_ids, skip_special_tokens=True)
+        #     final_answer = extract_final_answer(decoded_text)
+        #     self.probe_answers.setdefault(main_id, []).append(final_answer)
+        #     print(f"[Probe] Probe request {request.request_id} finished with answer: {final_answer}")
+        #     print(self.probe_answers)
+        #     answers = self.probe_answers[main_id]
+        #     if len(answers) >= 2 and answers[-1] == answers[-2]:
+        #         print(f"[Dynasor-Abort] Confident answer detected. Aborting {main_id}.")
+        #         self.finish_requests(main_id, RequestStatus.FINISHED_ABORTED)
+        #         # Optional: clear answers to avoid re-aborting
+        #         self.probe_answers[main_id] = []
         self.kv_cache_manager.free(request)
         self.kv_cache_manager.free_block_hashes(request)
         self.encoder_cache_manager.free(request)
@@ -967,17 +978,6 @@ import re
 from typing import Optional
 
 def extract_final_answer(text: str) -> Optional[str]:
-    # First, try the \boxed{...} pattern
-    match = re.search(r"\\boxed{(.*?)}", text)
-    if match:
-        return match.group(1).strip()
-
-    # Then try "Final Answer: ..." style
-    match = re.search(r"Final Answer\s*[:\-]?\s*(.*)", text, re.IGNORECASE)
-    if match:
-        return match.group(1).strip()
-
-    # Fallback: look for a number or expression ending in } \]
     match = re.search(r"([^\s{}\\]+)}\s*\\\]", text)
     if match:
         return match.group(1).strip()
