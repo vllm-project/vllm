@@ -63,6 +63,7 @@ autodoc2_hidden_objects = ["undoc", "dunder", "private", "inherited"]
 autodoc2_docstring_parser_regexes = [
     (".*", "docs.source.autodoc2_docstring_parser"),
 ]
+autodoc2_sort_names = True
 autodoc2_index_template = None
 
 
