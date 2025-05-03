@@ -3,6 +3,7 @@ import argparse
 import asyncio
 import csv
 import time
+import traceback
 from datetime import datetime
 from pathlib import Path
 from typing import Literal, Union, get_args
@@ -391,7 +392,12 @@ def main(
 
         for model in models:
             for backend in parallel_backends:
-                res_one = benchmark_one(model, backend)
+                try:
+                    res_one = benchmark_one(model, backend)
+                except Exception as e:
+                    print(f"Failed to benchmark {model=}, {backend=}")
+                    traceback.print_exception(e)
+                    continue
 
                 csv_writer.writerow({
                     "model_id": model,
@@ -442,7 +448,12 @@ async def main_async(
 
         for model in models:
             for backend in parallel_backends:
-                res_one = await benchmark_one_async(model, backend)
+                try:
+                    res_one = await benchmark_one_async(model, backend)
+                except Exception as e:
+                    print(f"Failed to benchmark {model=}, {backend=}")
+                    traceback.print_exception(e)
+                    continue
 
                 csv_writer.writerow({
                     "model_id": model,
