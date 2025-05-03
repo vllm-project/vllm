@@ -59,7 +59,7 @@ autodoc2_packages = [
 ]
 autodoc2_output_dir = "api"
 autodoc2_render_plugin = "myst"
-autodoc2_hidden_objects = ["undoc", "dunder", "private", "inherited"]
+autodoc2_hidden_objects = ["dunder", "private", "inherited"]
 autodoc2_docstring_parser_regexes = [
     (".*", "docs.source.autodoc2_docstring_parser"),
 ]
