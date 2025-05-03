@@ -1799,8 +1799,8 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
             sync_fn = fn
             async_fn = fn + "_async"
 
-            has_sync_override = (getattr(type(self), sync_fn)
-                                 != getattr(base_cls, sync_fn))
+            has_sync_override = (getattr(type(self), sync_fn) == getattr(
+                base_cls, sync_fn))
             has_async_override = (getattr(type(self), async_fn) == getattr(
                 base_cls, async_fn))
 
