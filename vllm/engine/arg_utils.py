@@ -234,6 +234,7 @@ class EngineArgs:
     hf_config_path: Optional[str] = ModelConfig.hf_config_path
     task: TaskOption = ModelConfig.task
     skip_tokenizer_init: bool = ModelConfig.skip_tokenizer_init
+    enable_prompt_embeds: bool = ModelConfig.enable_prompt_embeds
     tokenizer_mode: TokenizerMode = ModelConfig.tokenizer_mode
     trust_remote_code: bool = ModelConfig.trust_remote_code
     allowed_local_media_path: str = ModelConfig.allowed_local_media_path
@@ -874,6 +875,7 @@ class EngineArgs:
             disable_sliding_window=self.disable_sliding_window,
             disable_cascade_attn=self.disable_cascade_attn,
             skip_tokenizer_init=self.skip_tokenizer_init,
+            enable_prompt_embeds=self.enable_prompt_embeds,
             served_model_name=self.served_model_name,
             limit_mm_per_prompt=self.limit_mm_per_prompt,
             use_async_output_proc=not self.disable_async_output_proc,

@@ -321,6 +321,9 @@ class ModelConfig:
     """Skip initialization of tokenizer and detokenizer. Expects valid
     `prompt_token_ids` and `None` for prompt from the input. The generated
     output will contain token ids."""
+    enable_prompt_embeds: bool = False
+    """If `True`, enables passing text embeddings as inputs via the
+    `prompt_embeds` key."""
     served_model_name: Optional[Union[str, list[str]]] = None
     """The model name(s) used in the API. If multiple names are provided, the
     server will respond to any of the provided names. The model name in the
