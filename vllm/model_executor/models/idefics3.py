@@ -353,6 +353,47 @@ class Idefics3MultiModalProcessor(
 
         return processed_outputs
 
+    async def _call_hf_processor_async(
+        self,
+        prompt: str,
+        mm_data: Mapping[str, object],
+        mm_kwargs: Mapping[str, object],
+    ) -> BatchFeature:
+        # Text-only input not supported in composite processor
+        if not (images := mm_data.get("images", [])):
+            prompt_ids = self.info.get_tokenizer().encode(prompt)
+            prompt_ids = self._apply_hf_processor_tokens_only(prompt_ids)
+            return BatchFeature(dict(input_ids=[prompt_ids]), tensor_type="pt")
+
+        processed_outputs = await super()._call_hf_processor_async(
+            prompt,
+            mm_data,
+            mm_kwargs,
+        )
+
+        parsed_images = (self._get_data_parser().parse_mm_data({
+            "image": images
+        }).get_items("image", ImageProcessorItems))
+        image_sizes = [
+            parsed_images.get_image_size(i) for i in range(len(parsed_images))
+        ]
+        hf_processor = self.info.get_hf_processor(**mm_kwargs)
+
+        num_patches = [
+            self.info.get_num_patches(
+                image_width=size.width,
+                image_height=size.height,
+                processor=hf_processor,
+            ) for size in image_sizes
+        ]
+        processed_outputs["num_patches"] = torch.tensor(num_patches)
+
+        # Remove the extra batch dimension
+        processed_outputs["pixel_values"].squeeze_(0)
+        processed_outputs["pixel_attention_mask"].squeeze_(0)
+
+        return processed_outputs
+
     def _get_mm_fields_config(
         self,
         hf_inputs: BatchFeature,
