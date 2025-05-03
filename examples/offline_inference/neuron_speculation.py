@@ -28,12 +28,14 @@ def initialize_model():
     """Create an LLM with speculative decoding."""
     return LLM(
         model="openlm-research/open_llama_7b",
-        speculative_model='openlm-research/open_llama_3b',
-        num_speculative_tokens=4,
+        speculative_config={
+            "model": "openlm-research/open_llama_3b",
+            "num_speculative_tokens": 4,
+            "max_model_len": 2048
+        },
         max_num_seqs=4,
         max_model_len=2048,
         block_size=2048,
-        speculative_max_model_len=2048,
         use_v2_block_manager=True,
         device="neuron",
         tensor_parallel_size=32,
