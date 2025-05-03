@@ -3,6 +3,7 @@
 from typing import TYPE_CHECKING, Optional, Union
 
 import torch
+from tpu_info import device
 
 import vllm.envs as envs
 from vllm.inputs import ProcessorInputs, PromptType
@@ -54,7 +55,8 @@ class TpuPlatform(Platform):
 
     @classmethod
     def get_device_name(cls, device_id: int = 0) -> str:
-        return "tpu"
+        chip_type, _ = device.get_local_chips()
+        return f"TPU {chip_type.name}"
 
     @classmethod
     def get_device_total_memory(cls, device_id: int = 0) -> int:
