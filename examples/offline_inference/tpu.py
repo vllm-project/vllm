@@ -22,7 +22,7 @@ def main():
     # In real workloads, `enforace_eager` should be `False`.
     llm = LLM(model="Qwen/Qwen2-1.5B-Instruct",
               max_num_batched_tokens=16,
-              max_num_seqs=1, enforce_eager=True)
+              max_num_seqs=1)
     outputs = llm.generate(prompts, sampling_params)
     print("-" * 50)
     for output, answer in zip(outputs, answers):
