@@ -12,7 +12,6 @@
 # add these directories to sys.path here. If the directory is relative to the
 # documentation root, use os.path.abspath to make it absolute, like shown here.
 
-import ast
 import datetime
 import logging
 import os
@@ -60,45 +59,12 @@ autodoc2_packages = [
 ]
 autodoc2_output_dir = "api"
 autodoc2_render_plugin = "myst"
-autodoc2_module_all_regexes = []
 autodoc2_hidden_objects = ["undoc", "dunder", "private", "inherited"]
 autodoc2_docstring_parser_regexes = [
     (".*", "docs.source.autodoc2_docstring_parser"),
 ]
 autodoc2_index_template = None
 
-# These submodules have __all__ defined in __init__.py, but do not reference
-# all the files in the submodule. Leading to [toc.not_included] warnings.
-# TODO: Remove this once the submodules are fixed.
-skip_module_all_regexes = {
-    "^vllm.attention$",
-    "^vllm.platforms$",
-    "^vllm.model_executor$",
-    "^vllm.distributed.kv_transfer$",
-    "^vllm.distributed.kv_transfer.kv_connector.v1$",
-    "^vllm.model_executor.models$",
-    "^vllm.model_executor.model_loader$",
-    "^vllm.model_executor.layers.fused_moe$",
-    "^vllm.model_executor.layers.quantization$",
-    "^vllm.model_executor.layers.quantization.utils$",
-    "^vllm.transformers_utils.configs$",
-    "^vllm.lora.punica_wrapper$",
-    "^vllm.lora.ops.triton_ops$",
-}
-for path in REPO_ROOT.rglob("vllm/**/__init__.py"):
-    with open(path) as f:
-        content = f.read()
-    # Parse the file content to find the __all__ variable
-    tree = ast.parse(content)
-    for node in tree.body:
-        if isinstance(node, ast.Assign):
-            for target in node.targets:
-                # Check if the target is __all__
-                if isinstance(target, ast.Name) and target.id == "__all__":
-                    all_module_path = path.relative_to(REPO_ROOT).parent
-                    all_module = f"^{all_module_path}$".replace("/", ".")
-                    if all_module not in skip_module_all_regexes:
-                        autodoc2_module_all_regexes.append(all_module)
 
 # Add any paths that contain templates here, relative to this directory.
 templates_path = ['_templates']
