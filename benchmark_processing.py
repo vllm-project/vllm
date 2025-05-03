@@ -366,46 +366,47 @@ def main(
     timestamp = int(datetime.now().timestamp())
     csv_filepath = output_path / f"processing_{timestamp}.csv"
 
-    with csv_filepath.open("w") as f:
-        csv_writer = csv.DictWriter(
-            f,
-            fieldnames=[
-                "model_id",
-                "parallel_backend",
-                "ms_audio",
-                "ms_image",
-                "ms_video",
-            ],
-        )
-        csv_writer.writeheader()
+    try:
+        with csv_filepath.open("w") as f:
+            csv_writer = csv.DictWriter(
+                f,
+                fieldnames=[
+                    "model_id",
+                    "parallel_backend",
+                    "ms_audio",
+                    "ms_image",
+                    "ms_video",
+                ],
+            )
+            csv_writer.writeheader()
 
-        for model in models:
-            for backend in parallel_backends:
-                try:
-                    res_one = benchmark_one(model, backend)
-                except Exception as e:
-                    print(f"Failed to benchmark {model=}, {backend=}")
-                    traceback.print_exception(e)
-                    continue
+            for model in models:
+                for backend in parallel_backends:
+                    try:
+                        res_one = benchmark_one(model, backend)
+                    except Exception as e:
+                        print(f"Failed to benchmark {model=}, {backend=}")
+                        traceback.print_exception(e)
+                        continue
 
-                csv_writer.writerow({
-                    "model_id": model,
-                    "parallel_backend": backend,
-                    **{
-                        f"ms_{k}": v * 1000
-                        for k, v in res_one.items()
-                    },
-                })
+                    csv_writer.writerow({
+                        "model_id": model,
+                        "parallel_backend": backend,
+                        **{
+                            f"ms_{k}": v * 1000
+                            for k, v in res_one.items()
+                        },
+                    })
+    finally:
+        print(f"Saved results to: {csv_filepath}")
 
-    print(f"Saved results to: {csv_filepath}")
+        json_filepath = output_path / f"processing_{timestamp}.json"
 
-    json_filepath = output_path / f"processing_{timestamp}.json"
+        pd.read_csv(csv_filepath).to_json(json_filepath,
+                                          orient="records",
+                                          indent=4)
 
-    pd.read_csv(csv_filepath).to_json(json_filepath,
-                                      orient="records",
-                                      indent=4)
-
-    print(f"Saved results to: {json_filepath}")
+        print(f"Saved results to: {json_filepath}")
 
 
 async def main_async(
@@ -422,46 +423,47 @@ async def main_async(
     timestamp = int(datetime.now().timestamp())
     csv_filepath = output_path / f"processing_{timestamp}.csv"
 
-    with csv_filepath.open("w") as f:
-        csv_writer = csv.DictWriter(
-            f,
-            fieldnames=[
-                "model_id",
-                "parallel_backend",
-                "ms_audio",
-                "ms_image",
-                "ms_video",
-            ],
-        )
-        csv_writer.writeheader()
+    try:
+        with csv_filepath.open("w") as f:
+            csv_writer = csv.DictWriter(
+                f,
+                fieldnames=[
+                    "model_id",
+                    "parallel_backend",
+                    "ms_audio",
+                    "ms_image",
+                    "ms_video",
+                ],
+            )
+            csv_writer.writeheader()
 
-        for model in models:
-            for backend in parallel_backends:
-                try:
-                    res_one = await benchmark_one_async(model, backend)
-                except Exception as e:
-                    print(f"Failed to benchmark {model=}, {backend=}")
-                    traceback.print_exception(e)
-                    continue
+            for model in models:
+                for backend in parallel_backends:
+                    try:
+                        res_one = await benchmark_one_async(model, backend)
+                    except Exception as e:
+                        print(f"Failed to benchmark {model=}, {backend=}")
+                        traceback.print_exception(e)
+                        continue
 
-                csv_writer.writerow({
-                    "model_id": model,
-                    "parallel_backend": backend,
-                    **{
-                        f"ms_{k}": v * 1000
-                        for k, v in res_one.items()
-                    },
-                })
+                    csv_writer.writerow({
+                        "model_id": model,
+                        "parallel_backend": backend,
+                        **{
+                            f"ms_{k}": v * 1000
+                            for k, v in res_one.items()
+                        },
+                    })
+    finally:
+        print(f"Saved results to: {csv_filepath}")
 
-    print(f"Saved results to: {csv_filepath}")
+        json_filepath = output_path / f"processing_{timestamp}.json"
 
-    json_filepath = output_path / f"processing_{timestamp}.json"
+        pd.read_csv(csv_filepath).to_json(json_filepath,
+                                          orient="records",
+                                          indent=4)
 
-    pd.read_csv(csv_filepath).to_json(json_filepath,
-                                      orient="records",
-                                      indent=4)
-
-    print(f"Saved results to: {json_filepath}")
+        print(f"Saved results to: {json_filepath}")
 
 
 if __name__ == "__main__":
