@@ -1,0 +1,271 @@
+decoder layer hidden_states before attention View(Tensor(<class 'jaxlib.xla_extension.ArrayImpl'> [0.18457 -0.648438 0.0563965 0.287109 -0.3125 -0.00205994 -0.257812
+ -0.0371094 0.316406 -0.151367]))
+decoder layer hidden_states after attention View(Tensor(<class 'jaxlib.xla_extension.ArrayImpl'> [0.330078 0.667969 0.213867 -0.257812 -0.353516 -0.212891 -0.143555
+ -0.237305 -0.150391 -0.191406]))
+decoder layer hidden_states before attention View(Tensor(<class 'jaxlib.xla_extension.ArrayImpl'> [0.177734 0.408203 0.136719 -0.0942383 -0.253906 -0.275391 -0.0859375
+ -0.12207 -0.103516 -0.105469]))
+decoder layer hidden_states after attention View(Tensor(<class 'jaxlib.xla_extension.ArrayImpl'> [0.820312 0.734375 -0.453125 -0.578125 0.287109 0.800781 -0.847656
+ -1.30469 0.609375 0.388672]))
+decoder layer hidden_states before attention View(Tensor(<class 'jaxlib.xla_extension.ArrayImpl'> [0.992188 1.45312 -0.201172 -0.574219 -0.081543 1.11719 -0.742188 -1.39844
+ 0.4375 0.142578]))
+decoder layer hidden_states after attention View(Tensor(<class 'jaxlib.xla_extension.ArrayImpl'> [0.353516 1.89844 0.353516 0.205078 0.396484 -0.412109 -1.42969 0.488281
+ 0.691406 -0.632812]))
+decoder layer hidden_states before attention View(Tensor(<class 'jaxlib.xla_extension.ArrayImpl'> [0.941406 2.71875 0.0561523 -0.241211 0.213867 0.173828 -0.964844
+ -0.542969 0.632812 -0.193359]))
+decoder layer hidden_states after attention View(Tensor(<class 'jaxlib.xla_extension.ArrayImpl'> [0.102539 1.5625 -0.386719 0.128906 0.0505371 -0.78125 0.22168 0.104492
+ -0.275391 -0.695312]))
+decoder layer hidden_states before attention View(Tensor(<class 'jaxlib.xla_extension.ArrayImpl'> [0.929688 3.125 -0.125 -0.158203 0.199219 -0.605469 -0.804688 -0.451172
+ 0.363281 -0.417969]))
+decoder layer hidden_states after attention View(Tensor(<class 'jaxlib.xla_extension.ArrayImpl'> [0.550781 -0.261719 0.328125 0.644531 0.349609 -0.261719 0.847656
+ -0.308594 0.060791 -0.0186768]))
+decoder layer hidden_states before attention View(Tensor(<class 'jaxlib.xla_extension.ArrayImpl'> [1.23438 2.90625 0.0270996 0.0639648 0.380859 -0.726562 -0.550781
+ -0.578125 0.402344 -0.482422]))
+decoder layer hidden_states after attention View(Tensor(<class 'jaxlib.xla_extension.ArrayImpl'> [-0.121094 1.57812 -0.453125 0.298828 0.449219 -0.773438 1.13281 -0.542969
+ -1.35938 -0.330078]))
+decoder layer hidden_states before attention View(Tensor(<class 'jaxlib.xla_extension.ArrayImpl'> [1.21875 3.57812 -0.176758 0.208984 0.683594 -1.46875 -0.112305 -1.00781
+ -0.208008 -0.710938]))
+decoder layer hidden_states after attention View(Tensor(<class 'jaxlib.xla_extension.ArrayImpl'> [0.0688477 -0.457031 -0.5 -0.386719 0.00582886 -0.416016 -1.46094
+ -0.871094 0.804688 0.210938]))
+decoder layer hidden_states before attention View(Tensor(<class 'jaxlib.xla_extension.ArrayImpl'> [0.867188 2.75 -0.34375 0.0249023 0.535156 -1.3125 -0.699219 -1.14062
+ 0.154297 -0.5]))
+decoder layer hidden_states after attention View(Tensor(<class 'jaxlib.xla_extension.ArrayImpl'> [0.878906 1.27344 -0.228516 -0.691406 -1.00781 1.36719 0.412109 -0.847656
+ -0.124023 -0.96875]))
+decoder layer hidden_states before attention View(Tensor(<class 'jaxlib.xla_extension.ArrayImpl'> [0.976562 2.8125 -0.5625 -0.232422 0.0629883 -0.388672 -0.75 -1.25
+ 0.124023 -1.23438]))
+decoder layer hidden_states after attention View(Tensor(<class 'jaxlib.xla_extension.ArrayImpl'> [-0.878906 0.126953 0.324219 -0.287109 0.204102 0.851562 0.302734
+ -0.503906 -0.757812 -0.753906]))
+decoder layer hidden_states before attention View(Tensor(<class 'jaxlib.xla_extension.ArrayImpl'> [0.632812 2.48438 -0.464844 -0.363281 0.138672 0.128906 -0.644531 -1.39062
+ -0.287109 -2.01562]))
+decoder layer hidden_states after attention View(Tensor(<class 'jaxlib.xla_extension.ArrayImpl'> [-1.44531 0.527344 1.05469 0.613281 -0.439453 0.0432129 -0.261719
+ -0.925781 0.671875 0.232422]))
+decoder layer hidden_states before attention View(Tensor(<class 'jaxlib.xla_extension.ArrayImpl'> [0.230469 2.54688 0.174805 -0.165039 -0.0306396 0.134766 -0.894531
+ -2.09375 0.107422 -1.83594]))
+decoder layer hidden_states after attention View(Tensor(<class 'jaxlib.xla_extension.ArrayImpl'> [0.314453 0.400391 0.617188 -0.170898 0.0510254 -0.625 0.486328 0.511719
+ -0.898438 -0.734375]))
+decoder layer hidden_states before attention View(Tensor(<class 'jaxlib.xla_extension.ArrayImpl'> [0.326172 2.45312 0.617188 -0.246094 -0.00793457 -0.269531 -0.515625
+ -1.85156 -0.388672 -2.21875]))
+decoder layer hidden_states after attention View(Tensor(<class 'jaxlib.xla_extension.ArrayImpl'> [-0.046875 0.240234 -1.55469 -0.482422 -0.949219 -1.04688 0.933594
+ -0.207031 0.527344 -0.503906]))
+decoder layer hidden_states before attention View(Tensor(<class 'jaxlib.xla_extension.ArrayImpl'> [0.339844 2.67188 -0.5625 -0.640625 -0.339844 -0.867188 0.140625 -1.69531
+ -0.133789 -2.90625]))
+decoder layer hidden_states after attention View(Tensor(<class 'jaxlib.xla_extension.ArrayImpl'> [0.462891 -0.0615234 0.542969 0.304688 -1.20312 -0.0751953 0.726562
+ -0.917969 0.464844 0.0678711]))
+decoder layer hidden_states before attention View(Tensor(<class 'jaxlib.xla_extension.ArrayImpl'> [0.351562 2.26562 -0.0888672 -0.316406 -0.644531 -0.914062 0.597656
+ -1.57031 0.133789 -2.1875]))
+decoder layer hidden_states after attention View(Tensor(<class 'jaxlib.xla_extension.ArrayImpl'> [-0.210938 -0.228516 -0.316406 0.539062 0.433594 -1.97656 -0.0917969
+ 0.204102 0.988281 0.589844]))
+decoder layer hidden_states before attention View(Tensor(<class 'jaxlib.xla_extension.ArrayImpl'> [0.373047 2.28125 -0.367188 -0.0576172 -0.660156 -3.32812 0.699219 -1.9375
+ 0.722656 -2.26562]))
+decoder layer hidden_states after attention View(Tensor(<class 'jaxlib.xla_extension.ArrayImpl'> [0.871094 -0.392578 0.507812 0.0458984 0.12207 -0.800781 0.519531 -1.17188
+ 0.546875 -0.0368652]))
+decoder layer hidden_states before attention View(Tensor(<class 'jaxlib.xla_extension.ArrayImpl'> [0.546875 2 0.0383301 -0.0344238 -0.523438 -2.25 1.25781 -1.90625 1.10938
+ -2.89062]))
+decoder layer hidden_states after attention View(Tensor(<class 'jaxlib.xla_extension.ArrayImpl'> [-0.679688 1.07031 -0.578125 1.01562 -0.404297 0.929688 -0.261719 0.570312
+ 1.84375 1.20312]))
+decoder layer hidden_states before attention View(Tensor(<class 'jaxlib.xla_extension.ArrayImpl'> [0.363281 2.28125 -0.339844 0.535156 -0.632812 -1.51562 0.785156 -1.75
+ 2.01562 -1.35938]))
+decoder layer hidden_states after attention View(Tensor(<class 'jaxlib.xla_extension.ArrayImpl'> [-0.229492 0.0493164 -0.796875 -0.283203 0.237305 0.605469 -0.0249023
+ 0.458984 -0.613281 -0.112305]))
+decoder layer hidden_states before attention View(Tensor(<class 'jaxlib.xla_extension.ArrayImpl'> [0.412109 2.96875 -0.746094 0.355469 -0.757812 -2.10938 0.765625 -2.45312
+ 1.64844 -1.45312]))
+decoder layer hidden_states after attention View(Tensor(<class 'jaxlib.xla_extension.ArrayImpl'> [-0.482422 1.9375 -0.161133 -0.291016 -0.0476074 0.341797 0.388672
+ -0.578125 -0.0456543 0.173828]))
+decoder layer hidden_states before attention View(Tensor(<class 'jaxlib.xla_extension.ArrayImpl'> [0.179688 3.17188 -0.617188 0.166016 -0.546875 -0.957031 0.6875 -1.6875
+ 1.27344 -1.04688]))
+decoder layer hidden_states after attention View(Tensor(<class 'jaxlib.xla_extension.ArrayImpl'> [-0.582031 0.597656 -0.613281 0.292969 0.570312 -0.503906 0.570312
+ -0.730469 -0.890625 0.320312]))
+decoder layer hidden_states before attention View(Tensor(<class 'jaxlib.xla_extension.ArrayImpl'> [0.0250244 3.95312 -0.984375 0.316406 -0.601562 -1.4375 0.917969 -3.1875
+ 0.960938 -0.902344]))
+decoder layer hidden_states after attention View(Tensor(<class 'jaxlib.xla_extension.ArrayImpl'> [1.36719 0.478516 0.0512695 0.542969 1.25781 0.511719 -1.0625 -0.117676
+ 0.746094 -0.065918]))
+decoder layer hidden_states before attention View(Tensor(<class 'jaxlib.xla_extension.ArrayImpl'> [0.458984 3.6875 -0.914062 0.535156 0 -1.5 0.46875 -2.84375 1.28125
+ -0.886719]))
+decoder layer hidden_states after attention View(Tensor(<class 'jaxlib.xla_extension.ArrayImpl'> [-1.17969 0.169922 -0.988281 1.04688 0.0123291 -0.0505371 -0.036377
+ 0.0634766 0.048584 0.96875]))
+decoder layer hidden_states before attention View(Tensor(<class 'jaxlib.xla_extension.ArrayImpl'> [0.0737305 3.92188 -1.03906 0.71875 0.00415039 -1.10156 0.332031 -2.3125
+ 1.07812 -0.328125]))
+decoder layer hidden_states after attention View(Tensor(<class 'jaxlib.xla_extension.ArrayImpl'> [-0.902344 0.605469 -0.453125 -0.664062 -0.402344 1.90625 -0.462891
+ -0.0155029 -0.816406 1.57812]))
+decoder layer hidden_states before attention View(Tensor(<class 'jaxlib.xla_extension.ArrayImpl'> [-0.145508 4.1875 -1.08594 0.470703 -0.101562 -0.330078 0.141602 -1.86719
+ 0.625 0.229492]))
+decoder layer hidden_states after attention View(Tensor(<class 'jaxlib.xla_extension.ArrayImpl'> [-1.10938 0.228516 1.72656 0.114746 0.859375 1.20312 1.28125 -0.285156
+ -1.03906 -0.542969]))
+decoder layer hidden_states before attention View(Tensor(<class 'jaxlib.xla_extension.ArrayImpl'> [-0.46875 4.75 -0.519531 0.472656 0.124512 0.253906 0.482422 -2.1875
+ 0.320312 0.0454102]))
+decoder layer hidden_states after attention View(Tensor(<class 'jaxlib.xla_extension.ArrayImpl'> [1.05469 0.5 0.789062 -0.195312 -0.435547 -0.291016 -0.123047 -0.294922
+ 0.804688 0.925781]))
+decoder layer hidden_states before attention View(Tensor(<class 'jaxlib.xla_extension.ArrayImpl'> [-0.25 5.59375 -0.333984 0.546875 0.0123291 0.136719 0.578125 -2.76562
+ 0.65625 0.382812]))
+decoder layer hidden_states after attention View(Tensor(<class 'jaxlib.xla_extension.ArrayImpl'> [0.769531 1.28125 1.10938 -0.71875 0.613281 -0.917969 0.0500488 -0.275391
+ -0.0615234 -1.38281]))
+decoder layer hidden_states before attention View(Tensor(<class 'jaxlib.xla_extension.ArrayImpl'> [0.0112915 5.9375 0.027832 0.174805 0.142578 -0.285156 0.341797 -1.67969
+ 0.384766 -0.0673828]))
+decoder layer hidden_states after attention View(Tensor(<class 'jaxlib.xla_extension.ArrayImpl'> [-1.00781 0.267578 -0.628906 0.804688 0.597656 0.298828 0.498047 0.074707
+ 0.337891 -0.566406]))
+decoder layer hidden_states before attention View(Tensor(<class 'jaxlib.xla_extension.ArrayImpl'> [-0.3125 7.0625 -0.175781 0.457031 0.369141 -0.141602 0.546875 -2.39062
+ 0.835938 -0.240234]))
+decoder layer hidden_states after attention View(Tensor(<class 'jaxlib.xla_extension.ArrayImpl'> [-1.85938 1.09375 0.022583 -1.07812 0.554688 -0.640625 -1.91406 0.365234
+ -1.03906 0.0534668]))
+decoder layer hidden_states before attention View(Tensor(<class 'jaxlib.xla_extension.ArrayImpl'> [-0.617188 6.9375 -0.109863 0.115234 0.376953 -0.390625 0.0471191 -1.67969
+ 0.28125 -0.176758]))
+decoder layer hidden_states after attention View(Tensor(<class 'jaxlib.xla_extension.ArrayImpl'> [0.957031 0.0683594 0.00604248 -0.0410156 -0.353516 0.1875 -0.621094
+ -0.361328 -0.117188 0.166016]))
+INFO 05-03 04:07:52 [kv_cache_utils.py:639] GPU KV cache size: 161,776 tokens
+INFO 05-03 04:07:52 [kv_cache_utils.py:642] Maximum concurrency for 32,768 tokens per request: 4.94x
+INFO 05-03 04:07:52 [core.py:161] init engine (profile, create kv cache, warmup model) took 3.59 seconds
+INFO 05-03 04:07:52 [core_client.py:442] Core engine process 0 ready.
+Adding requests: 100%|█████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 1/1 [00:00<00:00, 129.73it/s]
+Processed prompts:   0%|                                                                                | 0/1 [00:00<?, ?it/s, est. speed input: 0.00 toks/s, output: 0.00 toks/s]decoder layer hidden_states before attention View(Tensor(<class 'jaxlib.xla_extension.ArrayImpl'> [0.494141 0.181641 0.636719 0.177734 -0.285156 0.40625 0.0268555 0.065918
+ 0.5625 -0.277344]))
+decoder layer hidden_states after attention View(Tensor(<class 'jaxlib.xla_extension.ArrayImpl'> [0 0 0 0 0 0 0 0 0 0]))
+decoder layer hidden_states before attention View(Tensor(<class 'jaxlib.xla_extension.ArrayImpl'> [0.255859 0.104492 0.574219 0.174805 -0.384766 0.582031 0.0383301
+ 0.0527344 0.457031 -0.345703]))
+decoder layer hidden_states after attention View(Tensor(<class 'jaxlib.xla_extension.ArrayImpl'> [0 0 0 0 0 0 0 0 0 0]))
+decoder layer hidden_states before attention View(Tensor(<class 'jaxlib.xla_extension.ArrayImpl'> [0.527344 0.224609 0.984375 0.404297 -0.710938 1.10156 0.0678711 0.120605
+ 0.753906 -0.644531]))
+decoder layer hidden_states after attention View(Tensor(<class 'jaxlib.xla_extension.ArrayImpl'> [0 0 0 0 0 0 0 0 0 0]))
+decoder layer hidden_states before attention View(Tensor(<class 'jaxlib.xla_extension.ArrayImpl'> [0.476562 0.21875 0.691406 0.28125 -0.605469 0.714844 0.0454102 0.0844727
+ 0.542969 -0.457031]))
+decoder layer hidden_states after attention View(Tensor(<class 'jaxlib.xla_extension.ArrayImpl'> [0 0 0 0 0 0 0 0 0 0]))
+decoder layer hidden_states before attention View(Tensor(<class 'jaxlib.xla_extension.ArrayImpl'> [0.511719 0.200195 0.777344 0.271484 -0.570312 0.828125 0.0483398
+ 0.0908203 0.480469 -0.449219]))
+decoder layer hidden_states after attention View(Tensor(<class 'jaxlib.xla_extension.ArrayImpl'> [0 0 0 0 0 0 0 0 0 0]))
+decoder layer hidden_states before attention View(Tensor(<class 'jaxlib.xla_extension.ArrayImpl'> [0.597656 0.228516 0.902344 0.376953 -0.640625 0.8125 0.0625 0.102539
+ 0.578125 -0.597656]))
+decoder layer hidden_states after attention View(Tensor(<class 'jaxlib.xla_extension.ArrayImpl'> [0 0 0 0 0 0 0 0 0 0]))
+decoder layer hidden_states before attention View(Tensor(<class 'jaxlib.xla_extension.ArrayImpl'> [0.695312 0.233398 0.976562 0.488281 -0.796875 0.972656 0.0805664 0.139648
+ 0.761719 -0.769531]))
+decoder layer hidden_states after attention View(Tensor(<class 'jaxlib.xla_extension.ArrayImpl'> [0 0 0 0 0 0 0 0 0 0]))
+decoder layer hidden_states before attention View(Tensor(<class 'jaxlib.xla_extension.ArrayImpl'> [0.511719 0.207031 0.898438 0.376953 -0.660156 0.738281 0.0761719 0.11377
+ 0.636719 -0.671875]))
+decoder layer hidden_states after attention View(Tensor(<class 'jaxlib.xla_extension.ArrayImpl'> [0 0 0 0 0 0 0 0 0 0]))
+decoder layer hidden_states before attention View(Tensor(<class 'jaxlib.xla_extension.ArrayImpl'> [0.4375 0.185547 1.25 0.464844 -0.59375 0.695312 0.115234 0.102051
+ 0.808594 -1]))
+decoder layer hidden_states after attention View(Tensor(<class 'jaxlib.xla_extension.ArrayImpl'> [0 0 0 0 0 0 0 0 0 0]))
+decoder layer hidden_states before attention View(Tensor(<class 'jaxlib.xla_extension.ArrayImpl'> [0.416016 0.166992 1.5 0.515625 -0.605469 1.0625 0.134766 0.102539 1.03906
+ -1.27344]))
+decoder layer hidden_states after attention View(Tensor(<class 'jaxlib.xla_extension.ArrayImpl'> [0 0 0 0 0 0 0 0 0 0]))
+decoder layer hidden_states before attention View(Tensor(<class 'jaxlib.xla_extension.ArrayImpl'> [0.535156 0.174805 1.95312 0.792969 -0.75 0.957031 0.161133 0.136719
+ 1.17969 -1.38281]))
+decoder layer hidden_states after attention View(Tensor(<class 'jaxlib.xla_extension.ArrayImpl'> [0 0 0 0 0 0 0 0 0 0]))
+decoder layer hidden_states before attention View(Tensor(<class 'jaxlib.xla_extension.ArrayImpl'> [0.535156 0.167969 2.10938 0.78125 -0.691406 0.941406 0.160156 0.142578
+ 1.11719 -1.38281]))
+decoder layer hidden_states after attention View(Tensor(<class 'jaxlib.xla_extension.ArrayImpl'> [0 0 0 0 0 0 0 0 0 0]))
+decoder layer hidden_states before attention View(Tensor(<class 'jaxlib.xla_extension.ArrayImpl'> [0.609375 0.183594 2.54688 1.03125 -0.667969 0.90625 0.206055 0.12793 1.5
+ -1.64844]))
+decoder layer hidden_states after attention View(Tensor(<class 'jaxlib.xla_extension.ArrayImpl'> [0 0 0 0 0 0 0 0 0 0]))
+decoder layer hidden_states before attention View(Tensor(<class 'jaxlib.xla_extension.ArrayImpl'> [0.431641 0.160156 2 0.769531 -0.582031 0.929688 0.167969 0.102051 1.07031
+ -1.28125]))
+decoder layer hidden_states after attention View(Tensor(<class 'jaxlib.xla_extension.ArrayImpl'> [0 0 0 0 0 0 0 0 0 0]))
+decoder layer hidden_states before attention View(Tensor(<class 'jaxlib.xla_extension.ArrayImpl'> [0.566406 0.174805 2.65625 0.933594 -0.78125 1.5625 0.228516 0.138672
+ 1.32031 -1.65625]))
+decoder layer hidden_states after attention View(Tensor(<class 'jaxlib.xla_extension.ArrayImpl'> [0 0 0 0 0 0 0 0 0 0]))
+decoder layer hidden_states before attention View(Tensor(<class 'jaxlib.xla_extension.ArrayImpl'> [0.488281 0.166016 2.59375 1.04688 -0.6875 0.875 0.255859 0.114258 1.45312
+ -2.14062]))
+decoder layer hidden_states after attention View(Tensor(<class 'jaxlib.xla_extension.ArrayImpl'> [0 0 0 0 0 0 0 0 0 0]))
+decoder layer hidden_states before attention View(Tensor(<class 'jaxlib.xla_extension.ArrayImpl'> [0.507812 0.171875 2.28125 0.972656 -0.683594 0.785156 0.208984 0.118652
+ 1.35156 -1.625]))
+decoder layer hidden_states after attention View(Tensor(<class 'jaxlib.xla_extension.ArrayImpl'> [0 0 0 0 0 0 0 0 0 0]))
+decoder layer hidden_states before attention View(Tensor(<class 'jaxlib.xla_extension.ArrayImpl'> [0.695312 0.224609 2.01562 0.925781 -0.945312 1.33594 0.208984 0.182617
+ 1.34375 -1.67188]))
+decoder layer hidden_states after attention View(Tensor(<class 'jaxlib.xla_extension.ArrayImpl'> [0 0 0 0 0 0 0 0 0 0]))
+decoder layer hidden_states before attention View(Tensor(<class 'jaxlib.xla_extension.ArrayImpl'> [0.546875 0.201172 1.51562 0.773438 -0.679688 0.710938 0.140625 0.116211
+ 1.07812 -1.33594]))
+decoder layer hidden_states after attention View(Tensor(<class 'jaxlib.xla_extension.ArrayImpl'> [0 0 0 0 0 0 0 0 0 0]))
+decoder layer hidden_states before attention View(Tensor(<class 'jaxlib.xla_extension.ArrayImpl'> [0.855469 0.243164 1.76562 0.867188 -1.11719 0.914062 0.137695 0.201172
+ 1.1875 -1.39062]))
+decoder layer hidden_states after attention View(Tensor(<class 'jaxlib.xla_extension.ArrayImpl'> [0 0 0 0 0 0 0 0 0 0]))
+decoder layer hidden_states before attention View(Tensor(<class 'jaxlib.xla_extension.ArrayImpl'> [0.671875 0.225586 1.72656 0.851562 -1.09375 1.20312 0.155273 0.182617
+ 1.21094 -1.36719]))
+decoder layer hidden_states after attention View(Tensor(<class 'jaxlib.xla_extension.ArrayImpl'> [0 0 0 0 0 0 0 0 0 0]))
+decoder layer hidden_states before attention View(Tensor(<class 'jaxlib.xla_extension.ArrayImpl'> [0.644531 0.240234 1.35938 0.621094 -0.824219 0.875 0.116211 0.15332
+ 1.02344 -1.08594]))
+decoder layer hidden_states after attention View(Tensor(<class 'jaxlib.xla_extension.ArrayImpl'> [0 0 0 0 0 0 0 0 0 0]))
+decoder layer hidden_states before attention View(Tensor(<class 'jaxlib.xla_extension.ArrayImpl'> [0.496094 0.259766 1.3125 0.617188 -0.683594 1.20312 0.108398 0.131836
+ 0.875 -1.02344]))
+decoder layer hidden_states after attention View(Tensor(<class 'jaxlib.xla_extension.ArrayImpl'> [0 0 0 0 0 0 0 0 0 0]))
+decoder layer hidden_states before attention View(Tensor(<class 'jaxlib.xla_extension.ArrayImpl'> [0.621094 0.298828 1.28125 0.59375 -0.726562 0.890625 0.0976562 0.154297
+ 0.925781 -0.960938]))
+decoder layer hidden_states after attention View(Tensor(<class 'jaxlib.xla_extension.ArrayImpl'> [0 0 0 0 0 0 0 0 0 0]))
+decoder layer hidden_states before attention View(Tensor(<class 'jaxlib.xla_extension.ArrayImpl'> [0.84375 0.349609 1.52344 0.800781 -1.03906 0.917969 0.129883 0.191406
+ 1.10156 -1.17188]))
+decoder layer hidden_states after attention View(Tensor(<class 'jaxlib.xla_extension.ArrayImpl'> [0 0 0 0 0 0 0 0 0 0]))
+decoder layer hidden_states before attention View(Tensor(<class 'jaxlib.xla_extension.ArrayImpl'> [0.476562 0.347656 1.03125 0.496094 -0.632812 1.125 0.0771484 0.115723
+ 0.683594 -0.75]))
+decoder layer hidden_states after attention View(Tensor(<class 'jaxlib.xla_extension.ArrayImpl'> [0 0 0 0 0 0 0 0 0 0]))
+decoder layer hidden_states before attention View(Tensor(<class 'jaxlib.xla_extension.ArrayImpl'> [0.828125 0.412109 1.65625 0.664062 -0.863281 1.15625 0.0961914 0.168945
+ 1.28125 -0.953125]))
+decoder layer hidden_states after attention View(Tensor(<class 'jaxlib.xla_extension.ArrayImpl'> [0 0 0 0 0 0 0 0 0 0]))
+decoder layer hidden_states before attention View(Tensor(<class 'jaxlib.xla_extension.ArrayImpl'> [0.558594 0.382812 1.09375 0.515625 -0.617188 1 0.0795898 0.126953
+ 0.847656 -0.761719]))
+decoder layer hidden_states after attention View(Tensor(<class 'jaxlib.xla_extension.ArrayImpl'> [0 0 0 0 0 0 0 0 0 0]))
+/home/wenxindong_google_com/xla/torchax/torchax/ops/mappings.py:46: UserWarning: The given NumPy array is not writable, and PyTorch does not support non-writable tensors. This means writing to this tensor will result in undefined behavior. You may want to copy the array to protect its data or make it writable before converting it to a tensor. This type of warning will be suppressed for the rest of this program. (Triggered internally at /pytorch/torch/csrc/utils/tensor_numpy.cpp:203.)
+  res = torch.from_numpy(numpy.asarray(x))
+decoder layer hidden_states before attention View(Tensor(<class 'jaxlib.xla_extension.ArrayImpl'> [0.353516 -1.64062 0.136719 -0.341797 -0.302734 0.173828 0.0610352
+ -1.00781 -0.554688 -0.243164]))
+decoder layer hidden_states after attention View(Tensor(<class 'jaxlib.xla_extension.ArrayImpl'> [0 0 0 0 0 0 0 0 0 0]))
+decoder layer hidden_states before attention View(Tensor(<class 'jaxlib.xla_extension.ArrayImpl'> [0.182617 -0.945312 0.123047 -0.335938 -0.408203 0.249023 0.0869141
+ -0.808594 -0.451172 -0.302734]))
+decoder layer hidden_states after attention View(Tensor(<class 'jaxlib.xla_extension.ArrayImpl'> [0 0 0 0 0 0 0 0 0 0]))
+decoder layer hidden_states before attention View(Tensor(<class 'jaxlib.xla_extension.ArrayImpl'> [0.378906 -2.03125 0.210938 -0.773438 -0.757812 0.470703 0.154297 -1.84375
+ -0.738281 -0.566406]))
+decoder layer hidden_states after attention View(Tensor(<class 'jaxlib.xla_extension.ArrayImpl'> [0 0 0 0 0 0 0 0 0 0]))
+decoder layer hidden_states before attention View(Tensor(<class 'jaxlib.xla_extension.ArrayImpl'> [0.341797 -1.98438 0.148438 -0.539062 -0.644531 0.306641 0.102539 -1.29688
+ -0.535156 -0.400391]))
+decoder layer hidden_states after attention View(Tensor(<class 'jaxlib.xla_extension.ArrayImpl'> [0 0 0 0 0 0 0 0 0 0]))
+decoder layer hidden_states before attention View(Tensor(<class 'jaxlib.xla_extension.ArrayImpl'> [0.367188 -1.8125 0.166992 -0.523438 -0.605469 0.355469 0.109375 -1.39062
+ -0.472656 -0.392578]))
+decoder layer hidden_states after attention View(Tensor(<class 'jaxlib.xla_extension.ArrayImpl'> [0 0 0 0 0 0 0 0 0 0]))
+decoder layer hidden_states before attention View(Tensor(<class 'jaxlib.xla_extension.ArrayImpl'> [0.427734 -2.0625 0.193359 -0.722656 -0.683594 0.347656 0.141602 -1.57031
+ -0.566406 -0.523438]))
+decoder layer hidden_states after attention View(Tensor(<class 'jaxlib.xla_extension.ArrayImpl'> [0 0 0 0 0 0 0 0 0 0]))
+decoder layer hidden_states before attention View(Tensor(<class 'jaxlib.xla_extension.ArrayImpl'> [0.496094 -2.10938 0.209961 -0.9375 -0.851562 0.416016 0.183594 -2.14062
+ -0.75 -0.671875]))
+decoder layer hidden_states after attention View(Tensor(<class 'jaxlib.xla_extension.ArrayImpl'> [0 0 0 0 0 0 0 0 0 0]))
+decoder layer hidden_states before attention View(Tensor(<class 'jaxlib.xla_extension.ArrayImpl'> [0.367188 -1.875 0.192383 -0.722656 -0.699219 0.316406 0.172852 -1.74219
+ -0.625 -0.589844]))
+decoder layer hidden_states after attention View(Tensor(<class 'jaxlib.xla_extension.ArrayImpl'> [0 0 0 0 0 0 0 0 0 0]))
+decoder layer hidden_states before attention View(Tensor(<class 'jaxlib.xla_extension.ArrayImpl'> [0.3125 -1.67969 0.267578 -0.890625 -0.632812 0.296875 0.261719 -1.5625
+ -0.792969 -0.875]))
+decoder layer hidden_states after attention View(Tensor(<class 'jaxlib.xla_extension.ArrayImpl'> [0 0 0 0 0 0 0 0 0 0]))
+decoder layer hidden_states before attention View(Tensor(<class 'jaxlib.xla_extension.ArrayImpl'> [0.298828 -1.50781 0.322266 -0.988281 -0.644531 0.455078 0.306641 -1.57031
+ -1.02344 -1.11719]))
+decoder layer hidden_states after attention View(Tensor(<class 'jaxlib.xla_extension.ArrayImpl'> [0 0 0 0 0 0 0 0 0 0]))
+decoder layer hidden_states before attention View(Tensor(<class 'jaxlib.xla_extension.ArrayImpl'> [0.384766 -1.57812 0.419922 -1.51562 -0.796875 0.410156 0.367188 -2.09375
+ -1.15625 -1.21094]))
+decoder layer hidden_states after attention View(Tensor(<class 'jaxlib.xla_extension.ArrayImpl'> [0 0 0 0 0 0 0 0 0 0]))
+decoder layer hidden_states before attention View(Tensor(<class 'jaxlib.xla_extension.ArrayImpl'> [0.384766 -1.51562 0.451172 -1.5 -0.734375 0.402344 0.363281 -2.17188
+ -1.10156 -1.21094]))
+decoder layer hidden_states after attention View(Tensor(<class 'jaxlib.xla_extension.ArrayImpl'> [0 0 0 0 0 0 0 0 0 0]))
+decoder layer hidden_states before attention View(Tensor(<class 'jaxlib.xla_extension.ArrayImpl'> [0.4375 -1.65625 0.546875 -1.97656 -0.710938 0.388672 0.466797 -1.96094
+ -1.46875 -1.44531]))
+decoder layer hidden_states after attention View(Tensor(<class 'jaxlib.xla_extension.ArrayImpl'> [0 0 0 0 0 0 0 0 0 0]))
+decoder layer hidden_states before attention View(Tensor(<class 'jaxlib.xla_extension.ArrayImpl'> [0.308594 -1.44531 0.427734 -1.47656 -0.621094 0.398438 0.380859 -1.5625
+ -1.05469 -1.125]))
+decoder layer hidden_states after attention View(Tensor(<class 'jaxlib.xla_extension.ArrayImpl'> [0 0 0 0 0 0 0 0 0 0]))
+decoder layer hidden_states before attention View(Tensor(<class 'jaxlib.xla_extension.ArrayImpl'> [0.404297 -1.57812 0.570312 -1.79688 -0.832031 0.667969 0.519531 -2.125
+ -1.29688 -1.44531]))
+decoder layer hidden_states after attention View(Tensor(<class 'jaxlib.xla_extension.ArrayImpl'> [0 0 0 0 0 0 0 0 0 0]))
+decoder layer hidden_states before attention View(Tensor(<class 'jaxlib.xla_extension.ArrayImpl'> [0.349609 -1.5 0.554688 -2.01562 -0.734375 0.375 0.582031 -1.75 -1.42969
+ -1.875]))
+decoder layer hidden_states after attention View(Tensor(<class 'jaxlib.xla_extension.ArrayImpl'> [0 0 0 0 0 0 0 0 0 0]))
+decoder layer hidden_states before attention View(Tensor(<class 'jaxlib.xla_extension.ArrayImpl'> [0.363281 -1.55469 0.488281 -1.86719 -0.730469 0.335938 0.472656 -1.8125
+ -1.33594 -1.42188]))
+decoder layer hidden_states after attention View(Tensor(<class 'jaxlib.xla_extension.ArrayImpl'> [0 0 0 0 0 0 0 0 0 0]))
+decoder layer hidden_states before attention View(Tensor(<class 'jaxlib.xla_extension.ArrayImpl'> [0.496094 -2.03125 0.431641 -1.77344 -1.00781 0.570312 0.474609 -2.79688
+ -1.32031 -1.46094]))
+decoder layer hidden_states after attention View(Tensor(<class 'jaxlib.xla_extension.ArrayImpl'> [0 0 0 0 0 0 0 0 0 0]))
+decoder layer hidden_states before attention View(Tensor(<class 'jaxlib.xla_extension.ArrayImpl'> [0.392578 -1.82031 0.324219 -1.48438 -0.722656 0.304688 0.318359 -1.78125
+ -1.0625 -1.17188]))
+decoder layer hidden_states after attention View(Tensor(<class 'jaxlib.xla_extension.ArrayImpl'> [0 0 0 0 0 0 0 0 0 0]))
+decoder layer hidden_states before attention View(Tensor(<class 'jaxlib.xla_extension.ArrayImpl'> [0.613281 -2.20312 0.376953 -1.66406 -1.1875 0.390625 0.3125 -3.07812
+ -1.17188 -1.21875]))
+decoder layer hidden_states after attention View(Tensor(<class 'jaxlib.xla_extension.ArrayImpl'> [0 0 0 0 0 0 0 0 0 0]))
+decoder layer hidden_states before attention View(Tensor(<class 'jaxlib.xla_extension.ArrayImpl'> [0.480469 -2.03125 0.371094 -1.63281 -1.16406 0.515625 0.353516 -2.79688
+ -1.19531 -1.20312]))
+decoder layer hidden_states after attention View(Tensor(<class 'jaxlib.xla_extension.ArrayImpl'> [0 0 0 0 0 0 0 0 0 0]))
+decoder layer hidden_states before attention View(Tensor(<class 'jaxlib.xla_extension.ArrayImpl'> [0.462891 -2.17188 0.291016 -1.19531 -0.878906 0.375 0.263672 -2.34375 -1
+ -0.953125]))
+decoder layer hidden_states after attention View(Tensor(<class 'jaxlib.xla_extension.ArrayImpl'> [0 0 0 0 0 0 0 0 0 0]))
+decoder layer hidden_states before attention View(Tensor(<class 'jaxlib.xla_extension.ArrayImpl'> [0.355469 -2.34375 0.283203 -1.17969 -0.726562 0.515625 0.246094 -2.03125
+ -0.859375 -0.898438]))

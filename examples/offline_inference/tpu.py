@@ -4,13 +4,13 @@ from vllm import LLM, SamplingParams
 
 prompts = [
     "A robot may not injure a human being",
-    "It is only with the heart that one can see rightly;",
-    "The greatest glory in living lies not in never falling,",
+    # "It is only with the heart that one can see rightly;",
+    # "The greatest glory in living lies not in never falling,",
 ]
 answers = [
     " or, through inaction, allow a human being to come to harm.",
-    " what is essential is invisible to the eye.",
-    " but in rising every time we fall.",
+    # " what is essential is invisible to the eye.",
+    # " but in rising every time we fall.",
 ]
 N = 1
 # Currently, top-p sampling is disabled. `top_p` should be 1.0.
@@ -22,7 +22,7 @@ def main():
     # In real workloads, `enforace_eager` should be `False`.
     llm = LLM(model="Qwen/Qwen2-1.5B-Instruct",
               max_num_batched_tokens=16,
-              max_num_seqs=1)
+              max_num_seqs=1, enforce_eager=True)
     outputs = llm.generate(prompts, sampling_params)
     print("-" * 50)
     for output, answer in zip(outputs, answers):

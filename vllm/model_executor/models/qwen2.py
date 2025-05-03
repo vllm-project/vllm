@@ -239,10 +239,15 @@ class Qwen2DecoderLayer(nn.Module):
         else:
             hidden_states, residual = self.input_layernorm(
                 hidden_states, residual)
+        
+        print("decoder layer hidden_states before attention", hidden_states.ravel()[:10])
+        
         hidden_states = self.self_attn(
             positions=positions,
             hidden_states=hidden_states,
         )
+
+        print("decoder layer hidden_states after attention", hidden_states.ravel()[:10])
 
         # Fully Connected
         hidden_states, residual = self.post_attention_layernorm(
@@ -251,15 +256,15 @@ class Qwen2DecoderLayer(nn.Module):
         return hidden_states, residual
 
 
-@support_torch_compile(
-    dynamic_arg_dims={
-        "input_ids": 0,
-        # positions is of shape (3, seq_len) if mrope is enabled for qwen2-vl,
-        # otherwise (seq_len, ).
-        "positions": -1,
-        "intermediate_tensors": 0,
-        "inputs_embeds": 0,
-    })
+# @support_torch_compile(
+#     dynamic_arg_dims={
+#         "input_ids": 0,
+#         # positions is of shape (3, seq_len) if mrope is enabled for qwen2-vl,
+#         # otherwise (seq_len, ).
+#         "positions": -1,
+#         "intermediate_tensors": 0,
+#         "inputs_embeds": 0,
+#     })
 class Qwen2Model(nn.Module):
 
     def __init__(self,
@@ -550,3 +555,14 @@ class Qwen2EmbeddingModel(nn.Module, SupportsLoRA, SupportsPP):
         weights = ((name, data) for name, data in weights
                    if not name.startswith("lm_head."))
         self.model.load_weights(weights)
+
+
+# decoder layer hidden_states before attention View(Tensor(<class 'jaxlib.xla_extension.ArrayImpl'> [0.18457 -0.648438 0.0563965 0.287109 -0.3125 -0.00205994 -0.257812
+#  -0.0371094 0.316406 -0.151367]))
+# decoder layer hidden_states after attention View(Tensor(<class 'jaxlib.xla_extension.ArrayImpl'> [0.330078 0.667969 0.213867 -0.257812 -0.353516 -0.212891 -0.143555
+#  -0.237305 -0.150391 -0.191406]))
+
+# decoder layer hidden_states before attention tensor([ 0.1846, -0.6484,  0.0566,  0.2871, -0.3125, -0.0021, -0.2578, -0.0374,
+#          0.3164, -0.1514], device='xla:0')
+# decoder layer hidden_states after attention tensor([ 0.3301,  0.6680,  0.2139, -0.2578, -0.3535, -0.2129, -0.1436, -0.2373,
+#         -0.1504, -0.1914], device='xla:0')
