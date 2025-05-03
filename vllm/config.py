@@ -212,7 +212,7 @@ def get_field(cls: ConfigType, name: str) -> Field:
         f"{cls.__name__}.{name} must have a default value or default factory.")
 
 
-TokenizerMode = Literal["auto", "slow", "mistral", "bitnet" ,"custom"]
+TokenizerMode = Literal["auto", "slow", "mistral", "bitnet", "custom"]
 ModelDType = Literal["auto", "half", "float16", "bfloat16", "float", "float32"]
 
 
