@@ -48,8 +48,8 @@ class Qwen3ReasoningParser(ReasoningParser):
                 "tokens in the tokenizer!")
 
     def is_reasoning_end(self,
-                        input_ids: list[int],
-                        previous_ids: Optional[list[int]] = None) -> bool:
+                         input_ids: list[int],
+                         previous_ids: Optional[list[int]] = None) -> bool:
         # Check if <think>...</think> tokens are
         # present in the input or previous IDs.
         think_start_in_previous = previous_ids and \
