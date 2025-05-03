@@ -1804,7 +1804,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
                 base_cls, async_fn))
 
             if has_sync_override and not has_async_override:
-                logger.warning(
+                logger.warning_once(
                     "You have overridden %s.%s (sync) but not %s.%s (async). "
                     "Falling back to sync implementation.", base_cls, sync_fn,
                     base_cls, async_fn)
