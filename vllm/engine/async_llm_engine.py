@@ -1089,46 +1089,48 @@ class AsyncLLMEngine(EngineClient):
             for the request.
 
         Details:
-            - If the engine is not running, start the background loop,
-              which iteratively invokes
-              {meth}`~vllm.engine.async_llm_engine.AsyncLLMEngine.engine_step`
-              to process the waiting requests.
-            - Add the request to the engine's `RequestTracker`.
-              On the next background loop, this request will be sent to
-              the underlying engine.
-              Also, a corresponding `AsyncStream` will be created.
-            - Wait for the request outputs from `AsyncStream` and yield them.
+        - If the engine is not running, start the background loop,
+            which iteratively invokes
+            {meth}`~vllm.engine.async_llm_engine.AsyncLLMEngine.engine_step`
+            to process the waiting requests.
+        - Add the request to the engine's `RequestTracker`.
+            On the next background loop, this request will be sent to
+            the underlying engine.
+            Also, a corresponding `AsyncStream` will be created.
+        - Wait for the request outputs from `AsyncStream` and yield them.
 
         Example:
-            >>> # Please refer to entrypoints/api_server.py for
-            >>> # the complete example.
-            >>>
-            >>> # initialize the engine and the example input
-            >>> # note that engine_args here is AsyncEngineArgs instance
-            >>> engine = AsyncLLMEngine.from_engine_args(engine_args)
-            >>> example_input = {
-            >>>     "input": "What is LLM?",
-            >>>     "request_id": 0,
-            >>> }
-            >>>
-            >>> # start the generation
-            >>> results_generator = engine.encode(
-            >>>    example_input["input"],
-            >>>    PoolingParams(),
-            >>>    example_input["request_id"])
-            >>>
-            >>> # get the results
-            >>> final_output = None
-            >>> async for request_output in results_generator:
-            >>>     if await request.is_disconnected():
-            >>>         # Abort the request if the client disconnects.
-            >>>         await engine.abort(request_id)
-            >>>         # Return or raise an error
-            >>>         ...
-            >>>     final_output = request_output
-            >>>
-            >>> # Process and return the final output
-            >>> ...
+        ```
+        # Please refer to entrypoints/api_server.py for
+        # the complete example.
+    
+        # initialize the engine and the example input
+        # note that engine_args here is AsyncEngineArgs instance
+        engine = AsyncLLMEngine.from_engine_args(engine_args)
+        example_input = {
+            "input": "What is LLM?",
+            "request_id": 0,
+        }
+    
+        # start the generation
+        results_generator = engine.encode(
+        example_input["input"],
+        PoolingParams(),
+        example_input["request_id"])
+    
+        # get the results
+        final_output = None
+        async for request_output in results_generator:
+            if await request.is_disconnected():
+                # Abort the request if the client disconnects.
+                await engine.abort(request_id)
+                # Return or raise an error
+                ...
+            final_output = request_output
+    
+        # Process and return the final output
+        ...
+        ```
         """
         try:
             async for output in await self.add_request(
