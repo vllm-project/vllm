@@ -283,7 +283,7 @@ MODELS = [
     # "rhymes-ai/Aria",
     "CohereForAI/aya-vision-8b",
     # "Salesforce/blip2-opt-2.7b",
-    "facebook/chameleon-7b",
+    # "facebook/chameleon-7b",
     # "deepseek-ai/deepseek-vl2-tiny",
     # "microsoft/Florence-2-base",
     "adept/fuyu-8b",
