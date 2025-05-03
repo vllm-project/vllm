@@ -13,6 +13,14 @@ from vllm.attention.backends.utils import CommonAttentionState
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.utils import cdiv
+import os
+
+if os.environ.get("VLLM_TORCHAX_ENABLED", "0") == "1":
+    import torchax
+    from jax.experimental.pallas.ops.tpu import flash_attention
+    import jax
+    from jax.experimental.pallas.ops.tpu.paged_attention.paged_attention_kernel import paged_attention as jax_paged_attention
+    from torch_xla.experimental.pallas_kernels.ragged_paged_attention_v2 import ragged_paged_attention as jax_ragged_paged_attention
 
 logger = init_logger(__name__)
 
@@ -169,25 +177,64 @@ class PallasAttentionBackendImpl(AttentionImpl):
         if kv_cache.numel() > 0:
             slot_mapping = attn_metadata.slot_mapping
             write_to_kv_cache(key, value, kv_cache, slot_mapping)
+        if os.environ.get("VLLM_TORCHAX_ENABLED", "0") == "0":
+            output = torch.ops.xla.ragged_paged_attention(
+                query,
+                kv_cache,
+                attn_metadata.context_lens,
+                attn_metadata.block_tables,
+                attn_metadata.query_start_loc,
+                attn_metadata.num_seqs,
+                # By default, the system utilizes optimized block size and
+                # vmem_limit_bytes parameters from the kernel repository. However,
+                # these can be manually adjusted for debugging if necessary.
+                num_kv_pages_per_block=None,
+                num_queries_per_block=None,
+                vmem_limit_bytes=None,
+                use_kernel=True,
+                sm_scale=self.scale,
+                sliding_window=self.sliding_window,
+                soft_cap=self.logits_soft_cap,
+            )
+        else:
+            output = torch.ones_like(query)
+            # output = jax_ragged_paged_attention(
+            #     query,
+            #     kv_cache, #[num_blocks, block_size, num_kv_heads * 2, head_size]
+            #     attn_metadata.context_lens,
+            #     attn_metadata.block_tables,
+            #     attn_metadata.query_start_loc,
+            #     num_seqs = attn_metadata.num_seqs,
+            #     # By default, the system utilizes optimized block size and
+            #     # vmem_limit_bytes parameters from the kernel repository. However,
+            #     # these can be manually adjusted for debugging if necessary.
+            #     # num_kv_pages_per_block=None,
+            #     # num_queries_per_block=None,
+            #     # vmem_limit_bytes=None,
+            #     # use_kernel=True,
+            #     sm_scale=self.scale,
+            #     sliding_window=self.sliding_window,
+            #     soft_cap=self.logits_soft_cap,
+            # )
 
-        output = torch.ops.xla.ragged_paged_attention(
-            query,
-            kv_cache,
-            attn_metadata.context_lens,
-            attn_metadata.block_tables,
-            attn_metadata.query_start_loc,
-            attn_metadata.num_seqs,
-            # By default, the system utilizes optimized block size and
-            # vmem_limit_bytes parameters from the kernel repository. However,
-            # these can be manually adjusted for debugging if necessary.
-            num_kv_pages_per_block=None,
-            num_queries_per_block=None,
-            vmem_limit_bytes=None,
-            use_kernel=True,
-            sm_scale=self.scale,
-            sliding_window=self.sliding_window,
-            soft_cap=self.logits_soft_cap,
-        )
+# def ragged_paged_attention(
+#     q: jax.Array,  # [max_num_batched_tokens, num_q_heads, head_dim]
+#     # TODO(jevinjiang): create a write_to_kv_cache kernel!
+#     kv_pages: jax.
+#     Array,  # [total_num_pages, page_size, num_combined_kv_heads, head_dim]
+#     kv_lens: jax.Array,  # i32[max_num_seqs]
+#     page_indices: jax.Array,  # i32[max_num_seqs, pages_per_seq]
+#     cu_q_lens: jax.Array,  # i32[max_num_seqs + 1]
+#     num_seqs: jax.Array,  # i32[1]
+#     *,
+#     sm_scale: float = 1.0,
+#     sliding_window: int | None = None,
+#     soft_cap: float | None = None,
+#     mask_value: float | None = DEFAULT_MASK_VALUE,
+#     num_kv_pages_per_block: int | None = None,
+#     num_queries_per_block: int | None = None,
+#     vmem_limit_bytes: int | None = None,
+# ):
 
         return output.reshape(num_tokens, hidden_size)
 
@@ -214,8 +261,8 @@ def write_to_kv_cache(
 
     kv = torch.cat([key, value], axis=-1).reshape(-1, num_combined_kv_heads,
                                                   head_size)
-
-    torch.ops.xla.dynamo_set_buffer_donor_(kv_cache, True)
+    if os.environ.get("VLLM_TORCHAX_ENABLED", "0") == "0":
+        torch.ops.xla.dynamo_set_buffer_donor_(kv_cache, True)
 
     kv_cache = kv_cache.flatten(0, 1)
     kv_cache.index_copy_(0, slot_mapping, kv)

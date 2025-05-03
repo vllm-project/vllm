@@ -668,13 +668,15 @@ def initialize_dummy_weights(
                 # from a CPU tensor.
                 # Note: We avoid using torch.rank_like as it doesn't currently
                 # support the generator argument.
-                param.copy_((high - low) *
-                            torch.rand(*param.shape,
+                temp = (high - low) * torch.rand(*param.shape,
                                        generator=generator,
                                        dtype=param.dtype,
                                        layout=param.layout,
-                                       requires_grad=param.requires_grad,
-                                       device="cpu") + low)
+                                       requires_grad=param.requires_grad
+                                      ) + low
+                if os.environ.get("VLLM_TORCHAX_ENABLED", "0") == "1":
+                    temp = temp.to("jax")
+                param.copy_(temp)
                 torch._sync(param)
                 continue
 
