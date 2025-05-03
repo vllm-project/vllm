@@ -1,5 +1,4 @@
 # SPDX-License-Identifier: Apache-2.0
-import asyncio
 import json
 import re
 import sys
@@ -1922,18 +1921,15 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
                     hf_processor_mm_kwargs=hf_processor_mm_kwargs,
                 )
 
-            prompt_ids_coro = self._apply_hf_processor_text_only_async(prompt)
+            prompt_ids = await self._apply_hf_processor_text_only_async(prompt)
         else:
-            prompt_ids_coro = self._apply_hf_processor_tokens_only_async(
+            prompt_ids = await self._apply_hf_processor_tokens_only_async(
                 prompt)
 
-        mm_kwargs_coro = self._apply_hf_processor_mm_only_async(
+        mm_kwargs = await self._apply_hf_processor_mm_only_async(
             mm_items=mm_items,
             hf_processor_mm_kwargs=hf_processor_mm_kwargs,
         )
-
-        prompt_ids, mm_kwargs = await asyncio.gather(prompt_ids_coro,
-                                                     mm_kwargs_coro)
 
         return prompt_ids, mm_kwargs, False
 
