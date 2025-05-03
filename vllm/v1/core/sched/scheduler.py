@@ -8,6 +8,7 @@ from collections import defaultdict, deque
 from collections.abc import Iterable
 from typing import Optional, Union
 
+from vllm import envs
 from vllm.config import VllmConfig
 from vllm.distributed.kv_events import EventPublisherFactory, KVEventBatch
 from vllm.distributed.kv_transfer.kv_connector.factory import (
@@ -827,6 +828,8 @@ class Scheduler(SchedulerInterface):
                         do_remote_prefill=True,
                         remote_block_ids=remote_blocks,
                         remote_engine_id=engine_id,
+                        remote_host=envs.VLLM_NIXL_SIDE_CHANNEL_HOST,
+                        remote_port=envs.VLLM_NIXL_SIDE_CHANNEL_PORT,
                     )
 
                 # Add EngineCoreOutput for this Request.

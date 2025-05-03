@@ -73,7 +73,8 @@ async def send_request_to_service(client: httpx.AsyncClient, endpoint: str,
 
 async def stream_service_response(client: httpx.AsyncClient, endpoint: str,
                                   req_data: dict, remote_block_ids: list[int],
-                                  remote_engine_id: str, request_id: str):
+                                  remote_engine_id: str, remote_host: str,
+                                  remote_port: int, request_id: str):
     """
     Asynchronously stream the response from a service using a persistent client.
     """
@@ -84,6 +85,9 @@ async def stream_service_response(client: httpx.AsyncClient, endpoint: str,
     req_data['do_remote_prefill'] = True
     req_data["remote_block_ids"] = remote_block_ids
     req_data['remote_engine_id'] = remote_engine_id
+    req_data["remote_host"] = remote_host
+    req_data["remote_port"] = remote_port
+
     async with client.stream("POST", endpoint, json=req_data,
                              headers=headers) as response:
         response.raise_for_status()
@@ -107,10 +111,8 @@ async def handle_completions(request: Request):
         response_json = response.json()
         remote_block_ids = response_json.get('remote_block_ids', [])
         remote_engine_id = response_json.get('remote_engine_id', '')
-
-        # Add these to the request data for the decoder
-        req_data['remote_block_ids'] = remote_block_ids
-        req_data['remote_engine_id'] = remote_engine_id
+        remote_host = response_json.get('remote_host', '')
+        remote_port = response_json.get('remote_port', 0)
 
         # Stream response from decode service
         async def generate_stream():
@@ -120,6 +122,8 @@ async def handle_completions(request: Request):
                     req_data,
                     remote_block_ids=remote_block_ids,
                     remote_engine_id=remote_engine_id,
+                    remote_host=remote_host,
+                    remote_port=remote_port,
                     request_id=request_id):
                 yield chunk
 

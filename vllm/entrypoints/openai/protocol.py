@@ -880,6 +880,14 @@ class CompletionRequest(OpenAIBaseModel):
         default=None,
         description="Remote block ids for prefill-decode disaggregation.")
 
+    remote_host: Optional[str] = Field(
+        default=None,
+        description="Side channel host for connector metadata exchange.")
+
+    remote_port: Optional[int] = Field(
+        default=None,
+        description="Side channel port for connector metadata exchange.")
+
     # doc: end-completion-extra-params
 
     # Default sampling parameters for completion requests
@@ -982,6 +990,8 @@ class CompletionRequest(OpenAIBaseModel):
             do_remote_prefill=self.do_remote_prefill,
             remote_engine_id=self.remote_engine_id,
             remote_block_ids=self.remote_block_ids,
+            remote_host=self.remote_host,
+            remote_port=self.remote_port,
         )
 
         return SamplingParams.from_optional(
@@ -1270,6 +1280,12 @@ class CompletionResponse(OpenAIBaseModel):
     remote_block_ids: Optional[list[int]] = Field(
         default=None,
         description="Remote block ids for prefill-decode disaggregation.")
+    remote_host: Optional[str] = Field(
+        default=None,
+        description="Side channel host for connector metadata exchange.")
+    remote_port: Optional[int] = Field(
+        default=None,
+        description="Side channel port for connector metadata exchange.")
 
 
 class CompletionResponseStreamChoice(OpenAIBaseModel):

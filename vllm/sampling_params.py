@@ -36,6 +36,8 @@ class KVTransferParams(
     # TODO(rob): we can handle xPyD and direct KV block Xfer
     remote_engine_id: Optional[str] = None
     remote_block_ids: Optional[list[int]] = None
+    remote_host: Optional[str] = None
+    remote_port: Optional[int] = None
     do_remote_decode: bool = False
     do_remote_prefill: bool = False
 
@@ -45,6 +47,8 @@ class KVTransferParams(
         do_remote_prefill: bool,
         remote_engine_id: Optional[str],
         remote_block_ids: Optional[list[int]],
+        remote_host: Optional[str],
+        remote_port: Optional[int],
     ) -> Optional["KVTransferParams"]:
         if do_remote_decode and do_remote_prefill:
             raise ValueError(
@@ -55,6 +59,8 @@ class KVTransferParams(
                 do_remote_prefill=do_remote_prefill,
                 remote_engine_id=remote_engine_id,
                 remote_block_ids=remote_block_ids,
+                remote_host=remote_host,
+                remote_port=remote_port,
             )
         return None
 

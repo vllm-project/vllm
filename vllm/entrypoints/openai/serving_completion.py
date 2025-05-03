@@ -480,9 +480,13 @@ class OpenAIServingCompletion(OpenAIServing):
         if kv_transfer_params is not None:
             remote_engine_id = kv_transfer_params.remote_engine_id
             remote_block_ids = kv_transfer_params.remote_block_ids
+            remote_host = kv_transfer_params.remote_host
+            remote_port = kv_transfer_params.remote_port
         else:
             remote_engine_id = None
             remote_block_ids = None
+            remote_host = None
+            remote_port = None
 
         assert len(final_res_batch) == 1
         return CompletionResponse(
@@ -493,6 +497,8 @@ class OpenAIServingCompletion(OpenAIServing):
             usage=usage,
             remote_engine_id=remote_engine_id,
             remote_block_ids=remote_block_ids,
+            remote_host=remote_host,
+            remote_port=remote_port,
         )
 
     def _create_completion_logprobs(
