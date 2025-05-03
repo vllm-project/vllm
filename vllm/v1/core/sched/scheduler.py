@@ -62,6 +62,7 @@ class Scheduler(SchedulerInterface):
         self.max_num_scheduled_tokens = \
             self.scheduler_config.max_num_batched_tokens
         self.max_model_len = self.scheduler_config.max_model_len
+        self.max_num_spec_tokens = self.scheduler_config.max_num_spec_tokens
 
         # Create KVConnector for the Scheduler. Note that each Worker
         # will have a corresponding KVConnector with Role=WORKER.
@@ -162,6 +163,8 @@ class Scheduler(SchedulerInterface):
         req_to_new_block_ids: dict[str, list[int]] = {}
         num_scheduled_tokens: dict[str, int] = {}
         token_budget = self.max_num_scheduled_tokens
+        spec_token_budget = self.max_num_spec_tokens
+
         # Encoder-related.
         scheduled_encoder_inputs: dict[str, list[int]] = {}
         encoder_budget = self.max_num_encoder_input_tokens
@@ -183,6 +186,19 @@ class Scheduler(SchedulerInterface):
                 num_new_tokens = (
                     self.scheduler_config.long_prefill_token_threshold)
             num_new_tokens = min(num_new_tokens, token_budget)
+
+            num_scheduled_spec_tokens = (num_new_tokens +
+                                         request.num_computed_tokens -
+                                         request.num_tokens)
+            if spec_token_budget:
+                if num_scheduled_spec_tokens > spec_token_budget:
+                    # We don't truncate the spec_token_ids list here because
+                    # it will be trimmed in the end of the while loop.
+                    num_scheduled_spec_tokens = spec_token_budget
+                # +1 here to include the last generated token.
+                num_new_tokens = min(num_new_tokens,
+                                     num_scheduled_spec_tokens + 1)
+                spec_token_budget -= num_scheduled_spec_tokens
 
             # Make sure the input position does not exceed the max model len.
             # This is necessary when using spec decoding.

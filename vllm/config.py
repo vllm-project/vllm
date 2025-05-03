@@ -1841,6 +1841,9 @@ class SchedulerConfig:
     is primarily set in `ModelConfig` and that value should be manually
     duplicated here."""
 
+    max_num_spec_tokens: int = None  # type: ignore
+    """Maximum number of speculative tokens for all requests in the batch."""
+
     max_num_partial_prefills: int = 1
     """For chunked prefill, the maximum number of sequences that can be
     partially prefilled concurrently."""
