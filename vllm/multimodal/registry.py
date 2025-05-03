@@ -3,6 +3,7 @@ from collections.abc import Mapping
 from concurrent.futures import (Executor, ProcessPoolExecutor,
                                 ThreadPoolExecutor)
 from dataclasses import dataclass
+from functools import lru_cache
 from typing import TYPE_CHECKING, Generic, Optional, Protocol, TypeVar
 
 import torch.nn as nn
@@ -21,7 +22,7 @@ from .profiling import (BaseDummyInputsBuilder, DummyDecoderData,
                         DummyEncoderData, MultiModalProfiler)
 
 if TYPE_CHECKING:
-    from vllm.config import ModelConfig, MultiModalConfig
+    from vllm.config import ModelConfig, ParallelProcessorBackend
 
 logger = init_logger(__name__)
 
@@ -79,6 +80,22 @@ class _ProcessorFactories(Generic[_I]):
         return self.processor(info, dummy_inputs_builder, cache=cache)
 
 
+@lru_cache(maxsize=1)
+def _get_executor(
+    parallel_processor_backend: "ParallelProcessorBackend",
+) -> Optional[Executor]:
+    if parallel_processor_backend == "uni":
+        return None
+    if parallel_processor_backend == "mp":
+        logger.info_once("Enabled multiprocessing for multi-modal data")
+        return ProcessPoolExecutor(mp_context=get_mp_context())
+    if parallel_processor_backend == "mt":
+        logger.info_once("Enabled multithreading for multi-modal data")
+        return ThreadPoolExecutor()
+
+    assert_never(parallel_processor_backend)
+
+
 class MultiModalRegistry:
     """
     A registry that dispatches data processing according to the model.
@@ -89,25 +106,6 @@ class MultiModalRegistry:
                                                   _ProcessorFactories]()
 
         self._processing_cache = ProcessingCache(VLLM_MM_INPUT_CACHE_GIB)
-
-    def _get_executor(
-        self,
-        mm_config: "MultiModalConfig",
-    ) -> Optional[Executor]:
-        if not hasattr(self, "_processing_executor"):
-            executor: Optional[Executor]
-            if mm_config.parallel_processor_backend == "uni":
-                executor = None
-            elif mm_config.parallel_processor_backend == "mp":
-                executor = ProcessPoolExecutor(mp_context=get_mp_context())
-            elif mm_config.parallel_processor_backend == "mt":
-                executor = ThreadPoolExecutor()
-            else:
-                assert_never(mm_config.parallel_processor_backend)
-
-            self._processing_executor = executor
-
-        return self._processing_executor
 
     @deprecated("Legacy input processor/mapper pipeline has been removed. "
                 "Please update your model runner to use "
@@ -293,7 +291,7 @@ class MultiModalRegistry:
         ctx = InputProcessingContext(
             model_config,
             tokenizer=tokenizer,
-            executor=self._get_executor(mm_config),
+            executor=_get_executor(mm_config.parallel_processor_backend),
         )
         cache = None if disable_cache else self._processing_cache
 

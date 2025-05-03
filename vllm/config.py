@@ -357,6 +357,9 @@ class ModelConfig:
     disable_mm_preprocessor_cache: bool = False
     """If `True`, disable caching of the multi-modal preprocessor/mapper (not
     recommended)."""
+    parallel_processor_backend: "ParallelProcessorBackend" = "uni"
+    """EXPERIMENTAL: Configures running the multi-modal processor in parallel.
+    """
     override_neuron_config: dict[str, Any] = field(default_factory=dict)
     """Initialize non-default neuron config or override default neuron config
     that are specific to Neuron devices, this argument will be used to
@@ -611,7 +614,9 @@ class ModelConfig:
                 limit_per_prompt=self.limit_mm_per_prompt,
                 mm_processor_kwargs=self.mm_processor_kwargs,
                 disable_mm_preprocessor_cache=self.
-                disable_mm_preprocessor_cache)
+                disable_mm_preprocessor_cache,
+                parallel_processor_backend=self.parallel_processor_backend,
+            )
 
         if self.limit_mm_per_prompt:
             raise ValueError("`limit_mm_per_prompt` is only supported for "

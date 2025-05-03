@@ -22,7 +22,8 @@ from vllm.config import (BlockSize, CacheConfig, CacheDType, CompilationConfig,
                          GuidedDecodingBackendV1, HfOverrides, KVEventsConfig,
                          KVTransferConfig, LoadConfig, LoadFormat, LoRAConfig,
                          ModelConfig, ModelDType, ModelImpl, MultiModalConfig,
-                         ObservabilityConfig, ParallelConfig, PoolerConfig,
+                         ObservabilityConfig, ParallelConfig,
+                         ParallelProcessorBackend, PoolerConfig,
                          PrefixCachingHashAlgo, PromptAdapterConfig,
                          SchedulerConfig, SchedulerPolicy, SpeculativeConfig,
                          TaskOption, TokenizerMode, TokenizerPoolConfig,
@@ -290,6 +291,8 @@ class EngineArgs:
         MultiModalConfig.mm_processor_kwargs
     disable_mm_preprocessor_cache: bool = \
         MultiModalConfig.disable_mm_preprocessor_cache
+    parallel_processor_backend: ParallelProcessorBackend = \
+        MultiModalConfig.parallel_processor_backend
     # LoRA fields
     enable_lora: bool = False
     enable_lora_bias: bool = LoRAConfig.bias_enabled
@@ -867,6 +870,7 @@ class EngineArgs:
             config_format=self.config_format,
             mm_processor_kwargs=self.mm_processor_kwargs,
             disable_mm_preprocessor_cache=self.disable_mm_preprocessor_cache,
+            parallel_processor_backend=self.parallel_processor_backend,
             override_neuron_config=self.override_neuron_config,
             override_pooler_config=self.override_pooler_config,
             logits_processor_pattern=self.logits_processor_pattern,

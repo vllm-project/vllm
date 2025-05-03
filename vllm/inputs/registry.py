@@ -160,7 +160,17 @@ class InputProcessingContext(InputContext):
         )
 
         try:
-            return hf_processor(**data, **merged_kwargs, return_tensors="pt")
+            fn = functools.partial(
+                hf_processor,
+                **data,
+                **merged_kwargs,
+                return_tensors="pt",
+            )
+
+            if self.executor is None:
+                return fn()
+
+            return self.executor.submit(fn).result()
         except Exception as exc:
             msg = (f"Failed to apply {type(hf_processor).__name__} "
                    f"on data={data} with kwargs={merged_kwargs}")
@@ -193,18 +203,18 @@ class InputProcessingContext(InputContext):
         )
 
         try:
-            if self.executor is not None:
-                loop = asyncio.get_running_loop()
-                fn = functools.partial(
-                    hf_processor,
-                    **data,
-                    **merged_kwargs,
-                    return_tensors="pt",
-                )
+            fn = functools.partial(
+                hf_processor,
+                **data,
+                **merged_kwargs,
+                return_tensors="pt",
+            )
 
-                return await loop.run_in_executor(self.executor, fn)
+            if self.executor is None:
+                return fn()
 
-            return hf_processor(**data, **merged_kwargs, return_tensors="pt")
+            loop = asyncio.get_running_loop()
+            return await loop.run_in_executor(self.executor, fn)
         except Exception as exc:
             msg = (f"Failed to apply {type(hf_processor).__name__} "
                    f"on data={data} with kwargs={merged_kwargs}")
