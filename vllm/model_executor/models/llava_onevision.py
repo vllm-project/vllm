@@ -325,8 +325,10 @@ class LlavaOnevisionMultiModalProcessor(
         else:
             image_outputs = {}
 
+        base_call_hf_processor = super()._call_hf_processor
+
         def get_pixel_values_videos(video):
-            item_outputs = super()._call_hf_processor(
+            item_outputs = base_call_hf_processor(
                 prompt=video_token,
                 mm_data={"videos": video},
                 mm_kwargs=mm_kwargs,
