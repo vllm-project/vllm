@@ -6,7 +6,6 @@ from typing import Any, Optional, Union, cast
 
 from typing_extensions import assert_never
 
-from vllm import envs
 from vllm.config import ModelConfig
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
@@ -306,8 +305,6 @@ class InputPreprocessor:
         if not self.model_config.enable_prompt_embeds:
             raise ValueError("You must set `--enable-prompt-embeds` to input "
                              "`prompt_embeds`.")
-        if envs.VLLM_USE_V1:
-            raise ValueError("`prompt_embeds` is only available in V0.")
 
         prompt_embeds = parsed_content["prompt_embeds"]
 
