@@ -150,7 +150,7 @@ def get_kwargs(cls: ConfigType) -> dict[str, Any]:
 
         # Get the help text for the field
         name = field.name
-        help = cls_docs[name]
+        help = cls_docs[name].strip()
         # Escape % for argparse
         help = help.replace("%", "%%")
 
@@ -165,6 +165,7 @@ def get_kwargs(cls: ConfigType) -> dict[str, Any]:
             type_hints.add(field.type)
 
         # Set other kwargs based on the type hints
+        json_tip = "\n\nShould be a valid JSON string."
         if contains_type(type_hints, bool):
             # Creates --no-<name> and --<name> flags
             kwargs[name]["action"] = argparse.BooleanOptionalAction
@@ -201,6 +202,7 @@ def get_kwargs(cls: ConfigType) -> dict[str, Any]:
         elif contains_type(type_hints, dict):
             # Dict arguments will always be optional
             kwargs[name]["type"] = optional_type(json.loads)
+            kwargs[name]["help"] += json_tip
         elif (contains_type(type_hints, str)
               or any(is_not_builtin(th) for th in type_hints)):
             kwargs[name]["type"] = str
@@ -1439,8 +1441,8 @@ class EngineArgs:
         # as the platform that vLLM is running on (e.g. the case of scaling
         # vLLM with Ray) and has no GPUs. In this case we use the default
         # values for non-H100/H200 GPUs.
+        from vllm.platforms import current_platform
         try:
-            from vllm.platforms import current_platform
             device_memory = current_platform.get_device_total_memory()
         except Exception:
             # This is only used to set default_max_num_batched_tokens
@@ -1461,11 +1463,37 @@ class EngineArgs:
             }
             default_max_num_seqs = 256
 
+        # tpu specific default values.
+        if current_platform.is_tpu():
+            default_max_num_batched_tokens_tpu = {
+                UsageContext.LLM_CLASS: {
+                    'V6E': 2048,
+                    'V5E': 1024,
+                    'V5P': 512,
+                },
+                UsageContext.OPENAI_API_SERVER: {
+                    'V6E': 1024,
+                    'V5E': 512,
+                    'V5P': 256,
+                }
+            }
+
         use_context_value = usage_context.value if usage_context else None
         if (self.max_num_batched_tokens is None
                 and usage_context in default_max_num_batched_tokens):
-            self.max_num_batched_tokens = default_max_num_batched_tokens[
-                usage_context]
+            if current_platform.is_tpu():
+                chip_name = current_platform.get_device_name()
+                if chip_name in default_max_num_batched_tokens_tpu[
+                        usage_context]:
+                    self.max_num_batched_tokens = \
+                        default_max_num_batched_tokens_tpu[
+                            usage_context][chip_name]
+                else:
+                    self.max_num_batched_tokens = \
+                        default_max_num_batched_tokens[usage_context]
+            else:
+                self.max_num_batched_tokens = default_max_num_batched_tokens[
+                    usage_context]
             logger.debug(
                 "Setting max_num_batched_tokens to %d for %s usage context.",
                 self.max_num_batched_tokens, use_context_value)
