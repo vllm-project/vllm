@@ -72,12 +72,15 @@ class _HfExamplesInfo:
             return
 
         current_version = TRANSFORMERS_VERSION
+        cur_base_version = Version(current_version).base_version
         min_version = self.min_transformers_version
         max_version = self.max_transformers_version
         msg = f"`transformers=={current_version}` installed, but `transformers"
-        if min_version and Version(current_version) < Version(min_version):
+        # Only check the base version for the min/max version, otherwise preview
+        # models cannot be run because `x.yy.0.dev0`<`x.yy.0`
+        if min_version and Version(cur_base_version) < Version(min_version):
             msg += f">={min_version}` is required to run this model."
-        elif max_version and Version(current_version) > Version(max_version):
+        elif max_version and Version(cur_base_version) > Version(max_version):
             msg += f"<={max_version}` is required to run this model."
         else:
             return
@@ -362,8 +365,8 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     "Qwen2AudioForConditionalGeneration": _HfExamplesInfo("Qwen/Qwen2-Audio-7B-Instruct"),  # noqa: E501
     "Qwen2VLForConditionalGeneration": _HfExamplesInfo("Qwen/Qwen2-VL-2B-Instruct"),  # noqa: E501
     "Qwen2_5_VLForConditionalGeneration": _HfExamplesInfo("Qwen/Qwen2.5-VL-3B-Instruct"),  # noqa: E501
-    "Qwen2_5OmniModel": _HfExamplesInfo("Qwen/Qwen2.5-Omni-7B",  # noqa: E501
-                                                                  min_transformers_version="4.52"),  # noqa: E501
+    "Qwen2_5OmniModel": _HfExamplesInfo("Qwen/Qwen2.5-Omni-3B",
+                                        min_transformers_version="4.52"),
     "SkyworkR1VChatModel": _HfExamplesInfo("Skywork/Skywork-R1V-38B"),
     "SmolVLMForConditionalGeneration": _HfExamplesInfo("HuggingFaceTB/SmolVLM2-2.2B-Instruct"),  # noqa: E501
     "UltravoxModel": _HfExamplesInfo("fixie-ai/ultravox-v0_5-llama-3_2-1b",  # noqa: E501
