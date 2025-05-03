@@ -66,7 +66,6 @@ autodoc2_docstring_parser_regexes = [
 autodoc2_sort_names = True
 autodoc2_index_template = None
 
-
 # Add any paths that contain templates here, relative to this directory.
 templates_path = ['_templates']
 
