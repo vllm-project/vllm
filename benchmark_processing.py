@@ -406,7 +406,9 @@ def main(
 
     json_filepath = output_path / f"processing_{timestamp}.json"
 
-    pd.read_csv(csv_filepath).to_json(json_filepath, indent=4)
+    pd.read_csv(csv_filepath).to_json(json_filepath,
+                                      orient="records",
+                                      indent=4)
 
     print(f"Saved results to: {json_filepath}")
 
@@ -455,7 +457,9 @@ async def main_async(
 
     json_filepath = output_path / f"processing_{timestamp}.json"
 
-    pd.read_csv(csv_filepath).to_json(json_filepath, indent=4)
+    pd.read_csv(csv_filepath).to_json(json_filepath,
+                                      orient="records",
+                                      indent=4)
 
     print(f"Saved results to: {json_filepath}")
 
