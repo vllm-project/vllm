@@ -95,6 +95,7 @@ def get_engine(
             m: m in modalities
             for m in get_args(ModalityStr)
         },
+        hf_overrides=model_info.hf_overrides,
         enforce_eager=True,
     )
 
@@ -118,6 +119,7 @@ def get_async_engine(
             m: m in modalities
             for m in get_args(ModalityStr)
         },
+        hf_overrides=model_info.hf_overrides,
         enforce_eager=True,
         disable_log_requests=True,
     )
