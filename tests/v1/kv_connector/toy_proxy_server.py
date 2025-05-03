@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import argparse
+import itertools
 import os
 import uuid
 from contextlib import asynccontextmanager
@@ -15,20 +16,55 @@ async def lifespan(app: FastAPI):
     """
     Lifespan context manager to handle startup and shutdown events.
     """
-    # Startup: Initialize clients
-    prefiller_base_url = f'http://{global_args.prefiller_host}:{global_args.prefiller_port}/v1'
-    decoder_base_url = f'http://{global_args.decoder_host}:{global_args.decoder_port}/v1'
+    # Startup: Initialize client pools for prefiller and decoder services
+    app.state.prefill_clients = []
+    app.state.decode_clients = []
 
-    app.state.prefill_client = httpx.AsyncClient(timeout=None,
-                                                 base_url=prefiller_base_url)
-    app.state.decode_client = httpx.AsyncClient(timeout=None,
-                                                base_url=decoder_base_url)
+    # Create prefill clients
+    for i, (host, port) in enumerate(global_args.prefiller_instances):
+        prefiller_base_url = f'http://{host}:{port}/v1'
+        app.state.prefill_clients.append({
+            'client':
+            httpx.AsyncClient(timeout=None, base_url=prefiller_base_url),
+            'host':
+            host,
+            'port':
+            port,
+            'id':
+            i
+        })
+
+    # Create decode clients
+    for i, (host, port) in enumerate(global_args.decoder_instances):
+        decoder_base_url = f'http://{host}:{port}/v1'
+        app.state.decode_clients.append({
+            'client':
+            httpx.AsyncClient(timeout=None, base_url=decoder_base_url),
+            'host':
+            host,
+            'port':
+            port,
+            'id':
+            i
+        })
+
+    # Initialize round-robin iterators
+    app.state.prefill_iterator = itertools.cycle(
+        range(len(app.state.prefill_clients)))
+    app.state.decode_iterator = itertools.cycle(
+        range(len(app.state.decode_clients)))
+
+    print(f"Initialized {len(app.state.prefill_clients)} prefill clients "
+          f"and {len(app.state.decode_clients)} decode clients.")
 
     yield
 
-    # Shutdown: Close clients
-    await app.state.prefill_client.aclose()
-    await app.state.decode_client.aclose()
+    # Shutdown: Close all clients
+    for client_info in app.state.prefill_clients:
+        await client_info['client'].aclose()
+
+    for client_info in app.state.decode_clients:
+        await client_info['client'].aclose()
 
 
 # Update FastAPI app initialization to use lifespan
@@ -40,23 +76,75 @@ def parse_args():
 
     parser.add_argument("--port", type=int, default=8000)
     parser.add_argument("--host", type=str, default="localhost")
-    parser.add_argument("--prefiller-host", type=str, default="localhost")
-    parser.add_argument("--prefiller-port", type=int, default=8100)
-    parser.add_argument("--decoder-host", type=str, default="localhost")
-    parser.add_argument("--decoder-port", type=int, default=8200)
+
+    # For prefiller instances
+    parser.add_argument("--prefiller-hosts",
+                        "--prefiller-host",
+                        type=str,
+                        nargs="+",
+                        default=["localhost"])
+    parser.add_argument("--prefiller-ports",
+                        "--prefiller-port",
+                        type=int,
+                        nargs="+",
+                        default=[8100])
+
+    # For decoder instances
+    parser.add_argument("--decoder-hosts",
+                        "--decoder-host",
+                        type=str,
+                        nargs="+",
+                        default=["localhost"])
+    parser.add_argument("--decoder-ports",
+                        "--decoder-port",
+                        type=int,
+                        nargs="+",
+                        default=[8200])
+
     args = parser.parse_args()
+
+    # Validate and pair hosts with ports
+    if len(args.prefiller_hosts) != len(args.prefiller_ports):
+        raise ValueError(
+            "Number of prefiller hosts must match number of prefiller ports")
+
+    if len(args.decoder_hosts) != len(args.decoder_ports):
+        raise ValueError(
+            "Number of decoder hosts must match number of decoder ports")
+
+    # Create tuples of (host, port) for each service type
+    args.prefiller_instances = list(
+        zip(args.prefiller_hosts, args.prefiller_ports))
+    args.decoder_instances = list(zip(args.decoder_hosts, args.decoder_ports))
+
     return args
 
 
-# Initialize variables to hold the persistent clients
-app.state.prefill_client = None
-app.state.decode_client = None
+def get_next_client(app, service_type: str):
+    """
+    Get the next client in round-robin fashion.
+
+    Args:
+        app: The FastAPI app instance
+        service_type: Either 'prefill' or 'decode'
+
+    Returns:
+        The next client to use
+    """
+    if service_type == 'prefill':
+        client_idx = next(app.state.prefill_iterator)
+        return app.state.prefill_clients[client_idx]
+    elif service_type == 'decode':
+        client_idx = next(app.state.decode_iterator)
+        return app.state.decode_clients[client_idx]
+    else:
+        raise ValueError(f"Unknown service type: {service_type}")
 
 
-async def send_request_to_service(client: httpx.AsyncClient, endpoint: str,
+async def send_request_to_service(client_info: dict, endpoint: str,
                                   req_data: dict, request_id: str):
     """
-    Send a request to a service using a persistent client.
+    Send a request to a service using a client from the pool.
     """
     req_data = req_data.copy()
     req_data['do_remote_decode'] = True
@@ -65,31 +153,37 @@ async def send_request_to_service(client: httpx.AsyncClient, endpoint: str,
         "Authorization": f"Bearer {os.environ.get('OPENAI_API_KEY')}",
         "X-Request-Id": request_id
     }
-    response = await client.post(endpoint, json=req_data, headers=headers)
+
+    response = await client_info['client'].post(endpoint,
+                                                json=req_data,
+                                                headers=headers)
     response.raise_for_status()
 
     return response
 
 
-async def stream_service_response(client: httpx.AsyncClient, endpoint: str,
+async def stream_service_response(client_info: dict, endpoint: str,
                                   req_data: dict, remote_block_ids: list[int],
                                   remote_engine_id: str, remote_host: str,
                                   remote_port: int, request_id: str):
     """
-    Asynchronously stream the response from a service using a persistent client.
+    Asynchronously stream response from a service using a client from the pool.
     """
     headers = {
         "Authorization": f"Bearer {os.environ.get('OPENAI_API_KEY')}",
         "X-Request-Id": request_id
     }
+    req_data = req_data.copy()
     req_data['do_remote_prefill'] = True
     req_data["remote_block_ids"] = remote_block_ids
     req_data['remote_engine_id'] = remote_engine_id
     req_data["remote_host"] = remote_host
     req_data["remote_port"] = remote_port
 
-    async with client.stream("POST", endpoint, json=req_data,
-                             headers=headers) as response:
+    async with client_info['client'].stream("POST",
+                                            endpoint,
+                                            json=req_data,
+                                            headers=headers) as response:
         response.raise_for_status()
         async for chunk in response.aiter_bytes():
             yield chunk
@@ -99,11 +193,13 @@ async def stream_service_response(client: httpx.AsyncClient, endpoint: str,
 async def handle_completions(request: Request):
     try:
         req_data = await request.json()
-
         request_id = str(uuid.uuid4())
 
+        # Get the next prefill client in round-robin fashion
+        prefill_client_info = get_next_client(request.app, 'prefill')
+
         # Send request to prefill service
-        response = await send_request_to_service(app.state.prefill_client,
+        response = await send_request_to_service(prefill_client_info,
                                                  "/completions", req_data,
                                                  request_id)
 
@@ -114,10 +210,15 @@ async def handle_completions(request: Request):
         remote_host = response_json.get('remote_host', '')
         remote_port = response_json.get('remote_port', 0)
 
+        # Get the next decode client in round-robin fashion
+        decode_client_info = get_next_client(request.app, 'decode')
+
+        print(f"Using {prefill_client_info} {decode_client_info}")
+
         # Stream response from decode service
         async def generate_stream():
             async for chunk in stream_service_response(
-                    app.state.decode_client,
+                    decode_client_info,
                     "/completions",
                     req_data,
                     remote_block_ids=remote_block_ids,
@@ -139,6 +240,16 @@ async def handle_completions(request: Request):
         print(e)
         print("".join(traceback.format_exception(*exc_info)))
         raise
+
+
+@app.get("/healthcheck")
+async def healthcheck():
+    """Simple endpoint to check if the server is running."""
+    return {
+        "status": "ok",
+        "prefill_instances": len(app.state.prefill_clients),
+        "decode_instances": len(app.state.decode_clients)
+    }
 
 
 if __name__ == '__main__':
