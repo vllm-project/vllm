@@ -13,7 +13,6 @@ import pandas as pd
 from tqdm import tqdm
 
 import vllm.envs as envs
-from tests.models.registry import HF_EXAMPLE_MODELS
 from tests.multimodal.utils import random_audio, random_image, random_video
 from vllm import AsyncEngineArgs, EngineArgs, SamplingParams
 from vllm.config import ModelConfig, ParallelProcessorBackend
@@ -29,17 +28,13 @@ ModalityStr = Literal["audio", "image", "video"]
 
 
 def get_supported_modalities(model_id: str) -> list[ModalityStr]:
-    model_info = HF_EXAMPLE_MODELS.find_hf_info(model_id)
     model_config = ModelConfig(
         model_id,
         task="auto",
-        tokenizer=model_info.tokenizer or model_id,
-        tokenizer_mode=model_info.tokenizer_mode,
-        trust_remote_code=model_info.trust_remote_code,
+        trust_remote_code=True,
         seed=0,
         dtype="float16",
         revision=None,
-        hf_overrides=model_info.hf_overrides,
     )
 
     model_cls = MULTIMODAL_REGISTRY._get_model_cls(model_config)
@@ -83,19 +78,15 @@ def get_engine(
     parallel_backend: ParallelProcessorBackend,
     modalities: list[ModalityStr],
 ) -> LLMEngine:
-    model_info = HF_EXAMPLE_MODELS.find_hf_info(model_id)
     args = EngineArgs(
         model=model_id,
-        tokenizer=model_info.tokenizer or model_id,
-        tokenizer_mode=model_info.tokenizer_mode,
-        trust_remote_code=model_info.trust_remote_code,
+        trust_remote_code=True,
         parallel_processor_backend=parallel_backend,
         max_model_len=4096,
         limit_mm_per_prompt={
             m: m in modalities
             for m in get_args(ModalityStr)
         },
-        hf_overrides=model_info.hf_overrides,
         enforce_eager=True,
     )
 
@@ -107,19 +98,15 @@ def get_async_engine(
     parallel_backend: ParallelProcessorBackend,
     modalities: list[ModalityStr],
 ) -> EngineClient:
-    model_info = HF_EXAMPLE_MODELS.find_hf_info(model_id)
     args = AsyncEngineArgs(
         model=model_id,
-        tokenizer=model_info.tokenizer or model_id,
-        tokenizer_mode=model_info.tokenizer_mode,
-        trust_remote_code=model_info.trust_remote_code,
+        trust_remote_code=True,
         parallel_processor_backend=parallel_backend,
         max_model_len=4096,
         limit_mm_per_prompt={
             m: m in modalities
             for m in get_args(ModalityStr)
         },
-        hf_overrides=model_info.hf_overrides,
         enforce_eager=True,
         disable_log_requests=True,
     )
