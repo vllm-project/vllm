@@ -446,6 +446,8 @@ class EngineArgs:
                                  **model_kwargs["disable_cascade_attn"])
         model_group.add_argument("--skip-tokenizer-init",
                                  **model_kwargs["skip_tokenizer_init"])
+        model_group.add_argument("--enable-prompt-embeds",
+                                 **model_kwargs["enable_prompt_embeds"])
         model_group.add_argument("--served-model-name",
                                  **model_kwargs["served_model_name"])
         # This one is a special case because it is the
