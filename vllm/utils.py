@@ -1392,7 +1392,7 @@ class FlexibleArgumentParser(ArgumentParser):
 
     def parse_args(  # type: ignore[override]
         self,
-        args: Sequence[str] | None = None,
+        args: list[str] | None = None,
         namespace: Namespace | None = None,
     ):
         if args is None:
@@ -1565,8 +1565,11 @@ class FlexibleArgumentParser(ArgumentParser):
 
         return processed_args
 
-    def add_argument_group(self, *args: Any,
-                           **kwargs: Any) -> _FlexibleArgumentGroup:
+    def add_argument_group(
+        self,
+        *args: Any,
+        **kwargs: Any,
+    ) -> _FlexibleArgumentGroup:
         group = _FlexibleArgumentGroup(self, self, *args, **kwargs)
         self._action_groups.append(group)
         return group
