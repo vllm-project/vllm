@@ -550,7 +550,7 @@ def get_num_prefill_decode_query_kv_tokens(
     based on the attention metadata and the specified attention type.
 
     Args:
-        attn_metadata (FlashAttentionMetadata): Attention Metadata object.
+        attn_metadata (AttentionMetadata): Attention Metadata object.
         attn_type (AttentionType): The type of attention being used.
     Returns:
         Tuple[int, int, int]: A tuple containing three integers:
