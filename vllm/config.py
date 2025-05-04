@@ -12,7 +12,8 @@ import textwrap
 import warnings
 from collections import Counter
 from contextlib import contextmanager
-from dataclasses import MISSING, Field, field, fields, is_dataclass, replace
+from dataclasses import (MISSING, Field, asdict, dataclass, field, fields,
+                         is_dataclass, replace)
 from functools import cached_property
 from importlib.util import find_spec
 from pathlib import Path
@@ -20,8 +21,7 @@ from typing import (TYPE_CHECKING, Any, Callable, ClassVar, Literal, Optional,
                     Protocol, TypeVar, Union, cast, get_args, get_origin)
 
 import torch
-from pydantic import BaseModel, PrivateAttr, SkipValidation, TypeAdapter
-from pydantic.dataclasses import dataclass
+from pydantic import BaseModel
 from torch.distributed import ProcessGroup, ReduceOp
 from transformers import PretrainedConfig
 from typing_extensions import deprecated
@@ -58,10 +58,7 @@ if TYPE_CHECKING:
 
     ConfigType = type[DataclassInstance]
 else:
-    PlacementGroup = Any
-    ExecutorBase = Any
-    QuantizationConfig = Any
-    BaseModelLoader = Any
+    QuantizationConfig = None
     ConfigType = type
 
 logger = init_logger(__name__)
@@ -206,7 +203,7 @@ def get_field(cls: ConfigType, name: str) -> Field:
     cls_fields = {f.name: f for f in fields(cls)}
     if name not in cls_fields:
         raise ValueError(f"Field '{name}' not found in {cls.__name__}.")
-    named_field: Field = cls_fields[name]
+    named_field: Field = cls_fields.get(name)
     if (default_factory := named_field.default_factory) is not MISSING:
         return field(default_factory=default_factory)
     if (default := named_field.default) is not MISSING:
@@ -219,9 +216,8 @@ TokenizerMode = Literal["auto", "slow", "mistral", "custom"]
 ModelDType = Literal["auto", "half", "float16", "bfloat16", "float", "float32"]
 
 
-# Arbitrary types allowed is required for torch.device
 @config
-@dataclass(config={"arbitrary_types_allowed": True})  # type: ignore
+@dataclass
 class ModelConfig:
     """Configuration for the model."""
 
@@ -234,7 +230,7 @@ class ModelConfig:
     task, even if the same model can be used for multiple tasks. When the model
     only supports one task, "auto" can be used to select it; otherwise, you
     must specify explicitly which task to use."""
-    tokenizer: SkipValidation[str] = None  # type: ignore
+    tokenizer: str = None  # type: ignore
     """Name or path of the Hugging Face tokenizer to use. If unspecified, model
     name or path will be used."""
     tokenizer_mode: TokenizerMode = "auto"
@@ -281,7 +277,7 @@ class ModelConfig:
     """The specific revision to use for the tokenizer on the Hugging Face Hub.
     It can be a branch name, a tag name, or a commit id. If unspecified, will
     use the default version."""
-    max_model_len: SkipValidation[int] = None  # type: ignore
+    max_model_len: int = None  # type: ignore
     """Model context length (prompt and output). If unspecified, will be
     automatically derived from the model config.
 
@@ -1333,7 +1329,7 @@ PrefixCachingHashAlgo = Literal["builtin", "sha256"]
 class CacheConfig:
     """Configuration for the KV cache."""
 
-    block_size: SkipValidation[BlockSize] = None  # type: ignore
+    block_size: BlockSize = None  # type: ignore
     """Size of a contiguous cache block in number of tokens. This is ignored on
     neuron devices and set to `--max-model-len`. On CUDA devices, only block
     sizes up to 32 are supported. On HPU devices, block size defaults to 128.
@@ -2008,13 +2004,13 @@ class SchedulerConfig:
     def __post_init__(self) -> None:
         if self.max_model_len is None:
             self.max_model_len = 8192
-            logger.warning(
+            logger.warning_once(
                 "max_model_len was is not set. Defaulting to arbitrary value "
                 "of %d.", self.max_model_len)
 
         if self.max_num_seqs is None:
             self.max_num_seqs = 128
-            logger.warning(
+            logger.warning_once(
                 "max_num_seqs was is not set. Defaulting to arbitrary value "
                 "of %d.", self.max_num_seqs)
 
@@ -2133,9 +2129,8 @@ class SchedulerConfig:
 Device = Literal["auto", "cuda", "neuron", "cpu", "tpu", "xpu", "hpu"]
 
 
-# Arbitrary types allowed is required for torch.device
 @config
-@dataclass(config={"arbitrary_types_allowed": True})  # type: ignore
+@dataclass
 class DeviceConfig:
     """Configuration for the device to use for vLLM execution."""
 
@@ -2669,9 +2664,8 @@ class SpeculativeConfig:
 LoRADType = Literal["auto", "float16", "bfloat16"]
 
 
-# Arbitrary types allowed is required for torch.dtype
 @config
-@dataclass(config={"arbitrary_types_allowed": True})  # type: ignore
+@dataclass
 class LoRAConfig:
     """Configuration for LoRA."""
 
@@ -2766,9 +2760,8 @@ class LoRAConfig:
                 "V1 LoRA does not support long LoRA, please use V0.")
 
 
-# Arbitrary types allowed is required for torch.dtype
 @config
-@dataclass(config={"arbitrary_types_allowed": True})  # type: ignore
+@dataclass
 class PromptAdapterConfig:
     """Configuration for PromptAdapters."""
 
@@ -2825,8 +2818,8 @@ class PromptAdapterConfig:
 class MultiModalConfig:
     """Controls the behavior of multimodal models."""
 
-    limit_per_prompt: dict[str, int] = \
-        cast(dict[str,int], get_field(ModelConfig, "limit_mm_per_prompt"))
+    limit_per_prompt: dict[str, int] = get_field(ModelConfig,
+                                                 "limit_mm_per_prompt")
     """
     The maximum number of input items allowed per prompt for each modality.
     Defaults to 1 (V0) or 999 (V1) for each modality.
@@ -3606,7 +3599,7 @@ class CompilationConfig:
 
     By default, all custom ops are enabled when running without Inductor and
     disabled when running with Inductor (compile_level >= Inductor)."""
-    splitting_ops: list[str] = field(default=None)  # type: ignore
+    splitting_ops: list[str] = field(default_factory=list)
     """A list of ops to split the full graph into subgraphs, used in piecewise
     compilation."""
 
@@ -3618,7 +3611,7 @@ class CompilationConfig:
     - True: inductor compilation is used. one graph for symbolic shape
         is compiled. In addition, compile for compile_sizes,
         using configurations in inductor_compile_config."""
-    compile_sizes: Optional[list[Union[int, str]]] = field(default=None)
+    compile_sizes: Optional[list[Union[int, str]]] = None
     """Sizes to compile for inductor. In addition
     to integers, it also supports "cudagraph_capture_sizes" to
     specify the sizes for cudagraph capture."""
@@ -3674,7 +3667,7 @@ class CompilationConfig:
         - enable_sequence_parallelism: whether to enable sequence parallelism.
         """
         dump_graph_stages: list[str] = field(default_factory=list)
-        dump_graph_dir: Path = field(default=Path("."))
+        dump_graph_dir: Path = Path(".")
         enable_fusion: bool = True
         enable_noop: bool = True
         enable_sequence_parallelism: bool = False
@@ -3699,27 +3692,27 @@ class CompilationConfig:
     pass_config: PassConfig = field(default_factory=PassConfig)
     """Custom inductor passes, see PassConfig for more details"""
 
-    max_capture_size: int = field(init=False)
+    max_capture_size: int = field(default=None, init=False)
     """not configurable, computed after init"""
-    local_cache_dir: str = field(init=False)
+    local_cache_dir: str = field(default=None, init=False)
     """local cache dir for each rank"""
-    bs_to_padded_graph_size: list[int] = field(init=False)
+    bs_to_padded_graph_size: list[int] = field(default=None, init=False)
     """optimization:
     Intuitively, bs_to_padded_graph_size should be dict[int, int].
     since we know all keys are in a range [0, max_capture_size],
     we can optimize it to list[int] for better lookup performance."""
 
     # keep track of enabled and disabled custom ops
-    enabled_custom_ops: Counter[str] = field(init=False)
+    enabled_custom_ops: Counter[str] = field(default_factory=Counter)
     """custom ops that are enabled"""
-    disabled_custom_ops: Counter[str] = field(init=False)
+    disabled_custom_ops: Counter[str] = field(default_factory=Counter)
     """custom ops that are disabled"""
-    traced_files: set[str] = field(init=False)
+    traced_files: set[str] = field(default_factory=set)
     """files that are traced for compilation"""
-    compilation_time: float = field(init=False)
+    compilation_time: float = 0.0
     """time taken for compilation"""
 
-    static_forward_context: dict[str, Any] = field(init=False)
+    static_forward_context: dict[str, Any] = field(default_factory=dict)
     """Per-model forward context
     Map from layer name to layer objects that need to be accessed outside
     model code, e.g., Attention, FusedMOE when dp_size>1."""
@@ -3757,12 +3750,16 @@ class CompilationConfig:
             "pass_config",
             "traced_files",
         }
-        exclude |= {
-            f.name
-            for f in fields(self) if getattr(self, f.name) is PrivateAttr
-        }
-        return TypeAdapter(CompilationConfig).dump_json(
-            self, exclude=exclude, exclude_defaults=True).decode()
+        include = dict()
+        for k, v in asdict(self).items():
+            if k in exclude:
+                continue
+            f = get_field(self, k)
+            d = f.default_factory() if f.default is MISSING else f.default
+            if d == v:
+                continue
+            include[k] = v
+        return json.dumps(include)
 
     __str__ = __repr__
 
@@ -3771,7 +3768,7 @@ class CompilationConfig:
         """Parse the CLI value for the compilation config."""
         if cli_value in ["0", "1", "2", "3"]:
             return cls(level=int(cli_value))
-        return TypeAdapter(CompilationConfig).validate_json(cli_value)
+        return cls(**json.loads(cli_value))
 
     def __post_init__(self) -> None:
         count_none = self.custom_ops.count("none")
@@ -3791,9 +3788,6 @@ class CompilationConfig:
             if KEY not in self.inductor_compile_config:
                 self.inductor_compile_config[KEY] = False
 
-        if self.splitting_ops is None:
-            self.splitting_ops = []
-
         for k, v in self.inductor_passes.items():
             if not isinstance(v, str):
                 assert callable(v), (
@@ -3809,12 +3803,6 @@ class CompilationConfig:
             func = __import__(module).__dict__[func_name]
             self.inductor_compile_config[k] = func if isinstance(
                 func, InductorPass) else CallableInductorPass(func)
-
-        self.enabled_custom_ops = Counter()
-        self.disabled_custom_ops = Counter()
-        self.traced_files = set()
-        self.static_forward_context = {}
-        self.compilation_time = 0.0
 
     def init_backend(self, vllm_config: "VllmConfig") -> Union[str, Callable]:
         if self.level == CompilationLevel.NO_COMPILATION:
@@ -3918,8 +3906,7 @@ class VllmConfig:
     """Load configuration."""
     lora_config: Optional[LoRAConfig] = None
     """LoRA configuration."""
-    speculative_config: SpeculativeConfig = field(
-        default_factory=SpeculativeConfig)
+    speculative_config: Optional[SpeculativeConfig] = None
     """Speculative decoding configuration."""
     decoding_config: Optional[DecodingConfig] = None
     """Decoding configuration."""
@@ -3946,8 +3933,7 @@ class VllmConfig:
     You can specify the full compilation config like so:
     `{"level": 3, "cudagraph_capture_sizes": [1, 2, 4, 8]}`
     """
-    kv_transfer_config: KVTransferConfig = field(
-        default_factory=KVTransferConfig)
+    kv_transfer_config: Optional[KVTransferConfig] = None
     """The configurations for distributed KV cache transfer."""
     kv_events_config: Optional[KVEventsConfig] = None
     """The configurations for event publishing."""

@@ -246,7 +246,7 @@ class OpenAIServing:
         if isinstance(request, ChatCompletionRequest):
             # TODO(#9845): remove max_tokens when field dropped from OpenAI API
             max_tokens = request.max_completion_tokens or request.max_tokens
-        elif isinstance(request, CompletionRequest):
+        else:
             max_tokens = request.max_tokens
         if max_tokens is None:
             if token_num >= self.max_model_len:

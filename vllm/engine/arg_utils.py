@@ -6,14 +6,12 @@ import dataclasses
 import json
 import re
 import threading
-from dataclasses import MISSING, dataclass, fields
+from dataclasses import MISSING, dataclass, fields, is_dataclass
 from itertools import permutations
 from typing import (Annotated, Any, Callable, Dict, List, Literal, Optional,
                     Type, TypeVar, Union, cast, get_args, get_origin)
 
 import torch
-from pydantic import TypeAdapter
-from pydantic.dataclasses import is_pydantic_dataclass
 from typing_extensions import TypeIs, deprecated
 
 import vllm.envs as envs
@@ -49,12 +47,9 @@ TypeHint = Union[type[Any], object]
 TypeHintT = Union[type[T], object]
 
 
-def optional_type(
-        return_type: Callable[[str], T]) -> Callable[[str], Optional[T]]:
+def parse_type(return_type: Callable[[str], T]) -> Callable[[str], T]:
 
-    def _optional_type(val: str) -> Optional[T]:
-        if val == "" or val == "None":
-            return None
+    def _parse_type(val: str) -> T:
         try:
             if return_type is json.loads and not re.match("^{.*}$", val):
                 return cast(T, nullable_kvs(val))
@@ -63,14 +58,24 @@ def optional_type(
             raise argparse.ArgumentTypeError(
                 f"Value {val} cannot be converted to {return_type}.") from e
 
+    return _parse_type
+
+
+def optional_type(
+        return_type: Callable[[str], T]) -> Callable[[str], Optional[T]]:
+
+    def _optional_type(val: str) -> Optional[T]:
+        if val == "" or val == "None":
+            return None
+        return parse_type(return_type)(val)
+
     return _optional_type
 
 
 def union_dict_and_str(val: str) -> Optional[Union[str, dict[str, str]]]:
     if not re.match("^{.*}$", val):
         return str(val)
-    else:
-        return optional_type(json.loads)(val)
+    return optional_type(json.loads)(val)
 
 
 @deprecated(
@@ -153,14 +158,12 @@ def get_kwargs(cls: ConfigType) -> dict[str, Any]:
             type_hints.add(field.type)
 
         # If the field is a dataclass, we can use the model_validate_json
-        generator = (th for th in type_hints if is_pydantic_dataclass(th))
-        dataclass_hint = next(generator, None)
+        generator = (th for th in type_hints if is_dataclass(th))
+        dataclass_cls = next(generator, None)
 
         # Get the default value of the field
         if field.default is not MISSING:
             default = field.default
-        elif dataclass_hint is not None:
-            default = {}
         elif field.default_factory is not MISSING:
             default = field.default_factory()
 
@@ -179,12 +182,12 @@ def get_kwargs(cls: ConfigType) -> dict[str, Any]:
 
         # Set other kwargs based on the type hints
         json_tip = "\n\nShould be a valid JSON string."
-        if dataclass_hint is not None:
-            type_adapter = TypeAdapter(dataclass_hint)
-            kwargs[name]["type"] = type_adapter.validate_json
+        if dataclass_cls is not None:
+            dataclass_init = lambda x, f=dataclass_cls: f(**json.loads(x))
+            kwargs[name]["type"] = dataclass_init
             # Special case for configs with a from_cli method
-            if hasattr(dataclass_hint, "from_cli"):
-                kwargs[name]["type"] = dataclass_hint.from_cli
+            if hasattr(dataclass_cls, "from_cli"):
+                kwargs[name]["type"] = dataclass_cls.from_cli
             kwargs[name]["help"] += json_tip
         elif contains_type(type_hints, bool):
             # Creates --no-<name> and --<name> flags
@@ -221,9 +224,9 @@ def get_kwargs(cls: ConfigType) -> dict[str, Any]:
             kwargs[name]["type"] = union_dict_and_str
         elif contains_type(type_hints, dict):
             # Dict arguments will always be optional
-            kwargs[name]["type"] = optional_type(json.loads)
+            kwargs[name]["type"] = parse_type(json.loads)
             kwargs[name]["help"] += json_tip
-        elif (contains_type(type_hints, str) or contains_type(type_hints, Any)
+        elif (contains_type(type_hints, str)
               or any(is_not_builtin(th) for th in type_hints)):
             kwargs[name]["type"] = str
         else:
