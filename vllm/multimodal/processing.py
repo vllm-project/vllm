@@ -111,13 +111,13 @@ class PromptUpdateDetails(Generic[_S]):
 
     is_embed: Optional[Callable[["_BoundPromptSequence"], torch.Tensor]] = None
     """
-    Given :attr:`full`, return a boolean mask of shape `(len(full),)`
+    Given {attr}`full`, return a boolean mask of shape `(len(full),)`
     indicating which positions of `full` to assign embeddings to.
 
     `None` (default) means to assign embeddings to all positions of `full`.
 
     The embeddings are obtained by calling
-    :class:`SupportsMultiModal.get_multimodal_embeddings`.
+    {class}`SupportsMultiModal.get_multimodal_embeddings`.
     """
 
     @staticmethod
@@ -156,13 +156,13 @@ PromptUpdateInfo = Union[PromptSeq, PromptUpdateDetails]
 The token sequence or text that are part of the update.
 
 If only part of the content corresponds to feature placeholders, you can
-use :class:`PromptUpdateDetails` to specify which part.
+use {class}`PromptUpdateDetails` to specify which part.
 """
 
 PromptUpdateContent = Union[Callable[[int], PromptUpdateInfo],
                             PromptUpdateInfo]
 """
-Given the index of the processed item within :attr:`modality`,
+Given the index of the processed item within {attr}`modality`,
 output the corresponding token sequence (or text).
 
 For convenience, you can directly pass in the token sequence (or text)
@@ -213,52 +213,52 @@ class PromptInsertion(PromptUpdate):
 
     Example:
 
-        For each image, insert a number of ``<image>`` feature placeholders
-        equal to the feature size of the vision encoder after the ``<s>`` token:
+    For each image, insert a number of ``<image>`` feature placeholders
+    equal to the feature size of the vision encoder after the ``<s>`` token:
 
-        .. code-block:: python
+    ```python
+    PromptInsertion(
+        modality="image",
+        target="<s>",
+        insertion="<image>" * image_feature_size,
+    )
+    ```
 
-            PromptInsertion(
-                modality="image",
-                target="<s>",
-                insertion="<image>" * image_feature_size,
-            )
+    Insert these tokens at the start of the prompt:
 
-        Insert these tokens at the start of the prompt:
+    ```python
+    PromptInsertion(
+        modality="image",
+        target=PromptIndexTargets.start(),
+        insertion="<image>" * image_feature_size,
+    )
+    ```
 
-        .. code-block:: python
+    Insert these tokens after a prefix ``Images:``:
 
-            PromptInsertion(
-                modality="image",
-                target=PromptIndexTargets.start(),
-                insertion="<image>" * image_feature_size,
-            )
+    ```python
+    PromptInsertion(
+        modality="image",
+        target=PromptIndexTargets.prefix("Images:"),
+        insertion="<image>" * image_feature_size,
+    )
+    ```
 
-        Insert these tokens after a prefix ``Images:``:
+    Insert these tokens at the end of the prompt:
 
-        .. code-block:: python
-
-            PromptInsertion(
-                modality="image",
-                target=PromptIndexTargets.prefix("Images:"),
-                insertion="<image>" * image_feature_size,
-            )
-
-        Insert these tokens at the end of the prompt:
-
-        .. code-block:: python
-
-            PromptInsertion(
-                modality="image",
-                target=PromptIndexTargets.end(),
-                insertion="<image>" * image_feature_size,
-            )
+    ```python
+    PromptInsertion(
+        modality="image",
+        target=PromptIndexTargets.end(),
+        insertion="<image>" * image_feature_size,
+    )
+    ```
     """
 
     insertion: PromptUpdateContent = field(repr=False)
     """
-    Given the index of the processed item within :attr:`modality`,
-    output the token sequence (or text) to insert right after :attr:`target`.
+    Given the index of the processed item within {attr}`modality`,
+    output the token sequence (or text) to insert right after {attr}`target`.
 
     For convenience, you can directly pass in the token sequence (or text)
     instead of a function if it does not depend on the input.
@@ -280,57 +280,57 @@ class PromptReplacement(PromptUpdate):
 
     Example:
 
-        For each image, replace one ``<image>`` input placeholder in the prompt
-        with a number of ``<image>`` feature placeholders
-        equal to the feature size of the vision encoder:
+    For each image, replace one ``<image>`` input placeholder in the prompt
+    with a number of ``<image>`` feature placeholders
+    equal to the feature size of the vision encoder:
 
-        .. code-block:: python
+    ```python
+    PromptReplacement(
+        modality="image",
+        target="<image>",
+        replacement="<image>" * image_feature_size,
+    )
+    ```
 
-            PromptReplacement(
-                modality="image",
-                target="<image>",
-                replacement="<image>" * image_feature_size,
-            )
+    As above, but further pad the feature placeholders with ``<image_bos>``
+    and `<image_eos>``, which are not supposed to be passed to the vision
+    encoder:
 
-        As above, but further pad the feature placeholders with ``<image_bos>``
-        and `<image_eos>``, which are not supposed to be passed to the vision
-        encoder:
+    ```python
+    PromptReplacement(
+        modality="image",
+        target="<image>",
+        replacement=PromptUpdateDetails(
+            full="".join([
+                "<image_bos>",
+                "<image>" * image_feature_size,
+                "<image_eos>",
+            ]),
+            features="<image>" * image_feature_size,
+        ),
+    )
+    ```
 
-        .. code-block:: python
+    To avoid unnecessary tokenization during prompt replacement,
+    we recommended passing token sequences instead of text:
 
-            PromptReplacement(
-                modality="image",
-                target="<image>",
-                replacement=PromptUpdateDetails(
-                    full="".join([
-                        "<image_bos>",
-                        "<image>" * image_feature_size,
-                        "<image_eos>",
-                    ]),
-                    features="<image>" * image_feature_size,
-                ),
-            )
-
-        To avoid unnecessary tokenization during prompt replacement,
-        we recommended passing token sequences instead of text:
-
-        .. code-block:: python
-
-            PromptReplacement(
-                modality="image",
-                target=[image_token_id],
-                replacement=PromptUpdateDetails(
-                    full=([image_bos_id] + [image_token_id] * image_feature_size
-                          + [image_eos_id]),
-                    features=[image_token_id] * image_feature_size,
-                ),
-            )
+    ```python
+    PromptReplacement(
+        modality="image",
+        target=[image_token_id],
+        replacement=PromptUpdateDetails(
+            full=([image_bos_id] + [image_token_id] * image_feature_size
+                    + [image_eos_id]),
+            features=[image_token_id] * image_feature_size,
+        ),
+    )
+    ```
     """
 
     replacement: PromptUpdateContent = field(repr=False)
     """
-    Given the index of the processed item within :attr:`modality`,
-    output the token sequence (or text) to replace :attr:`target`.
+    Given the index of the processed item within {attr}`modality`,
+    output the token sequence (or text) to replace {attr}`target`.
 
     For convenience, you can directly pass in the token sequence (or text)
     instead of a function if it does not depend on the input.
@@ -384,14 +384,14 @@ _M = TypeVar("_M", bound=Union[_HasModalityAttr, _HasModalityProp])
 
 
 def full_groupby_modality(values: Iterable[_M]) -> ItemsView[str, list[_M]]:
-    """Convenience function to apply :func:`full_groupby` based on modality."""
+    """Convenience function to apply {func}`full_groupby` based on modality."""
     return full_groupby(values, key=lambda x: x.modality)
 
 
 @dataclass
 class _BoundPromptSequence:
     """
-    A :data:`_PromptSeq` bound to a tokenizer to automatically
+    A {data}`_PromptSeq` bound to a tokenizer to automatically
     convert between token sequence and text representations.
     """
     tokenizer: AnyTokenizer = field(repr=False)
@@ -443,8 +443,8 @@ class _BoundPromptContent:
 @dataclass
 class BoundPromptUpdate:
     """
-    A :class:`PromptUpdate` bound to a tokenizer to automatically convert
-    :attr:`target` and the result of :meth:`get_content` between
+    A {class}`PromptUpdate` bound to a tokenizer to automatically convert
+    {attr}`target` and the result of {meth}`get_content` between
     token sequence and text representations.
     """
     _origin: PromptUpdate
@@ -479,7 +479,7 @@ class BoundPromptUpdate:
 
     def get_content(self, item_idx: int) -> _BoundPromptContent:
         """
-        Given the index of the processed item within :attr:`modality`,
+        Given the index of the processed item within {attr}`modality`,
         output the token sequence (or text) to update.
         """
         content = self.content
@@ -516,7 +516,7 @@ def iter_token_matches(
     match_ids: list[int],
 ) -> Generator[_TokenMatch]:
     """
-    Yield each occurrence of :code:`match_ids` in :code:`token_ids`.
+    Yield each occurrence of `match_ids` in `token_ids`.
 
     Note that empty matches are ignored.
     """
@@ -545,8 +545,8 @@ def replace_token_matches(
     new_ids: list[int],
 ) -> list[int]:
     """
-    Replace each occurrence of :code:`match_ids` in :code:`token_ids`
-    with :code:`new_ids`.
+    Replace each occurrence of `match_ids` in `token_ids`
+    with `new_ids`.
 
     Note that empty matches are ignored.
     """
@@ -654,7 +654,7 @@ def find_token_matches(
     prompt: list[int],
     prompt_updates: Sequence[BoundPromptUpdate],
 ) -> Sequence[PromptTargetMatch]:
-    """Return each target of :code:`prompt_updates` found in :code:`prompt`."""
+    """Return each target of `prompt_updates` found in `prompt`."""
 
     def get_matches(update: BoundPromptUpdate):
         target = update.target
@@ -680,7 +680,7 @@ def find_text_matches(
     prompt: str,
     prompt_updates: Sequence[BoundPromptUpdate],
 ) -> Sequence[PromptTargetMatch]:
-    """Return each target of :code:`prompt_updates` found in :code:`prompt`."""
+    """Return each target of `prompt_updates` found in `prompt`."""
 
     def get_matches(update: BoundPromptUpdate):
         target = update.target
@@ -707,7 +707,7 @@ def _resolve_matches(
     mm_matches: Mapping[str, Sequence[PromptTargetMatch]],
 ) -> list[PromptTargetMatch]:
     """
-    Resolve :code:`mm_matches` to ensure that there are no overlapping matches,
+    Resolve `mm_matches` to ensure that there are no overlapping matches,
     and sort them such that earlier matches take priority over later ones.
     """
     matches = [m for matches in mm_matches.values() for m in matches]
@@ -731,7 +731,7 @@ def _apply_matches(
     mm_matches: Mapping[str, Sequence[PromptTargetMatch]],
     mm_item_counts: Mapping[str, int],
 ) -> list[_S]:
-    """Apply the updates in :code:`mm_matches` to :code:`prompt`."""
+    """Apply the updates in `mm_matches` to `prompt`."""
     out_seqs = list[Union[str, list[int]]]()
     prev_end_idx = 0
     next_idx_by_modality = defaultdict[str, int](lambda: 0)
@@ -780,7 +780,7 @@ def apply_token_matches(
     mm_matches: Mapping[str, Sequence[PromptTargetMatch]],
     mm_item_counts: Mapping[str, int],
 ) -> list[int]:
-    """Apply the updates in :code:`mm_matches` to :code:`prompt`."""
+    """Apply the updates in `mm_matches` to `prompt`."""
     if not mm_matches:
         return prompt
 
@@ -794,7 +794,7 @@ def apply_text_matches(
     mm_matches: Mapping[str, Sequence[PromptTargetMatch]],
     mm_item_counts: Mapping[str, int],
 ) -> str:
-    """Apply the updates in :code:`mm_matches` to :code:`prompt`."""
+    """Apply the updates in `mm_matches` to `prompt`."""
     if not mm_matches:
         return prompt
 
@@ -809,7 +809,7 @@ def _iter_placeholders(
     mm_item_counts: Mapping[str, int],
 ) -> Iterable[PlaceholderFeaturesInfo]:
     """
-    Yield each set of placeholder tokens found in :code:`prompt`.
+    Yield each set of placeholder tokens found in `prompt`.
 
     Matches are exclusive even when multiple modalities share
     the same placeholder tokens. In that case, the modality that
@@ -1016,7 +1016,7 @@ class ProcessingCache:
     ) -> None:
         """
         Put a processed multi-modal item into the cache
-        according to its dependencies (see :meth:`get`).
+        according to its dependencies (see {meth}`get`).
         """
         cache_key = MultiModalHasher.hash_kwargs(model_id=model_id,
                                                  **{modality: input_item},
@@ -1083,7 +1083,7 @@ _I = TypeVar("_I", bound=BaseProcessingInfo)
 
 MultiModalHashes = dict[str, list[str]]
 """
-A collection of hashes with a similar structure as :class:`MultiModalKwargs`.
+A collection of hashes with a similar structure as {class}`MultiModalKwargs`.
 """
 
 
@@ -1091,7 +1091,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
     """
     Abstract base class to process multi-modal inputs to be used in vLLM.
 
-    Not to be confused with :class:`transformers.ProcessorMixin`.
+    Not to be confused with {class}`transformers.ProcessorMixin`.
     """
 
     def __init__(self,
@@ -1118,10 +1118,10 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
     def _get_data_parser(self) -> MultiModalDataParser:
         """
         Construct a parser to preprocess multi-modal data items
-        before passing them to :meth:`_get_hf_mm_data`.
+        before passing them to {meth}`_get_hf_mm_data`.
 
         You can support additional modalities by creating a subclass
-        of :class:`MultiModalDataParser` that has additional subparsers.
+        of {class}`MultiModalDataParser` that has additional subparsers.
         """
         return MultiModalDataParser()
 
@@ -1130,8 +1130,8 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         mm_data: MultiModalDataDict,
     ) -> MultiModalDataItems:
         """
-        Normalize :class:`MultiModalDataDict` to :class:`MultiModalDataItems`
-        before passing them to :meth:`_get_hf_mm_data`.
+        Normalize {class}`MultiModalDataDict` to {class}`MultiModalDataItems`
+        before passing them to {meth}`_get_hf_mm_data`.
         """
         mm_items = self.data_parser.parse_mm_data(mm_data)
         supported_mm_limits = self.info.get_supported_mm_limits()
@@ -1183,7 +1183,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         inputs.
 
         Moreover, this information is critical to determine the token positions
-        in order to construct  :class:`~vllm-multimodal.input.PlaceholderRange`
+        in order to construct  {class}`~vllm-multimodal.input.PlaceholderRange`
         for each multi-modal item.
         """
         raise NotImplementedError
@@ -1237,8 +1237,8 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         """
         Return whether the HF processor applies prompt updates.
 
-        For most HF processors, this should be :code:`True` when multi-modal
-        data items are passed, but :code:`False` when multi-modal embeddings
+        For most HF processors, this should be `True` when multi-modal
+        data items are passed, but `False` when multi-modal embeddings
         are passed.
         """
         return not any(
@@ -1307,7 +1307,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         Most HF processors accept prompt text but not prompt tokens.
         If the HF processor adds or removes tokens that are not related to
         multi-modal data, you should override this method so it is consistent
-        with the output of :meth:`_apply_hf_processor_text_only` on the
+        with the output of {meth}`_apply_hf_processor_text_only` on the
         corresponding text.
         """
         return prompt_tokens
@@ -1322,7 +1322,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
 
         Since HF processor requires that text and multi-modal items
         correspond to each other, we generate dummy text using
-        :class:`DummyInputsBuilder` to go along with the multi-modal data.
+        {class}`DummyInputsBuilder` to go along with the multi-modal data.
         """
         mm_counts = mm_items.get_all_counts()
 
@@ -1346,10 +1346,10 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         Apply the HF processor on the prompt text and multi-modal data.
 
         In addition, return whether prompt updates have been applied
-        (for most HF processors, this should be :code:`True`).
+        (for most HF processors, this should be `True`).
 
         Note:
-            If :code:`enable_hf_prompt_update=False`, we use HF processor
+            If `enable_hf_prompt_update=False`, we use HF processor
             to perform prompt updates if available; HF processor requires
             that the prompt corresponds to multi-modal items.
         """

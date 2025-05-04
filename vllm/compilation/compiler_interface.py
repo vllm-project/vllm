@@ -39,7 +39,7 @@ class CompilerInterface:
         Gather all the relevant information from the vLLM config,
         to compute a hash so that we can cache the compiled model.
 
-        See :meth:`VllmConfig.compute_hash` to check what information
+        See {meth}`VllmConfig.compute_hash` to check what information
         is already considered by default. This function should only
         consider the information that is specific to the compiler.
         """
