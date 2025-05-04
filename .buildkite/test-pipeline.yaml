@@ -39,7 +39,7 @@ steps:
   - pip install -r ../../requirements/docs.txt
   - SPHINXOPTS=\"-W\" make html
   # Check API reference (if it fails, you may have missing mock imports)
-  - grep \"sig sig-object py\" build/html/api/inference_params.html
+  - grep \"sig sig-object py\" build/html/api/vllm/vllm.sampling_params.html
 
 - label: Async Engine, Inputs, Utils, Worker Test # 24min
   source_file_dependencies:

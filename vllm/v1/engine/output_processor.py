@@ -308,7 +308,7 @@ class OutputProcessor:
             * If there is no queue (for usage with LLMEngine), 
               return a list of RequestOutput objects.
 
-        ****************** NOTE FOR DEVELOPERS ******************
+        NOTE FOR DEVELOPERS
 
         vLLM V1 minimizes the number of python loops over the full
         batch to ensure system overheads are minimized. This is the 
@@ -316,8 +316,6 @@ class OutputProcessor:
 
         If you need to touch every element of the batch, do it from
         within the loop below.
-        
-        **********************************************************
         """
 
         request_outputs: list[RequestOutput] = []

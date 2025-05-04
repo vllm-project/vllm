@@ -1911,10 +1911,10 @@ class SchedulerConfig:
 
     cuda_graph_sizes: list[int] = field(default_factory=lambda: [512])
     """Cuda graph capture sizes, default is 512.
-    1. if one value is provided, then the capture list would follow the pattern:
-        [1, 2, 4] + [i for i in range(8, cuda_graph_sizes + 1, 8)]
-    2. more than one value (e.g. 1 2 128) is provided,
-        then the capture list will follow the provided list."""
+    1. if one value is provided, then the capture list would follow the
+    pattern: [1, 2, 4] + [i for i in range(8, cuda_graph_sizes + 1, 8)]
+    2. more than one value (e.g. 1 2 128) is provided, then the capture list
+    will follow the provided list."""
 
     delay_factor: float = 0.0
     """Apply a delay (of delay factor multiplied by previous
@@ -2888,7 +2888,7 @@ class PoolerConfig:
     pooling_type: Optional[str] = None
     """
     The pooling method of the pooling model. This should be a key in
-    :class:`vllm.model_executor.layers.pooler.PoolingType`.
+    {class}`vllm.model_executor.layers.pooler.PoolingType`.
     """
 
     normalize: Optional[bool] = None

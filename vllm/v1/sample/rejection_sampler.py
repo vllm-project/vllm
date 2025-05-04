@@ -75,7 +75,7 @@ class RejectionSampler(nn.Module):
                 outside of the rejection sampler with the default sampling
                 strategy. It allows for more flexibility in the sampling
                 process such as top_p, top_k sampling.
-            sampling_metadata (SamplingMetadata):
+            sampling_metadata (vllm.v1.sample.metadata.SamplingMetadata):
                 Additional metadata needed for sampling, such as temperature,
                 top-k/top-p parameters, or other relevant information.
         Returns:

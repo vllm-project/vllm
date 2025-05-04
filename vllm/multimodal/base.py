@@ -64,35 +64,35 @@ class MultiModalPlaceholderMap:
 
         Examples:
 
-        .. code-block::
+        ```
+        Prompt:    |AAAA BBBB What's in these images?|
+        Positions: |.................................|
 
-            Prompt:    |AAAA BBBB What's in these images?|
-            Positions: |.................................|
+            images      = [A, B]
+            src_ranges  = [(0, 4), (4, 8)]
+            dest_ranges = [(0, 4), (5, 9)]
 
-                images      = [A, B]
-                src_ranges  = [(0, 4), (4, 8)]
-                dest_ranges = [(0, 4), (5, 9)]
+        Prompt:    |AAAA BBBB What's in these images?|
+        Positions: |  .....                          |
 
-            Prompt:    |AAAA BBBB What's in these images?|
-            Positions: |  .....                          |
+            images      = [A, B]
+            src_ranges  = [(2, 4), (4, 6)]
+            dest_ranges = [(0, 2), (3, 5)]
 
-                images      = [A, B]
-                src_ranges  = [(2, 4), (4, 6)]
-                dest_ranges = [(0, 2), (3, 5)]
+        Prompt:    |AAAA BBBB What's in these images?|
+        Positions: |     .........                   |
 
-            Prompt:    |AAAA BBBB What's in these images?|
-            Positions: |     .........                   |
+            images      = [B]
+            src_ranges  = [(0, 4)]
+            dest_ranges = [(0, 4)]
 
-                images      = [B]
-                src_ranges  = [(0, 4)]
-                dest_ranges = [(0, 4)]
+        Prompt:    |AAAA BBBB What's in these images?|
+        Positions: |          .......................|
 
-            Prompt:    |AAAA BBBB What's in these images?|
-            Positions: |          .......................|
-
-                images      = []
-                src_ranges  = []
-                dest_ranges = []
+            images      = []
+            src_ranges  = []
+            dest_ranges = []
+        ```
         """
         seq_mm_data = seq_group.multi_modal_data
         seq_mm_placeholders = seq_group.multi_modal_placeholders

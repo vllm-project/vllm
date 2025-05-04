@@ -19,7 +19,6 @@ import cloudpickle
 import torch.nn as nn
 
 from vllm.logger import init_logger
-from vllm.utils import is_in_doc_build
 
 from .interfaces import (has_inner_state, has_noops, is_attention_free,
                          is_hybrid, supports_cross_encoding,
@@ -375,13 +374,13 @@ class _ModelRegistry:
         """
         Register an external model to be used in vLLM.
 
-        :code:`model_cls` can be either:
+        `model_cls` can be either:
 
-        - A :class:`torch.nn.Module` class directly referencing the model.
-        - A string in the format :code:`<module>:<class>` which can be used to
+        - A {class}`torch.nn.Module` class directly referencing the model.
+        - A string in the format `<module>:<class>` which can be used to
           lazily import the model. This is useful to avoid initializing CUDA
           when importing the model and thus the related error
-          :code:`RuntimeError: Cannot re-initialize CUDA in forked subprocess`.
+          `RuntimeError: Cannot re-initialize CUDA in forked subprocess`.
         """
         if not isinstance(model_arch, str):
             msg = f"`model_arch` should be a string, not a {type(model_arch)}"
@@ -400,8 +399,7 @@ class _ModelRegistry:
                 raise ValueError(msg)
 
             model = _LazyRegisteredModel(*split_str)
-        elif isinstance(model_cls, type) and (is_in_doc_build() or issubclass(
-                model_cls, nn.Module)):
+        elif isinstance(model_cls, type) and issubclass(model_cls, nn.Module):
             model = _RegisteredModel.from_model_cls(model_cls)
         else:
             msg = ("`model_cls` should be a string or PyTorch model class, "

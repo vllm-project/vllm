@@ -13,16 +13,17 @@
 # documentation root, use os.path.abspath to make it absolute, like shown here.
 
 import datetime
-import inspect
 import logging
 import os
+import re
 import sys
+from pathlib import Path
 
 import requests
-from sphinx.ext import autodoc
 
 logger = logging.getLogger(__name__)
-sys.path.append(os.path.abspath("../.."))
+REPO_ROOT = Path(__file__).resolve().parent.parent.parent
+sys.path.append(os.path.abspath(REPO_ROOT))
 
 # -- Project information -----------------------------------------------------
 
@@ -40,8 +41,7 @@ extensions = [
     "sphinx.ext.linkcode",
     "sphinx.ext.intersphinx",
     "sphinx_copybutton",
-    "sphinx.ext.autodoc",
-    "sphinx.ext.autosummary",
+    "autodoc2",
     "myst_parser",
     "sphinxarg.ext",
     "sphinx_design",
@@ -49,7 +49,22 @@ extensions = [
 ]
 myst_enable_extensions = [
     "colon_fence",
+    "fieldlist",
 ]
+autodoc2_packages = [
+    {
+        "path": "../../vllm",
+        "exclude_dirs": ["__pycache__", "third_party"],
+    },
+]
+autodoc2_output_dir = "api"
+autodoc2_render_plugin = "myst"
+autodoc2_hidden_objects = ["dunder", "private", "inherited"]
+autodoc2_docstring_parser_regexes = [
+    (".*", "docs.source.autodoc2_docstring_parser"),
+]
+autodoc2_sort_names = True
+autodoc2_index_template = None
 
 # Add any paths that contain templates here, relative to this directory.
 templates_path = ['_templates']
@@ -77,6 +92,11 @@ html_theme_options = {
     'repository_url': 'https://github.com/vllm-project/vllm',
     'use_repository_button': True,
     'use_edit_page_button': True,
+    # Prevents the full API being added to the left sidebar of every page.
+    # Reduces build time by 2.5x and reduces build size from ~225MB to ~95MB.
+    'collapse_navbar': True,
+    # Makes API visible in the right sidebar on API reference pages.
+    'show_toc_level': 3,
 }
 # Add any paths that contain custom static files (such as style sheets) here,
 # relative to this directory. They are copied after the builtin static files,
@@ -164,73 +184,64 @@ def linkcode_resolve(domain, info):
         return None
     if not info['module']:
         return None
-    filename = info['module'].replace('.', '/')
-    module = info['module']
 
-    # try to determine the correct file and line number to link to
-    obj = sys.modules[module]
+    # Get path from module name
+    file = Path(f"{info['module'].replace('.', '/')}.py")
+    path = REPO_ROOT / file
+    if not path.exists():
+        path = REPO_ROOT / file.with_suffix("") / "__init__.py"
+    if not path.exists():
+        return None
 
-    # get as specific as we can
-    lineno: int = 0
-    filename: str = ""
-    try:
-        for part in info['fullname'].split('.'):
-            obj = getattr(obj, part)
+    # Get the line number of the object
+    with open(path) as f:
+        lines = f.readlines()
+    name = info['fullname'].split(".")[-1]
+    pattern = fr"^( {{4}})*((def|class) )?{name}\b.*"
+    for lineno, line in enumerate(lines, 1):
+        if not line or line.startswith("#"):
+            continue
+        if re.match(pattern, line):
+            break
 
-            # Skip decorator wrappers by checking if the object is a function
-            # and has a __wrapped__ attribute (which decorators typically set)
-            while hasattr(obj, '__wrapped__'):
-                obj = obj.__wrapped__
+    # If the line number is not found, return None
+    if lineno == len(lines):
+        return None
 
-            if not (inspect.isclass(obj) or inspect.isfunction(obj)
-                    or inspect.ismethod(obj)):
-                obj = obj.__class__  # Get the class of the instance
-
-            lineno = inspect.getsourcelines(obj)[1]
-            filename = (inspect.getsourcefile(obj)
-                        or f"{filename}.py").split("vllm/", 1)[1]
-    except Exception:
-        # For some things, like a class member, won't work, so
-        # we'll use the line number of the parent (the class)
-        pass
-
-    if filename.startswith("checkouts/"):
+    # If the line number is found, create the URL
+    filename = path.relative_to(REPO_ROOT)
+    if "checkouts" in path.parts:
         # a PR build on readthedocs
-        pr_number = filename.split("/")[1]
-        filename = filename.split("/", 2)[2]
+        pr_number = REPO_ROOT.name
         base, branch = get_repo_base_and_branch(pr_number)
         if base and branch:
             return f"https://github.com/{base}/blob/{branch}/{filename}#L{lineno}"
-
     # Otherwise, link to the source file on the main branch
     return f"https://github.com/vllm-project/vllm/blob/main/{filename}#L{lineno}"
 
 
-# Mock out external dependencies here, otherwise the autodoc pages may be blank.
+# Mock out external dependencies here, otherwise sphinx-argparse won't work.
 autodoc_mock_imports = [
+    "huggingface_hub",
+    "pydantic",
+    "zmq",
+    "cloudpickle",
+    "aiohttp",
+    "starlette",
     "blake3",
-    "compressed_tensors",
     "cpuinfo",
-    "cv2",
-    "torch",
     "transformers",
     "psutil",
-    "prometheus_client",
-    "sentencepiece",
     "vllm._C",
     "PIL",
     "numpy",
-    'triton',
     "tqdm",
-    "tensorizer",
-    "pynvml",
-    "outlines",
-    "xgrammar",
-    "librosa",
-    "soundfile",
-    "gguf",
-    "lark",
-    "decord",
+    # The mocks below are required by
+    # docs/source/serving/openai_compatible_server.md's
+    # vllm.entrypoints.openai.cli_args
+    "openai",
+    "fastapi",
+    "partial_json_parser",
 ]
 
 for mock_target in autodoc_mock_imports:
@@ -240,18 +251,6 @@ for mock_target in autodoc_mock_imports:
             "autodoc_mock_imports cannot mock modules that have already "
             "been loaded into sys.modules when the sphinx build starts.",
             mock_target)
-
-
-class MockedClassDocumenter(autodoc.ClassDocumenter):
-    """Remove note about base class when a class is derived from object."""
-
-    def add_line(self, line: str, source: str, *lineno: int) -> None:
-        if line == "   Bases: :py:class:`object`":
-            return
-        super().add_line(line, source, *lineno)
-
-
-autodoc.ClassDocumenter = MockedClassDocumenter
 
 intersphinx_mapping = {
     "python": ("https://docs.python.org/3", None),
@@ -263,8 +262,5 @@ intersphinx_mapping = {
     "torch": ("https://pytorch.org/docs/stable", None),
     "psutil": ("https://psutil.readthedocs.io/en/stable", None),
 }
-
-autodoc_preserve_defaults = True
-autodoc_warningiserror = True
 
 navigation_with_keys = False

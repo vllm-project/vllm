@@ -14,7 +14,7 @@ Usually, this is automatically inferred so you don't have to specify it.
 ## Offline Inference
 
 The {class}`~vllm.LLM` class provides various methods for offline inference.
-See [Engine Arguments](#engine-args) for a list of options when initializing the model.
+See <project:#configuration> for a list of options when initializing the model.
 
 ### `LLM.generate`
 

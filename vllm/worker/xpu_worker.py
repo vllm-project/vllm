@@ -26,7 +26,7 @@ logger = init_logger(__name__)
 
 class XPUWorker(LoRANotSupportedWorkerBase, Worker):
     """A worker class that executes (a partition of) the model on a GPU.
-    
+
     Each worker is associated with a single XPU device. The worker is 
     responsible for maintaining the KV cache and executing the model on the 
     XPU. In case of distributed inference, each worker is assigned a partition
@@ -93,9 +93,10 @@ class XPUWorker(LoRANotSupportedWorkerBase, Worker):
         Then, it calculate the maximum possible number of GPU and CPU blocks
         that can be allocated with the remaining free memory.
 
-        .. tip::
-            You may limit the usage of GPU memory
-            by adjusting the `gpu_memory_utilization` parameter.
+        :::{tip}
+        You may limit the usage of GPU memory
+        by adjusting the `gpu_memory_utilization` parameter.
+        :::
         """
         # Profile the memory usage of the model and get the maximum number of
         # cache blocks that can be allocated with the remaining free memory.

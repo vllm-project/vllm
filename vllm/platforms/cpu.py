@@ -19,8 +19,6 @@ if TYPE_CHECKING:
 else:
     VllmConfig = None
 
-logger = init_logger(__name__)
-
 
 class CpuPlatform(Platform):
     _enum = PlatformEnum.CPU

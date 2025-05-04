@@ -965,7 +965,7 @@ def select_tiling(
 
 class MolmoProcessorWrapper:
     """
-    Wraps :class:`MolmoProcessor` so that it can be called directly.
+    Wraps {class}`MolmoProcessor` so that it can be called directly.
 
     The original definition can be found here:
     https://huggingface.co/allenai/Molmo-7B-D-0924/blob/main/preprocessing_molmo.py

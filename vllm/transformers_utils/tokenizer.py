@@ -39,9 +39,9 @@ def decode_tokens(
 ) -> str:
     """
     Backend-agnostic equivalent of HF's
-    :code:`tokenizer.decode(token_ids, ...)`.
+    `tokenizer.decode(token_ids, ...)`.
 
-    :code:`skip_special_tokens=None` means to use the backend's default
+    `skip_special_tokens=None` means to use the backend's default
     settings.
     """
     if skip_special_tokens is not None:
@@ -61,9 +61,9 @@ def encode_tokens(
 ) -> list[int]:
     """
     Backend-agnostic equivalent of HF's
-    :code:`tokenizer.encode(text, ...)`.
+    `tokenizer.encode(text, ...)`.
 
-    :code:`add_special_tokens=None` means to use the backend's default
+    `add_special_tokens=None` means to use the backend's default
     settings.
     """
 

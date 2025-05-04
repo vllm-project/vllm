@@ -309,8 +309,8 @@ class LRUCache(cachetools.LRUCache[_K, _V], Generic[_K, _V]):
         """
         Gets the cumulative number of hits and queries against this cache.
 
-        If :code:`delta=True`, instead gets these statistics
-        since the last call that also passed :code:`delta=True`.
+        If `delta=True`, instead gets these statistics
+        since the last call that also passed `delta=True`.
         """
         info = CacheInfo(hits=self._hits, total=self._total)
 
@@ -983,7 +983,7 @@ def flatten_2d_lists(lists: Iterable[Iterable[T]]) -> list[T]:
 
 def full_groupby(values: Iterable[_V], *, key: Callable[[_V], _K]):
     """
-    Unlike :class:`itertools.groupby`, groups are not broken by
+    Unlike {class}`itertools.groupby`, groups are not broken by
     non-contiguous data.
     """
     groups = defaultdict[_K, list[_V]](list)
@@ -1773,14 +1773,6 @@ def get_cuda_view_from_cpu_tensor(cpu_tensor: torch.Tensor) -> torch.Tensor:
     return torch.ops._C.get_cuda_view_from_cpu_tensor(cpu_tensor)
 
 
-def is_in_doc_build() -> bool:
-    try:
-        from sphinx.ext.autodoc.mock import _MockModule
-        return isinstance(torch, _MockModule)
-    except ModuleNotFoundError:
-        return False
-
-
 def import_from_path(module_name: str, file_path: Union[str, os.PathLike]):
     """
     Import a Python file according to its file path.
@@ -1820,10 +1812,11 @@ class _PlaceholderBase:
     Disallows downstream usage of placeholder modules.
 
     We need to explicitly override each dunder method because
-    :meth:`__getattr__` is not called when they are accessed.
+    {meth}`__getattr__` is not called when they are accessed.
 
-    See also:
-        [Special method lookup](https://docs.python.org/3/reference/datamodel.html#special-lookup)
+    :::{seealso}
+    [Special method lookup](https://docs.python.org/3/reference/datamodel.html#special-lookup)
+    :::
     """
 
     def __getattr__(self, key: str) -> Never:
@@ -2052,9 +2045,6 @@ def direct_register_custom_op(
     library object. If you want to bind the operator to a different library,
     make sure the library object is alive when the operator is used.
     """
-    if is_in_doc_build():
-        return
-
     if not supports_custom_op():
         from vllm.platforms import current_platform
         assert not current_platform.is_cuda_alike(), (

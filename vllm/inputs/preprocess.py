@@ -224,7 +224,7 @@ class InputPreprocessor:
         lora_request: Optional[LoRARequest],
         tokenization_kwargs: Optional[dict[str, Any]] = None,
     ) -> list[int]:
-        """Async version of :meth:`_tokenize_prompt`."""
+        """Async version of {meth}`_tokenize_prompt`."""
         tokenizer = self.get_tokenizer_group()
         tokenization_kwargs = self._get_tokenization_kw(tokenization_kwargs)
 
@@ -287,7 +287,7 @@ class InputPreprocessor:
         lora_request: Optional[LoRARequest],
         return_mm_hashes: bool = False,
     ) -> MultiModalInputs:
-        """Async version of :meth:`_process_multimodal`."""
+        """Async version of {meth}`_process_multimodal`."""
         tokenizer = await self._get_mm_tokenizer_async(lora_request)
 
         mm_processor = self.mm_registry.create_processor(self.model_config,
@@ -472,7 +472,7 @@ class InputPreprocessor:
 
         Returns:
 
-        * :class:`SingletonInputs` instance
+        * {class}`SingletonInputs` instance
         """
         parsed = parse_singleton_prompt(prompt)
 
@@ -508,7 +508,7 @@ class InputPreprocessor:
         lora_request: Optional[LoRARequest] = None,
         return_mm_hashes: bool = False,
     ) -> SingletonInputs:
-        """Async version of :meth:`_prompt_to_llm_inputs`."""
+        """Async version of {meth}`_prompt_to_llm_inputs`."""
         parsed = parse_singleton_prompt(prompt)
 
         if parsed["type"] == "embeds":
@@ -644,7 +644,7 @@ class InputPreprocessor:
     ) -> EncoderDecoderInputs:
         """
         For encoder/decoder models only:
-        Process an input prompt into an :class:`EncoderDecoderInputs` instance.
+        Process an input prompt into an {class}`EncoderDecoderInputs` instance.
 
         There are two types of input prompts:
         singleton prompts which carry only the
@@ -670,7 +670,7 @@ class InputPreprocessor:
 
         Returns:
 
-        * :class:`EncoderDecoderInputs` instance
+        * {class}`EncoderDecoderInputs` instance
         """
         encoder_inputs: SingletonInputs
         decoder_inputs: Optional[SingletonInputs]
@@ -710,7 +710,7 @@ class InputPreprocessor:
         prompt: PromptType,
         tokenization_kwargs: Optional[dict[str, Any]] = None,
     ) -> EncoderDecoderInputs:
-        """Async version of :meth:`_process_encoder_decoder_prompt`."""
+        """Async version of {meth}`_process_encoder_decoder_prompt`."""
         encoder_inputs: SingletonInputs
         decoder_inputs: Optional[SingletonInputs]
 
@@ -778,7 +778,7 @@ class InputPreprocessor:
     ) -> DecoderOnlyInputs:
         """
         For decoder-only models:
-        Process an input prompt into an :class:`DecoderOnlyInputs` instance.
+        Process an input prompt into an {class}`DecoderOnlyInputs` instance.
 
         Arguments:
 
@@ -789,7 +789,7 @@ class InputPreprocessor:
 
         Returns:
 
-        * :class:`DecoderOnlyInputs` instance
+        * {class}`DecoderOnlyInputs` instance
         """
 
         prompt_comps = self._prompt_to_llm_inputs(
@@ -812,7 +812,7 @@ class InputPreprocessor:
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
         return_mm_hashes: bool = False,
     ) -> DecoderOnlyInputs:
-        """Async version of :meth:`_process_decoder_only_prompt`."""
+        """Async version of {meth}`_process_decoder_only_prompt`."""
         prompt_comps = await self._prompt_to_llm_inputs_async(
             prompt,
             tokenization_kwargs=tokenization_kwargs,
@@ -863,7 +863,7 @@ class InputPreprocessor:
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
         return_mm_hashes: bool = False,
     ) -> ProcessorInputs:
-        """Async version of :meth:`preprocess`."""
+        """Async version of {meth}`preprocess`."""
         if self.model_config.is_encoder_decoder:
             assert not return_mm_hashes, (
                 "Multimodal hashes for encoder-decoder models should not be ",

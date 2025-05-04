@@ -167,4 +167,4 @@ class HTTPConnection:
 
 
 global_http_connection = HTTPConnection()
-"""The global :class:`HTTPConnection` instance used by vLLM."""
+"""The global {class}`HTTPConnection` instance used by vLLM."""
