@@ -384,7 +384,7 @@ def awq_dequantize(qweight: torch.Tensor,
     if envs.VLLM_USE_TRITON_AWQ:
         from vllm.model_executor.layers.quantization.awq_triton import (
             awq_dequantize_triton)
-        return awq_dequantize_triton(qweight, scales, zeros, split_k_iters, thx, thy, dtype)
+        return awq_dequantize_triton(qweight, scales, zeros, split_k_iters, thx, thy)
     return torch.ops._C.awq_dequantize(qweight, scales, zeros, split_k_iters, thx, thy, dtype)
 
 
