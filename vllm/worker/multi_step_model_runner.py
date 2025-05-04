@@ -734,11 +734,11 @@ def _pythonize_sampler_output(
     cache: Optional[PythonizationCache],
 ) -> None:
     """ This function is only called when the output tensors are ready. 
-    See :class:`ModelOutput`. 
+    See {class}`ModelOutput`. 
     
     Modifies `output.outputs` and `pinned_sampled_token_buffer` in-place, 
     adding a Pythonized output data structure
-    (:class:`CompletionSequenceGroupOutput`) for each :class:`SequenceGroup`.
+    ({class}`CompletionSequenceGroupOutput`) for each {class}`SequenceGroup`.
 
     Args:
       model_input
