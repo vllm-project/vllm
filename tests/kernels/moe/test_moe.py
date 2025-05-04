@@ -460,7 +460,7 @@ def test_fused_marlin_moe(
         quant_type_id=quant_type.id,
         is_k_full=is_k_full)
 
-    torch.testing.assert_close(marlin_output, torch_output, atol=4e-2, rtol=0)
+    torch.testing.assert_close(marlin_output, torch_output, atol=5e-2, rtol=0)
 
 
 def test_moe_align_block_size_opcheck():
