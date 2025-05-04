@@ -1431,7 +1431,7 @@ class EngineArgs:
         """Set Default Arguments for V1 Engine."""
 
         # V1 always uses chunked prefills.
-        self.enable_chunked_prefill = True
+        self.enable_chunked_prefill = False # COT
 
         # V1 enables prefix caching by default.
         if self.enable_prefix_caching is None:

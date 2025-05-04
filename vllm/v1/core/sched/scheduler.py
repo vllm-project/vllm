@@ -70,7 +70,7 @@ class Scheduler(SchedulerInterface):
         self.enable_dynasor_abort=True
         self.tokenizer = get_tokenizer(self.vllm_config.model_config.tokenizer)
         self.probe_answers={}
-        self.probe_responses={}
+        self.requests_to_abort=[]
 
         # include_finished_set controls whether a separate set of finished
         # request ids should be included in the EngineCoreOutputs returned
@@ -174,6 +174,8 @@ class Scheduler(SchedulerInterface):
         # num_tokens_with_spec. This is general enough to cover
         # chunked prefills, prefix caching, speculative decoding,
         # and the "jump decoding" optimization in the future.
+        for request in self.requests_to_abort:
+            self.finish_requests(request, RequestStatus.FINISHED_ABORTED)
 
         scheduled_new_reqs: list[Request] = []
         scheduled_resumed_reqs: list[Request] = []
@@ -670,12 +672,15 @@ class Scheduler(SchedulerInterface):
             encoder_inputs_to_schedule.append(i)
         return encoder_inputs_to_schedule, num_new_tokens, encoder_budget
 
-    def _create_and_add_new_request(self, parent_request: Request,decode_count) -> None:
+    def _create_and_add_new_request(self, parent_request: Request,decode_count, early_exit=False) -> None:
         """Create a new prefill Request using (original prompt + decoded outputs + custom string)."""
         original_prompt_ids = list(parent_request.prompt_token_ids)
         decoded_output_ids = list(parent_request.output_token_ids[:decode_count])
         # probe msg  
-        custom_text = "... Oh, I suddenly got the answer to the whole problem, **Final Answer**\n\n\\[ \\boxed{"
+        if early_exit:  
+            custom_text="</think>"
+        else:
+            custom_text = "... Oh, I suddenly got the answer to the whole problem, **Final Answer**\n\n\\[ \\boxed{"
         custom_token_ids = list(self.tokenizer.encode(custom_text))
         # new prefill
         new_prompt_token_ids = original_prompt_ids + decoded_output_ids + custom_token_ids
@@ -716,9 +721,8 @@ class Scheduler(SchedulerInterface):
         # loop can be a performance bottleneck. We should do our best to avoid
         # expensive operations inside the loop.
         self.running = deque(sorted(self.running, key=lambda r: 0 if "probe" in r.request_id else 1))
-        print("self.running order:")
+        requests_to_abort = []
         for request in self.running:
-            print(request.request_id)
             if len(request.output_token_ids) in [5, 15] and "probe" not in request.request_id:
                     # logger_myown.info(
                     #     f"Request {request.request_id} reached {len(request.output_token_ids)} decoded tokens!")
@@ -783,14 +787,17 @@ class Scheduler(SchedulerInterface):
                         decoded_text = self.tokenizer.decode(request.output_token_ids, skip_special_tokens=True)
                         final_answer = extract_final_answer(decoded_text)
                         self.probe_answers.setdefault(main_id, []).append(final_answer)
-                        # print(f"[Probe] Probe request {request.request_id} finished with answer: {final_answer}")
-                        # print(self.probe_answers)
+                        print(f"[Probe] Probe request {request.request_id} finished with answer: {final_answer}")
+                        print(self.probe_answers)
                         answers = self.probe_answers[main_id]
                         if len(answers) >= 2 and answers[-1] == answers[-2]:
-                            # print(f"[Dynasor-Abort] Confident answer detected. Aborting {main_id}.")
-                            self.finish_requests(main_id, RequestStatus.FINISHED_ABORTED)
-                            # Optional: clear answers to avoid re-aborting
-                            self.probe_answers[main_id] = []
+                            print(f"[Dynasor-Abort] Confident answer detected. Aborting {main_id}.")
+                            
+                            main_req= self.requests.get(main_id)
+                            self._create_and_add_new_request(main_req, len(main_req.output_token_ids), early_exit=True)
+                            self.requests_to_abort.append(main_id)
+                            
+
 
                     self._free_request(request)
                     del new_token_ids[num_new:]  # Trim new tokens if needed.
@@ -844,6 +851,8 @@ class Scheduler(SchedulerInterface):
 
 
             
+        
+
         # Return the cached request data to the queue so they can be reused.
         for req_data in scheduler_output.scheduled_cached_reqs:
             # NOTE(rob): since we free stopped reqs above, adding stopped reqs
