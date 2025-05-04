@@ -49,9 +49,8 @@ async def client(server):
     "model_name",
     [MODEL_NAME],
 )
-async def test_invalid_json_schema(
-    client: openai.AsyncOpenAI, model_name: str
-) -> None:
+async def test_invalid_json_schema(client: openai.AsyncOpenAI,
+                                   model_name: str) -> None:
     invalid_json_schema = {
         "$defs": {
             "CarType": {
@@ -61,28 +60,32 @@ async def test_invalid_json_schema(
             }
         },
         "properties": {
-            "brand": {"title": "Brand", "type": "string"},
-            "model": {"title": "Model", "type": "string"},
-            "car_type": {"$ref": "#/$defs/CarType"},
+            "brand": {
+                "title": "Brand",
+                "type": "string"
+            },
+            "model": {
+                "title": "Model",
+                "type": "string"
+            },
+            "car_type": {
+                "$ref": "#/$defs/CarType"
+            },
             "foo": "bar",
         },
         "required": ["brand", "model", "car_type"],
         "title": "CarDescription",
         "type": "object",
     }
-    prompt = (
-        "Generate a JSON with the brand, model and car_type of"
-        "the most iconic car from the 90's"
-    )
+    prompt = ("Generate a JSON with the brand, model and car_type of"
+              "the most iconic car from the 90's")
     with pytest.raises((openai.BadRequestError, openai.APIError)):
         await client.chat.completions.create(
             model=model_name,
-            messages=[
-                {
-                    "role": "user",
-                    "content": prompt,
-                }
-            ],
+            messages=[{
+                "role": "user",
+                "content": prompt,
+            }],
             extra_body={"guided_json": invalid_json_schema},
         )
 
@@ -142,4 +145,3 @@ async def test_invalid_grammar(client: openai.AsyncOpenAI, model_name: str):
             }],
             extra_body={"guided_grammar": invalid_simplified_sql_grammar},
         )
-
