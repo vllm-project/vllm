@@ -21,7 +21,8 @@ from vllm.engine.llm_engine import LLMEngine
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.chat_utils import (apply_hf_chat_template,
                                          parse_chat_messages,
-                                         resolve_chat_template_content_format)
+                                         resolve_chat_template_content_format,
+                                         resolve_hf_chat_template)
 from vllm.inputs import InputProcessingContext
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.utils import (encode_audio_base64, encode_image_base64,
@@ -125,6 +126,13 @@ def get_prompt(model_config: ModelConfig, modality: ModalityStr) -> str:
     chat_template = None
     tools = None
 
+    chat_template = resolve_hf_chat_template(
+        tokenizer,
+        chat_template,
+        tools,
+        trust_remote_code=True,
+    )
+
     content_format = resolve_chat_template_content_format(
         chat_template,
         tools,
@@ -135,25 +143,38 @@ def get_prompt(model_config: ModelConfig, modality: ModalityStr) -> str:
 
     rng = np.random.RandomState(0)
     if modality == "audio":
-        dummy_url = encode_audio_base64(*random_audio(rng, 1024, 4096, 16000))
+        audio_base64 = encode_audio_base64(
+            *random_audio(rng, 1024, 4096, 16000))
+        mm_content = {
+            "type": "audio_url",
+            "audio_url": {
+                "url": f"data:audio/wav;base64,{audio_base64}"
+            }
+        }
     elif modality == "image":
         image_base64 = encode_image_base64(random_image(rng, 256, 1024))
-        dummy_url = f"data:image/jpeg;base64,{image_base64}"
+        mm_content = {
+            "type": "image_url",
+            "image_url": {
+                "url": f"data:image/jpeg;base64,{image_base64}"
+            }
+        }
     elif modality == "video":
-        dummy_url = encode_video_base64(random_video(rng, 4, 16, 256, 1024))
+        video_base64 = encode_video_base64(random_video(rng, 4, 16, 256, 1024))
+        mm_content = {
+            "type": "video_url",
+            "video_url": {
+                "url": f"data:video/jpeg;base64,{video_base64}"
+            }
+        }
 
-    conversation, _ = parse_chat_messages(
+    conversation, mm_data = parse_chat_messages(
         [
             {
                 "role":
                 "user",
                 "content": [
-                    {
-                        "type": f"{modality}_url",
-                        f"{modality}_url": {
-                            "url": dummy_url
-                        },
-                    },
+                    mm_content,
                     {
                         "type": "text",
                         "text": f"Describe this {modality}"
@@ -320,13 +341,13 @@ async def benchmark_one_async(
 MODELS = [
     # "rhymes-ai/Aria",
     "CohereForAI/aya-vision-8b",
-    "Salesforce/blip2-opt-6.7b",
-    "facebook/chameleon-7b",
+    # "Salesforce/blip2-opt-6.7b",
+    # "facebook/chameleon-7b",
     # "deepseek-ai/deepseek-vl2-tiny",
     # "microsoft/Florence-2-base",
-    "adept/fuyu-8b",
+    # "adept/fuyu-8b",
     "google/gemma-3-4b-it",
-    "THUDM/glm-4v-9b",
+    # "THUDM/glm-4v-9b",
     # "ibm-granite/granite-speech-3.3-8b",
     "h2oai/h2ovl-mississippi-800m",
     "OpenGVLab/InternVL2-1B",
@@ -344,13 +365,13 @@ MODELS = [
     "openbmb/MiniCPM-o-2_6",
     "openbmb/MiniCPM-V-2_6",
     # "MiniMaxAI/MiniMax-VL-01",
-    "allenai/Molmo-7B-D-0924",
-    "allenai/Molmo-7B-O-0924",
+    # "allenai/Molmo-7B-D-0924",
+    # "allenai/Molmo-7B-O-0924",
     # "nvidia/NVLM-D-72B",
     "AIDC-AI/Ovis2-1B",
-    "google/paligemma-3b-mix-224",
-    "google/paligemma2-3b-ft-docci-448",
-    "microsoft/Phi-3.5-vision-instruct",
+    # "google/paligemma-3b-mix-224",
+    # "google/paligemma2-3b-ft-docci-448",
+    # "microsoft/Phi-3.5-vision-instruct",
     "microsoft/Phi-4-multimodal-instruct",
     # "mistralai/Pixtral-12B-2409",
     # "mistral-community/pixtral-12b",
