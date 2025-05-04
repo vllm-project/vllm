@@ -233,10 +233,17 @@ void* my_malloc(ssize_t size, int device, CUstream stream) {
   size_t alignedSize = ((size + granularity - 1) / granularity) * granularity;
 
   CUdeviceptr d_mem;
+#ifndef USE_ROCM
   CUDA_CHECK(cuMemAddressReserve(&d_mem, alignedSize, 0, 0, 0));
   if (error_code != 0) {
     return nullptr;
   }
+#else
+  CUDA_CHECK(cuMemAddressReserve(&d_mem, alignedSize, granularity, 0, 0));
+  if (error_code != 0) {
+    return nullptr;
+  }
+#endif
 
 #ifndef USE_ROCM
   // allocate the CUmemGenericAllocationHandle
