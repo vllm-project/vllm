@@ -34,24 +34,27 @@ def multi_image_multi_aspect_ratio_inputs(formatter: Callable[[str], str]):
         "<image>\nWhat is the season?",
     ]
     formatted_prompts = [formatter(prompt) for prompt in img_prompts]
+    aspect_ratio_images = [
+        [stop_sign, cherry_blossom],
+        # Images with different sizes and aspect-ratios
+        [
+            rescale_image_size(stop_sign, 0.1),
+            stop_sign,
+        ],
+        [
+            stop_sign,
+            rescale_image_size(stop_sign, 0.25),
+            cherry_blossom.resize((183, 488)),
+            cherry_blossom.resize((488, 183))
+        ],
+        cherry_blossom,
+    ]
 
     return [(
         formatted_prompts,
-        [
-            [stop_sign, cherry_blossom],
-            # Images with different sizes and aspect-ratios
-            [
-                rescale_image_size(stop_sign, 0.1),
-                stop_sign,
-            ],
-            [
-                stop_sign,
-                rescale_image_size(stop_sign, 0.25),
-                cherry_blossom.resize((183, 488)),
-                cherry_blossom.resize((488, 183))
-            ],
-            cherry_blossom,
-        ])]
+        aspect_ratio_images,
+        [None] * len(img_prompts),
+    )]
 
 
 def multi_video_multi_aspect_ratio_inputs(formatter: Callable[[str], str],
@@ -70,24 +73,27 @@ def multi_video_multi_aspect_ratio_inputs(formatter: Callable[[str], str],
         "<video>\nWhy is this video funny?",
     ]
     formatted_prompts = [formatter(prompt) for prompt in video_prompts]
+    aspect_ratio_videos = [
+        [video, video],
+        # Videos with different sizes and aspect-ratios
+        [
+            rescale_video_size(video, 0.1),
+            video,
+        ],
+        [
+            video,
+            rescale_video_size(video, 0.25),
+            resize_video(video, (183, 488)),
+            resize_video(video, (488, 183))
+        ],
+        video,
+    ]
 
     return [(
         formatted_prompts,
-        [
-            [video, video],
-            # Videos with different sizes and aspect-ratios
-            [
-                rescale_video_size(video, 0.1),
-                video,
-            ],
-            [
-                video,
-                rescale_video_size(video, 0.25),
-                resize_video(video, (183, 488)),
-                resize_video(video, (488, 183))
-            ],
-            video,
-        ])]
+        aspect_ratio_videos,
+        [None] * len(video_prompts),
+    )]
 
 
 def different_patch_input_cases_internvl():
