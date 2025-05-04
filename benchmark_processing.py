@@ -91,6 +91,7 @@ def get_engine(
             m: m in modalities
             for m in get_args(ModalityStr)
         },
+        disable_mm_preprocessor_cache=True,
         enforce_eager=True,
     )
 
@@ -110,6 +111,7 @@ def get_async_engine(
             m: m in modalities
             for m in get_args(ModalityStr)
         },
+        disable_mm_preprocessor_cache=True,
         enforce_eager=True,
         disable_log_requests=True,
     )
@@ -318,7 +320,7 @@ async def benchmark_one_async(
 MODELS = [
     # "rhymes-ai/Aria",
     "CohereForAI/aya-vision-8b",
-    "Salesforce/blip2-opt-2.7b",
+    "Salesforce/blip2-opt-6.7b",
     "facebook/chameleon-7b",
     # "deepseek-ai/deepseek-vl2-tiny",
     # "microsoft/Florence-2-base",
