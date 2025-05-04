@@ -54,8 +54,6 @@ ignore_patterns = [
 ]
 
 [tool.ruff]
-# Allow lines to be as long as 80.
-line-length = 80
 exclude = [
     # External file, leaving license intact
     "examples/other/fp8/quantizer/quantize.py",
