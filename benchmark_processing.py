@@ -19,8 +19,13 @@ from vllm.config import ModelConfig, ParallelProcessorBackend
 from vllm.engine.async_llm_engine import AsyncLLMEngine
 from vllm.engine.llm_engine import LLMEngine
 from vllm.engine.protocol import EngineClient
+from vllm.entrypoints.chat_utils import (apply_hf_chat_template,
+                                         parse_chat_messages,
+                                         resolve_chat_template_content_format)
 from vllm.inputs import InputProcessingContext
 from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.multimodal.utils import (encode_audio_base64, encode_image_base64,
+                                   encode_video_base64)
 from vllm.transformers_utils.tokenizer import cached_tokenizer_from_config
 from vllm.usage.usage_lib import UsageContext
 
@@ -82,7 +87,6 @@ def get_engine(
         model=model_id,
         trust_remote_code=True,
         parallel_processor_backend=parallel_backend,
-        max_model_len=4096,
         limit_mm_per_prompt={
             m: m in modalities
             for m in get_args(ModalityStr)
@@ -102,7 +106,6 @@ def get_async_engine(
         model=model_id,
         trust_remote_code=True,
         parallel_processor_backend=parallel_backend,
-        max_model_len=4096,
         limit_mm_per_prompt={
             m: m in modalities
             for m in get_args(ModalityStr)
@@ -117,14 +120,37 @@ def get_async_engine(
 def get_prompt(model_config: ModelConfig, modality: ModalityStr) -> str:
     tokenizer = cached_tokenizer_from_config(model_config)
 
-    return tokenizer.apply_chat_template(
+    chat_template = None
+    tools = None
+
+    content_format = resolve_chat_template_content_format(
+        chat_template,
+        tools,
+        "auto",
+        tokenizer,
+        trust_remote_code=True,
+    )
+
+    rng = np.random.RandomState(0)
+    if modality == "audio":
+        dummy_url = encode_audio_base64(*random_audio(rng, 1024, 4096, 16000))
+    elif modality == "image":
+        image_base64 = encode_image_base64(random_image(rng, 256, 1024))
+        dummy_url = f"data:image/jpeg;base64,{image_base64}"
+    elif modality == "video":
+        dummy_url = encode_video_base64(random_video(rng, 4, 16, 256, 1024))
+
+    conversation, _ = parse_chat_messages(
         [
             {
                 "role":
                 "user",
                 "content": [
                     {
-                        "type": modality
+                        "type": f"{modality}_url",
+                        f"{modality}_url": {
+                            "url": dummy_url
+                        },
                     },
                     {
                         "type": "text",
@@ -133,7 +159,17 @@ def get_prompt(model_config: ModelConfig, modality: ModalityStr) -> str:
                 ]
             },
         ],
-        tokenize=False,
+        model_config,
+        tokenizer,
+        content_format,
+    )
+
+    return apply_hf_chat_template(
+        tokenizer,
+        conversation,
+        chat_template,
+        tools,
+        trust_remote_code=True,
     )
 
 
@@ -282,16 +318,16 @@ async def benchmark_one_async(
 MODELS = [
     # "rhymes-ai/Aria",
     "CohereForAI/aya-vision-8b",
-    # "Salesforce/blip2-opt-2.7b",
-    # "facebook/chameleon-7b",
+    "Salesforce/blip2-opt-2.7b",
+    "facebook/chameleon-7b",
     # "deepseek-ai/deepseek-vl2-tiny",
     # "microsoft/Florence-2-base",
-    # "adept/fuyu-8b",
+    "adept/fuyu-8b",
     "google/gemma-3-4b-it",
-    # "THUDM/glm-4v-9b",
+    "THUDM/glm-4v-9b",
     # "ibm-granite/granite-speech-3.3-8b",
-    # "h2oai/h2ovl-mississippi-800m",
-    # "OpenGVLab/InternVL2-1B",
+    "h2oai/h2ovl-mississippi-800m",
+    "OpenGVLab/InternVL2-1B",
     "HuggingFaceTB/SmolVLM-256M-Instruct",
     "HuggingFaceTB/SmolVLM2-2.2B-Instruct",
     # "moonshotai/Kimi-VL-A3B-Instruct",
@@ -302,16 +338,16 @@ MODELS = [
     "llava-hf/llava-onevision-qwen2-0.5b-ov-hf",
     # "meta-llama/Llama-3.2-11B-Vision-Instruct",
     # "TIGER-Lab/Mantis-8B-siglip-llama3",
-    # "openbmb/MiniCPM-Llama3-V-2_5",
-    # "openbmb/MiniCPM-o-2_6",
-    # "openbmb/MiniCPM-V-2_6",
+    "openbmb/MiniCPM-Llama3-V-2_5",
+    "openbmb/MiniCPM-o-2_6",
+    "openbmb/MiniCPM-V-2_6",
     # "MiniMaxAI/MiniMax-VL-01",
     "allenai/Molmo-7B-D-0924",
     "allenai/Molmo-7B-O-0924",
     # "nvidia/NVLM-D-72B",
     "AIDC-AI/Ovis2-1B",
-    # "google/paligemma-3b-mix-224",
-    # "google/paligemma2-3b-ft-docci-448",
+    "google/paligemma-3b-mix-224",
+    "google/paligemma2-3b-ft-docci-448",
     "microsoft/Phi-3.5-vision-instruct",
     "microsoft/Phi-4-multimodal-instruct",
     # "mistralai/Pixtral-12B-2409",
