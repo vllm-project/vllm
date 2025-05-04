@@ -15,7 +15,6 @@ project(vllm_extensions LANGUAGES CXX)
 
 # CUDA by default, can be overridden by using -DVLLM_TARGET_DEVICE=... (used by setup.py)
 set(VLLM_TARGET_DEVICE "cuda" CACHE STRING "Target device backend for vLLM")
-
 message(STATUS "Build type: ${CMAKE_BUILD_TYPE}")
 message(STATUS "Target device: ${VLLM_TARGET_DEVICE}")
 
@@ -250,9 +249,8 @@ set(VLLM_EXT_SRC
 if(VLLM_GPU_LANG STREQUAL "CUDA")
   SET(CUTLASS_ENABLE_HEADERS_ONLY ON CACHE BOOL "Enable only the header library")
 
-  # Set CUTLASS_REVISION manually -- its revision detection doesn't work in this case.
-  # Please keep this in sync with FetchContent_Declare line below.
-  set(CUTLASS_REVISION "v3.9.0" CACHE STRING "CUTLASS revision to use")
+  # Set CUTLASS_REVISION. Used for FetchContent. Also fixes some bogus messages when building.
+  set(CUTLASS_REVISION "v3.9.1" CACHE STRING "CUTLASS revision to use")
 
   # Use the specified CUTLASS source directory for compilation if VLLM_CUTLASS_SRC_DIR is provided
   if (DEFINED ENV{VLLM_CUTLASS_SRC_DIR})
@@ -270,7 +268,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
         cutlass
         GIT_REPOSITORY https://github.com/nvidia/cutlass.git
         # Please keep this in sync with CUTLASS_REVISION line above.
-        GIT_TAG v3.9.0
+        GIT_TAG ${CUTLASS_REVISION}
         GIT_PROGRESS TRUE
 
         # Speed up CUTLASS download by retrieving only the specified GIT_TAG instead of the history.
@@ -682,6 +680,17 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
   endif()
 endif()
 
+if(VLLM_GPU_LANG STREQUAL "CUDA")
+  set(MOE_PERMUTE_SRC
+      "csrc/moe/permute_unpermute_kernels/moe_permute_unpermute_kernel.cu"
+      "csrc/moe/moe_permute_unpermute_op.cu")
+
+  set_gencode_flags_for_srcs(
+    SRCS "${MARLIN_PERMUTE_SRC}"
+    CUDA_ARCHS "${MOE_PERMUTE_ARCHS}")
+
+  list(APPEND VLLM_MOE_EXT_SRC "${MOE_PERMUTE_SRC}")
+endif()
 message(STATUS "Enabling moe extension.")
 define_gpu_extension_target(
   _moe_C
@@ -690,6 +699,8 @@ define_gpu_extension_target(
   SOURCES ${VLLM_MOE_EXT_SRC}
   COMPILE_FLAGS ${VLLM_GPU_FLAGS}
   ARCHITECTURES ${VLLM_GPU_ARCHES}
+  INCLUDE_DIRECTORIES ${CUTLASS_INCLUDE_DIR}
+  INCLUDE_DIRECTORIES ${CUTLASS_TOOLS_UTIL_INCLUDE_DIR}
   USE_SABI 3
   WITH_SOABI)
 
