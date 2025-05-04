@@ -419,7 +419,7 @@ async def ping(raw_request: Request) -> Response:
     return await health(raw_request)
 
 
-@router.post("/tokenize", dependencies=[Depends(validate_json_request)])
+@router.post("/tokenize", dependencies=[Depends(validate_json_request)], responses={500: {"model": ErrorResponse}})
 @with_cancellation
 async def tokenize(request: TokenizeRequest, raw_request: Request):
     handler = tokenization(raw_request)
@@ -434,7 +434,7 @@ async def tokenize(request: TokenizeRequest, raw_request: Request):
     assert_never(generator)
 
 
-@router.post("/detokenize", dependencies=[Depends(validate_json_request)])
+@router.post("/detokenize", dependencies=[Depends(validate_json_request)], responses={500: {"model": ErrorResponse}})
 @with_cancellation
 async def detokenize(request: DetokenizeRequest, raw_request: Request):
     handler = tokenization(raw_request)
@@ -464,7 +464,8 @@ async def show_version():
 
 
 @router.post("/v1/chat/completions",
-             dependencies=[Depends(validate_json_request)])
+             dependencies=[Depends(validate_json_request)],
+             responses={400: {"model": ErrorResponse}, 500: {"model": ErrorResponse}})
 @with_cancellation
 @load_aware_call
 async def create_chat_completion(request: ChatCompletionRequest,
@@ -486,7 +487,7 @@ async def create_chat_completion(request: ChatCompletionRequest,
     return StreamingResponse(content=generator, media_type="text/event-stream")
 
 
-@router.post("/v1/completions", dependencies=[Depends(validate_json_request)])
+@router.post("/v1/completions", dependencies=[Depends(validate_json_request)], responses={400: {"model": ErrorResponse}, 500: {"model": ErrorResponse}})
 @with_cancellation
 @load_aware_call
 async def create_completion(request: CompletionRequest, raw_request: Request):
@@ -601,7 +602,7 @@ async def create_score_v1(request: ScoreRequest, raw_request: Request):
     return await create_score(request, raw_request)
 
 
-@router.post("/v1/audio/transcriptions")
+@router.post("/v1/audio/transcriptions", responses={400: {"model": ErrorResponse}, 500: {"model": ErrorResponse}})
 @with_cancellation
 @load_aware_call
 async def create_transcriptions(request: Annotated[TranscriptionRequest,
@@ -735,7 +736,7 @@ if envs.VLLM_SERVER_DEV_MODE:
         return JSONResponse(content={"is_sleeping": is_sleeping})
 
 
-@router.post("/invocations", dependencies=[Depends(validate_json_request)])
+@router.post("/invocations", dependencies=[Depends(validate_json_request)], responses={400: {"model": ErrorResponse}, 500: {"model": ErrorResponse}})
 async def invocations(raw_request: Request):
     """
     For SageMaker, routes requests to other handlers based on model `task`.
