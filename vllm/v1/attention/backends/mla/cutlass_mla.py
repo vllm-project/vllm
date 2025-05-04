@@ -7,7 +7,6 @@ import torch
 import vllm._custom_ops as ops
 from vllm.attention.backends.abstract import (AttentionType,
                                               is_quantized_kv_cache)
-from vllm.attention.ops.triton_decode_attention import decode_attention_fwd
 from vllm.logger import init_logger
 from vllm.v1.attention.backends.mla.common import (MLACommonBackend,
                                                    MLACommonImpl,
@@ -88,7 +87,7 @@ class CutlassMLAImpl(MLACommonImpl[MLACommonMetadata]):
                         dtype=q_nope.dtype,
                         device=q_nope.device)
 
-        # Run MQA
+        # Run MLA
         ops.cutlass_mla_decode(o, q_nope, q_pe, kv_c_and_k_pe_cache,
                                attn_metadata.decode.seq_lens,
                                attn_metadata.decode.block_table, self.scale)
