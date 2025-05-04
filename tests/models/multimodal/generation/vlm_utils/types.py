@@ -37,10 +37,40 @@ IMAGE_SIZE_FACTORS = [(), (1.0, ), (1.0, 1.0, 1.0), (0.25, 0.5, 1.0)]
 EMBEDDING_SIZE_FACTORS = [(), (1.0, ), (1.0, 1.0, 1.0)]
 RunnerOutput = tuple[list[int], str, Optional[SampleLogprobs]]
 # yapf: enable
-VisionInput = list[Union[list[Image], Image]]
+VisionInput = list[Optional[Union[list[Image], Image]]]
 Audio = tuple[npt.NDArray, float]
 AudioInput = list[Optional[Union[list[Audio], Audio]]]
-RunnerInput = list[tuple[list[str], VisionInput, AudioInput]]
+
+
+class PromptWithMultiModalInput(NamedTuple):
+    """Holds the multimodal input for a single test case."""
+    prompts: list[str]
+    vision_data: VisionInput
+    audio_data: AudioInput
+
+    def __iter__(self):
+        yield from zip(self.prompts, self.vision_data, self.audio_data)
+
+    @classmethod
+    def construct(
+        cls,
+        prompts: list[str],
+        vision_data: Optional[VisionInput] = None,
+        audio_data: Optional[AudioInput] = None,
+    ) -> "PromptWithMultiModalInput":
+        """
+        Constructs a multimodal input from a prompt and optional mm_data.
+        This method will pad unprovided inputs with None values to 
+        match the length of prompts for parameterization automatically.
+        """
+        assert not (
+            vision_data is None and audio_data is None
+        ), "At least one of vision_data or audio_data must be provided."
+        return cls(
+            prompts,
+            vision_data if vision_data is not None else [None] * len(prompts),
+            audio_data if audio_data is not None else [None] * len(prompts),
+        )
 
 
 class VLMTestType(Enum):
@@ -57,7 +87,7 @@ class SizeType(Enum):
 
 
 class CustomTestOptions(NamedTuple):
-    inputs: RunnerInput
+    inputs: list[PromptWithMultiModalInput]
     limit_mm_per_prompt: dict[str, int]
     # kwarg to pass multimodal data in as to vllm/hf runner instances.
     runner_mm_key: str = "images"

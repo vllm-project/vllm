@@ -14,7 +14,7 @@ from vllm.multimodal.video import (rescale_video_size, resize_video,
 
 from .....conftest import IMAGE_ASSETS, VIDEO_ASSETS
 from .builders import build_multi_image_inputs, build_single_image_inputs
-from .types import ImageSizeWrapper, SizeType
+from .types import ImageSizeWrapper, PromptWithMultiModalInput, SizeType
 
 
 def multi_image_multi_aspect_ratio_inputs(formatter: Callable[[str], str]):
@@ -50,11 +50,12 @@ def multi_image_multi_aspect_ratio_inputs(formatter: Callable[[str], str]):
         cherry_blossom,
     ]
 
-    return [(
-        formatted_prompts,
-        aspect_ratio_images,
-        [None] * len(img_prompts),
-    )]
+    return [
+        PromptWithMultiModalInput.construct(
+            prompts=formatted_prompts,
+            vision_data=aspect_ratio_images,
+        )
+    ]
 
 
 def multi_video_multi_aspect_ratio_inputs(formatter: Callable[[str], str],
@@ -89,11 +90,12 @@ def multi_video_multi_aspect_ratio_inputs(formatter: Callable[[str], str],
         video,
     ]
 
-    return [(
-        formatted_prompts,
-        aspect_ratio_videos,
-        [None] * len(video_prompts),
-    )]
+    return [
+        PromptWithMultiModalInput.construct(
+            prompts=formatted_prompts,
+            vision_data=aspect_ratio_videos,
+        )
+    ]
 
 
 def different_patch_input_cases_internvl():
@@ -146,4 +148,10 @@ def mixed_modality_qwen2_5_omni(size_factor: float = 0.25):
     image = ImageAsset("cherry_blossom").pil_image.convert("RGB")
     W, H = image.size
     image = image.resize((int(W * size_factor), int(H * size_factor)))
-    return [([prompt], [image], [audio])]
+    return [
+        PromptWithMultiModalInput(
+            prompts=[prompt],
+            vision_data=[image],
+            audio_data=[audio],
+        )
+    ]

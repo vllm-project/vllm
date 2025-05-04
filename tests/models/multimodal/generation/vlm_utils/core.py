@@ -10,14 +10,14 @@ from vllm.transformers_utils.tokenizer import AnyTokenizer
 
 from .....conftest import HfRunner, VllmRunner
 from ....registry import HF_EXAMPLE_MODELS
-from .types import RunnerInput, RunnerOutput
+from .types import PromptWithMultiModalInput, RunnerOutput
 
 
 def run_test(
     *,
     hf_runner: type[HfRunner],
     vllm_runner: type[VllmRunner],
-    inputs: RunnerInput,
+    inputs: list[PromptWithMultiModalInput],
     model: str,
     dtype: str,
     max_tokens: int,
