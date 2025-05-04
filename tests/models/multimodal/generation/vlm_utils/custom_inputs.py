@@ -124,7 +124,7 @@ def windows_attention_image_qwen2_5_vl():
     return build_single_image_inputs([image], [prompt], wrapped_sf)
 
 
-def mixed_modality_qwen2_5_omni():
+def mixed_modality_qwen2_5_omni(size_factor: float = 0.25):
     default_system = (
         "You are Qwen, a virtual human developed by the Qwen Team, Alibaba "
         "Group, capable of perceiving auditory and visual inputs, as well as "
@@ -136,6 +136,8 @@ def mixed_modality_qwen2_5_omni():
               "<|vision_bos|><|IMAGE|><|vision_eos|>"
               f"{question}<|im_end|>\n"
               f"<|im_start|>assistant\n")
-    audio = AudioAsset("mary_had_lamb").audio_and_sample_rate,
-    image = ImageAsset("cherry_blossom").pil_image.convert("RGB"),
+    audio = AudioAsset("mary_had_lamb").audio_and_sample_rate
+    image = ImageAsset("cherry_blossom").pil_image.convert("RGB")
+    W, H = image.size
+    image = image.resize((int(W * size_factor), int(H * size_factor)))
     return [([prompt], [image], [audio])]

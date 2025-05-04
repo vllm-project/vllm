@@ -623,13 +623,14 @@ VLM_TEST_SETTINGS = {
             limit_mm_per_prompt={"image": 4},
         )],
     ),
-    "qwen2_5_omni_mixed_modalities": VLMTestInfo(
+    "qwen2_5_omni-mixed-modalities": VLMTestInfo(
         models=["Qwen/Qwen2.5-Omni-3B"],
         test_type=VLMTestType.CUSTOM_INPUTS,
         max_model_len=4096,
         max_num_seqs=2,
-        auto_cls=AutoModelForVision2Seq,
+        auto_cls=AutoModelForTextToWaveform,
         vllm_output_post_proc=model_utils.qwen2_vllm_to_hf_output,
+        patch_hf_runner=model_utils.qwen2_5_omni_patch_hf_runner,
         custom_test_opts=[CustomTestOptions(
             inputs=custom_inputs.mixed_modality_qwen2_5_omni(),
             limit_mm_per_prompt={"image": 1, "audio": 1},
