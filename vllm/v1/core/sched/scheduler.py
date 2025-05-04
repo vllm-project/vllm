@@ -676,7 +676,7 @@ class Scheduler(SchedulerInterface):
         decoded_output_ids = list(parent_request.output_token_ids[:decode_count])
         # probe msg  
         custom_text = "... Oh, I suddenly got the answer to the whole problem, **Final Answer**\n\n\\[ \\boxed{"
-        custom_token_ids = list(self.tokenizer.encode(custom_text, add_special_tokens=False))
+        custom_token_ids = list(self.tokenizer.encode(custom_text))
         # new prefill
         new_prompt_token_ids = original_prompt_ids + decoded_output_ids + custom_token_ids
         # new unique request ID
@@ -715,20 +715,10 @@ class Scheduler(SchedulerInterface):
         # NOTE(woosuk): As len(self.running) can be up to 1K or more, the below
         # loop can be a performance bottleneck. We should do our best to avoid
         # expensive operations inside the loop.
+        self.running = deque(sorted(self.running, key=lambda r: 0 if "probe" in r.request_id else 1))
+        print("self.running order:")
         for request in self.running:
-            if request.is_finished and "probe" in request.request_id:
-                main_id = request.request_id.split("_probe_after_")[0]
-                decoded_text = self.tokenizer.decode(request.output_token_ids, skip_special_tokens=True)
-                final_answer = extract_final_answer(decoded_text)
-                self.probe_answers.setdefault(main_id, []).append(final_answer)
-                print(f"[Probe] Probe request {request.request_id} finished with answer: {final_answer}")
-                print(self.probe_answers)
-                answers = self.probe_answers[main_id]
-                if len(answers) >= 2 and answers[-1] == answers[-2]:
-                    print(f"[Dynasor-Abort] Confident answer detected. Aborting {main_id}.")
-                    self.finish_requests(main_id, RequestStatus.FINISHED_ABORTED)
-                    self.probe_answers[main_id] = []  # Optional cleanup
-            
+            print(request.request_id)
             if len(request.output_token_ids) in [5, 15] and "probe" not in request.request_id:
                     # logger_myown.info(
                     #     f"Request {request.request_id} reached {len(request.output_token_ids)} decoded tokens!")
@@ -788,6 +778,19 @@ class Scheduler(SchedulerInterface):
                 # This must be called before we make the EngineCoreOutput.
                 stopped = check_stop(request, self.max_model_len)
                 if stopped:
+                    if "probe" in request.request_id:
+                        main_id = request.request_id.split("_probe_after_")[0]
+                        decoded_text = self.tokenizer.decode(request.output_token_ids, skip_special_tokens=True)
+                        final_answer = extract_final_answer(decoded_text)
+                        self.probe_answers.setdefault(main_id, []).append(final_answer)
+                        # print(f"[Probe] Probe request {request.request_id} finished with answer: {final_answer}")
+                        # print(self.probe_answers)
+                        answers = self.probe_answers[main_id]
+                        if len(answers) >= 2 and answers[-1] == answers[-2]:
+                            # print(f"[Dynasor-Abort] Confident answer detected. Aborting {main_id}.")
+                            self.finish_requests(main_id, RequestStatus.FINISHED_ABORTED)
+                            # Optional: clear answers to avoid re-aborting
+                            self.probe_answers[main_id] = []
 
                     self._free_request(request)
                     del new_token_ids[num_new:]  # Trim new tokens if needed.
@@ -850,6 +853,7 @@ class Scheduler(SchedulerInterface):
 
         self.running = new_running
 
+
         
 
 
@@ -908,19 +912,6 @@ class Scheduler(SchedulerInterface):
 
     def _free_request(self, request: Request) -> None:
         assert request.is_finished()
-        # if "probe" in request.request_id:
-        #     main_id = request.request_id.split("_probe_after_")[0]
-        #     decoded_text = self.tokenizer.decode(request.output_token_ids, skip_special_tokens=True)
-        #     final_answer = extract_final_answer(decoded_text)
-        #     self.probe_answers.setdefault(main_id, []).append(final_answer)
-        #     print(f"[Probe] Probe request {request.request_id} finished with answer: {final_answer}")
-        #     print(self.probe_answers)
-        #     answers = self.probe_answers[main_id]
-        #     if len(answers) >= 2 and answers[-1] == answers[-2]:
-        #         print(f"[Dynasor-Abort] Confident answer detected. Aborting {main_id}.")
-        #         self.finish_requests(main_id, RequestStatus.FINISHED_ABORTED)
-        #         # Optional: clear answers to avoid re-aborting
-        #         self.probe_answers[main_id] = []
         self.kv_cache_manager.free(request)
         self.kv_cache_manager.free_block_hashes(request)
         self.encoder_cache_manager.free(request)
