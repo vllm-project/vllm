@@ -2298,3 +2298,5 @@
 2025-05-03 23:22:34,832 - INFO - [Preempt] Pausing main decode due to active probe.
 2025-05-03 23:22:34,840 - INFO - [Preempt] Pausing main decode due to active probe.
 2025-05-03 23:22:34,847 - INFO - [Preempt] Pausing main decode due to active probe.
+2025-05-04 20:36:45,252 - INFO - Request 0 reached 5 decoded tokens!
+2025-05-04 20:36:45,333 - INFO - Request 0 reached 15 decoded tokens!

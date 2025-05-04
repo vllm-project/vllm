@@ -174,8 +174,7 @@ class Scheduler(SchedulerInterface):
         # num_tokens_with_spec. This is general enough to cover
         # chunked prefills, prefix caching, speculative decoding,
         # and the "jump decoding" optimization in the future.
-        for request in self.requests_to_abort:
-            self.finish_requests(request, RequestStatus.FINISHED_ABORTED)
+        
 
         scheduled_new_reqs: list[Request] = []
         scheduled_resumed_reqs: list[Request] = []
@@ -677,10 +676,7 @@ class Scheduler(SchedulerInterface):
         original_prompt_ids = list(parent_request.prompt_token_ids)
         decoded_output_ids = list(parent_request.output_token_ids[:decode_count])
         # probe msg  
-        if early_exit:  
-            custom_text="</think>"
-        else:
-            custom_text = "... Oh, I suddenly got the answer to the whole problem, **Final Answer**\n\n\\[ \\boxed{"
+        custom_text = "... Oh, I suddenly got the answer to the whole problem, **Final Answer**\n\n\\[ \\boxed{"
         custom_token_ids = list(self.tokenizer.encode(custom_text))
         # new prefill
         new_prompt_token_ids = original_prompt_ids + decoded_output_ids + custom_token_ids
@@ -721,11 +717,9 @@ class Scheduler(SchedulerInterface):
         # loop can be a performance bottleneck. We should do our best to avoid
         # expensive operations inside the loop.
         self.running = deque(sorted(self.running, key=lambda r: 0 if "probe" in r.request_id else 1))
-        requests_to_abort = []
+       
         for request in self.running:
             if len(request.output_token_ids) in [5, 15] and "probe" not in request.request_id:
-                    # logger_myown.info(
-                    #     f"Request {request.request_id} reached {len(request.output_token_ids)} decoded tokens!")
                     self._create_and_add_new_request(request,len(request.output_token_ids))
             req_id = request.request_id
             num_tokens_scheduled = num_scheduled_tokens.get(req_id, 0)
@@ -770,7 +764,16 @@ class Scheduler(SchedulerInterface):
 
             stopped = False
             new_logprobs = None
-            new_token_ids = generated_token_ids
+            
+            if request.request_id in self.requests_to_abort:
+                new_token_ids = [self.tokenizer.encode("</think>", add_special_tokens=False)[0]]
+                print(f"How many decodes done:",{len(request.output_token_ids)})
+            
+                self.requests_to_abort.remove(request.request_id)
+            else:
+                new_token_ids = generated_token_ids
+
+            
 
             # Append generated tokens and check for stop. Note that if
             # a request is still being prefilled, we expect the model runner
@@ -791,10 +794,9 @@ class Scheduler(SchedulerInterface):
                         print(self.probe_answers)
                         answers = self.probe_answers[main_id]
                         if len(answers) >= 2 and answers[-1] == answers[-2]:
-                            print(f"[Dynasor-Abort] Confident answer detected. Aborting {main_id}.")
+                            # print(f"[Dynasor-Abort] Confident answer detected. Aborting {main_id}.")
                             
                             main_req= self.requests.get(main_id)
-                            self._create_and_add_new_request(main_req, len(main_req.output_token_ids), early_exit=True)
                             self.requests_to_abort.append(main_id)
                             
 
@@ -878,14 +880,7 @@ class Scheduler(SchedulerInterface):
         return engine_core_outputs
 
     def add_request(self, request: Request) -> None:
-        if "probe" in request.request_id:
-            self.waiting.appendleft(request)  # COT
-            # logger_myown.info(f"Probe request {request.request_id} added to the front of the queue.")
-    
-        else:
-            self.waiting.append(request)
-            # logger_myown.info(f"Normal request {request.request_id} added to the queue.")
-        
+        self.waiting.append(request)
         self.requests[request.request_id] = request
         if self.log_stats:
             request.record_event(EngineCoreEventType.QUEUED)
