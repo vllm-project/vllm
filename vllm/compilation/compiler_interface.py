@@ -11,8 +11,11 @@ import torch
 import torch._inductor.compile_fx
 import torch.fx as fx
 
+import vllm.envs as envs
 from vllm.config import VllmConfig
 from vllm.utils import is_torch_equal_or_newer
+
+from .inductor_pass import pass_context
 
 
 class CompilerInterface:
@@ -36,7 +39,7 @@ class CompilerInterface:
         Gather all the relevant information from the vLLM config,
         to compute a hash so that we can cache the compiled model.
 
-        See :meth:`VllmConfig.compute_hash` to check what information
+        See {meth}`VllmConfig.compute_hash` to check what information
         is already considered by default. This function should only
         consider the information that is specific to the compiler.
         """
@@ -311,16 +314,21 @@ class InductorAdaptor(CompilerInterface):
                     torch._functorch.config.patch(
                         enable_remote_autograd_cache=False))
 
-            compiled_graph = compile_fx(
-                graph,
-                example_inputs,
-                inner_compile=hijacked_compile_fx_inner,
-                config_patches=current_config)
+            with pass_context(runtime_shape):
+                compiled_graph = compile_fx(
+                    graph,
+                    example_inputs,
+                    inner_compile=hijacked_compile_fx_inner,
+                    config_patches=current_config)
 
-        assert hash_str is not None, (
-            "failed to get the hash of the compiled graph")
-        assert file_path is not None, (
-            "failed to get the file path of the compiled graph")
+        # We treat VLLM_DISABLE_COMPILE_CACHE as the overall switch for torch
+        # compilation cache. So turn off the checks if we disable the
+        # compilation cache.
+        if not envs.VLLM_DISABLE_COMPILE_CACHE:
+            assert hash_str is not None, (
+                "failed to get the hash of the compiled graph")
+            assert file_path is not None, (
+                "failed to get the file path of the compiled graph")
         return compiled_graph, (hash_str, file_path)
 
     def load(self,

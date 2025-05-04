@@ -15,16 +15,16 @@ vLLM currently supports the following reasoning models:
 | [DeepSeek R1 series](https://huggingface.co/collections/deepseek-ai/deepseek-r1-678e1e131c0169c0bc89728d) | `deepseek_r1` | `guided_json`, `guided_regex` | ❌ |
 | [QwQ-32B](https://huggingface.co/Qwen/QwQ-32B) | `deepseek_r1` | `guided_json`, `guided_regex` | ✅ |
 | [IBM Granite 3.2 language models](https://huggingface.co/collections/ibm-granite/granite-32-language-models-67b3bc8c13508f6d064cff9a) | `granite` | ❌ | ❌ |
+| [Qwen3 series](https://huggingface.co/collections/Qwen/qwen3-67dd247413f0e2e4f653967f) | `qwen3` | `guided_json`, `guided_regex` | ✅ |
 
 - IBM Granite 3.2 reasoning is disabled by default; to enable it, you must also pass `thinking=True` in your `chat_template_kwargs`.
 
 ## Quickstart
 
-To use reasoning models, you need to specify the `--enable-reasoning` and `--reasoning-parser` flags when making a request to the chat completion endpoint. The `--reasoning-parser` flag specifies the reasoning parser to use for extracting reasoning content from the model output.
+To use reasoning models, you need to specify the `--reasoning-parser` flags when making a request to the chat completion endpoint. The `--reasoning-parser` flag specifies the reasoning parser to use for extracting reasoning content from the model output.
 
 ```bash
-vllm serve deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B \
-    --enable-reasoning --reasoning-parser deepseek_r1
+vllm serve deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B --reasoning-parser deepseek_r1
 ```
 
 Next, make a request to the model that should return the reasoning content in the response.
@@ -139,8 +139,7 @@ Remember to check whether the `reasoning_content` exists in the response before 
 The reasoning content is also available in the structured output. The structured output engine like `xgrammar` will use the reasoning content to generate structured output. It is only supported in v0 engine now.
 
 ```bash
-VLLM_USE_V1=0 vllm serve deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B \
-    --enable-reasoning --reasoning-parser deepseek_r1
+VLLM_USE_V1=0 vllm serve deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B --reasoning-parser deepseek_r1
 ```
 
 Please note that the `VLLM_USE_V1` environment variable must be set to `0` to use the v0 engine.
@@ -315,9 +314,8 @@ class DeepSeekReasoner(Reasoner):
 
 The structured output engine like `xgrammar` will use `end_token_id` to check if the reasoning content is present in the model output and skip the structured output if it is the case.
 
-Finally, you can enable reasoning for the model by using the `--enable-reasoning` and `--reasoning-parser` flags.
+Finally, you can enable reasoning for the model by using the `--reasoning-parser` flags.
 
 ```bash
-vllm serve <model_tag> \
-    --enable-reasoning --reasoning-parser example
+vllm serve <model_tag> --reasoning-parser example
 ```
