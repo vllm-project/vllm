@@ -1359,6 +1359,7 @@ class FlexibleArgumentParser(ArgumentParser):
         super().__init__(*args, **kwargs)
 
     if sys.version_info < (3, 13):
+
         def parse_known_args(  # type: ignore[override]
             self,
             args: Sequence[str] | None = None,
@@ -1366,10 +1367,12 @@ class FlexibleArgumentParser(ArgumentParser):
         ) -> tuple[Namespace | None, list[str]]:
             namespace, args = super().parse_known_args(args, namespace)
             for action in FlexibleArgumentParser._deprecated:
-                if action.dest not in FlexibleArgumentParser._seen and getattr(namespace, action.dest, None) != action.default:
+                if action.dest not in FlexibleArgumentParser._seen and getattr(
+                        namespace, action.dest,
+                        None) != action.default:  # noqa: E501
                     self._warning(
-                        _gettext("argument '%(argument_name)s' is deprecated") %
-                        {'argument_name': action.dest})
+                        _gettext("argument '%(argument_name)s' is deprecated")
+                        % {'argument_name': action.dest})
                     FlexibleArgumentParser._seen.add(action.dest)
             return namespace, args
 
