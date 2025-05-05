@@ -124,10 +124,6 @@ def subtuple(obj: object,
     return _TYPE_CACHE[typename]['object'](**values)  # type: ignore
 
 
-def round_up(value: int, k: int):
-    return (value + k - 1) // k * k
-
-
 def align_workers(value, op):
     group = get_world_group().cpu_group
     world_size = torch.distributed.get_world_size()
