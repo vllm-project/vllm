@@ -7,6 +7,7 @@ from vllm.model_executor.layers.fused_moe.layer import (
     FusedMoE, UnquantizedFusedMoEMethod)
 from vllm.model_executor.layers.linear import (LinearBase,
                                                UnquantizedLinearMethod)
+from vllm.model_executor.layers.quantization import QuantizationMethods
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig, QuantizeMethodBase)
 
