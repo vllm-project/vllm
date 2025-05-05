@@ -3,8 +3,8 @@
 from abc import ABC, abstractmethod
 from collections import UserDict
 from collections.abc import Callable, Iterator, Mapping, Sequence
-from typing import (TYPE_CHECKING, Any, Generic, NamedTuple, Optional, TypeVar,
-                    Union)
+from typing import (TYPE_CHECKING, Any, Generic, Literal, NamedTuple, Optional,
+                    TypeVar, Union)
 
 import numpy as np
 import torch
@@ -14,7 +14,7 @@ from typing_extensions import TypeAlias, TypeGuard, assert_never
 
 from vllm.utils import is_list_of
 
-from .audio import resample_audio
+from .audio import AudioResampler
 from .inputs import (AudioItem, HfAudioItem, HfImageItem, HfVideoItem,
                      ImageItem, ModalityData, MultiModalDataDict,
                      MultiModalFieldConfig, MultiModalKwargs, VideoItem)
@@ -25,7 +25,7 @@ _I = TypeVar("_I")
 
 class ModalityDataItems(ABC, Generic[_T, _I]):
     """
-    Represents data items for a modality in :class:`MultiModalDataItems`.
+    Represents data items for a modality in {class}`MultiModalDataItems`.
     """
 
     def __init__(self, data: _T, modality: str) -> None:
@@ -246,7 +246,7 @@ _D = TypeVar("_D", bound=ModalityDataItems[Any, Any])
 
 class MultiModalDataItems(UserDict[str, ModalityDataItems[Any, Any]]):
     """
-    As :data:`~vllm.multimodal.inputs.MultiModalDataDict`, but normalized
+    As {data}`~vllm.multimodal.inputs.MultiModalDataDict`, but normalized
     such that each entry corresponds to a list.
     """
 
@@ -254,7 +254,7 @@ class MultiModalDataItems(UserDict[str, ModalityDataItems[Any, Any]]):
         """
         Get the number of data items belonging to a modality.
         
-        If `strict=False`, return `0` instead of raising :exc:`KeyError`
+        If `strict=False`, return `0` instead of raising {exc}`KeyError`
         even if the modality is not found.
         """
         if modality not in self:
@@ -300,18 +300,26 @@ ModalityDataParser: TypeAlias = Callable[[ModalityData[Any]],
 
 class MultiModalDataParser:
     """
-    Parses :data:`~vllm.multimodal.inputs.MultiModalDataDict` into
-    :class:`MultiModalDataItems`.
+    Parses {data}`~vllm.multimodal.inputs.MultiModalDataDict` into
+    {class}`MultiModalDataItems`.
 
     Args:
         target_sr (float, optional): Enables automatic resampling of audio
             items to the model's expected sampling rate.
     """
 
-    def __init__(self, *, target_sr: Optional[float] = None) -> None:
+    def __init__(
+        self,
+        *,
+        target_sr: Optional[float] = None,
+        audio_resample_method: Literal["librosa", "scipy"] = "librosa",
+    ) -> None:
         super().__init__()
 
-        self.target_sr = target_sr
+        self.audio_resampler = AudioResampler(
+            target_sr=target_sr,
+            method=audio_resample_method,
+        )
 
     def _is_embeddings(
             self, data: object
@@ -374,15 +382,8 @@ class MultiModalDataParser:
             if orig_sr is None:
                 new_audio = audio
             else:
-                target_sr = self.target_sr
-                if target_sr is None:
-                    raise RuntimeError(
-                        "Audio resampling is not supported when "
-                        "`target_sr` is not provided")
-
-                new_audio = resample_audio(audio,
-                                           orig_sr=orig_sr,
-                                           target_sr=target_sr)
+                new_audio = self.audio_resampler.resample(audio,
+                                                          orig_sr=orig_sr)
 
             new_audios.append(new_audio)
 
