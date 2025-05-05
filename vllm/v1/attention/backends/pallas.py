@@ -15,13 +15,6 @@ from vllm.logger import init_logger
 from vllm.utils import cdiv
 import os
 
-if os.environ.get("VLLM_TORCHAX_ENABLED", "0") == "1":
-    import torchax
-    from jax.experimental.pallas.ops.tpu import flash_attention
-    import jax
-    from jax.experimental.pallas.ops.tpu.paged_attention.paged_attention_kernel import paged_attention as jax_paged_attention
-    from torch_xla.experimental.pallas_kernels.ragged_paged_attention_v2 import ragged_paged_attention as jax_ragged_paged_attention
-
 logger = init_logger(__name__)
 
 
@@ -177,6 +170,7 @@ class PallasAttentionBackendImpl(AttentionImpl):
         if kv_cache.numel() > 0:
             slot_mapping = attn_metadata.slot_mapping
             write_to_kv_cache(key, value, kv_cache, slot_mapping)
+
         output = torch.ops.xla.ragged_paged_attention(
             query,
             kv_cache,
@@ -195,6 +189,7 @@ class PallasAttentionBackendImpl(AttentionImpl):
             sliding_window=self.sliding_window,
             soft_cap=self.logits_soft_cap,
         )
+
         return output.reshape(num_tokens, hidden_size)
 
 

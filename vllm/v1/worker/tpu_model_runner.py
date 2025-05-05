@@ -898,7 +898,6 @@ class TPUModelRunner:
             xm_tp_rank = jax.process_index()
         else:
             xm_tp_rank = xr.global_ordinal()
-            
         with patch(
                 "vllm.model_executor.layers.vocab_parallel_embedding."
                 "get_tensor_model_parallel_rank",
@@ -909,7 +908,6 @@ class TPUModelRunner:
         if os.environ.get("VLLM_TORCHAX_ENABLED", "0") == "0":
             xm.mark_step()
             xm.wait_device_ops()
-        
         self.model = model
         self.sampler = TPUSampler()
 

@@ -8,7 +8,6 @@ import torch.distributed
 import torch.nn as nn
 
 if os.environ.get("VLLM_TORCHAX_ENABLED", "0") == "1":
-    import torchax
     import jax 
 else:
     import torch_xla.core.xla_model as xm
@@ -135,7 +134,6 @@ class TPUWorker:
             # NOTE(woosuk): Set per-rank cache path since different ranks
             # can have slightly different XLA graphs.
             world_size = self.parallel_config.world_size
-            rank = xr.global_ordinal()
             # The PyTorch/XLA compilation cache uses the Torch IR to generate keys.
             # Consequently, changes in optimization flags, which affect compilation
             # results, don't change the cache key. This can result in the wrong
@@ -152,8 +150,8 @@ class TPUWorker:
 
         if rank == 0:
             # If usage stat is enabled, collect relevant info.
-            report_usage_stats(self.vllm_config)
-
+            report_usage_stats(self.vllm_config)        
+    
     def determine_available_memory(self) -> int:
         kv_caches: dict[str, torch.Tensor] = {}
         kv_cache_spec = self.model_runner.get_kv_cache_spec()
@@ -198,15 +196,19 @@ class TPUWorker:
             m = xm.get_memory_info(self.device)
             total_memory_size = m["bytes_limit"]
             current_mem = m["bytes_used"]
+            # Ideally we would use profiled = m["peak_bytes_used"] to
+            # get weights + activations. But there is memory used during
+            # compilation / weight loading that impacts the peak and
+            # there is no way to reset peak memory in XLA, So we
+            # use the heuristic of 2% of weights.
+            profiled = current_mem * 1.02
         else:
-            total_memory_size = 32 * 1024 ** 3 # 32GB
-            current_mem = 24 * 1024 ** 3 # 24GB
-        # Ideally we would use profiled = m["peak_bytes_used"] to
-        # get weights + activations. But there is memory used during
-        # compilation / weight loading that impacts the peak and
-        # there is no way to reset peak memory in XLA, So we
-        # use the heuristic of 2% of weights.
-        profiled = current_mem * 1.02
+            m = jax.local_devices()[0].memory_stats()
+            total_memory_size = m["bytes_limit"]
+            current_mem = m["bytes_in_use"]
+            # TODO: Torchax OOMs if we use the same heuristic as torchxla.
+            profiled = m["peak_bytes_in_use"]
+
 
         # Calculate the TPU KV cache size based on profiling.
         usable_memory_size = int(total_memory_size *
