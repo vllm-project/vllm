@@ -83,7 +83,7 @@ def rocm_aiter_ck_moe_impl(hidden_states: torch.Tensor, w1: torch.Tensor,
     return ck_moe(hidden_states=hidden_states,
                   w1=w1,
                   w2=w2,
-                  topk_weight=topk_weights,
+                  topk_weights=topk_weights,
                   topk_ids=topk_ids)
 
 
