@@ -171,7 +171,7 @@ class DisaggregatedScheduler(Scheduler):
             req_index += 1
 
             # Encoder-related.
-            if encoder_inputs_to_schedule:
+            if not request.do_remote_prefill and encoder_inputs_to_schedule:
                 scheduled_encoder_inputs[request.request_id] = (
                     encoder_inputs_to_schedule)
                 # Allocate the encoder cache.
