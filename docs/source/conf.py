@@ -224,7 +224,6 @@ def linkcode_resolve(domain, info):
 autodoc_mock_imports = [
     "pydantic",
     "zmq",
-    "cloudpickle",
     "aiohttp",
     "starlette",
     "blake3",
