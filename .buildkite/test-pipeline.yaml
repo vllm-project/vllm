@@ -460,6 +460,7 @@ steps:
   - vllm/
   - tests/models/language
   commands:
+    - echo "TORCH_NIGHTLY is $TORCH_NIGHTLY"
     # Install causal-conv1d for plamo2 models here, as it is not compatible with pip-compile.
     - pip install 'git+https://github.com/Dao-AILab/causal-conv1d@v1.5.0.post8'
     - pytest -v -s models/language -m core_model
