@@ -275,7 +275,7 @@ class OpenAIServing:
         add_special_tokens: bool = True,
     ) -> TextTokensPrompt:
         """
-        A simpler implementation of :meth:`_tokenize_prompt_input_or_inputs`
+        A simpler implementation of {meth}`_tokenize_prompt_input_or_inputs`
         that assumes single input.
         """
         return next(
@@ -296,7 +296,7 @@ class OpenAIServing:
         add_special_tokens: bool = True,
     ) -> Iterator[TextTokensPrompt]:
         """
-        A simpler implementation of :meth:`_tokenize_prompt_input_or_inputs`
+        A simpler implementation of {meth}`_tokenize_prompt_input_or_inputs`
         that assumes multiple inputs.
         """
         for text in prompt_inputs:
@@ -469,6 +469,9 @@ class OpenAIServing:
             engine_prompt["multi_modal_data"] = mm_data
         if request.mm_processor_kwargs is not None:
             engine_prompt["mm_processor_kwargs"] = request.mm_processor_kwargs
+
+        if hasattr(request, "cache_salt") and request.cache_salt is not None:
+            engine_prompt["cache_salt"] = request.cache_salt
 
         return conversation, [request_prompt], [engine_prompt]
 
