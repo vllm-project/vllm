@@ -13,3 +13,4 @@ commonmark # Required by sphinx-argparse when using :markdownhelp:
 cachetools
 -f https://download.pytorch.org/whl/cpu
 torch
+transformers
