@@ -88,7 +88,7 @@ for PORT in "${DECODE_PORTS[@]}"; do
 done
 
 # Build the command for the proxy server with all the hosts and ports
-PROXY_CMD="python ${GIT_ROOT}/tests/v1/kv_connector/toy_proxy_server.py --port 8192"
+PROXY_CMD="python ${GIT_ROOT}/tests/v1/kv_connector/nixl_integration/toy_proxy_server.py --port 8192"
 
 # Add all prefill hosts and ports
 PROXY_CMD+=" --prefiller-hosts ${PREFILL_HOSTS[@]}"
@@ -106,4 +106,4 @@ $PROXY_CMD &
 sleep 5
 
 # Run lm eval.
-python -m pytest -s -x ${GIT_ROOT}/tests/v1/kv_connector/test_accuracy.py
+python -m pytest -s -x ${GIT_ROOT}/tests/v1/kv_connector/nixl_integration/test_accuracy.py
