@@ -43,7 +43,9 @@ pip install https://github.com/vllm-project/vllm/releases/download/v${VLLM_VERSI
 
 LLM inference is a fast-evolving field, and the latest code may contain bug fixes, performance improvements, and new features that are not released yet. To allow users to try the latest code without waiting for the next release, vLLM provides wheels for Linux running on a x86 platform with CUDA 12 for every commit since `v0.5.3`.
 
-##### Install the latest code using `pip`
+:::{card}
+**Install the latest code using `pip`**
+^^^
 
 ```console
 pip install -U vllm --pre --extra-index-url https://wheels.vllm.ai/nightly
@@ -59,8 +61,11 @@ pip install https://wheels.vllm.ai/${VLLM_COMMIT}/vllm-1.0.0.dev-cp38-abi3-manyl
 ```
 
 Note that the wheels are built with Python 3.8 ABI (see [PEP 425](https://peps.python.org/pep-0425/) for more details about ABI), so **they are compatible with Python 3.8 and later**. The version string in the wheel file name (`1.0.0.dev`) is just a placeholder to have a unified URL for the wheels, the actual versions of wheels are contained in the wheel metadata (the wheels listed in the extra index url have correct versions). Although we don't support Python 3.8 any more (because PyTorch 2.5 dropped support for Python 3.8), the wheels are still built with Python 3.8 ABI to keep the same wheel name as before.
+:::
 
-##### Install the latest code using `uv`
+:::{card}
+**Install the latest code using `uv`**
+^^^
 
 Another way to install the latest code is to use `uv`:
 
@@ -68,7 +73,11 @@ Another way to install the latest code is to use `uv`:
 uv pip install -U vllm --extra-index-url https://wheels.vllm.ai/nightly
 ```
 
-##### Install specific revisions using `uv`
+:::
+
+:::{card}
+**Install specific revisions using `uv`**
+^^^
 
 If you want to access the wheels for previous commits (e.g. to bisect the behavior change, performance regression), you can specify the commit hash in the URL:
 
@@ -78,6 +87,7 @@ uv pip install vllm --extra-index-url https://wheels.vllm.ai/${VLLM_COMMIT}
 ```
 
 The `uv` approach works for vLLM `v0.6.6` and later and offers an easy-to-remember command. A unique feature of `uv` is that packages in `--extra-index-url` have [higher priority than the default index](https://docs.astral.sh/uv/pip/compatibility/#packages-that-exist-on-multiple-indexes). If the latest public release is `v0.6.6.post1`, `uv`'s behavior allows installing a commit before `v0.6.6.post1` by specifying the `--extra-index-url`. In contrast, `pip` combines packages from `--extra-index-url` and the default index, choosing only the latest version, which makes it difficult to install a development version prior to the released version.
+:::
 
 ### Build wheel from source
 
