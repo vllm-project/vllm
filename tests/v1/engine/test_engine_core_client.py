@@ -345,10 +345,12 @@ def test_startup_failure(monkeypatch: pytest.MonkeyPatch):
     with monkeypatch.context() as m, pytest.raises(Exception) as e_info:
         m.setenv("VLLM_USE_V1", "1")
 
+        t = time.time()
         engine_args = EngineArgs(model=MODEL_NAME)
         vllm_config = engine_args.create_engine_config(
             usage_context=UsageContext.UNKNOWN_CONTEXT)
         executor_class = Executor.get_class(vllm_config)
+        print(f"VllmConfig creation took {time.time() - t:.2f} seconds.")
 
         # Start another thread to wait for engine core process to start
         # and kill it - simulate fatal uncaught process exit.
@@ -360,8 +362,9 @@ def test_startup_failure(monkeypatch: pytest.MonkeyPatch):
                 time.sleep(0.5)
                 children = set(this_proc.children()) - children_before
                 if children:
+                    print(f"Found child processes: {children}")
                     child = children.pop()
-                    print("Killing child core process", child.pid)
+                    print(f"Killing child core process {child.pid}")
                     child.kill()
                     break
 
