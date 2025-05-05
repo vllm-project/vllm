@@ -5,9 +5,7 @@ from enum import Enum
 from pathlib import PosixPath
 from typing import Any, Callable, NamedTuple, Optional, Union
 
-import numpy.typing as npt
 import torch
-from PIL.Image import Image
 from pytest import MarkDecorator
 from transformers import AutoModelForCausalLM
 from transformers.models.auto.auto_factory import _BaseAutoModelClass
@@ -16,7 +14,9 @@ from vllm.config import TaskOption
 from vllm.sequence import SampleLogprobs
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 
-from .....conftest import IMAGE_ASSETS, HfRunner, ImageAsset, ImageTestAssets
+from .....conftest import (IMAGE_ASSETS, HfRunner, ImageAsset, ImageTestAssets,
+                           PromptAudioInput, PromptImageInput,
+                           PromptVideoInput)
 from ....utils import check_logprobs_close
 
 # meta image tag; will be replaced by the appropriate tag for the model
@@ -37,9 +37,8 @@ IMAGE_SIZE_FACTORS = [(), (1.0, ), (1.0, 1.0, 1.0), (0.25, 0.5, 1.0)]
 EMBEDDING_SIZE_FACTORS = [(), (1.0, ), (1.0, 1.0, 1.0)]
 RunnerOutput = tuple[list[int], str, Optional[SampleLogprobs]]
 # yapf: enable
-VisionInput = list[Optional[Union[list[Image], Image]]]
-_Audio = tuple[npt.NDArray, float]
-AudioInput = list[Optional[Union[list[_Audio], _Audio]]]
+VisionInput = list[Optional[Union[PromptImageInput, PromptVideoInput]]]
+AudioInput = list[Optional[PromptAudioInput]]
 
 
 class PromptWithMultiModalInput(NamedTuple):
