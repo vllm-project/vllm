@@ -1,12 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
+import os
+import signal
 import time
 import uuid
 from threading import Thread
 from typing import Optional
 
-import psutil
 import pytest
 from transformers import AutoTokenizer
 
@@ -17,8 +18,8 @@ from vllm.platforms import current_platform
 from vllm.usage.usage_lib import UsageContext
 from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.engine.core import EngineCore
-from vllm.v1.engine.core_client import (AsyncMPClient, EngineCoreClient,
-                                        SyncMPClient)
+from vllm.v1.engine.core_client import (AsyncMPClient, CoreEngine,
+                                        EngineCoreClient, SyncMPClient)
 from vllm.v1.executor.abstract import Executor
 
 from ...distributed.conftest import MockSubscriber
@@ -345,6 +346,16 @@ def test_startup_failure(monkeypatch: pytest.MonkeyPatch):
     with monkeypatch.context() as m, pytest.raises(Exception) as e_info:
         m.setenv("VLLM_USE_V1", "1")
 
+        # Monkey-patch to extract core process pid while it's starting.
+        core_proc_pid = [None]
+        ce_ctor = CoreEngine.__init__
+
+        def patched_ce_ctor(self, *args, **kwargs):
+            ce_ctor(self, *args, **kwargs)
+            core_proc_pid[0] = self.proc_handle.proc.pid
+
+        m.setattr(CoreEngine, "__init__", patched_ce_ctor)
+
         t = time.time()
         engine_args = EngineArgs(model=MODEL_NAME)
         vllm_config = engine_args.create_engine_config(
@@ -354,19 +365,13 @@ def test_startup_failure(monkeypatch: pytest.MonkeyPatch):
 
         # Start another thread to wait for engine core process to start
         # and kill it - simulate fatal uncaught process exit.
-        this_proc = psutil.Process()
-        children_before = set(this_proc.children())
 
         def kill_first_child():
-            while True:
+            while (child_pid := core_proc_pid[0]) is None:
                 time.sleep(0.5)
-                children = set(this_proc.children()) - children_before
-                if children:
-                    print(f"Found child processes: {children}")
-                    child = children.pop()
-                    print(f"Killing child core process {child.pid}")
-                    child.kill()
-                    break
+            print(f"Killing child core process {child_pid}")
+            assert isinstance(child_pid, int)
+            os.kill(child_pid, signal.SIGKILL)
 
         Thread(target=kill_first_child, daemon=True).start()
 
