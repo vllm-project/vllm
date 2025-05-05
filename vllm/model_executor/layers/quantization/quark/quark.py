@@ -8,6 +8,7 @@ import torch
 from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.linear import (LinearBase, LinearMethodBase,
                                                UnquantizedLinearMethod)
+from vllm.model_executor.layers.quantization import QuantizationMethods
 from vllm.model_executor.layers.quantization.base_config import (  # noqa: E501
     QuantizationConfig, QuantizeMethodBase)
 from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
@@ -47,7 +48,7 @@ class QuarkConfig(QuantizationConfig):
     def get_min_capability(cls) -> int:
         return 70
 
-    def get_name(self) -> str:
+    def get_name(self) -> QuantizationMethods:
         return "quark"
 
     def get_quant_method(self, layer: torch.nn.Module,
@@ -306,18 +307,6 @@ class QuarkConfig(QuantizationConfig):
 
         # If no matches, return None
         return None
-
-    def has_fp8_layer_weights(self):
-        layer_quant_config = self.quant_config.get("layer_quant_config")
-        to_dict = lambda obj: cast(Dict[str, Any], obj) or {}
-        return any([
-            'fp8' in cast(
-                str,
-                to_dict(
-                    to_dict(to_dict(layer_quant_config).get(layer_name)).get(
-                        "weight")).get("dtype"))
-            for layer_name in ["*v_proj", "*k_proj", "*q_proj"]
-        ])
 
 
 class QuarkLinearMethod(LinearMethodBase):

@@ -3,10 +3,10 @@
 requires = [
     "cmake>=3.26",
     "ninja",
-    "packaging",
-    "setuptools>=61",
+    "packaging>=24.2",
+    "setuptools>=77.0.3,<80.0.0",
     "setuptools-scm>=8.0",
-    "torch == 2.6.0",
+    "torch == 2.7.0",
     "wheel",
     "jinja2",
 ]
@@ -15,7 +15,8 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "vllm"
 authors = [{name = "vLLM Team"}]
-license = { "file"= "LICENSE" }
+license = "Apache-2.0"
+license-files = ["LICENSE"]
 readme = "README.md"
 description = "A high-throughput and memory-efficient inference and serving engine for LLMs"
 classifiers = [
@@ -23,7 +24,6 @@ classifiers = [
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
-    "License :: OSI Approved :: Apache Software License",
     "Intended Audience :: Developers",
     "Intended Audience :: Information Technology",
     "Intended Audience :: Science/Research",
@@ -46,8 +46,7 @@ vllm = "vllm.entrypoints.cli.main:main"
 
 [tool.setuptools.packages.find]
 where = ["."]
-exclude = ["benchmarks", "csrc", "docs", "examples", "tests*"]
-namespaces = false
+include = ["vllm*"]
 
 [tool.yapfignore]
 ignore_patterns = [
@@ -59,7 +58,8 @@ ignore_patterns = [
 line-length = 80
 exclude = [
     # External file, leaving license intact
-    "examples/other/fp8/quantizer/quantize.py"
+    "examples/other/fp8/quantizer/quantize.py",
+    "vllm/vllm_flash_attn/flash_attn_interface.pyi"
 ]
 
 [tool.ruff.lint.per-file-ignores]

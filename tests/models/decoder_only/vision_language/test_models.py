@@ -447,6 +447,19 @@ VLM_TEST_SETTINGS = {
         hf_output_post_proc=model_utils.minicpmv_trunc_hf_output,
         patch_hf_runner=model_utils.minicpmv_26_patch_hf_runner,
     ),
+    "minimax_vl_01": VLMTestInfo(
+        models=["MiniMaxAI/MiniMax-VL-01"],
+        prompt_formatter=lambda img_prompt: f"<beginning_of_sentence>user: {img_prompt} assistant:<end_of_sentence>", # noqa: E501
+        img_idx_to_prompt=lambda _: "<image>",
+        test_type=(VLMTestType.IMAGE, VLMTestType.MULTI_IMAGE),
+        max_model_len=8192,
+        max_num_seqs=4,
+        dtype="bfloat16",
+        hf_output_post_proc=model_utils.minimax_vl_01_hf_output,
+        patch_hf_runner=model_utils.minimax_vl_01_patch_hf_runner,
+        auto_cls=AutoModelForImageTextToText,
+        marks=[large_gpu_mark(min_gb=80)],
+    ),
     "molmo": VLMTestInfo(
         models=["allenai/Molmo-7B-D-0924"],
         test_type=(VLMTestType.IMAGE, VLMTestType.MULTI_IMAGE),
@@ -454,6 +467,18 @@ VLM_TEST_SETTINGS = {
         max_model_len=4096,
         max_num_seqs=2,
         patch_hf_runner=model_utils.molmo_patch_hf_runner,
+    ),
+    "ovis2": VLMTestInfo(
+        models=["AIDC-AI/Ovis2-1B"],
+        test_type=(VLMTestType.IMAGE, VLMTestType.MULTI_IMAGE),
+        prompt_formatter=lambda img_prompt: f"<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n<|im_start|>user\n{img_prompt}<|im_end|>\n<|im_start|>assistant\n", # noqa: E501
+        img_idx_to_prompt=lambda idx: "<image>\n", # noqa: E501
+        max_model_len=4096,
+        max_num_seqs=2,
+        dtype="half",
+        # use sdpa mode for hf runner since ovis2 didn't work with flash_attn
+        hf_model_kwargs={"llm_attn_implementation": "sdpa"},
+        patch_hf_runner=model_utils.ovis2_patch_hf_runner,
     ),
     "phi3v": VLMTestInfo(
         models=["microsoft/Phi-3.5-vision-instruct"],

@@ -11,8 +11,11 @@ import torch
 import torch._inductor.compile_fx
 import torch.fx as fx
 
+import vllm.envs as envs
 from vllm.config import VllmConfig
 from vllm.utils import is_torch_equal_or_newer
+
+from .inductor_pass import pass_context
 
 
 class CompilerInterface:
@@ -195,7 +198,6 @@ class InductorAdaptor(CompilerInterface):
         hash_str, file_path = None, None
         from torch._inductor.codecache import (FxGraphCache,
                                                compiled_fx_graph_hash)
-
         if torch.__version__.startswith("2.5"):
             original_load = FxGraphCache.load
             original_load_name = "torch._inductor.codecache.FxGraphCache.load"
@@ -280,6 +282,16 @@ class InductorAdaptor(CompilerInterface):
                 patch("torch._inductor.codecache.FxGraphCache._get_shape_env",
                       _get_shape_env))
 
+            from torch._functorch._aot_autograd.autograd_cache import (
+                AOTAutogradCache)
+
+            # torch 2.8+ on main uses _get_shape_env in AOTAutogradCache
+            if hasattr(AOTAutogradCache, "_get_shape_env"):
+                stack.enter_context(
+                    patch(
+                        "torch._functorch._aot_autograd.autograd_cache.AOTAutogradCache._get_shape_env",
+                        _get_shape_env))
+
             # for forcing the graph to be cached
             stack.enter_context(
                 patch(
@@ -302,16 +314,21 @@ class InductorAdaptor(CompilerInterface):
                     torch._functorch.config.patch(
                         enable_remote_autograd_cache=False))
 
-            compiled_graph = compile_fx(
-                graph,
-                example_inputs,
-                inner_compile=hijacked_compile_fx_inner,
-                config_patches=current_config)
+            with pass_context(runtime_shape):
+                compiled_graph = compile_fx(
+                    graph,
+                    example_inputs,
+                    inner_compile=hijacked_compile_fx_inner,
+                    config_patches=current_config)
 
-        assert hash_str is not None, (
-            "failed to get the hash of the compiled graph")
-        assert file_path is not None, (
-            "failed to get the file path of the compiled graph")
+        # We treat VLLM_DISABLE_COMPILE_CACHE as the overall switch for torch
+        # compilation cache. So turn off the checks if we disable the
+        # compilation cache.
+        if not envs.VLLM_DISABLE_COMPILE_CACHE:
+            assert hash_str is not None, (
+                "failed to get the hash of the compiled graph")
+            assert file_path is not None, (
+                "failed to get the file path of the compiled graph")
         return compiled_graph, (hash_str, file_path)
 
     def load(self,
@@ -325,11 +342,19 @@ class InductorAdaptor(CompilerInterface):
         assert isinstance(handle[1], str)
         hash_str = handle[0]
 
+        from torch._functorch._aot_autograd.autograd_cache import (
+            AOTAutogradCache)
         from torch._inductor.codecache import FxGraphCache
         with ExitStack() as exit_stack:
             exit_stack.enter_context(
                 patch("torch._inductor.codecache.FxGraphCache._get_shape_env",
                       lambda *args, **kwargs: AlwaysHitShapeEnv()))
+            # torch 2.8+ on main uses _get_shape_env in AOTAutogradCache
+            if hasattr(AOTAutogradCache, "_get_shape_env"):
+                exit_stack.enter_context(
+                    patch(
+                        "torch._functorch._aot_autograd.autograd_cache.AOTAutogradCache._get_shape_env",
+                        lambda *args, **kwargs: AlwaysHitShapeEnv()))
 
             # Dynamo metrics context, see method for more details.
             exit_stack.enter_context(self.metrics_context())
