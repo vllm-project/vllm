@@ -391,9 +391,9 @@ class MambaMixer2(CustomOp):
         # stay the same and reused for all mamba layers in the same iteration
         attn_metadata: AttentionMetadata = get_forward_context().attn_metadata
 
-        num_prefills = attn_metadata.num_prefills  # #requests
-        num_decodes = attn_metadata.num_decode_tokens  # #tokens==#requests
-        num_prefill_tokens = attn_metadata.num_prefill_tokens  # #tokens
+        num_prefills = attn_metadata.num_prefills  # request count
+        num_decodes = attn_metadata.num_decode_tokens  # token count (=request)
+        num_prefill_tokens = attn_metadata.num_prefill_tokens  # token count
         has_prefill = num_prefills > 0
         has_decode = num_decodes > 0
 
