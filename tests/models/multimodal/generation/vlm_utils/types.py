@@ -37,34 +37,32 @@ IMAGE_SIZE_FACTORS = [(), (1.0, ), (1.0, 1.0, 1.0), (0.25, 0.5, 1.0)]
 EMBEDDING_SIZE_FACTORS = [(), (1.0, ), (1.0, 1.0, 1.0)]
 RunnerOutput = tuple[list[int], str, Optional[SampleLogprobs]]
 # yapf: enable
-VisionInput = list[Optional[Union[PromptImageInput, PromptVideoInput]]]
-AudioInput = list[Optional[PromptAudioInput]]
 
 
 class PromptWithMultiModalInput(NamedTuple):
     """Holds the multimodal input for a single test case."""
     prompts: list[str]
-    vision_data: VisionInput
-    audio_data: AudioInput
+    image_data: list[Optional[PromptImageInput]]
+    video_data: list[Optional[PromptVideoInput]]
+    audio_data: list[Optional[PromptAudioInput]]
 
     @classmethod
     def create(
         cls,
         prompts: list[str],
-        vision_data: Optional[VisionInput] = None,
-        audio_data: Optional[AudioInput] = None,
+        image_data: Optional[list[Optional[PromptImageInput]]] = None,
+        video_data: Optional[list[Optional[PromptVideoInput]]] = None,
+        audio_data: Optional[list[Optional[PromptAudioInput]]] = None,
     ) -> "PromptWithMultiModalInput":
         """
         Constructs a multimodal input from a prompt and optional mm_data.
         This method will pad unprovided inputs with None values to 
         match the length of prompts for parameterization automatically.
         """
-        assert not (
-            vision_data is None and audio_data is None
-        ), "At least one of vision_data or audio_data must be provided."
         return cls(
             prompts,
-            vision_data if vision_data is not None else [None] * len(prompts),
+            image_data if image_data is not None else [None] * len(prompts),
+            video_data if video_data is not None else [None] * len(prompts),
             audio_data if audio_data is not None else [None] * len(prompts),
         )
 

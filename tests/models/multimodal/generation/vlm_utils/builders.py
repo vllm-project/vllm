@@ -111,7 +111,7 @@ def build_single_image_inputs(
     return [
         PromptWithMultiModalInput.create(
             prompts=[prompt for _ in size_wrapper.data],
-            vision_data=[
+            image_data=[
                 apply_image_size_scaling(image, size, size_wrapper.type)
                 for size in size_wrapper.data
             ],
@@ -158,7 +158,7 @@ def build_multi_image_inputs(
     return [
         PromptWithMultiModalInput.create(
             prompts=[prompt for _ in size_wrapper.data],
-            vision_data=[[
+            image_data=[[
                 apply_image_size_scaling(image, size, size_wrapper.type)
                 for image in images
             ] for size in size_wrapper.data],
@@ -225,7 +225,7 @@ def build_video_inputs_from_test_info(
     return [
         PromptWithMultiModalInput.create(
             prompts=[prompt for _ in size_wrapper.data],
-            vision_data=[
+            video_data=[
                 video_scaler(video, size) for size in size_wrapper.data
             ],
         ) for video, prompt in zip(sampled_vids, model_prompts)

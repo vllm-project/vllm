@@ -93,16 +93,16 @@ def run_test(
         if stop_str:
             vllm_kwargs["stop"] = stop_str
 
-        for prompts, vision_data, audio_data in vllm_inputs:
-            vllm_kwargs_with_media = dict(**vllm_kwargs)
-            vllm_kwargs_with_media[runner_mm_key] = vision_data
-            if audio_data is not None:
-                vllm_kwargs_with_media["audios"] = audio_data
+        for prompts, image_data, video_data, audio_data in vllm_inputs:
+            mm_data = dict(images=image_data,
+                           videos=video_data,
+                           audios=audio_data)
+            vllm_kwargs_with_mm_data = vllm_kwargs | mm_data
             vllm_output = vllm_model.generate_greedy_logprobs(
                 prompts,
                 max_tokens,
                 num_logprobs=num_logprobs,
-                **vllm_kwargs_with_media)
+                **vllm_kwargs_with_mm_data)
             vllm_outputs_per_mm.append(vllm_output)
 
     hf_model = hf_runner(model,
@@ -127,17 +127,17 @@ def run_test(
         if stop_str:
             hf_kwargs["stop_strings"] = stop_str
 
-        for prompts, vision_data, audio_data in inputs:
-            hf_kwargs_with_media = dict(**hf_kwargs)
-            hf_kwargs_with_media[runner_mm_key] = vision_data
-            if audio_data is not None:
-                hf_kwargs_with_media["audios"] = audio_data
+        for prompts, image_data, video_data, audio_data in inputs:
+            mm_data = dict(images=image_data,
+                           videos=video_data,
+                           audios=audio_data)
+            hf_kwargs_with_mm_data = hf_kwargs | mm_data
             hf_output = hf_model.generate_greedy_logprobs_limit(
                 prompts,
                 max_tokens,
                 num_logprobs=num_logprobs,
                 tokenizer=tokenizer,
-                **hf_kwargs_with_media)
+                **hf_kwargs_with_mm_data)
             hf_outputs_per_mm.append(hf_output)
 
     # Apply output processing / sanitation to the vLLM and HF runner results

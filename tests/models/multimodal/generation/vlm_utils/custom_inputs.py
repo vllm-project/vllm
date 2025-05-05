@@ -53,7 +53,7 @@ def multi_image_multi_aspect_ratio_inputs(formatter: Callable[[str], str]):
     return [
         PromptWithMultiModalInput.create(
             prompts=formatted_prompts,
-            vision_data=aspect_ratio_images,
+            image_data=aspect_ratio_images,
         )
     ]
 
@@ -93,7 +93,7 @@ def multi_video_multi_aspect_ratio_inputs(formatter: Callable[[str], str],
     return [
         PromptWithMultiModalInput.create(
             prompts=formatted_prompts,
-            vision_data=aspect_ratio_videos,
+            video_data=aspect_ratio_videos,
         )
     ]
 
@@ -149,9 +149,9 @@ def mixed_modality_qwen2_5_omni(size_factor: float = 0.25):
     W, H = image.size
     image = image.resize((int(W * size_factor), int(H * size_factor)))
     return [
-        PromptWithMultiModalInput(
+        PromptWithMultiModalInput.create(
             prompts=[prompt],
-            vision_data=[image],
+            image_data=[image],
             audio_data=[audio],
         )
     ]
