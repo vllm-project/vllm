@@ -223,5 +223,10 @@ def write_to_kv_cache(
     if os.environ.get("VLLM_TORCHAX_ENABLED", "0") == "0":
         torch.ops.xla.dynamo_set_buffer_donor_(kv_cache, True)
 
-    kv_cache = kv_cache.flatten(0, 1)
-    kv_cache.index_copy_(0, slot_mapping, kv)
+    # kv_cache = kv_cache.flatten(0, 1)
+    # kv_cache.index_copy_(0, slot_mapping, kv)
+
+    kv_cache_shape = kv_cache.shape
+    kv_cache_copy = kv_cache.flatten(0, 1)
+    kv_cache_copy[slot_mapping, ...] = kv
+    kv_cache_copy = kv_cache_copy.reshape(kv_cache_shape)

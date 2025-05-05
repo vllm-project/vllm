@@ -240,14 +240,14 @@ class Qwen2DecoderLayer(nn.Module):
             hidden_states, residual = self.input_layernorm(
                 hidden_states, residual)
         
-        print("decoder layer hidden_states before attention", hidden_states.ravel()[:10])
+        # print("decoder layer hidden_states before attention", hidden_states.ravel()[:10])
         
         hidden_states = self.self_attn(
             positions=positions,
             hidden_states=hidden_states,
         )
 
-        print("decoder layer hidden_states after attention", hidden_states.ravel()[:10])
+        # print("decoder layer hidden_states after attention", hidden_states.ravel()[:10])
 
         # Fully Connected
         hidden_states, residual = self.post_attention_layernorm(
