@@ -445,7 +445,6 @@ def safetensors_weights_iterator(
                     torchax.disable_globally()
                 param = f.get_tensor(name)
                 if os.environ.get("VLLM_TORCHAX_ENABLED", "0") == "1":
-                    import torchax
                     torchax.enable_globally()
                     param = param.to("jax")
                 yield name, param
