@@ -810,6 +810,8 @@ class ModelConfig:
                 "gptq_marlin_24",
                 "gptq_marlin",
                 "gptq_bitblas",
+                "gptq_hpu",
+                "awq_hpu",
                 "awq_marlin",
                 "ipex",
                 "moe_wna16",
