@@ -83,7 +83,7 @@ def rocm_aiter_ck_moe_impl(hidden_states: torch.Tensor, w1: torch.Tensor,
     return ck_moe(hidden_states=hidden_states,
                   w1=w1,
                   w2=w2,
-                  topk_weights=topk_weights,
+                  topk_weight=topk_weights,
                   topk_ids=topk_ids)
 
 
@@ -152,7 +152,7 @@ def rocm_aiter_fmoe_fp8_blockscale_g1u1_fake(
         block_shape: List[int],
         smooth_scale: Optional[torch.Tensor] = None) -> torch.Tensor:
 
-    return torch.empty_like(a1, dtype=torch.bf16)
+    return torch.empty_like(a1, dtype=hidden_states_dtype)
 
 
 def rocm_aiter_asm_moe_impl(hidden_states: torch.Tensor,
@@ -392,7 +392,7 @@ def rocm_aiter_fused_experts(
             fc2_smooth_scale=None,
             a16=False,
             per_tensor_quant_scale=None,
-            expert_mask=expert_map,
+            expert_mask=None,
             activation_str=activation)
 
     # w8a8 per-tensor activation per-tensor weight
