@@ -481,26 +481,20 @@ class ModelOptNvFp4LinearMethod(LinearMethodBase):
     ) -> torch.Tensor:
         output_dtype = x.dtype
 
-        # for input only the contracting dimension has a constraint.
         x_m, x_k = x.shape
         w_n, w_k = layer.weight.shape
-        # print(f"{x.shape=}")
-        # print(f"{layer.weight.shape=}")
         output_shape = [x_m, w_n]
         block_size = 16
+
+        # quantize input to FP4
         """
-        # quantize input to (FP4 and interleaved block scale)
-        # x_global_scale = layer.input_scale
-        x_global_scale = 1 / layer.input_scale
-        # x_fp4, x_blockscale = scaled_fp4_quant(x, s_quant)
-        x_fp4, x_blockscale = ref_nvfp4_quant(x, x_global_scale, block_size)
-        # x_blockscale = self.swizzle_blockscale(x_blockscale)
-        # print(f"{x_fp4.shape=}")
-        # print(f"{x_blockscale.shape=}")
+        dynamic_scale = 1 / layer.input_scale
+        x_fp4, x_blockscale = ref_nvfp4_quant(x, dynamic_scale, block_size)
+
 
         # dequantize input
         x_fp4 = x_fp4.reshape(x_m, x_k // block_size, block_size)
-        x_blockscale = x_blockscale.unsqueeze(-1) / x_global_scale
+        x_blockscale = x_blockscale.unsqueeze(-1).to(torch.float32) / dynamic_scale
         x_dq = (x_fp4 * x_blockscale).reshape(x_m, x_k).to(output_dtype)
         del x_fp4, x_blockscale
         """
@@ -509,16 +503,12 @@ class ModelOptNvFp4LinearMethod(LinearMethodBase):
         w_fp4 = layer.weight.data.view(torch.uint8)
         w_blockscale = layer.weight_scale_swizzled.data
         w_global_scale = layer.weight_scale_2
-        # print(f"{w_fp4.shape=}")
-        # print(f"{w_blockscale.shape=}")
-        # print(f"{w_global_scale.shape=}")
         w_dq = dequantize_to_dtype(w_fp4, w_blockscale, w_global_scale,
                                    output_dtype, x.device, block_size)
 
         # matmul
+        # out = torch.matmul(x_dq, w_dq.t())
         out = torch.matmul(x, w_dq.t())
-        # del x_dq, w_dq
-        # print(f"{out.shape=}")
 
         if bias is not None:
             out = out + bias
