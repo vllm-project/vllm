@@ -28,6 +28,8 @@ from vllm.v1.core.kv_cache_utils import (get_kv_cache_config,
 from vllm.v1.core.sched.interface import SchedulerInterface
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.core.sched.scheduler import Scheduler as V1Scheduler
+from vllm.v1.core.sched.scheduler_disagg import (  # noqa: E501
+    DisaggregatedScheduler as V1DisaggregatedScheduler)
 from vllm.v1.engine import (EngineCoreOutputs, EngineCoreRequest,
                             EngineCoreRequestType, UtilityOutput)
 from vllm.v1.engine.mm_input_cache import MirroredProcessingCache
@@ -86,7 +88,7 @@ class EngineCore:
         # This warning can be removed once the V1 Scheduler interface is
         # finalized and we can maintain support for scheduler classes that
         # implement it
-        if Scheduler is not V1Scheduler:
+        if Scheduler not in [V1Scheduler, V1DisaggregatedScheduler]:
             logger.warning(
                 "Using configured V1 scheduler class %s. "
                 "This scheduler interface is not public and "
