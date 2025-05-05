@@ -91,7 +91,40 @@ def test_literal_to_kwargs(type_hints, expected):
 
 @config
 @dataclass
-class DummyConfigClass:
+class NestedConfig:
+    field: int = 1
+    """field"""
+
+
+@config
+@dataclass
+class FromCliConfig1:
+    field: int = 1
+    """field"""
+
+    @classmethod
+    def from_cli(cls, cli_value: str):
+        inst = cls(**json.loads(cli_value))
+        inst.field += 1
+        return inst
+
+
+@config
+@dataclass
+class FromCliConfig2:
+    field: int = 1
+    """field"""
+
+    @classmethod
+    def from_cli(cls, cli_value: str):
+        inst = cls(**json.loads(cli_value))
+        inst.field += 2
+        return inst
+
+
+@config
+@dataclass
+class DummyConfig:
     regular_bool: bool = True
     """Regular bool with default True"""
     optional_bool: Optional[bool] = None
@@ -110,18 +143,24 @@ class DummyConfigClass:
     """Literal of literals with default 1"""
     json_tip: dict = field(default_factory=dict)
     """Dict which will be JSON in CLI"""
+    nested_config: NestedConfig = field(default_factory=NestedConfig)
+    """Nested config"""
+    from_cli_conig1: FromCliConfig1 = field(default_factory=FromCliConfig1)
+    """Config with from_cli method"""
+    from_cli_conig2: FromCliConfig2 = field(default_factory=FromCliConfig2)
+    """Different config with from_cli method"""
 
 
 @pytest.mark.parametrize(("type_hint", "expected"), [
     (int, False),
-    (DummyConfigClass, True),
+    (DummyConfig, True),
 ])
 def test_is_not_builtin(type_hint, expected):
     assert is_not_builtin(type_hint) == expected
 
 
 def test_get_kwargs():
-    kwargs = get_kwargs(DummyConfigClass)
+    kwargs = get_kwargs(DummyConfig)
     print(kwargs)
 
     # bools should not have their type set
@@ -144,6 +183,11 @@ def test_get_kwargs():
     # dict should have json tip in help
     json_tip = "\n\nShould be a valid JSON string."
     assert kwargs["json_tip"]["help"].endswith(json_tip)
+    # nested config should should construct the nested config
+    assert kwargs["nested_config"]["type"]('{"field": 2}') == NestedConfig(2)
+    # from_cli configs should be constructed with the correct method
+    assert kwargs["from_cli_conig1"]["type"]('{"field": 2}').field == 3
+    assert kwargs["from_cli_conig2"]["type"]('{"field": 2}').field == 4
 
 
 @pytest.mark.parametrize(("arg", "expected"), [
