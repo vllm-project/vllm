@@ -31,3 +31,8 @@ bitsandbytes>=0.45.3
 # required for minicpmo_26 test
 vector_quantize_pytorch
 vocos
+
+# required for  Multi-Modal Models Test (Standard)
+num2words # required for smolvlm test
+pqdm
+blobfile # required for kimi-vl test
