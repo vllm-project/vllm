@@ -22,3 +22,4 @@ help:
 clean:
 	@$(SPHINXBUILD) -M clean "$(SOURCEDIR)" "$(BUILDDIR)" $(SPHINXOPTS) $(O)
 	rm -rf "$(SOURCEDIR)/getting_started/examples"
+	rm -rf "$(SOURCEDIR)/api/vllm"

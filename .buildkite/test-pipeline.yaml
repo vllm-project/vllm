@@ -40,7 +40,7 @@ steps:
   - pip install -r ../../requirements/docs.txt
   - SPHINXOPTS=\"-W\" make html
   # Check API reference (if it fails, you may have missing mock imports)
-  - grep \"sig sig-object py\" build/html/api/inference_params.html
+  - grep \"sig sig-object py\" build/html/api/vllm/vllm.sampling_params.html
 
 - label: Async Engine, Inputs, Utils, Worker Test # 24min
   mirror_hardwares: [amdexperimental]
@@ -301,6 +301,7 @@ steps:
 
 - label: PyTorch Compilation Unit Tests
   mirror_hardwares: [amdexperimental, amdproduction]
+  torch_nightly: true
   source_file_dependencies:
     - vllm/
     - tests/compile
@@ -311,6 +312,7 @@ steps:
 
 - label: PyTorch Fullgraph Smoke Test # 9min
   mirror_hardwares: [amdexperimental, amdproduction]
+  torch_nightly: true
   source_file_dependencies:
   - vllm/
   - tests/compile
@@ -322,6 +324,7 @@ steps:
 
 - label: PyTorch Fullgraph Test # 18min
   mirror_hardwares: [amdexperimental, amdproduction]
+  torch_nightly: true
   source_file_dependencies:
   - vllm/
   - tests/compile
@@ -452,6 +455,7 @@ steps:
 
 - label: Basic Models Test # 24min
   mirror_hardwares: [amdexperimental]
+  torch_nightly: true
   source_file_dependencies:
   - vllm/
   - tests/models
