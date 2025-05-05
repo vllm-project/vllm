@@ -454,8 +454,8 @@ steps:
     - VLLM_USE_V1=0 pytest -v -s models/test_initialization.py -k 'plamo2'
 
 - label: Language Models Test (Standard)
-  torch_nightly: true
   #mirror_hardwares: [amd]
+  torch_nightly: true
   source_file_dependencies:
   - vllm/
   - tests/models/language
@@ -476,8 +476,8 @@ steps:
     - pytest -v -s models/language -m 'not core_model'
 
 - label: Multi-Modal Models Test (Standard)
-  torch_nightly: true
   #mirror_hardwares: [amd]
+  torch_nightly: true
   source_file_dependencies:
   - vllm/
   - tests/models/multimodal
