@@ -1233,7 +1233,11 @@ def moe_kernel_prepare_input(
     elif use_mxfp4_w4a4:
         assert block_shape is None
         if not current_platform.supports_mx():
-            A, A_scale = per_token_group_quant_mxfp4(A, OCP_MX_BLOCK_SIZE)
+            from quark.torch.kernel.hw_emulation.extensions import kernel_ext
+
+            # A, A_scale = per_token_group_quant_mxfp4(A, OCP_MX_BLOCK_SIZE)
+            kernel_ext.qdq_mxfp4(A, OCP_MX_BLOCK_SIZE)
+            A_scale = None
         else:
             raise NotImplementedError()
     else:
