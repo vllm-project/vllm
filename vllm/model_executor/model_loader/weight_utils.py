@@ -27,6 +27,7 @@ from vllm.model_executor.layers.quantization import (QuantizationConfig,
                                                      get_quantization_config)
 from vllm.platforms import current_platform
 from vllm.utils import PlaceholderModule
+import vllm.envs as envs
 
 try:
     from runai_model_streamer import SafetensorsStreamer
@@ -440,11 +441,11 @@ def safetensors_weights_iterator(
     ):
         with safe_open(st_file, framework="pt") as f:
             for name in f.keys():  # noqa: SIM118
-                if os.environ.get("VLLM_TORCHAX_ENABLED", "0") == "1":
+                if envs.VLLM_TORCHAX_ENABLED:
                     import torchax
                     torchax.disable_globally()
                 param = f.get_tensor(name)
-                if os.environ.get("VLLM_TORCHAX_ENABLED", "0") == "1":
+                if envs.VLLM_TORCHAX_ENABLED:
                     torchax.enable_globally()
                     param = param.to("jax")
                 yield name, param

@@ -6,15 +6,14 @@ from typing import Optional
 import torch
 import torch.distributed
 import torch.nn as nn
-
-if os.environ.get("VLLM_TORCHAX_ENABLED", "0") == "1":
+import vllm.envs as envs
+if envs.VLLM_TORCHAX_ENABLED:
     import jax 
 else:
     import torch_xla.core.xla_model as xm
     import torch_xla.debug.profiler as xp
     import torch_xla.runtime as xr
 
-import vllm.envs as envs
 from vllm.config import ParallelConfig, VllmConfig
 from vllm.distributed import (ensure_model_parallel_initialized,
                               init_distributed_environment)
@@ -41,7 +40,7 @@ class TPUWorker:
         distributed_init_method: str,
         is_driver_worker: bool = False,
     ):
-        if os.environ.get("VLLM_TORCHAX_ENABLED", "0") == "1":
+        if envs.VLLM_TORCHAX_ENABLED:
             torch._sync = lambda *args, **kwargs: None
         
         self.is_driver_worker = is_driver_worker
@@ -108,7 +107,7 @@ class TPUWorker:
 
         # Device initialization should happen after initializing
         # the distributed runtime.
-        if os.environ.get("VLLM_TORCHAX_ENABLED", "0") == "1":
+        if envs.VLLM_TORCHAX_ENABLED:
             self.device = torch.device("jax:0")
         else:
             self.device = xm.xla_device()
@@ -117,11 +116,11 @@ class TPUWorker:
         # Set random seed.
         set_random_seed(self.model_config.seed)
         
-        if os.environ.get("VLLM_TORCHAX_ENABLED", "0") == "1":
+        if envs.VLLM_TORCHAX_ENABLED:
             rank = jax.process_index()
         else:
             rank = xr.global_ordinal()
-        if os.environ.get("VLLM_TORCHAX_ENABLED", "0") == "0":
+        if not envs.VLLM_TORCHAX_ENABLED:
             if self.model_config.seed is not None:
                 xm.set_rng_state(self.model_config.seed, self.device)
 
@@ -179,7 +178,7 @@ class TPUWorker:
         self.model_runner.profile_run(self.model_runner.max_num_tokens)
 
         # Synchronize before measuring the memory usage.
-        if os.environ.get("VLLM_TORCHAX_ENABLED", "0") == "0":
+        if not envs.VLLM_TORCHAX_ENABLED:
             xm.wait_device_ops()
 
         # During the profiling run, the model runs without KV cache. After
@@ -192,7 +191,7 @@ class TPUWorker:
 
         # Get the maximum amount of memory used by the model weights and
         # intermediate activations.
-        if os.environ.get("VLLM_TORCHAX_ENABLED", "0") == "0":
+        if not envs.VLLM_TORCHAX_ENABLED:
             m = xm.get_memory_info(self.device)
             total_memory_size = m["bytes_limit"]
             current_mem = m["bytes_used"]
