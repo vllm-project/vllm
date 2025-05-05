@@ -170,9 +170,10 @@ class Worker(WorkerBase):
         Then, it calculate the free memory that can be used for KV cache in
         bytes.
 
-        .. tip::
-            You may limit the usage of GPU memory
-            by adjusting the `gpu_memory_utilization` parameter.
+        :::{tip}
+        You may limit the usage of GPU memory
+        by adjusting the `gpu_memory_utilization` parameter.
+        :::
         """
         torch.cuda.empty_cache()
         torch.cuda.reset_peak_memory_stats()

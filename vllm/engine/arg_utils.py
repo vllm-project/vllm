@@ -7,6 +7,7 @@ import json
 import re
 import threading
 from dataclasses import MISSING, dataclass, fields
+from itertools import permutations
 from typing import (Any, Callable, Dict, List, Literal, Optional, Type,
                     TypeVar, Union, cast, get_args, get_origin)
 
@@ -14,21 +15,21 @@ import torch
 from typing_extensions import TypeIs, deprecated
 
 import vllm.envs as envs
-from vllm import version
 from vllm.config import (BlockSize, CacheConfig, CacheDType, CompilationConfig,
-                         ConfigFormat, ConfigType, DecodingConfig, Device,
-                         DeviceConfig, DistributedExecutorBackend,
-                         GuidedDecodingBackendV1, HfOverrides,
+                         ConfigFormat, ConfigType, DecodingConfig,
+                         DetailedTraceModules, Device, DeviceConfig,
+                         DistributedExecutorBackend, GuidedDecodingBackend,
+                         GuidedDecodingBackendV1, HfOverrides, KVEventsConfig,
                          KVTransferConfig, LoadConfig, LoadFormat, LoRAConfig,
-                         ModelConfig, ModelImpl, MultiModalConfig,
+                         ModelConfig, ModelDType, ModelImpl, MultiModalConfig,
                          ObservabilityConfig, ParallelConfig, PoolerConfig,
                          PrefixCachingHashAlgo, PromptAdapterConfig,
                          SchedulerConfig, SchedulerPolicy, SpeculativeConfig,
-                         TaskOption, TokenizerPoolConfig, VllmConfig,
-                         get_attr_docs, get_field)
+                         TaskOption, TokenizerMode, TokenizerPoolConfig,
+                         VllmConfig, get_attr_docs, get_field)
 from vllm.executor.executor_base import ExecutorBase
 from vllm.logger import init_logger
-from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS
+from vllm.model_executor.layers.quantization import QuantizationMethods
 from vllm.plugins import load_general_plugins
 from vllm.reasoning import ReasoningParserManager
 from vllm.test_utils import MODEL_WEIGHTS_S3_BUCKET, MODELS_ON_S3
@@ -39,8 +40,6 @@ from vllm.utils import FlexibleArgumentParser, GiB_bytes, is_in_ray_actor
 # yapf: enable
 
 logger = init_logger(__name__)
-
-ALLOWED_DETAILED_TRACE_MODULES = ["model", "worker", "all"]
 
 # object is used to allow for special typing forms
 T = TypeVar("T")
@@ -63,6 +62,13 @@ def optional_type(
                 f"Value {val} cannot be converted to {return_type}.") from e
 
     return _optional_type
+
+
+def union_dict_and_str(val: str) -> Optional[Union[str, dict[str, str]]]:
+    if not re.match("^{.*}$", val):
+        return str(val)
+    else:
+        return optional_type(json.loads)(val)
 
 
 @deprecated(
@@ -116,6 +122,18 @@ def get_type(type_hints: set[TypeHint], type: TypeHintT) -> TypeHintT:
     return next((th for th in type_hints if is_type(th, type)), None)
 
 
+def literal_to_kwargs(type_hints: set[TypeHint]) -> dict[str, Any]:
+    """Convert Literal type hints to argparse kwargs."""
+    type_hint = get_type(type_hints, Literal)
+    choices = get_args(type_hint)
+    choice_type = type(choices[0])
+    if not all(isinstance(choice, choice_type) for choice in choices):
+        raise ValueError(
+            "All choices must be of the same type. "
+            f"Got {choices} with types {[type(c) for c in choices]}")
+    return {"type": choice_type, "choices": sorted(choices)}
+
+
 def is_not_builtin(type_hint: TypeHint) -> bool:
     """Check if the class is not a built-in type."""
     return type_hint.__module__ != "builtins"
@@ -132,7 +150,7 @@ def get_kwargs(cls: ConfigType) -> dict[str, Any]:
 
         # Get the help text for the field
         name = field.name
-        help = cls_docs[name]
+        help = cls_docs[name].strip()
         # Escape % for argparse
         help = help.replace("%", "%%")
 
@@ -147,19 +165,12 @@ def get_kwargs(cls: ConfigType) -> dict[str, Any]:
             type_hints.add(field.type)
 
         # Set other kwargs based on the type hints
+        json_tip = "\n\nShould be a valid JSON string."
         if contains_type(type_hints, bool):
             # Creates --no-<name> and --<name> flags
             kwargs[name]["action"] = argparse.BooleanOptionalAction
         elif contains_type(type_hints, Literal):
-            # Creates choices from Literal arguments
-            type_hint = get_type(type_hints, Literal)
-            choices = sorted(get_args(type_hint))
-            kwargs[name]["choices"] = choices
-            choice_type = type(choices[0])
-            assert all(type(c) is choice_type for c in choices), (
-                "All choices must be of the same type. "
-                f"Got {choices} with types {[type(c) for c in choices]}")
-            kwargs[name]["type"] = choice_type
+            kwargs[name].update(literal_to_kwargs(type_hints))
         elif contains_type(type_hints, tuple):
             type_hint = get_type(type_hints, tuple)
             types = get_args(type_hint)
@@ -179,17 +190,30 @@ def get_kwargs(cls: ConfigType) -> dict[str, Any]:
             kwargs[name]["nargs"] = "+"
         elif contains_type(type_hints, int):
             kwargs[name]["type"] = int
+            # Special case for large integers
+            if name in {"max_model_len"}:
+                kwargs[name]["type"] = human_readable_int
         elif contains_type(type_hints, float):
             kwargs[name]["type"] = float
+        elif contains_type(type_hints,
+                           dict) and (contains_type(type_hints, str) or any(
+                               is_not_builtin(th) for th in type_hints)):
+            kwargs[name]["type"] = union_dict_and_str
         elif contains_type(type_hints, dict):
             # Dict arguments will always be optional
             kwargs[name]["type"] = optional_type(json.loads)
+            kwargs[name]["help"] += json_tip
         elif (contains_type(type_hints, str)
               or any(is_not_builtin(th) for th in type_hints)):
             kwargs[name]["type"] = str
         else:
             raise ValueError(
                 f"Unsupported type {type_hints} for argument {name}.")
+
+        # If the type hint was a sequence of literals, use the helper function
+        # to update the type and choices
+        if get_origin(kwargs[name].get("type")) is Literal:
+            kwargs[name].update(literal_to_kwargs({kwargs[name]["type"]}))
 
         # If None is in type_hints, make the argument optional.
         # But not if it's a bool, argparse will handle this better.
@@ -203,22 +227,26 @@ def get_kwargs(cls: ConfigType) -> dict[str, Any]:
 @dataclass
 class EngineArgs:
     """Arguments for vLLM engine."""
-    model: str = 'facebook/opt-125m'
-    served_model_name: Optional[Union[str, List[str]]] = None
-    tokenizer: Optional[str] = None
-    hf_config_path: Optional[str] = None
-    task: TaskOption = "auto"
-    skip_tokenizer_init: bool = False
-    tokenizer_mode: str = 'auto'
-    trust_remote_code: bool = False
-    allowed_local_media_path: str = ""
+    model: str = ModelConfig.model
+    served_model_name: Optional[Union[
+        str, List[str]]] = ModelConfig.served_model_name
+    tokenizer: Optional[str] = ModelConfig.tokenizer
+    hf_config_path: Optional[str] = ModelConfig.hf_config_path
+    task: TaskOption = ModelConfig.task
+    skip_tokenizer_init: bool = ModelConfig.skip_tokenizer_init
+    enable_prompt_embeds: bool = ModelConfig.enable_prompt_embeds
+    tokenizer_mode: TokenizerMode = ModelConfig.tokenizer_mode
+    trust_remote_code: bool = ModelConfig.trust_remote_code
+    allowed_local_media_path: str = ModelConfig.allowed_local_media_path
     download_dir: Optional[str] = LoadConfig.download_dir
     load_format: str = LoadConfig.load_format
-    config_format: ConfigFormat = ConfigFormat.AUTO
-    dtype: str = 'auto'
+    config_format: str = ModelConfig.config_format
+    dtype: ModelDType = ModelConfig.dtype
     kv_cache_dtype: CacheDType = CacheConfig.cache_dtype
-    seed: Optional[int] = None
-    max_model_len: Optional[int] = None
+    seed: Optional[int] = ModelConfig.seed
+    max_model_len: Optional[int] = ModelConfig.max_model_len
+    cuda_graph_sizes: list[int] = get_field(SchedulerConfig,
+                                            "cuda_graph_sizes")
     # Note: Specifying a custom executor backend by passing a class
     # is intended for expert use only. The API may change without
     # notice.
@@ -236,8 +264,8 @@ class EngineArgs:
     enable_prefix_caching: Optional[bool] = CacheConfig.enable_prefix_caching
     prefix_caching_hash_algo: PrefixCachingHashAlgo = \
         CacheConfig.prefix_caching_hash_algo
-    disable_sliding_window: bool = False
-    disable_cascade_attn: bool = False
+    disable_sliding_window: bool = ModelConfig.disable_sliding_window
+    disable_cascade_attn: bool = ModelConfig.disable_cascade_attn
     use_v2_block_manager: bool = True
     swap_space: float = CacheConfig.swap_space
     cpu_offload_gb: float = CacheConfig.cpu_offload_gb
@@ -249,18 +277,19 @@ class EngineArgs:
     long_prefill_token_threshold: int = \
         SchedulerConfig.long_prefill_token_threshold
     max_num_seqs: Optional[int] = SchedulerConfig.max_num_seqs
-    max_logprobs: int = 20  # Default value for OpenAI Chat Completions API
+    max_logprobs: int = ModelConfig.max_logprobs
     disable_log_stats: bool = False
-    revision: Optional[str] = None
-    code_revision: Optional[str] = None
-    rope_scaling: Optional[Dict[str, Any]] = None
-    rope_theta: Optional[float] = None
-    hf_token: Optional[Union[bool, str]] = None
-    hf_overrides: Optional[HfOverrides] = None
-    tokenizer_revision: Optional[str] = None
-    quantization: Optional[str] = None
-    enforce_eager: Optional[bool] = None
-    max_seq_len_to_capture: int = 8192
+    revision: Optional[str] = ModelConfig.revision
+    code_revision: Optional[str] = ModelConfig.code_revision
+    rope_scaling: dict[str, Any] = get_field(ModelConfig, "rope_scaling")
+    rope_theta: Optional[float] = ModelConfig.rope_theta
+    hf_token: Optional[Union[bool, str]] = ModelConfig.hf_token
+    hf_overrides: Optional[HfOverrides] = \
+        get_field(ModelConfig, "hf_overrides")
+    tokenizer_revision: Optional[str] = ModelConfig.tokenizer_revision
+    quantization: Optional[QuantizationMethods] = ModelConfig.quantization
+    enforce_eager: bool = ModelConfig.enforce_eager
+    max_seq_len_to_capture: int = ModelConfig.max_seq_len_to_capture
     disable_custom_all_reduce: bool = ParallelConfig.disable_custom_all_reduce
     # The following three fields are deprecated and will be removed in a future
     # release. Setting them will have no effect. Please remove them from your
@@ -271,8 +300,10 @@ class EngineArgs:
         get_field(TokenizerPoolConfig, "extra_config")
     limit_mm_per_prompt: dict[str, int] = \
         get_field(MultiModalConfig, "limit_per_prompt")
-    mm_processor_kwargs: Optional[Dict[str, Any]] = None
-    disable_mm_preprocessor_cache: bool = False
+    mm_processor_kwargs: Optional[Dict[str, Any]] = \
+        MultiModalConfig.mm_processor_kwargs
+    disable_mm_preprocessor_cache: bool = \
+        MultiModalConfig.disable_mm_preprocessor_cache
     # LoRA fields
     enable_lora: bool = False
     enable_lora_bias: bool = LoRAConfig.bias_enabled
@@ -308,43 +339,55 @@ class EngineArgs:
         bool] = SchedulerConfig.enable_chunked_prefill
     disable_chunked_mm_input: bool = SchedulerConfig.disable_chunked_mm_input
 
-    guided_decoding_backend: str = DecodingConfig.guided_decoding_backend
-    logits_processor_pattern: Optional[str] = None
+    guided_decoding_backend: GuidedDecodingBackend = DecodingConfig.backend
+    guided_decoding_disable_fallback: bool = DecodingConfig.disable_fallback
+    guided_decoding_disable_any_whitespace: bool = \
+        DecodingConfig.disable_any_whitespace
+    guided_decoding_disable_additional_properties: bool = \
+        DecodingConfig.disable_additional_properties
+    logits_processor_pattern: Optional[
+        str] = ModelConfig.logits_processor_pattern
 
     speculative_config: Optional[Dict[str, Any]] = None
 
     qlora_adapter_name_or_path: Optional[str] = None
-    show_hidden_metrics_for_version: Optional[str] = None
-    otlp_traces_endpoint: Optional[str] = None
-    collect_detailed_traces: Optional[str] = None
-    disable_async_output_proc: bool = False
+    show_hidden_metrics_for_version: Optional[str] = \
+        ObservabilityConfig.show_hidden_metrics_for_version
+    otlp_traces_endpoint: Optional[str] = \
+        ObservabilityConfig.otlp_traces_endpoint
+    collect_detailed_traces: Optional[list[DetailedTraceModules]] = \
+        ObservabilityConfig.collect_detailed_traces
+    disable_async_output_proc: bool = not ModelConfig.use_async_output_proc
     scheduling_policy: SchedulerPolicy = SchedulerConfig.policy
     scheduler_cls: Union[str, Type[object]] = SchedulerConfig.scheduler_cls
 
-    override_neuron_config: Optional[Dict[str, Any]] = None
-    override_pooler_config: Optional[PoolerConfig] = None
+    override_neuron_config: dict[str, Any] = \
+        get_field(ModelConfig, "override_neuron_config")
+    override_pooler_config: Optional[Union[dict, PoolerConfig]] = \
+        ModelConfig.override_pooler_config
     compilation_config: Optional[CompilationConfig] = None
     worker_cls: str = ParallelConfig.worker_cls
     worker_extension_cls: str = ParallelConfig.worker_extension_cls
 
     kv_transfer_config: Optional[KVTransferConfig] = None
+    kv_events_config: Optional[KVEventsConfig] = None
 
-    generation_config: Optional[str] = "auto"
-    override_generation_config: Optional[Dict[str, Any]] = None
-    enable_sleep_mode: bool = False
-    model_impl: str = "auto"
+    generation_config: str = ModelConfig.generation_config
+    enable_sleep_mode: bool = ModelConfig.enable_sleep_mode
+    override_generation_config: dict[str, Any] = \
+        get_field(ModelConfig, "override_generation_config")
+    model_impl: str = ModelConfig.model_impl
 
     calculate_kv_scales: bool = CacheConfig.calculate_kv_scales
 
     additional_config: Optional[Dict[str, Any]] = None
-    enable_reasoning: Optional[bool] = None
-    reasoning_parser: Optional[str] = DecodingConfig.reasoning_backend
+    enable_reasoning: Optional[bool] = None  # DEPRECATED
+    reasoning_parser: str = DecodingConfig.reasoning_backend
+
     use_tqdm_on_load: bool = LoadConfig.use_tqdm_on_load
+    pt_load_map_location: str = LoadConfig.pt_load_map_location
 
     def __post_init__(self):
-        if not self.tokenizer:
-            self.tokenizer = self.model
-
         # support `EngineArgs(compilation_config={...})`
         # without having to manually construct a
         # CompilationConfig object
@@ -361,127 +404,112 @@ class EngineArgs:
         """Shared CLI arguments for vLLM engine."""
 
         # Model arguments
-        parser.add_argument(
-            '--model',
-            type=str,
-            default=EngineArgs.model,
-            help='Name or path of the huggingface model to use.')
-        parser.add_argument(
-            '--task',
-            default=EngineArgs.task,
-            choices=get_args(TaskOption),
-            help='The task to use the model for. Each vLLM instance only '
-            'supports one task, even if the same model can be used for '
-            'multiple tasks. When the model only supports one task, ``"auto"`` '
-            'can be used to select it; otherwise, you must specify explicitly '
-            'which task to use.')
-        parser.add_argument(
-            '--tokenizer',
-            type=optional_type(str),
-            default=EngineArgs.tokenizer,
-            help='Name or path of the huggingface tokenizer to use. '
-            'If unspecified, model name or path will be used.')
-        parser.add_argument(
-            "--hf-config-path",
-            type=optional_type(str),
-            default=EngineArgs.hf_config_path,
-            help='Name or path of the huggingface config to use. '
-            'If unspecified, model name or path will be used.')
-        parser.add_argument(
-            '--skip-tokenizer-init',
-            action='store_true',
-            help='Skip initialization of tokenizer and detokenizer. '
-            'Expects valid prompt_token_ids and None for prompt from '
-            'the input. The generated output will contain token ids.')
-        parser.add_argument(
-            '--revision',
-            type=optional_type(str),
-            default=None,
-            help='The specific model version to use. It can be a branch '
-            'name, a tag name, or a commit id. If unspecified, will use '
-            'the default version.')
-        parser.add_argument(
-            '--code-revision',
-            type=optional_type(str),
-            default=None,
-            help='The specific revision to use for the model code on '
-            'Hugging Face Hub. It can be a branch name, a tag name, or a '
-            'commit id. If unspecified, will use the default version.')
-        parser.add_argument(
-            '--tokenizer-revision',
-            type=optional_type(str),
-            default=None,
-            help='Revision of the huggingface tokenizer to use. '
-            'It can be a branch name, a tag name, or a commit id. '
-            'If unspecified, will use the default version.')
-        parser.add_argument(
-            '--tokenizer-mode',
-            type=str,
-            default=EngineArgs.tokenizer_mode,
-            choices=['auto', 'slow', 'mistral', 'custom'],
-            help='The tokenizer mode.\n\n* "auto" will use the '
-            'fast tokenizer if available.\n* "slow" will '
-            'always use the slow tokenizer. \n* '
-            '"mistral" will always use the `mistral_common` tokenizer. \n* '
-            '"custom" will use --tokenizer to select the '
-            'preregistered tokenizer.')
-        parser.add_argument('--trust-remote-code',
-                            action='store_true',
-                            help='Trust remote code from huggingface.')
-        parser.add_argument(
-            '--allowed-local-media-path',
-            type=str,
-            help="Allowing API requests to read local images or videos "
-            "from directories specified by the server file system. "
-            "This is a security risk. "
-            "Should only be enabled in trusted environments.")
+        model_kwargs = get_kwargs(ModelConfig)
+        model_group = parser.add_argument_group(
+            title="ModelConfig",
+            description=ModelConfig.__doc__,
+        )
+        model_group.add_argument("--model", **model_kwargs["model"])
+        model_group.add_argument("--task", **model_kwargs["task"])
+        model_group.add_argument("--tokenizer", **model_kwargs["tokenizer"])
+        model_group.add_argument("--tokenizer-mode",
+                                 **model_kwargs["tokenizer_mode"])
+        model_group.add_argument("--trust-remote-code",
+                                 **model_kwargs["trust_remote_code"])
+        model_group.add_argument("--dtype", **model_kwargs["dtype"])
+        model_group.add_argument("--seed", **model_kwargs["seed"])
+        model_group.add_argument("--hf-config-path",
+                                 **model_kwargs["hf_config_path"])
+        model_group.add_argument("--allowed-local-media-path",
+                                 **model_kwargs["allowed_local_media_path"])
+        model_group.add_argument("--revision", **model_kwargs["revision"])
+        model_group.add_argument("--code-revision",
+                                 **model_kwargs["code_revision"])
+        model_group.add_argument("--rope-scaling",
+                                 **model_kwargs["rope_scaling"])
+        model_group.add_argument("--rope-theta", **model_kwargs["rope_theta"])
+        model_group.add_argument("--tokenizer-revision",
+                                 **model_kwargs["tokenizer_revision"])
+        model_group.add_argument("--max-model-len",
+                                 **model_kwargs["max_model_len"])
+        model_group.add_argument("--quantization", "-q",
+                                 **model_kwargs["quantization"])
+        model_group.add_argument("--enforce-eager",
+                                 **model_kwargs["enforce_eager"])
+        model_group.add_argument("--max-seq-len-to-capture",
+                                 **model_kwargs["max_seq_len_to_capture"])
+        model_group.add_argument("--max-logprobs",
+                                 **model_kwargs["max_logprobs"])
+        model_group.add_argument("--disable-sliding-window",
+                                 **model_kwargs["disable_sliding_window"])
+        model_group.add_argument("--disable-cascade-attn",
+                                 **model_kwargs["disable_cascade_attn"])
+        model_group.add_argument("--skip-tokenizer-init",
+                                 **model_kwargs["skip_tokenizer_init"])
+        model_group.add_argument("--enable-prompt-embeds",
+                                 **model_kwargs["enable_prompt_embeds"])
+        model_group.add_argument("--served-model-name",
+                                 **model_kwargs["served_model_name"])
+        # This one is a special case because it is the
+        # opposite of ModelConfig.use_async_output_proc
+        model_group.add_argument(
+            "--disable-async-output-proc",
+            action="store_true",
+            default=EngineArgs.disable_async_output_proc,
+            help="Disable async output processing. This may result in "
+            "lower performance.")
+        model_group.add_argument("--config-format",
+                                 choices=[f.value for f in ConfigFormat],
+                                 **model_kwargs["config_format"])
+        # This one is a special case because it can bool
+        # or str. TODO: Handle this in get_kwargs
+        model_group.add_argument("--hf-token",
+                                 type=str,
+                                 nargs="?",
+                                 const=True,
+                                 default=model_kwargs["hf_token"]["default"],
+                                 help=model_kwargs["hf_token"]["help"])
+        model_group.add_argument("--hf-overrides",
+                                 **model_kwargs["hf_overrides"])
+        model_group.add_argument("--override-neuron-config",
+                                 **model_kwargs["override_neuron_config"])
+        model_group.add_argument("--override-pooler-config",
+                                 **model_kwargs["override_pooler_config"])
+        model_group.add_argument("--logits-processor-pattern",
+                                 **model_kwargs["logits_processor_pattern"])
+        model_group.add_argument("--generation-config",
+                                 **model_kwargs["generation_config"])
+        model_group.add_argument("--override-generation-config",
+                                 **model_kwargs["override_generation_config"])
+        model_group.add_argument("--enable-sleep-mode",
+                                 **model_kwargs["enable_sleep_mode"])
+        model_group.add_argument("--model-impl",
+                                 choices=[f.value for f in ModelImpl],
+                                 **model_kwargs["model_impl"])
+
         # Model loading arguments
         load_kwargs = get_kwargs(LoadConfig)
         load_group = parser.add_argument_group(
             title="LoadConfig",
             description=LoadConfig.__doc__,
         )
-        load_group.add_argument('--load-format',
+        load_group.add_argument("--load-format",
                                 choices=[f.value for f in LoadFormat],
                                 **load_kwargs["load_format"])
-        load_group.add_argument('--download-dir',
+        load_group.add_argument("--download-dir",
                                 **load_kwargs["download_dir"])
-        load_group.add_argument('--model-loader-extra-config',
+        load_group.add_argument("--model-loader-extra-config",
                                 **load_kwargs["model_loader_extra_config"])
-        load_group.add_argument('--use-tqdm-on-load',
+        load_group.add_argument("--ignore-patterns",
+                                **load_kwargs["ignore_patterns"])
+        load_group.add_argument("--use-tqdm-on-load",
                                 **load_kwargs["use_tqdm_on_load"])
-
-        parser.add_argument(
-            '--config-format',
-            default=EngineArgs.config_format,
-            choices=[f.value for f in ConfigFormat],
-            help='The format of the model config to load.\n\n'
-            '* "auto" will try to load the config in hf format '
-            'if available else it will try to load in mistral format ')
-        parser.add_argument(
-            '--dtype',
-            type=str,
-            default=EngineArgs.dtype,
-            choices=[
-                'auto', 'half', 'float16', 'bfloat16', 'float', 'float32'
-            ],
-            help='Data type for model weights and activations.\n\n'
-            '* "auto" will use FP16 precision for FP32 and FP16 models, and '
-            'BF16 precision for BF16 models.\n'
-            '* "half" for FP16. Recommended for AWQ quantization.\n'
-            '* "float16" is the same as "half".\n'
-            '* "bfloat16" for a balance between precision and range.\n'
-            '* "float" is shorthand for FP32 precision.\n'
-            '* "float32" for FP32 precision.')
-        parser.add_argument('--max-model-len',
-                            type=human_readable_int,
-                            default=EngineArgs.max_model_len,
-                            help='Model context length. If unspecified, will '
-                            'be automatically derived from the model config. '
-                            'Supports k/m/g/K/M/G in human-readable format.\n'
-                            'Examples:\n'
-                            '- 1k → 1000\n'
-                            '- 1K → 1024\n')
+        load_group.add_argument('--qlora-adapter-name-or-path',
+                                type=str,
+                                default=None,
+                                help='Name or path of the QLoRA adapter.')
+        load_group.add_argument('--pt-load-map-location',
+                                **load_kwargs["pt_load_map_location"])
 
         # Guided decoding arguments
         guided_decoding_kwargs = get_kwargs(DecodingConfig)
@@ -489,35 +517,31 @@ class EngineArgs:
             title="DecodingConfig",
             description=DecodingConfig.__doc__,
         )
+        guided_decoding_group.add_argument("--guided-decoding-backend",
+                                           **guided_decoding_kwargs["backend"])
         guided_decoding_group.add_argument(
-            '--guided-decoding-backend',
-            **guided_decoding_kwargs["guided_decoding_backend"])
+            "--guided-decoding-disable-fallback",
+            **guided_decoding_kwargs["disable_fallback"])
+        guided_decoding_group.add_argument(
+            "--guided-decoding-disable-any-whitespace",
+            **guided_decoding_kwargs["disable_any_whitespace"])
+        guided_decoding_group.add_argument(
+            "--guided-decoding-disable-additional-properties",
+            **guided_decoding_kwargs["disable_additional_properties"])
+        guided_decoding_group.add_argument(
+            "--enable-reasoning",
+            action=argparse.BooleanOptionalAction,
+            help="[DEPRECATED] The `--enable-reasoning` flag is deprecated as "
+            "of v0.8.6. Use `--reasoning-parser` to specify the reasoning "
+            "parser backend insteadThis flag (`--enable-reasoning`) will be "
+            "removed in v0.10.0. When `--reasoning-parser` is specified, "
+            "reasoning mode is automatically enabled.")
         guided_decoding_group.add_argument(
             "--reasoning-parser",
             # This choices is a special case because it's not static
             choices=list(ReasoningParserManager.reasoning_parsers),
             **guided_decoding_kwargs["reasoning_backend"])
 
-        parser.add_argument(
-            '--logits-processor-pattern',
-            type=optional_type(str),
-            default=None,
-            help='Optional regex pattern specifying valid logits processor '
-            'qualified names that can be passed with the `logits_processors` '
-            'extra completion argument. Defaults to None, which allows no '
-            'processors.')
-        parser.add_argument(
-            '--model-impl',
-            type=str,
-            default=EngineArgs.model_impl,
-            choices=[f.value for f in ModelImpl],
-            help='Which implementation of the model to use.\n\n'
-            '* "auto" will try to use the vLLM implementation if it exists '
-            'and fall back to the Transformers implementation if no vLLM '
-            'implementation is available.\n'
-            '* "vllm" will use the vLLM model implementation.\n'
-            '* "transformers" will use the Transformers model '
-            'implementation.\n')
         # Parallel arguments
         parallel_kwargs = get_kwargs(ParallelConfig)
         parallel_group = parser.add_argument_group(
@@ -525,27 +549,31 @@ class EngineArgs:
             description=ParallelConfig.__doc__,
         )
         parallel_group.add_argument(
-            '--distributed-executor-backend',
+            "--distributed-executor-backend",
             **parallel_kwargs["distributed_executor_backend"])
         parallel_group.add_argument(
-            '--pipeline-parallel-size', '-pp',
+            "--pipeline-parallel-size", "-pp",
             **parallel_kwargs["pipeline_parallel_size"])
-        parallel_group.add_argument('--tensor-parallel-size', '-tp',
+        parallel_group.add_argument("--tensor-parallel-size", "-tp",
                                     **parallel_kwargs["tensor_parallel_size"])
-        parallel_group.add_argument('--data-parallel-size', '-dp',
+        parallel_group.add_argument("--data-parallel-size", "-dp",
                                     **parallel_kwargs["data_parallel_size"])
         parallel_group.add_argument(
-            '--enable-expert-parallel',
+            "--enable-expert-parallel",
             **parallel_kwargs["enable_expert_parallel"])
         parallel_group.add_argument(
-            '--max-parallel-loading-workers',
+            "--max-parallel-loading-workers",
             **parallel_kwargs["max_parallel_loading_workers"])
         parallel_group.add_argument(
-            '--ray-workers-use-nsight',
+            "--ray-workers-use-nsight",
             **parallel_kwargs["ray_workers_use_nsight"])
         parallel_group.add_argument(
-            '--disable-custom-all-reduce',
+            "--disable-custom-all-reduce",
             **parallel_kwargs["disable_custom_all_reduce"])
+        parallel_group.add_argument("--worker-cls",
+                                    **parallel_kwargs["worker_cls"])
+        parallel_group.add_argument("--worker-extension-cls",
+                                    **parallel_kwargs["worker_extension_cls"])
 
         # KV cache arguments
         cache_kwargs = get_kwargs(CacheConfig)
@@ -553,103 +581,22 @@ class EngineArgs:
             title="CacheConfig",
             description=CacheConfig.__doc__,
         )
-        cache_group.add_argument('--block-size', **cache_kwargs["block_size"])
-        cache_group.add_argument('--gpu-memory-utilization',
+        cache_group.add_argument("--block-size", **cache_kwargs["block_size"])
+        cache_group.add_argument("--gpu-memory-utilization",
                                  **cache_kwargs["gpu_memory_utilization"])
-        cache_group.add_argument('--swap-space', **cache_kwargs["swap_space"])
-        cache_group.add_argument('--kv-cache-dtype',
+        cache_group.add_argument("--swap-space", **cache_kwargs["swap_space"])
+        cache_group.add_argument("--kv-cache-dtype",
                                  **cache_kwargs["cache_dtype"])
-        cache_group.add_argument('--num-gpu-blocks-override',
+        cache_group.add_argument("--num-gpu-blocks-override",
                                  **cache_kwargs["num_gpu_blocks_override"])
         cache_group.add_argument("--enable-prefix-caching",
                                  **cache_kwargs["enable_prefix_caching"])
         cache_group.add_argument("--prefix-caching-hash-algo",
                                  **cache_kwargs["prefix_caching_hash_algo"])
-        cache_group.add_argument('--cpu-offload-gb',
+        cache_group.add_argument("--cpu-offload-gb",
                                  **cache_kwargs["cpu_offload_gb"])
-        cache_group.add_argument('--calculate-kv-scales',
+        cache_group.add_argument("--calculate-kv-scales",
                                  **cache_kwargs["calculate_kv_scales"])
-
-        parser.add_argument('--disable-sliding-window',
-                            action='store_true',
-                            help='Disables sliding window, '
-                            'capping to sliding window size.')
-        parser.add_argument('--use-v2-block-manager',
-                            action='store_true',
-                            default=True,
-                            help='[DEPRECATED] block manager v1 has been '
-                            'removed and SelfAttnBlockSpaceManager (i.e. '
-                            'block manager v2) is now the default. '
-                            'Setting this flag to True or False'
-                            ' has no effect on vLLM behavior.')
-
-        parser.add_argument('--seed',
-                            type=int,
-                            default=EngineArgs.seed,
-                            help='Random seed for operations.')
-        parser.add_argument(
-            '--max-logprobs',
-            type=int,
-            default=EngineArgs.max_logprobs,
-            help=('Max number of log probs to return logprobs is specified in'
-                  ' SamplingParams.'))
-        parser.add_argument('--disable-log-stats',
-                            action='store_true',
-                            help='Disable logging statistics.')
-        # Quantization settings.
-        parser.add_argument('--quantization',
-                            '-q',
-                            type=optional_type(str),
-                            choices=[*QUANTIZATION_METHODS, None],
-                            default=EngineArgs.quantization,
-                            help='Method used to quantize the weights. If '
-                            'None, we first check the `quantization_config` '
-                            'attribute in the model config file. If that is '
-                            'None, we assume the model weights are not '
-                            'quantized and use `dtype` to determine the data '
-                            'type of the weights.')
-        parser.add_argument(
-            '--rope-scaling',
-            default=None,
-            type=json.loads,
-            help='RoPE scaling configuration in JSON format. '
-            'For example, ``{"rope_type":"dynamic","factor":2.0}``')
-        parser.add_argument('--rope-theta',
-                            default=None,
-                            type=float,
-                            help='RoPE theta. Use with `rope_scaling`. In '
-                            'some cases, changing the RoPE theta improves the '
-                            'performance of the scaled model.')
-        parser.add_argument(
-            '--hf-token',
-            type=str,
-            nargs='?',
-            const=True,
-            default=None,
-            help='The token to use as HTTP bearer authorization'
-            ' for remote files. If `True`, will use the token '
-            'generated when running `huggingface-cli login` '
-            '(stored in `~/.huggingface`).')
-        parser.add_argument('--hf-overrides',
-                            type=json.loads,
-                            default=EngineArgs.hf_overrides,
-                            help='Extra arguments for the HuggingFace config. '
-                            'This should be a JSON string that will be '
-                            'parsed into a dictionary.')
-        parser.add_argument('--enforce-eager',
-                            action='store_true',
-                            help='Always use eager-mode PyTorch. If False, '
-                            'will use eager mode and CUDA graph in hybrid '
-                            'for maximal performance and flexibility.')
-        parser.add_argument('--max-seq-len-to-capture',
-                            type=int,
-                            default=EngineArgs.max_seq_len_to_capture,
-                            help='Maximum sequence length covered by CUDA '
-                            'graphs. When a sequence has context length '
-                            'larger than this, we fall back to eager mode. '
-                            'Additionally for encoder-decoder models, if the '
-                            'sequence length of the encoder input is larger '
-                            'than this, we fall back to the eager mode.')
 
         # Tokenizer arguments
         tokenizer_kwargs = get_kwargs(TokenizerPoolConfig)
@@ -657,11 +604,11 @@ class EngineArgs:
             title="TokenizerPoolConfig",
             description=TokenizerPoolConfig.__doc__,
         )
-        tokenizer_group.add_argument('--tokenizer-pool-size',
+        tokenizer_group.add_argument("--tokenizer-pool-size",
                                      **tokenizer_kwargs["pool_size"])
-        tokenizer_group.add_argument('--tokenizer-pool-type',
+        tokenizer_group.add_argument("--tokenizer-pool-type",
                                      **tokenizer_kwargs["pool_type"])
-        tokenizer_group.add_argument('--tokenizer-pool-extra-config',
+        tokenizer_group.add_argument("--tokenizer-pool-extra-config",
                                      **tokenizer_kwargs["extra_config"])
 
         # Multimodal related configs
@@ -670,13 +617,13 @@ class EngineArgs:
             title="MultiModalConfig",
             description=MultiModalConfig.__doc__,
         )
-        multimodal_group.add_argument('--limit-mm-per-prompt',
+        multimodal_group.add_argument("--limit-mm-per-prompt",
                                       **multimodal_kwargs["limit_per_prompt"])
         multimodal_group.add_argument(
-            '--mm-processor-kwargs',
+            "--mm-processor-kwargs",
             **multimodal_kwargs["mm_processor_kwargs"])
         multimodal_group.add_argument(
-            '--disable-mm-preprocessor-cache',
+            "--disable-mm-preprocessor-cache",
             **multimodal_kwargs["disable_mm_preprocessor_cache"])
 
         # LoRA related configs
@@ -686,25 +633,25 @@ class EngineArgs:
             description=LoRAConfig.__doc__,
         )
         lora_group.add_argument(
-            '--enable-lora',
+            "--enable-lora",
             action=argparse.BooleanOptionalAction,
-            help='If True, enable handling of LoRA adapters.')
-        lora_group.add_argument('--enable-lora-bias',
+            help="If True, enable handling of LoRA adapters.")
+        lora_group.add_argument("--enable-lora-bias",
                                 **lora_kwargs["bias_enabled"])
-        lora_group.add_argument('--max-loras', **lora_kwargs["max_loras"])
-        lora_group.add_argument('--max-lora-rank',
+        lora_group.add_argument("--max-loras", **lora_kwargs["max_loras"])
+        lora_group.add_argument("--max-lora-rank",
                                 **lora_kwargs["max_lora_rank"])
-        lora_group.add_argument('--lora-extra-vocab-size',
+        lora_group.add_argument("--lora-extra-vocab-size",
                                 **lora_kwargs["lora_extra_vocab_size"])
         lora_group.add_argument(
-            '--lora-dtype',
+            "--lora-dtype",
             **lora_kwargs["lora_dtype"],
         )
-        lora_group.add_argument('--long-lora-scaling-factors',
+        lora_group.add_argument("--long-lora-scaling-factors",
                                 **lora_kwargs["long_lora_scaling_factors"])
-        lora_group.add_argument('--max-cpu-loras',
+        lora_group.add_argument("--max-cpu-loras",
                                 **lora_kwargs["max_cpu_loras"])
-        lora_group.add_argument('--fully-sharded-loras',
+        lora_group.add_argument("--fully-sharded-loras",
                                 **lora_kwargs["fully_sharded_loras"])
 
         # PromptAdapter related configs
@@ -714,14 +661,14 @@ class EngineArgs:
             description=PromptAdapterConfig.__doc__,
         )
         prompt_adapter_group.add_argument(
-            '--enable-prompt-adapter',
+            "--enable-prompt-adapter",
             action=argparse.BooleanOptionalAction,
-            help='If True, enable handling of PromptAdapters.')
+            help="If True, enable handling of PromptAdapters.")
         prompt_adapter_group.add_argument(
-            '--max-prompt-adapters',
+            "--max-prompt-adapters",
             **prompt_adapter_kwargs["max_prompt_adapters"])
         prompt_adapter_group.add_argument(
-            '--max-prompt-adapter-token',
+            "--max-prompt-adapter-token",
             **prompt_adapter_kwargs["max_prompt_adapter_token"])
 
         # Device arguments
@@ -738,74 +685,35 @@ class EngineArgs:
             description=SpeculativeConfig.__doc__,
         )
         speculative_group.add_argument(
-            '--speculative-config',
+            "--speculative-config",
             type=json.loads,
             default=None,
-            help='The configurations for speculative decoding.'
-            ' Should be a JSON string.')
+            help="The configurations for speculative decoding. Should be a "
+            "JSON string.")
 
-        parser.add_argument(
-            '--ignore-patterns',
-            action="append",
-            type=str,
-            default=[],
-            help="The pattern(s) to ignore when loading the model."
-            "Default to `original/**/*` to avoid repeated loading of llama's "
-            "checkpoints.")
-
-        parser.add_argument(
-            "--served-model-name",
-            nargs="+",
-            type=str,
-            default=None,
-            help="The model name(s) used in the API. If multiple "
-            "names are provided, the server will respond to any "
-            "of the provided names. The model name in the model "
-            "field of a response will be the first name in this "
-            "list. If not specified, the model name will be the "
-            "same as the ``--model`` argument. Noted that this name(s) "
-            "will also be used in `model_name` tag content of "
-            "prometheus metrics, if multiple names provided, metrics "
-            "tag will take the first one.")
-        parser.add_argument('--qlora-adapter-name-or-path',
-                            type=str,
-                            default=None,
-                            help='Name or path of the QLoRA adapter.')
-
-        parser.add_argument('--show-hidden-metrics-for-version',
-                            type=str,
-                            default=None,
-                            help='Enable deprecated Prometheus metrics that '
-                            'have been hidden since the specified version. '
-                            'For example, if a previously deprecated metric '
-                            'has been hidden since the v0.7.0 release, you '
-                            'use --show-hidden-metrics-for-version=0.7 as a '
-                            'temporary escape hatch while you migrate to new '
-                            'metrics. The metric is likely to be removed '
-                            'completely in an upcoming release.')
-
-        parser.add_argument(
-            '--otlp-traces-endpoint',
-            type=str,
-            default=None,
-            help='Target URL to which OpenTelemetry traces will be sent.')
-        parser.add_argument(
-            '--collect-detailed-traces',
-            type=str,
-            default=None,
-            help="Valid choices are " +
-            ",".join(ALLOWED_DETAILED_TRACE_MODULES) +
-            ". It makes sense to set this only if ``--otlp-traces-endpoint`` is"
-            " set. If set, it will collect detailed traces for the specified "
-            "modules. This involves use of possibly costly and or blocking "
-            "operations and hence might have a performance impact.")
-
-        parser.add_argument(
-            '--disable-async-output-proc',
-            action='store_true',
-            default=EngineArgs.disable_async_output_proc,
-            help="Disable async output processing. This may result in "
-            "lower performance.")
+        # Observability arguments
+        observability_kwargs = get_kwargs(ObservabilityConfig)
+        observability_group = parser.add_argument_group(
+            title="ObservabilityConfig",
+            description=ObservabilityConfig.__doc__,
+        )
+        observability_group.add_argument(
+            "--show-hidden-metrics-for-version",
+            **observability_kwargs["show_hidden_metrics_for_version"])
+        observability_group.add_argument(
+            "--otlp-traces-endpoint",
+            **observability_kwargs["otlp_traces_endpoint"])
+        # TODO: generalise this special case
+        choices = observability_kwargs["collect_detailed_traces"]["choices"]
+        metavar = f"{{{','.join(choices)}}}"
+        observability_kwargs["collect_detailed_traces"]["metavar"] = metavar
+        observability_kwargs["collect_detailed_traces"]["choices"] += [
+            ",".join(p)
+            for p in permutations(get_args(DetailedTraceModules), r=2)
+        ]
+        observability_group.add_argument(
+            "--collect-detailed-traces",
+            **observability_kwargs["collect_detailed_traces"])
 
         # Scheduler arguments
         scheduler_kwargs = get_kwargs(SchedulerConfig)
@@ -814,9 +722,9 @@ class EngineArgs:
             description=SchedulerConfig.__doc__,
         )
         scheduler_group.add_argument(
-            '--max-num-batched-tokens',
+            "--max-num-batched-tokens",
             **scheduler_kwargs["max_num_batched_tokens"])
-        scheduler_group.add_argument('--max-num-seqs',
+        scheduler_group.add_argument("--max-num-seqs",
                                      **scheduler_kwargs["max_num_seqs"])
         scheduler_group.add_argument(
             "--max-num-partial-prefills",
@@ -824,110 +732,83 @@ class EngineArgs:
         scheduler_group.add_argument(
             "--max-long-partial-prefills",
             **scheduler_kwargs["max_long_partial_prefills"])
+        scheduler_group.add_argument('--cuda-graph-sizes',
+                                     **scheduler_kwargs["cuda_graph_sizes"])
         scheduler_group.add_argument(
             "--long-prefill-token-threshold",
             **scheduler_kwargs["long_prefill_token_threshold"])
-        scheduler_group.add_argument('--num-lookahead-slots',
+        scheduler_group.add_argument("--num-lookahead-slots",
                                      **scheduler_kwargs["num_lookahead_slots"])
-        scheduler_group.add_argument('--scheduler-delay-factor',
+        scheduler_group.add_argument("--scheduler-delay-factor",
                                      **scheduler_kwargs["delay_factor"])
-        scheduler_group.add_argument('--preemption-mode',
+        scheduler_group.add_argument("--preemption-mode",
                                      **scheduler_kwargs["preemption_mode"])
-        scheduler_group.add_argument('--num-scheduler-steps',
+        scheduler_group.add_argument("--num-scheduler-steps",
                                      **scheduler_kwargs["num_scheduler_steps"])
         scheduler_group.add_argument(
-            '--multi-step-stream-outputs',
+            "--multi-step-stream-outputs",
             **scheduler_kwargs["multi_step_stream_outputs"])
-        scheduler_group.add_argument('--scheduling-policy',
+        scheduler_group.add_argument("--scheduling-policy",
                                      **scheduler_kwargs["policy"])
         scheduler_group.add_argument(
-            '--enable-chunked-prefill',
+            "--enable-chunked-prefill",
             **scheduler_kwargs["enable_chunked_prefill"])
         scheduler_group.add_argument(
             "--disable-chunked-mm-input",
             **scheduler_kwargs["disable_chunked_mm_input"])
-        parser.add_argument('--scheduler-cls',
-                            **scheduler_kwargs["scheduler_cls"])
+        scheduler_group.add_argument("--scheduler-cls",
+                                     **scheduler_kwargs["scheduler_cls"])
 
-        parser.add_argument(
-            '--override-neuron-config',
-            type=json.loads,
+        # Compilation arguments
+        # compilation_kwargs = get_kwargs(CompilationConfig)
+        compilation_group = parser.add_argument_group(
+            title="CompilationConfig",
+            description=CompilationConfig.__doc__,
+        )
+        compilation_group.add_argument(
+            "--compilation-config",
+            "-O",
+            type=CompilationConfig.from_cli,
             default=None,
-            help="Override or set neuron device configuration. "
-            "e.g. ``{\"cast_logits_dtype\": \"bloat16\"}``.")
-        parser.add_argument(
-            '--override-pooler-config',
-            type=PoolerConfig.from_json,
+            help="torch.compile configuration for the model. "
+            "When it is a number (0, 1, 2, 3), it will be "
+            "interpreted as the optimization level.\n"
+            "NOTE: level 0 is the default level without "
+            "any optimization. level 1 and 2 are for internal "
+            "testing only. level 3 is the recommended level "
+            "for production.\n"
+            "To specify the full compilation config, "
+            "use a JSON string, e.g. ``{\"level\": 3, "
+            "\"cudagraph_capture_sizes\": [1, 2, 4, 8]}``\n"
+            "Following the convention of traditional "
+            "compilers, using ``-O`` without space is also "
+            "supported. ``-O3`` is equivalent to ``-O 3``.")
+
+        # KVTransfer arguments
+        # kv_transfer_kwargs = get_kwargs(KVTransferConfig)
+        kv_transfer_group = parser.add_argument_group(
+            title="KVTransferConfig",
+            description=KVTransferConfig.__doc__,
+        )
+        kv_transfer_group.add_argument(
+            "--kv-transfer-config",
+            type=KVTransferConfig.from_cli,
             default=None,
-            help="Override or set the pooling method for pooling models. "
-            "e.g. ``{\"pooling_type\": \"mean\", \"normalize\": false}``.")
-
-        parser.add_argument('--compilation-config',
-                            '-O',
-                            type=CompilationConfig.from_cli,
-                            default=None,
-                            help='torch.compile configuration for the model. '
-                            'When it is a number (0, 1, 2, 3), it will be '
-                            'interpreted as the optimization level.\n'
-                            'NOTE: level 0 is the default level without '
-                            'any optimization. level 1 and 2 are for internal '
-                            'testing only. level 3 is the recommended level '
-                            'for production.\n'
-                            'To specify the full compilation config, '
-                            'use a JSON string, e.g. ``{"level": 3, '
-                            '"cudagraph_capture_sizes": [1, 2, 4, 8]}``\n'
-                            'Following the convention of traditional '
-                            'compilers, using ``-O`` without space is also '
-                            'supported. ``-O3`` is equivalent to ``-O 3``.')
-
-        parser.add_argument('--kv-transfer-config',
-                            type=KVTransferConfig.from_cli,
-                            default=None,
-                            help='The configurations for distributed KV cache '
-                            'transfer. Should be a JSON string.')
-
-        parser.add_argument(
-            '--worker-cls',
-            type=str,
-            default="auto",
-            help='The worker class to use for distributed execution.')
-        parser.add_argument(
-            '--worker-extension-cls',
-            type=str,
-            default="",
-            help='The worker extension class on top of the worker cls, '
-            'it is useful if you just want to add new functions to the worker '
-            'class without changing the existing functions.')
-        parser.add_argument(
-            "--generation-config",
-            type=optional_type(str),
-            default="auto",
-            help="The folder path to the generation config. "
-            "Defaults to 'auto', the generation config will be loaded from "
-            "model path. If set to 'vllm', no generation config is loaded, "
-            "vLLM defaults will be used. If set to a folder path, the "
-            "generation config will be loaded from the specified folder path. "
-            "If `max_new_tokens` is specified in generation config, then "
-            "it sets a server-wide limit on the number of output tokens "
-            "for all requests.")
-
-        parser.add_argument(
-            "--override-generation-config",
-            type=json.loads,
+            help="The configurations for distributed KV cache "
+            "transfer. Should be a JSON string.")
+        kv_transfer_group.add_argument(
+            '--kv-events-config',
+            type=KVEventsConfig.from_cli,
             default=None,
-            help="Overrides or sets generation config in JSON format. "
-            "e.g. ``{\"temperature\": 0.5}``. If used with "
-            "--generation-config=auto, the override parameters will be merged "
-            "with the default config from the model. If generation-config is "
-            "None, only the override parameters are used.")
+            help='The configurations for event publishing.')
 
-        parser.add_argument("--enable-sleep-mode",
-                            action="store_true",
-                            default=False,
-                            help="Enable sleep mode for the engine. "
-                            "(only cuda platform is supported)")
-
-        parser.add_argument(
+        # vLLM arguments
+        # vllm_kwargs = get_kwargs(VllmConfig)
+        vllm_group = parser.add_argument_group(
+            title="VllmConfig",
+            description=VllmConfig.__doc__,
+        )
+        vllm_group.add_argument(
             "--additional-config",
             type=json.loads,
             default=None,
@@ -936,23 +817,18 @@ class EngineArgs:
             "configs are valid for the platform you are using. The input format"
             " is like '{\"config_key\":\"config_value\"}'")
 
-        parser.add_argument(
-            "--enable-reasoning",
-            action="store_true",
-            default=False,
-            help="Whether to enable reasoning_content for the model. "
-            "If enabled, the model will be able to generate reasoning content."
-        )
-
-        parser.add_argument(
-            "--disable-cascade-attn",
-            action="store_true",
-            default=False,
-            help="Disable cascade attention for V1. While cascade attention "
-            "does not change the mathematical correctness, disabling it "
-            "could be useful for preventing potential numerical issues. "
-            "Note that even if this is set to False, cascade attention will be "
-            "only used when the heuristic tells that it's beneficial.")
+        # Other arguments
+        parser.add_argument('--use-v2-block-manager',
+                            action='store_true',
+                            default=True,
+                            help='[DEPRECATED] block manager v1 has been '
+                            'removed and SelfAttnBlockSpaceManager (i.e. '
+                            'block manager v2) is now the default. '
+                            'Setting this flag to True or False'
+                            ' has no effect on vLLM behavior.')
+        parser.add_argument('--disable-log-stats',
+                            action='store_true',
+                            help='Disable logging statistics.')
 
         return parser
 
@@ -980,8 +856,7 @@ class EngineArgs:
             model=self.model,
             hf_config_path=self.hf_config_path,
             task=self.task,
-            # We know this is not None because we set it in __post_init__
-            tokenizer=cast(str, self.tokenizer),
+            tokenizer=self.tokenizer,
             tokenizer_mode=self.tokenizer_mode,
             trust_remote_code=self.trust_remote_code,
             allowed_local_media_path=self.allowed_local_media_path,
@@ -1002,6 +877,7 @@ class EngineArgs:
             disable_sliding_window=self.disable_sliding_window,
             disable_cascade_attn=self.disable_cascade_attn,
             skip_tokenizer_init=self.skip_tokenizer_init,
+            enable_prompt_embeds=self.enable_prompt_embeds,
             served_model_name=self.served_model_name,
             limit_mm_per_prompt=self.limit_mm_per_prompt,
             use_async_output_proc=not self.disable_async_output_proc,
@@ -1027,12 +903,14 @@ class EngineArgs:
 
         if self.quantization == "bitsandbytes":
             self.load_format = "bitsandbytes"
+
         return LoadConfig(
             load_format=self.load_format,
             download_dir=self.download_dir,
             model_loader_extra_config=self.model_loader_extra_config,
             ignore_patterns=self.ignore_patterns,
             use_tqdm_on_load=self.use_tqdm_on_load,
+            pt_load_map_location=self.pt_load_map_location,
         )
 
     def create_speculative_config(
@@ -1190,6 +1068,7 @@ class EngineArgs:
             max_num_batched_tokens=self.max_num_batched_tokens,
             max_num_seqs=self.max_num_seqs,
             max_model_len=model_config.max_model_len,
+            cuda_graph_sizes=self.cuda_graph_sizes,
             num_lookahead_slots=num_lookahead_slots,
             delay_factor=self.scheduler_delay_factor,
             enable_chunked_prefill=self.enable_chunked_prefill,
@@ -1235,31 +1114,19 @@ class EngineArgs:
                                         if self.enable_prompt_adapter else None
 
         decoding_config = DecodingConfig(
-            guided_decoding_backend=self.guided_decoding_backend,
+            backend=self.guided_decoding_backend,
+            disable_fallback=self.guided_decoding_disable_fallback,
+            disable_any_whitespace=self.guided_decoding_disable_any_whitespace,
+            disable_additional_properties=\
+                self.guided_decoding_disable_additional_properties,
             reasoning_backend=self.reasoning_parser
-            if self.enable_reasoning else None,
         )
 
-        show_hidden_metrics = False
-        if self.show_hidden_metrics_for_version is not None:
-            show_hidden_metrics = version._prev_minor_version_was(
-                self.show_hidden_metrics_for_version)
-
-        detailed_trace_modules = []
-        if self.collect_detailed_traces is not None:
-            detailed_trace_modules = self.collect_detailed_traces.split(",")
-        for m in detailed_trace_modules:
-            if m not in ALLOWED_DETAILED_TRACE_MODULES:
-                raise ValueError(
-                    f"Invalid module {m} in collect_detailed_traces. "
-                    f"Valid modules are {ALLOWED_DETAILED_TRACE_MODULES}")
         observability_config = ObservabilityConfig(
-            show_hidden_metrics=show_hidden_metrics,
+            show_hidden_metrics_for_version=self.
+            show_hidden_metrics_for_version,
             otlp_traces_endpoint=self.otlp_traces_endpoint,
-            collect_model_forward_time="model" in detailed_trace_modules
-            or "all" in detailed_trace_modules,
-            collect_model_execute_time="worker" in detailed_trace_modules
-            or "all" in detailed_trace_modules,
+            collect_detailed_traces=self.collect_detailed_traces,
         )
 
         config = VllmConfig(
@@ -1276,6 +1143,7 @@ class EngineArgs:
             prompt_adapter_config=prompt_adapter_config,
             compilation_config=self.compilation_config,
             kv_transfer_config=self.kv_transfer_config,
+            kv_events_config=self.kv_events_config,
             additional_config=self.additional_config,
         )
 
@@ -1326,9 +1194,8 @@ class EngineArgs:
                                recommend_to_remove=True)
             return False
 
-        # remove backend options when doing this check
-        if self.guided_decoding_backend.split(':')[0] \
-            not in get_args(GuidedDecodingBackendV1):
+        if self.guided_decoding_backend not in get_args(
+                GuidedDecodingBackendV1):
             _raise_or_fallback(
                 feature_name=
                 f"--guided-decoding-backend={self.guided_decoding_backend}",
@@ -1367,6 +1234,12 @@ class EngineArgs:
         # No Prompt Adapter so far.
         if self.enable_prompt_adapter:
             _raise_or_fallback(feature_name="--enable-prompt-adapter",
+                               recommend_to_remove=False)
+            return False
+
+        # No text embedding inputs so far.
+        if self.enable_prompt_embeds:
+            _raise_or_fallback(feature_name="--enable-prompt-embeds",
                                recommend_to_remove=False)
             return False
 
@@ -1578,8 +1451,8 @@ class EngineArgs:
         # as the platform that vLLM is running on (e.g. the case of scaling
         # vLLM with Ray) and has no GPUs. In this case we use the default
         # values for non-H100/H200 GPUs.
+        from vllm.platforms import current_platform
         try:
-            from vllm.platforms import current_platform
             device_memory = current_platform.get_device_total_memory()
         except Exception:
             # This is only used to set default_max_num_batched_tokens
@@ -1600,11 +1473,37 @@ class EngineArgs:
             }
             default_max_num_seqs = 256
 
+        # tpu specific default values.
+        if current_platform.is_tpu():
+            default_max_num_batched_tokens_tpu = {
+                UsageContext.LLM_CLASS: {
+                    'V6E': 2048,
+                    'V5E': 1024,
+                    'V5P': 512,
+                },
+                UsageContext.OPENAI_API_SERVER: {
+                    'V6E': 1024,
+                    'V5E': 512,
+                    'V5P': 256,
+                }
+            }
+
         use_context_value = usage_context.value if usage_context else None
         if (self.max_num_batched_tokens is None
                 and usage_context in default_max_num_batched_tokens):
-            self.max_num_batched_tokens = default_max_num_batched_tokens[
-                usage_context]
+            if current_platform.is_tpu():
+                chip_name = current_platform.get_device_name()
+                if chip_name in default_max_num_batched_tokens_tpu[
+                        usage_context]:
+                    self.max_num_batched_tokens = \
+                        default_max_num_batched_tokens_tpu[
+                            usage_context][chip_name]
+                else:
+                    self.max_num_batched_tokens = \
+                        default_max_num_batched_tokens[usage_context]
+            else:
+                self.max_num_batched_tokens = default_max_num_batched_tokens[
+                    usage_context]
             logger.debug(
                 "Setting max_num_batched_tokens to %d for %s usage context.",
                 self.max_num_batched_tokens, use_context_value)
@@ -1668,7 +1567,7 @@ def _warn_or_fallback(feature_name: str) -> bool:
 def human_readable_int(value):
     """Parse human-readable integers like '1k', '2M', etc.
     Including decimal values with decimal multipliers.
-    
+
     Examples:
     - '1k' -> 1,000
     - '1K' -> 1,024

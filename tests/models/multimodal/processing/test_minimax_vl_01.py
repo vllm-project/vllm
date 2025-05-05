@@ -7,15 +7,14 @@ from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.parse import ImageSize
 from vllm.multimodal.processing import BaseMultiModalProcessor
 
-from ....conftest import _ImageAssets
+from ....conftest import ImageTestAssets
 from ...utils import build_model_context
 
 
 @pytest.mark.parametrize("model_id", ["MiniMaxAI/MiniMax-VL-01"])
-# yapf: enable
 @pytest.mark.parametrize("num_imgs", [1, 2])
 def test_processor_override(
-    image_assets: _ImageAssets,
+    image_assets: ImageTestAssets,
     model_id: str,
     num_imgs: int,
 ):
