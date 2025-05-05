@@ -67,8 +67,6 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
         assert self.runner.block_size == 1, "AITER MLA" \
             "requires only block size 1."
 
-        self.block_size = self.runner.block_size
-
     def _get_paged_kv_tensors(
             self, block_table: torch.Tensor,
             seq_lens: torch.Tensor) -> tuple[torch.Tensor, ...]:
