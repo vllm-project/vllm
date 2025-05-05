@@ -1345,14 +1345,28 @@ def fused_experts_impl(hidden_states: torch.Tensor,
 
     if use_mxfp4_w4a4 and not current_platform.supports_mx(
     ) and envs.VLLM_QUARK_EMU_MEM_OPT:
-        # Weight has to be dequantized for mxfp4 emulation.
-        w1 = per_token_group_dequant_mxfp4(w1, w1_scale, OCP_MX_BLOCK_SIZE,
-                                           hidden_states.dtype)
+        # # Weight has to be dequantized for mxfp4 emulation.
+        # w1 = per_token_group_dequant_mxfp4(w1, w1_scale, OCP_MX_BLOCK_SIZE,
+        #                                    hidden_states.dtype)
+        # w1_scale = None
+        # w2 = per_token_group_dequant_mxfp4(w2, w2_scale, OCP_MX_BLOCK_SIZE,
+        #                                    hidden_states.dtype)
+        # w2_scale = None
+
+        from quark.torch.kernel.hw_emulation.extensions import kernel_ext
+
+        # # TODO: check whether these buffers are recreated at each function call, or whether pytorch is smart enough to reuse reserved but not allocated memory?
+        dq_w1 = torch.empty((*w1.shape[:-1], w1.shape[-1] * 2), dtype=hidden_states.dtype, device=hidden_states.device)
+        dq_w2 = torch.empty((*w2.shape[:-1], w2.shape[-1] * 2), dtype=hidden_states.dtype, device=hidden_states.device)
+
+        kernel_ext.dq_uint8_mxfp4_to_half(w1, w1_scale, dq_w1, OCP_MX_BLOCK_SIZE)
+        kernel_ext.dq_uint8_mxfp4_to_half(w2, w2_scale, dq_w2, OCP_MX_BLOCK_SIZE)
         w1_scale = None
-        w2 = per_token_group_dequant_mxfp4(w2, w2_scale, OCP_MX_BLOCK_SIZE,
-                                           hidden_states.dtype)
         w2_scale = None
 
+        w1 = dq_w1
+        w2 = dq_w2
+    
     for chunk in range((num_tokens // CHUNK_SIZE) + 1):
         begin_chunk_idx, end_chunk_idx = (chunk * CHUNK_SIZE,
                                           min((chunk + 1) * CHUNK_SIZE,
