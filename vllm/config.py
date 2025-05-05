@@ -59,7 +59,7 @@ if TYPE_CHECKING:
 
     ConfigType = type[DataclassInstance]
 else:
-    QuantizationConfig = None
+    QuantizationConfig = Any
     ConfigType = type
 
 logger = init_logger(__name__)

@@ -176,10 +176,6 @@ def get_kwargs(cls: ConfigType) -> dict[str, Any]:
         # Initialise the kwargs dictionary for the field
         kwargs[name] = {"default": default, "help": help}
 
-        # Skip the type detection if there is nothing to detect
-        if type_hints == {type(None)}:
-            continue
-
         # Set other kwargs based on the type hints
         json_tip = "\n\nShould be a valid JSON string."
         if dataclass_cls is not None:
