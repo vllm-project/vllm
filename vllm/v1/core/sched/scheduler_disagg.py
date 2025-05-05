@@ -272,7 +272,7 @@ class DisaggregatedScheduler(Scheduler):
 
                 # Number of tokens to be scheduled.
                 # We use `request.num_tokens` instead of
-                # `request.num_prompt_tokens` to consider the resumed reqs,
+                # `request.num_prompt_tokens` to consider the resumed request,
                 # which have output tokens.
                 num_new_tokens = request.num_tokens - num_computed_tokens
                 if (0 < self.scheduler_config.long_prefill_token_threshold <
