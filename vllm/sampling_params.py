@@ -33,7 +33,6 @@ class KVTransferParams(
         omit_defaults=True,  # type: ignore[call-arg]
         # required for @cached_property.
         dict=True):
-    # TODO(rob): we can handle xPyD and direct KV block Xfer
     remote_engine_id: Optional[str] = None
     remote_block_ids: Optional[list[int]] = None
     remote_host: Optional[str] = None

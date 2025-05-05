@@ -90,3 +90,37 @@ def test_basic_lifecycle():
 
     # Confirm we do not have any memory leaks after req lifecycle.
     assert_scheduler_empty(scheduler)
+
+
+def test_short_prompt_lifecycle():
+    """Test lifecycle of a Remote Decode request with short prompt."""
+
+    vllm_config = create_vllm_config()
+    scheduler = create_scheduler(vllm_config)
+
+    # Not enough tokens for full block.
+    NUM_TOKENS = vllm_config.cache_config.block_size // 2
+    request = create_request(request_id=1,
+                             num_tokens=NUM_TOKENS,
+                             do_remote_decode=True)
+
+    scheduler.add_request(request)
+
+    # STEP (1): Prefill.
+    # (1a): schedule()
+    scheduler_output = scheduler.schedule()
+    assert len(scheduler.running) == 1
+    assert len(scheduler_output.scheduled_new_reqs) == 1
+
+    # (1b): execute_model()
+    model_runner_output = create_model_runner_output(reqs=[request])
+
+    # (1c): update_from_output()
+    # Since tokens < block_size, there will be no kv xfer.
+    # So this should be cleaned up immediately.
+    _ = scheduler.update_from_output(scheduler_output, model_runner_output)
+
+    # Confirm we do not have any memory leaks after req lifecycle.
+    # We need one more call to schedule() to clear data for persistent batch.
+    _ = scheduler.schedule()
+    assert_scheduler_empty(scheduler)

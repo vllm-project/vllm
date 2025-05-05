@@ -438,10 +438,10 @@ class NixlConnectorWorker:
         In TP>1 setup, each rank exchanges KVs with its counterpart
         ranks independently. get_finished() runs in a worker creates
         the done_sending and done_recving sets that are sent to the
-        scheduler via ModelRunnerOutput by Rank 0. To avoid race
-        ensure trnxs are done before adding to finished, Ranks 1 to
-        N-1 communicate to Rank 0 once their transaction is done.
-        Rank 0 only returns finished once all ranks are complete.
+        scheduler via ModelRunnerOutput by Rank 0. To ensure trnxs
+        are done before adding to finished, Ranks 1 to N-1 communicate
+        to Rank 0 once their transaction is done + Rank 0 returns
+        finished sets to Scheduler only once all ranks are done.
         """
         done_sending = self._get_new_notifs()
         done_recving = self._pop_done_transfers(self._recving_transfers)
@@ -579,17 +579,8 @@ class NixlConnectorWorker:
         # saturate IB with heterogeneous TP sizes. We should remove the staging
         # blocks until we are ready.
 
-        # NOTE(rob): we could potentially do the rearranging during the load_kv!
-
-        # Note(tms): The remote_block_ids only contain full computed blocks,
-        # while the local_block_ids are all blocks allocated for this request,
-        # so truncate the local_block_ids to account for this.
-        del local_block_ids[len(remote_block_ids):]
+        assert len(local_block_ids) > 0
         assert len(local_block_ids) == len(remote_block_ids)
-
-        # NOTE(rob): this can cause the remote blocks to not be freed?
-        if len(local_block_ids) == 0:
-            return
 
         # Get side handles.
         local_xfer_side_handle = self.src_xfer_side_handle
@@ -621,7 +612,6 @@ class NixlConnectorWorker:
     def _get_block_descs_ids(self, engine_id: str,
                              block_ids: list[int]) -> list[int]:
         """Get the descs ids for a set of block ids."""
-        # TODO(rob): should we precompute this?
 
         # range(1) for MLA, range(2) otherwise.
         region_ids = range(self.num_regions)
