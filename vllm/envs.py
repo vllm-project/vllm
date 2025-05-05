@@ -732,7 +732,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
 
     # IP address used for NIXL handshake between remote agents.
     "VLLM_NIXL_SIDE_CHANNEL_HOST":
-    lambda: os.getenv("VLLM_NIXL_SIZE_CHANNEL_HOST", "localhost"),
+    lambda: os.getenv("VLLM_NIXL_SIDE_CHANNEL_HOST", "localhost"),
 
     # Port used for NIXL handshake between remote agents.
     "VLLM_NIXL_SIDE_CHANNEL_PORT":
