@@ -109,7 +109,7 @@ def build_single_image_inputs(
     #
     # NOTE: rescaling preserves the image aspect ratio.
     return [
-        PromptWithMultiModalInput.construct(
+        PromptWithMultiModalInput.create(
             prompts=[prompt for _ in size_wrapper.data],
             vision_data=[
                 apply_image_size_scaling(image, size, size_wrapper.type)
@@ -156,7 +156,7 @@ def build_multi_image_inputs(
         image_lists, model_prompts,
         size_wrapper: ImageSizeWrapper) -> list[PromptWithMultiModalInput]:
     return [
-        PromptWithMultiModalInput.construct(
+        PromptWithMultiModalInput.create(
             prompts=[prompt for _ in size_wrapper.data],
             vision_data=[[
                 apply_image_size_scaling(image, size, size_wrapper.type)
@@ -223,7 +223,7 @@ def build_video_inputs_from_test_info(
                     else rescale_video_size)
 
     return [
-        PromptWithMultiModalInput.construct(
+        PromptWithMultiModalInput.create(
             prompts=[prompt for _ in size_wrapper.data],
             vision_data=[
                 video_scaler(video, size) for size in size_wrapper.data

@@ -38,8 +38,8 @@ EMBEDDING_SIZE_FACTORS = [(), (1.0, ), (1.0, 1.0, 1.0)]
 RunnerOutput = tuple[list[int], str, Optional[SampleLogprobs]]
 # yapf: enable
 VisionInput = list[Optional[Union[list[Image], Image]]]
-Audio = tuple[npt.NDArray, float]
-AudioInput = list[Optional[Union[list[Audio], Audio]]]
+_Audio = tuple[npt.NDArray, float]
+AudioInput = list[Optional[Union[list[_Audio], _Audio]]]
 
 
 class PromptWithMultiModalInput(NamedTuple):
@@ -48,11 +48,8 @@ class PromptWithMultiModalInput(NamedTuple):
     vision_data: VisionInput
     audio_data: AudioInput
 
-    def __iter__(self):
-        yield from zip(self.prompts, self.vision_data, self.audio_data)
-
     @classmethod
-    def construct(
+    def create(
         cls,
         prompts: list[str],
         vision_data: Optional[VisionInput] = None,
