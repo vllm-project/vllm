@@ -2,6 +2,7 @@
 import asyncio
 import contextlib
 import queue
+import sys
 import uuid
 import weakref
 from abc import ABC, abstractmethod
@@ -878,8 +879,8 @@ class DPAsyncMPClient(AsyncMPClient):
 
         assert len(self.core_engines) > 1
 
-        self.lb_engines: Optional[list[int]] = None
-        self.lb_index = self.client_index
+        # List of [waiting, running] pair per engine.
+        self.lb_engines: list[list[int]] = []
 
         self.first_req_sock_addr = get_open_zmq_inproc_path()
         self.first_req_send_socket = make_zmq_socket(self.ctx,
@@ -908,8 +909,6 @@ class DPAsyncMPClient(AsyncMPClient):
                                      self.first_req_sock_addr,
                                      zmq.PAIR,
                                      bind=False) as first_req_rcv_socket:
-
-                # TODO CHECK WHY THIS SUB DOESN'T SEEM TO WORK
                 # Send subscription message.
                 await socket.send(b'\x01')
 
@@ -945,23 +944,35 @@ class DPAsyncMPClient(AsyncMPClient):
                         continue
 
                     # Update local load-balancing state.
-                    engines, wave, running = msgspec.msgpack.decode(buf)
+                    counts, wave, running = msgspec.msgpack.decode(buf)
                     self.current_wave = wave
                     self.engines_running = running
-                    if self.lb_engines != engines:
-                        self.lb_index = self.client_index
-                    self.lb_engines = engines
+                    self.lb_engines = counts
 
         resources.stats_update_task = asyncio.create_task(
             run_engine_stats_update_task())
 
     def get_core_engine_for_request(self) -> CoreEngine:
-        index = self.lb_index
-        if self.lb_engines:
-            eng_index = self.lb_engines[index % len(self.lb_engines)]
+        if not self.lb_engines:
+            return self.core_engines[0]
+        # TODO use P2C alg for larger DP sizes
+        num_engines = len(self.lb_engines)
+        min_counts = [sys.maxsize, sys.maxsize]
+        eng_index = 0
+        for i in range(num_engines):
+            # Start from client_index for to help with balancing when
+            # engines are empty.
+            idx = (self.client_index + i) % num_engines
+            counts = self.lb_engines[idx]
+            if counts < min_counts:
+                min_counts = counts
+                eng_index = idx
+        # Adjust local counts for better balancing between stats updates
+        # from the coordinator (these are overwritten 10x per second).
+        if min_counts[0]:
+            min_counts[0] += 1
         else:
-            eng_index = index % len(self.core_engines)
-        self.lb_index = index + 1
+            min_counts[1] += 1
         return self.core_engines[eng_index]
 
     async def call_utility_async(self, method: str, *args) -> Any:

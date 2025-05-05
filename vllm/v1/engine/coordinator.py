@@ -130,7 +130,7 @@ class CoordinatorProc:
                 wait_for = 100 if self.stats_changed else 3000
                 events = poller.poll(timeout=max(0, wait_for - elapsed))
                 if not events:
-                    engine_list = self._get_engine_list()
+                    engine_list = self._get_engine_counts()
                     to_publish = (engine_list, self.current_wave,
                                   self.engines_running)
                     msg = msgspec.msgpack.encode(to_publish)
@@ -194,6 +194,9 @@ class CoordinatorProc:
         wave_encoded = msgspec.msgpack.encode((wave, exclude_engine_index))
         socket.send_multipart(
             (EngineCoreRequestType.START_DP_WAVE.value, wave_encoded))
+
+    def _get_engine_counts(self) -> list[list[int]]:
+        return [e.request_counts for e in self.engines]
 
     def _get_engine_list(self) -> Optional[list[int]]:
         shortlist: list[int] = []
