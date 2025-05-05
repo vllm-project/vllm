@@ -632,7 +632,7 @@ VLM_TEST_SETTINGS = {
         patch_hf_runner=model_utils.qwen2_5_omni_patch_hf_runner,
         custom_test_opts=[CustomTestOptions(
             inputs=custom_inputs.mixed_modality_qwen2_5_omni(),
-            limit_mm_per_prompt={"image": 1, "audio": 1},
+            limit_mm_per_prompt={"audio": 1, "image": 1, "video": 1},
         )],
     ),
     # regression test for https://github.com/vllm-project/vllm/issues/15122

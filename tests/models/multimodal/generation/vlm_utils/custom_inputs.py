@@ -8,6 +8,7 @@ from PIL import Image
 
 from vllm.assets.audio import AudioAsset
 from vllm.assets.image import ImageAsset
+from vllm.assets.video import VideoAsset
 from vllm.multimodal.image import rescale_image_size
 from vllm.multimodal.video import (rescale_video_size, resize_video,
                                    sample_frames_from_video)
@@ -138,20 +139,21 @@ def mixed_modality_qwen2_5_omni(size_factor: float = 0.25):
         "Group, capable of perceiving auditory and visual inputs, as well as "
         "generating text and speech.")
     question = ("What is recited in the audio? "
-                "What is the content of this image?")
+                "What is the content of this image? Why is this video funny?")
     prompt = (f"<|im_start|>system\n{default_system}<|im_end|>\n"
               "<|im_start|>user\n<|audio_bos|><|AUDIO|><|audio_eos|>"
               "<|vision_bos|><|IMAGE|><|vision_eos|>"
+              "<|vision_bos|><|VIDEO|><|vision_eos|>"
               f"{question}<|im_end|>\n"
               f"<|im_start|>assistant\n")
     audio = AudioAsset("mary_had_lamb").audio_and_sample_rate
+    video = VideoAsset(name="baby_reading", num_frames=4).np_ndarrays
     image = ImageAsset("cherry_blossom").pil_image.convert("RGB")
-    W, H = image.size
-    image = image.resize((int(W * size_factor), int(H * size_factor)))
     return [
         PromptWithMultiModalInput.create(
             prompts=[prompt],
-            image_data=[image],
+            image_data=[rescale_image_size(image, size_factor=size_factor)],
+            video_data=[video],
             audio_data=[audio],
         )
     ]
