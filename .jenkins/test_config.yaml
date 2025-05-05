@@ -96,14 +96,14 @@ stages:
       - name: gsm8k_small_g2_tp1_eagle_spec_decode
         flavor: g2
         command: PT_HPU_LAZY_MODE=1 VLLM_CONTIGUOUS_PA=false VLLM_SKIP_WARMUP=True pytest -v tests/spec_decode/e2e/test_eagle_correctness.py::test_eagle_e2e_greedy_correctness
-  # - name: tests_lora
-    # steps:
-      # - name: test_llama_lora
-      #   flavor: g2
-      #   command: PT_HPU_LAZY_MODE=1 VLLM_SKIP_WARMUP=true pytest -v tests/lora/test_llama_hpu.py::test_llama_lora_1x
-      # - name: test_multilora
-      #   flavor: g2
-      #   command: PT_HPU_LAZY_MODE=1 VLLM_SKIP_WARMUP=true pytest -v tests/lora/test_multilora_hpu.py::test_llama_multilora_1x
+  - name: tests_lora
+    steps:
+      - name: test_llama_lora
+        flavor: g2
+        command: PT_HPU_LAZY_MODE=1 VLLM_SKIP_WARMUP=true pytest -v tests/lora/test_llama_hpu.py::test_llama_lora_1x
+      - name: test_multilora
+        flavor: g2
+        command: PT_HPU_LAZY_MODE=1 VLLM_SKIP_WARMUP=true pytest -v tests/lora/test_multilora_hpu.py::test_llama_multilora_1x
       # - name: test_long_context
       #   flavor: g2
       #   command: PT_HPU_LAZY_MODE=1 VLLM_SKIP_WARMUP=true pytest -v tests/lora/test_long_context_hpu.py::test_quality

@@ -18,6 +18,7 @@ from vllm.distributed import (get_tensor_model_parallel_rank,
                               tensor_model_parallel_all_gather,
                               tensor_model_parallel_all_reduce)
 from vllm.distributed.utils import divide
+from vllm.model_executor.custom_op import CustomOp
 # yapf: disable
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                LinearBase,
@@ -135,7 +136,8 @@ class BaseLayerWithLoRA(nn.Module):
         raise NotImplementedError
 
 
-class VocabParallelEmbeddingWithLoRA(BaseLayerWithLoRA):
+@CustomOp.register("vocab_parallel_embedding_with_lora")
+class VocabParallelEmbeddingWithLoRA(BaseLayerWithLoRA, CustomOp):
 
     def __init__(self, base_layer: VocabParallelEmbedding) -> None:
         super().__init__()
@@ -236,7 +238,46 @@ class VocabParallelEmbeddingWithLoRA(BaseLayerWithLoRA):
                 assert self.embeddings_weights is not None
                 self.embeddings_weights[:embeddings.shape[0]].copy_(embeddings)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward_hpu(self, x: torch.Tensor) -> torch.Tensor:
+        # x need to reshaped into 2d as batch is there
+        # can be removed on moving to flat tensors
+        shape = x.shape
+        x = x.view(shape[0] * shape[1])
+
+        added_tokens_mask = torch.where(x > self.base_layer.org_vocab_size - 1,
+                                        1, 0)
+        embeddings_indices = torch.narrow(
+            self.punica_wrapper._embeddings_indices, 1, 0, x.size(0))
+
+        indices = embeddings_indices[1]
+        full_lora_a_embeddings = F.embedding(
+            x + indices,
+            self.lora_a_stacked_2d,
+        )
+        indices = embeddings_indices[0]
+        full_output = self.base_layer.forward(x +
+                                              (indices * added_tokens_mask))
+
+        full_output_org = full_output
+        if full_output.ndim == 3:
+            full_output = full_output.view(
+                full_output.shape[0] * full_output.shape[1], -1)
+        if full_lora_a_embeddings.ndim == 3:
+            full_lora_a_embeddings = full_lora_a_embeddings.view(
+                full_lora_a_embeddings.shape[0] *
+                full_lora_a_embeddings.shape[1],
+                -1,
+            )
+        self.punica_wrapper.add_lora_embedding(full_output,
+                                               full_lora_a_embeddings,
+                                               self.lora_b_stacked,
+                                               add_input=True)
+        # can be removed on moving to flat tensors
+        full_output_org = full_output_org.view(shape[0], shape[1],
+                                               full_output_org.shape[1])
+        return full_output.view_as(full_output_org)
+
+    def forward_native(self, x: torch.Tensor) -> torch.Tensor:
         added_tokens_mask = torch.where(x > self.base_layer.org_vocab_size - 1,
                                         1, 0)
         embeddings_indices = torch.narrow(
@@ -398,6 +439,27 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
             self.lora_bias_stacked[0][index, 0, :lora_bias.shape[0]].copy_(
                 lora_bias.T, non_blocking=True)
 
+    def apply_hpu(self,
+                  x: torch.Tensor,
+                  bias: Optional[torch.Tensor] = None) -> torch.Tensor:
+        output = self.base_layer.quant_method.apply(self.base_layer, x, bias)
+
+        # In transformers backend, x and output have extra batch dimension like
+        # (1, seq_len, hidden_dim), while punica expects (seq_len, hidden_dim),
+        # therefore we need to flatten the batch dimensions.
+        output_org = output
+        if x.ndim == 3 and output.ndim == 3:
+            output = output.flatten(0, 1)
+            x = x.flatten(0, 1)
+
+        self.punica_wrapper.add_lora_linear(output, x, self.lora_a_stacked,
+                                            self.lora_b_stacked,
+                                            self.lora_bias_stacked, 1.0,
+                                            self.output_slices)
+        # convert output to 3d, for attention
+        # can be removed once we move to flat tensors
+        return output.view_as(output_org)
+
     def apply(self,
               x: torch.Tensor,
               bias: Optional[torch.Tensor] = None) -> torch.Tensor:
@@ -493,7 +555,8 @@ class ReplicatedLinearWithLoRA(BaseLinearLayerWithLoRA):
         return type(source_layer) is ReplicatedLinear
 
 
-class ColumnParallelLinearWithLoRA(BaseLinearLayerWithLoRA):
+@CustomOp.register("column_parallel_linear_with_lora")
+class ColumnParallelLinearWithLoRA(BaseLinearLayerWithLoRA, CustomOp):
     """
     LoRA on top of ColumnParallelLinear layer.
     LoRA B is sliced for tensor parallelism.
@@ -551,7 +614,37 @@ class ColumnParallelLinearWithLoRA(BaseLinearLayerWithLoRA):
         bias = bias[start_idx:end_idx]
         return bias
 
-    def forward(
+    def forward_hpu(
+        self, input_: torch.Tensor
+    ) -> Union[torch.Tensor, tuple[torch.Tensor, Optional[torch.Tensor]]]:
+        """Forward of ColumnParallelLinear
+
+        Args:
+            input_: Tensor whose last dimension is `input_size`.
+
+        Returns:
+            - output
+            - bias
+        """
+        bias = (self.base_layer.bias
+                if not self.base_layer.skip_bias_add else None)
+
+        # Matrix multiply.
+        output_parallel = self.apply_hpu(input_, bias)
+        if self.base_layer.gather_output:
+            # All-gather across the partitions.
+            output = tensor_model_parallel_all_gather(output_parallel)
+        else:
+            output = output_parallel
+
+        if not self.base_layer.return_bias:
+            return output
+
+        output_bias = (self.base_layer.bias
+                       if self.base_layer.skip_bias_add else None)
+        return output, output_bias
+
+    def forward_native(
         self, input_: torch.Tensor
     ) -> Union[torch.Tensor, tuple[torch.Tensor, Optional[torch.Tensor]]]:
         """Forward of ColumnParallelLinear
@@ -871,7 +964,8 @@ class QKVCrossParallelLinearWithLoRA(BaseLayerWithLoRA):
     pass
 
 
-class RowParallelLinearWithLoRA(BaseLinearLayerWithLoRA):
+@CustomOp.register("row_parallel_linear_with_lora")
+class RowParallelLinearWithLoRA(BaseLinearLayerWithLoRA, CustomOp):
 
     def __init__(self, base_layer: RowParallelLinear) -> None:
         super().__init__(base_layer)
@@ -899,7 +993,50 @@ class RowParallelLinearWithLoRA(BaseLinearLayerWithLoRA):
     def slice_bias(self, bias: torch.Tensor) -> torch.Tensor:
         return bias
 
-    def forward(
+    def forward_hpu(
+        self, input_: torch.Tensor
+    ) -> Union[torch.Tensor, tuple[torch.Tensor, Optional[torch.Tensor]]]:
+        """Forward of RowParallelLinear
+
+        Args:
+            input_: tensor whose last dimension is `input_size`. If
+                    `input_is_parallel` is set, then the last dimension
+                    is `input_size // tp_size`.
+
+        Returns:
+            - output
+            - bias
+        """
+        # Set up backprop all-reduce.
+        if self.base_layer.input_is_parallel:
+            input_parallel = input_
+        else:
+            # TODO: simplify code below
+            splitted_input = split_tensor_along_last_dim(
+                input_, num_partitions=self.base_layer.tp_size)
+            input_parallel = splitted_input[self.tp_rank].contiguous()
+
+        # Matrix multiply.
+        output_parallel = self.apply_hpu(input_parallel)
+        if self.base_layer.reduce_results and self.base_layer.tp_size > 1:
+            output_ = tensor_model_parallel_all_reduce(output_parallel)
+        else:
+            output_ = output_parallel
+
+        if not self.base_layer.skip_bias_add:
+            output = (output_ + self.base_layer.bias
+                      if self.base_layer.bias is not None else output_)
+            output_bias = None
+        else:
+            output = output_
+            output_bias = self.base_layer.bias
+
+        if not self.base_layer.return_bias:
+            return output
+
+        return output, output_bias
+
+    def forward_native(
         self, input_: torch.Tensor
     ) -> Union[torch.Tensor, tuple[torch.Tensor, Optional[torch.Tensor]]]:
         """Forward of RowParallelLinear

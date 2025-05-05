@@ -93,9 +93,7 @@ class PunicaWrapperHPU(PunicaWrapperBase):
                         *,
                         buffer: Optional[Tuple[torch.Tensor, ...]] = None,
                         **kwargs) -> None:
-        y_org = y
         x = x.view(-1, x.shape[-1])
-        y = y.view(-1, y.shape[-1])
         offset_left = 0
 
         for slice_idx in range(len(output_slices)):
@@ -103,7 +101,6 @@ class PunicaWrapperHPU(PunicaWrapperBase):
                 y[:, offset_left:offset_left + output_slices[slice_idx]], x,
                 lora_a_stacked[slice_idx], lora_b_stacked[slice_idx], 0, scale)
             offset_left += output_slices[slice_idx]
-        y = y.view_as(y_org)
 
     def add_lora_logits(self,
                         y: torch.Tensor,
