@@ -8,7 +8,7 @@ from typing import Literal, Optional
 
 import pytest
 
-from vllm.config import config
+from vllm.config import CompilationConfig, config
 from vllm.engine.arg_utils import (EngineArgs, contains_type, get_kwargs,
                                    get_type, is_not_builtin, is_type,
                                    literal_to_kwargs, nullable_kvs,
@@ -179,7 +179,7 @@ def test_compilation_config():
 
     # default value
     args = parser.parse_args([])
-    assert args.compilation_config is None
+    assert args.compilation_config == CompilationConfig()
 
     # set to O3
     args = parser.parse_args(["-O3"])
