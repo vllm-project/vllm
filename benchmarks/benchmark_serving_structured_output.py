@@ -414,7 +414,6 @@ async def benchmark(
     ignore_eos: bool,
     max_concurrency: Optional[int],
     structured_output_ratio: float,
-    structured_output_backend: str,
     goodput_config_dict: Optional[dict[str, float]] = None,
 ):
     if backend in ASYNC_REQUEST_FUNCS:
@@ -426,8 +425,6 @@ async def benchmark(
         extra_body = {}
         # Add the schema to the extra_body
         extra_body[request.structure_type] = request.schema
-        # Add the specific structured_output_backend
-        extra_body["guided_decoding_backend"] = structured_output_backend
         return extra_body
 
     print("Starting initial single prompt test run...")
@@ -785,7 +782,6 @@ def main(args: argparse.Namespace):
             ignore_eos=args.ignore_eos,
             max_concurrency=args.max_concurrency,
             structured_output_ratio=args.structured_output_ratio,
-            structured_output_backend=args.structured_output_backend,
             goodput_config_dict=goodput_config_dict,
         ))
 
@@ -1000,14 +996,6 @@ if __name__ == "__main__":
                         type=float,
                         default=1.0,
                         help="Ratio of Structured Outputs requests")
-    parser.add_argument("--structured-output-backend",
-                        type=str,
-                        choices=[
-                            "outlines", "lm-format-enforcer", "xgrammar",
-                            "guidance", "auto"
-                        ],
-                        default="auto",
-                        help="Backend to use for structured outputs")
 
     args = parser.parse_args()
     main(args)
