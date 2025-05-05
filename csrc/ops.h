@@ -362,7 +362,7 @@ int64_t open_mem_handle(torch::Tensor& mem_handle);
 void free_shared_buffer(int64_t buffer);
 
 #ifdef USE_ROCM
-fptr_t qr_init_device_collectives(int64_t rank, int64_t world_size);
+fptr_t init_custom_qr(int64_t rank, int64_t world_size);
 void qr_destroy(fptr_t _fa);
 torch::Tensor qr_get_handle(fptr_t _fa);
 void qr_open_handles(fptr_t _fa, const std::vector<torch::Tensor>& handles);
