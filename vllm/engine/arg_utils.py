@@ -30,7 +30,7 @@ from vllm.config import (BlockSize, CacheConfig, CacheDType, CompilationConfig,
                          VllmConfig, get_attr_docs, get_field)
 from vllm.executor.executor_base import ExecutorBase
 from vllm.logger import init_logger
-from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS
+from vllm.model_executor.layers.quantization import QuantizationMethods
 from vllm.platforms import current_platform
 from vllm.plugins import load_general_plugins
 from vllm.reasoning import ReasoningParserManager
