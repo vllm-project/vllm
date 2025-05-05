@@ -952,7 +952,7 @@ def get_client_text_logprob_generations(
         completions: list[Completion]) -> list[TextTextLogprobs]:
     '''Operates on the output of a request made to an Open-AI-protocol
     completions endpoint; obtains top-rank logprobs for each token in
-    each :class:`SequenceGroup`
+    each {class}`SequenceGroup`
     '''
     text_generations = get_client_text_generations(completions)
     text = ''.join(text_generations)

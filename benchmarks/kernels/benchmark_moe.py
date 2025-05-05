@@ -115,8 +115,8 @@ def benchmark_config(config: BenchmarkConfig,
         from vllm.model_executor.layers.fused_moe import override_config
         with override_config(config):
             if use_deep_gemm:
-                topk_weights, topk_ids = fused_topk(x, input_gating, topk,
-                                                    False)
+                topk_weights, topk_ids, token_expert_indices = fused_topk(
+                    x, input_gating, topk, False)
                 return fused_experts(
                     x,
                     w1,
@@ -442,8 +442,14 @@ class BenchmarkWorker:
                                                    hidden_size, search_space,
                                                    is_fp16, topk)
 
-        with torch.cuda.device(self.device_id) if current_platform.is_rocm(
-        ) else nullcontext():
+        need_device_guard = False
+        if current_platform.is_rocm():
+            visible_device = os.environ.get("ROCR_VISIBLE_DEVICES", None)
+            if visible_device != f"{self.device_id}":
+                need_device_guard = True
+
+        with torch.cuda.device(
+                self.device_id) if need_device_guard else nullcontext():
             for config in tqdm(search_space):
                 try:
                     kernel_time = benchmark_config(
@@ -577,6 +583,15 @@ def main(args: argparse.Namespace):
         batch_sizes = [args.batch_size]
 
     use_deep_gemm = bool(args.use_deep_gemm)
+
+    if current_platform.is_rocm() and "HIP_VISIBLE_DEVICES" in os.environ:
+        # Ray will set ROCR_VISIBLE_DEVICES for device visibility
+        logger.warning(
+            "Ray uses ROCR_VISIBLE_DEVICES to control device accessibility."
+            "Replacing HIP_VISIBLE_DEVICES with ROCR_VISIBLE_DEVICES.")
+        val = os.environ["HIP_VISIBLE_DEVICES"]
+        os.environ["ROCR_VISIBLE_DEVICES"] = val
+        del os.environ["HIP_VISIBLE_DEVICES"]
 
     ray.init()
     num_gpus = int(ray.available_resources()["GPU"])
