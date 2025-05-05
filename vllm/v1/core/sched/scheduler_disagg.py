@@ -590,8 +590,7 @@ class DisaggregatedScheduler(Scheduler):
             self._free_blocks(self.requests[req_id])
 
         # Return the cached request data to the queue so they can
-        # be reused. Note: we cannot add stopped requests to this
-        # since they are already freed above!
+        # be reused.
         for req_data in scheduler_output.scheduled_cached_reqs:
             # NOTE(rob): since we free stopped reqs above, adding stopped reqs
             # to _cached_reqs_data will cause a memory leak.
