@@ -146,7 +146,7 @@ class RequestState:
         new_token_ids: list[int],
         finish_reason: Optional[FinishReason],
         stop_reason: Union[int, str, None],
-        kv_transfer_params: KVTransferParams,
+        kv_transfer_params: Optional[KVTransferParams] = None,
     ) -> Optional[RequestOutput]:
 
         finished = finish_reason is not None
@@ -176,7 +176,7 @@ class RequestState:
         request_id: str,
         outputs: list[CompletionOutput],
         finished: bool,
-        kv_transfer_params: KVTransferParams,
+        kv_transfer_params: Optional[KVTransferParams] = None,
     ) -> RequestOutput:
 
         if self.output_kind == RequestOutputKind.DELTA:
@@ -320,7 +320,7 @@ class OutputProcessor:
 
         If you need to touch every element of the batch, do it from
         within the loop below.
-        
+
         **********************************************************
         """
 
