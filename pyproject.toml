@@ -48,6 +48,9 @@ vllm = "vllm.entrypoints.cli.main:main"
 where = ["."]
 include = ["vllm*"]
 
+[tool.yapf]
+column_limit = 88
+
 [tool.yapfignore]
 ignore_patterns = [
     "build/**",
