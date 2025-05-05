@@ -237,6 +237,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 dtype=torch.int64,
                 device="cpu",
                 pin_memory=self.pin_memory)
+            
+            # NOTE: `mrope_positions_np` shares same 
+            # underlying data with `mrope_positions_cpu`.
+            # 
+            # `mrope_positions_np` is created in favor of 
+            # numba accelerated func `mrope_assign_next_input_positions` 
+            # while it can operate numpy array only.
             self.mrope_positions_np = self.mrope_positions_cpu.numpy()
 
         # Only relevant for models using ALiBi (e.g, MPT)
