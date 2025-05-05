@@ -1,11 +1,11 @@
-sphinx==8.2.3
+sphinx==7.4.7
 sphinx-argparse==0.5.2
 sphinx-autodoc2==0.5.0
 sphinx-book-theme==1.1.4
 sphinx-copybutton==0.5.2
 sphinx-design==0.6.1
 sphinx-togglebutton==0.3.2
-myst-parser==4.0.1
+myst-parser==3.0.1  # `myst-parser==4.0.1` breaks inline code in titles
 msgspec
 commonmark # Required by sphinx-argparse when using :markdownhelp:
 
